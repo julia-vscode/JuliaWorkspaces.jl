@@ -1,5 +1,7 @@
 module JuliaWorkspaces
 
+include("compat.jl")
+
 import Pkg
 
 include("URIs2/URIs2.jl")
