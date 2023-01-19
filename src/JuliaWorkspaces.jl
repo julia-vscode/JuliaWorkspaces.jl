@@ -1,6 +1,7 @@
 module JuliaWorkspaces
 
 import UUIDs
+using UUIDs: UUID
 
 include("compat.jl")
 
@@ -11,7 +12,6 @@ import .URIs2
 using .URIs2: filepath2uri, uri2filepath
 
 using .URIs2: URI
-using UUIDs: UUID
 
 include("textdocument.jl")
 
