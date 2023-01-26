@@ -1,7 +1,8 @@
 module JuliaWorkspaces
 
-import UUIDs
+import UUIDs, JuliaSyntax
 using UUIDs: UUID
+using JuliaSyntax: SyntaxNode
 
 include("compat.jl")
 
@@ -42,22 +43,32 @@ struct JuliaWorkspace
     _text_documents::Dict{URI,TextDocument}
 
     # Parsed syntax trees
+    _julia_syntax_trees::Dict{URI,SyntaxNode}
     # TODO Replace this with a concrete syntax tree for TOML
     _toml_syntax_trees::Dict{URI,Dict}
+
+    # diagnostics
+    _diagnostics::Dict{URI,Vector{JuliaSyntax.Diagnostic}}
 
     # Semantic information
     _packages::Dict{URI,JuliaPackage} # For now we just record all the packages, later we would want to extract the semantic content
     _projects::Dict{URI,JuliaProject} # For now we just record all the projects, later we would want to extract the semantic content
 end
 
-JuliaWorkspace() = JuliaWorkspace(Set{URI}(), Dict{URI,TextDocument}(), Dict{URI,Dict}(), Dict{URI,JuliaPackage}(), Dict{URI,JuliaProject}())
+JuliaWorkspace() = JuliaWorkspace(Set{URI}(), Dict{URI,TextDocument}(), Dict{URI,SyntaxNode}(), Dict{URI,Dict}(), Dict{URI,Vector{JuliaSyntax.Diagnostic}}(), Dict{URI,JuliaPackage}(), Dict{URI,JuliaProject}())
 
 function JuliaWorkspace(workspace_folders::Set{URI})
     text_documents = isempty(workspace_folders) ? Dict{URI,TextDocument}() : merge((read_path_into_textdocuments(path) for path in workspace_folders)...)
 
+    julia_syntax_trees = Dict{URI,SyntaxNode}()
     toml_syntax_trees = Dict{URI,Dict}()
+    diagnostics = Dict{URI,Vector{JuliaSyntax.Diagnostic}}()
     for (k,v) in pairs(text_documents)
-        if endswith(lowercase(string(k)), ".toml")
+        if endswith(lowercase(string(k)), ".jl")
+            node, diag = parse_julia_file(get_text(v))
+            julia_syntax_trees[k] = node
+            diagnostics[k] = diag
+        elseif endswith(lowercase(string(k)), ".toml")
             # try
                 toml_syntax_trees[k] = parse_toml_file(get_text(v))
             # catch err
@@ -66,9 +77,14 @@ function JuliaWorkspace(workspace_folders::Set{URI})
         end
     end
 
-    new_jw = JuliaWorkspace(workspace_folders, text_documents, toml_syntax_trees, semantic_pass_toml_files(toml_syntax_trees)...)
+    diagnostics = Dict{URI,Vector{JuliaSyntax.Diagnostic}}()
+    new_jw = JuliaWorkspace(workspace_folders, text_documents, julia_syntax_trees, toml_syntax_trees, diagnostics,semantic_pass_toml_files(toml_syntax_trees)...)
 
     return new_jw
+end
+
+function parse_julia_file(content)
+    JuliaSyntax.parse!(SyntaxNode, IOBuffer(content))
 end
 
 function parse_toml_file(content)
@@ -85,6 +101,12 @@ function is_path_manifest_file(path)
     basename_lower_case = basename(lowercase(path))
 
     return basename_lower_case=="manifest.toml" || basename_lower_case=="juliamanifest.toml"
+end
+
+function is_path_julia_file(path)
+    _, ext = splitext(lowercase(path))
+
+    return ext == ".jl"
 end
 
 function read_textdocument_from_uri(uri::URI)
@@ -116,7 +138,7 @@ function read_path_into_textdocuments(uri::URI)
                 for file in files
                     
                     filepath = joinpath(root, file)
-                    if is_path_project_file(filepath) || is_path_manifest_file(filepath)
+                    if is_path_julia_file(filepath) || is_path_project_file(filepath) || is_path_manifest_file(filepath)
                         uri = filepath2uri(filepath)
                         doc = read_textdocument_from_uri(uri)
                         doc === nothing && continue
@@ -135,10 +157,16 @@ end
 function add_workspace_folder(jw::JuliaWorkspace, folder::URI)
     new_roots = push!(copy(jw._workspace_folders), folder)
     new_toml_syntax_trees = copy(jw._toml_syntax_trees)
+    new_julia_syntax_trees = copy(jw._julia_syntax_trees)
+    new_diagnostics = copy(jw._diagnostics)
 
     additional_documents = read_path_into_textdocuments(folder)
     for (k,v) in pairs(additional_documents)
-        if endswith(lowercase(string(k)), ".toml")
+        if is_path_julia_file(string(k))
+            node, diags = parse_julia_file(get_text(v))
+            new_julia_syntax_trees[k] = node
+            new_diagnostics[k] = diags
+        elseif is_path_project_file(string(k)) || is_path_manifest_file(string(K))
             try
                 new_toml_syntax_trees[k] = parse_toml_file(get_text(v))
             catch err
@@ -149,7 +177,7 @@ function add_workspace_folder(jw::JuliaWorkspace, folder::URI)
 
     new_text_documents = merge(jw._text_documents, additional_documents)
 
-    new_jw = JuliaWorkspace(new_roots, new_text_documents, new_toml_syntax_trees, semantic_pass_toml_files(new_toml_syntax_trees)...)
+    new_jw = JuliaWorkspace(new_roots, new_text_documents, new_julia_syntax_trees, new_toml_syntax_trees, new_diagnostics, semantic_pass_toml_files(new_toml_syntax_trees)...)
     return new_jw
 end
 
@@ -161,11 +189,19 @@ function remove_workspace_folder(jw::JuliaWorkspace, folder::URI)
         return any(startswith(string(i.first), string(j)) for j in new_roots )
     end
 
+    new_julia_syntax_trees = filter(jw._julia_syntax_trees) do i
+        return haskey(new_text_documents, i.first)
+    end
+
     new_toml_syntax_trees = filter(jw._toml_syntax_trees) do i
         return haskey(new_text_documents, i.first)
     end
 
-    new_jw = JuliaWorkspace(new_roots, new_text_documents, new_toml_syntax_trees, semantic_pass_toml_files(new_toml_syntax_trees)...)
+    new_diagnostics = filter(jw._diagnostics) do i
+        return haskey(new_text_documents, i.first)
+    end
+
+    new_jw = JuliaWorkspace(new_roots, new_text_documents, new_julia_syntax_trees, new_toml_syntax_trees, new_diagnostics, semantic_pass_toml_files(new_toml_syntax_trees)...)
     return new_jw
 end
 
@@ -179,17 +215,30 @@ function add_file(jw::JuliaWorkspace, uri::URI)
         new_text_documents[uri] = new_doc
 
         new_toml_syntax_trees = jw._toml_syntax_trees
-        try
-            new_toml_syntax_tree = parse_toml_file(get_text(new_doc))
+        new_julia_syntax_trees = jw._julia_syntax_trees
+        new_diagnostics = jw._diagnostics
 
-            new_toml_syntax_trees = copy(jw._toml_syntax_trees)
+        if is_path_julia_file(string(uri))
+            node, diag = parse_julia_file(get_text(new_doc))
 
-            new_toml_syntax_trees[uri] = new_toml_syntax_tree
-        catch err
-            nothing
+            new_julia_syntax_trees = copy(jw._julia_syntax_trees)
+            new_diagnostics = copy(jw._diagnostics)
+
+            new_julia_syntax_trees[uri] = node
+            new_diagnostics[uri] = diag
+        elseif is_path_project_file(string(uri)) || is_path_manifest_file(string(uri))
+            try
+                new_toml_syntax_tree = parse_toml_file(get_text(new_doc))
+
+                new_toml_syntax_trees = copy(jw._toml_syntax_trees)
+
+                new_toml_syntax_trees[uri] = new_toml_syntax_tree
+            catch err
+                nothing
+            end
         end
 
-        new_jw =  JuliaWorkspace(jw._workspace_folders, new_text_documents, new_toml_syntax_trees, semantic_pass_toml_files(new_toml_syntax_trees)...)
+        new_jw =  JuliaWorkspace(jw._workspace_folders, new_text_documents, new_julia_syntax_trees, new_toml_syntax_trees, new_diagnostics, semantic_pass_toml_files(new_toml_syntax_trees)...)
     end
 
     return new_jw
@@ -205,17 +254,30 @@ function update_file(jw::JuliaWorkspace, uri::URI)
         new_text_documents[uri] = new_doc
 
         new_toml_syntax_trees = jw._toml_syntax_trees
-        try
-            new_toml_syntax_tree = parse_toml_file(get_text(new_doc))
+        new_julia_syntax_trees = jw._julia_syntax_trees
+        new_diagnostics = jw._diagnostics
 
-            new_toml_syntax_trees = copy(jw._toml_syntax_trees)
+        if is_path_julia_file(string(uri))
+            node, diag = parse_julia_file(get_text(new_doc))
 
-            new_toml_syntax_trees[uri] = new_toml_syntax_tree
-        catch err
-            delete!(new_toml_syntax_trees, uri)
+            new_julia_syntax_trees = copy(jw._julia_syntax_trees)
+            new_diagnostics = copy(jw._diagnostics)
+
+            new_julia_syntax_trees[uri] = node
+            new_diagnostics[uri] = diag
+        elseif is_path_project_file(string(uri)) || is_path_manifest_file(string(uri))
+            try
+                new_toml_syntax_tree = parse_toml_file(get_text(new_doc))
+
+                new_toml_syntax_trees = copy(jw._toml_syntax_trees)
+
+                new_toml_syntax_trees[uri] = new_toml_syntax_tree
+            catch err
+                delete!(new_toml_syntax_trees, uri)
+            end
         end
 
-        new_jw = JuliaWorkspace(jw._workspace_folders, new_text_documents, new_toml_syntax_trees, semantic_pass_toml_files(new_toml_syntax_trees)...)
+        new_jw = JuliaWorkspace(jw._workspace_folders, new_text_documents, new_julia_syntax_trees, new_toml_syntax_trees, new_diagnostics, semantic_pass_toml_files(new_toml_syntax_trees)...)
     end
 
     return new_jw
@@ -226,12 +288,25 @@ function delete_file(jw::JuliaWorkspace, uri::URI)
     delete!(new_text_documents, uri)
 
     new_toml_syntax_trees = jw._toml_syntax_trees
+    new_julia_syntax_trees = jw._julia_syntax_trees
+    new_diagnostics = jw._diagnostics
+    
     if haskey(jw._toml_syntax_trees, uri)
         new_toml_syntax_trees = copy(jw._toml_syntax_trees)
         delete!(new_toml_syntax_trees, uri)
     end
 
-    new_jw = JuliaWorkspace(jw._workspace_folders, new_text_documents, new_toml_syntax_trees, semantic_pass_toml_files(new_toml_syntax_trees)...)
+    if haskey(jw._julia_syntax_trees, uri)
+        new_julia_syntax_trees = copy(jw._julia_syntax_trees)
+        delete!(new_julia_syntax_trees, uri)
+    end
+
+    if haskey(jw._diagnostics, uri)
+        new_diagnostics = copy(jw._diagnostics)
+        delete!(new_diagnostics, uri)
+    end
+
+    new_jw = JuliaWorkspace(jw._workspace_folders, new_text_documents, new_julia_syntax_trees, new_toml_syntax_trees, new_diagnostics, semantic_pass_toml_files(new_toml_syntax_trees)...)
 
     return new_jw
 end
