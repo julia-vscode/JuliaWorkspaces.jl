@@ -7,7 +7,7 @@ import ..URIs2
 using ..URIs2: URI, uri2filepath
 
 import ...JuliaWorkspaces
-using ...JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail, JuliaPackage, JuliaProject
+using ...JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail, JuliaPackage, JuliaProject, splitpath
 
 function find_test_detail!(node, project_uri, package_uri, package_name, testitems, testsetups, errors)
     if kind(node) == K"macrocall" && length(node.val)>0 && node.val[1].val == Symbol("@testitem")
