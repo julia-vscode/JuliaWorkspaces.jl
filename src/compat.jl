@@ -52,3 +52,53 @@
         end
     end
 end
+
+if VERSION < v"1.1" || Sys.iswindows() && VERSION < v"1.3"
+    _splitdir_nodrive(path::String) = _splitdir_nodrive("", path)
+    function _splitdir_nodrive(a::String, b::String)
+        m = match(Base.Filesystem.path_dir_splitter, b)
+        m === nothing && return (a, b)
+        a = string(a, isempty(m.captures[1]) ? m.captures[2][1] : m.captures[1])
+        a, String(m.captures[3])
+    end
+    splitpath(p::AbstractString) = splitpath(String(p))
+
+    function splitpath(p::String)
+        drive, p = _splitdrive(p)
+        out = String[]
+        isempty(p) && (pushfirst!(out, p))  # "" means the current directory.
+        while !isempty(p)
+            dir, base = _splitdir_nodrive(p)
+            dir == p && (pushfirst!(out, dir); break)  # Reached root node.
+            if !isempty(base)  # Skip trailing '/' in basename
+                pushfirst!(out, base)
+            end
+            p = dir
+        end
+        if !isempty(drive)  # Tack the drive back on to the first element.
+            out[1] = drive * out[1]  # Note that length(out) is always >= 1.
+        end
+        return out
+    end
+    _path_separator    = "\\"
+    _path_separator_re = r"[/\\]+"
+    function _pathsep(paths::AbstractString...)
+        for path in paths
+            m = match(_path_separator_re, String(path))
+            m !== nothing && return m.match[1:1]
+        end
+        return _path_separator
+    end
+    function joinpath(a::String, b::String)
+        isabspath(b) && return b
+        A, a = _splitdrive(a)
+        B, b = _splitdrive(b)
+        !isempty(B) && A != B && return string(B,b)
+        C = isempty(B) ? A : B
+        isempty(a)                              ? string(C,b) :
+        occursin(_path_separator_re, a[end:end]) ? string(C,a,b) :
+                                                  string(C,a,_pathsep(a,b),b)
+    end
+    joinpath(a::AbstractString, b::AbstractString) = joinpath(String(a), String(b))
+    joinpath(a, b, c, paths...) = joinpath(joinpath(a, b), c, paths...)
+end
