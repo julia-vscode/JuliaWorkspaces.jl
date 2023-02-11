@@ -9,7 +9,7 @@
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("Your @testitem is missing a name and code block.", 1:9)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "Your @testitem is missing a name and code block.", 1:9)
 end
 
 @testitem "Wrong type for name" begin
@@ -23,7 +23,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("Your @testitem must have a first argument that is of type String for the name.", 1:14)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "Your @testitem must have a first argument that is of type String for the name.", 1:14)
 end
 
 @testitem "Code block missing" begin
@@ -37,7 +37,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("Your @testitem is missing a code block argument.", 1:15)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "Your @testitem is missing a code block argument.", 1:15)
 end
 
 @testitem "Final arg not a code block" begin
@@ -51,7 +51,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("The final argument of a @testitem must be a begin end block.", 1:17)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "The final argument of a @testitem must be a begin end block.", 1:17)
 end
 
 @testitem "None kw arg" begin
@@ -65,7 +65,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("The arguments to a @testitem must be in keyword format.", 1:29)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "The arguments to a @testitem must be in keyword format.", 1:29)
 end
 
 @testitem "Duplicate kw arg" begin
@@ -79,7 +79,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("The keyword argument default_imports cannot be specified more than once.", 1:68)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "The keyword argument default_imports cannot be specified more than once.", 1:68)
 end
 
 @testitem "Incomplete kw arg" begin
@@ -93,7 +93,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("The final argument of a @testitem must be a begin end block.", 1:42)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "The final argument of a @testitem must be a begin end block.", 1:42)
 end
 
 @testitem "Wrong default_imports type kw arg" begin
@@ -107,7 +107,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("The keyword argument default_imports only accepts bool values.", 1:43)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "The keyword argument default_imports only accepts bool values.", 1:43)
 end
 
 @testitem "non vector arg for tags kw" begin
@@ -121,7 +121,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("The keyword argument tags only accepts a vector of symbols.", 1:32)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "The keyword argument tags only accepts a vector of symbols.", 1:32)
 end
 
 @testitem "Wrong types in tags kw arg" begin
@@ -135,7 +135,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("The keyword argument tags only accepts a vector of symbols.", 1:37)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "The keyword argument tags only accepts a vector of symbols.", 1:37)
 end
 
 @testitem "Unknown keyword arg" begin
@@ -149,7 +149,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("Unknown keyword argument.", 1:34)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "Unknown keyword argument.", 1:34)
 end
 
 @testitem "All parts correctly there" begin
@@ -189,7 +189,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("Your `@testsetup` is missing a `module ... end` block.", 1:length(src)-1)
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "Your `@testsetup` is missing a `module ... end` block.", 1:length(src)-1)
 end
 
 @testitem "@testsetup macro extra args" begin
@@ -203,7 +203,7 @@ end
     @test length(jw._testsetups[uri"file://src/foo.jl"]) == 0
     @test length(jw._testerrors[uri"file://src/foo.jl"]) == 1
 
-    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail("Your `@testsetup` must have a single `module ... end` argument.", 1:length(src))
+    @test jw._testerrors[uri"file://src/foo.jl"][1] == TestErrorDetail(uri"file://src/foo.jl", "Your `@testsetup` must have a single `module ... end` argument.", 1:length(src))
 end
 
 @testitem "@testsetup all correct" begin

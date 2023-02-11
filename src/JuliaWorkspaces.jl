@@ -21,7 +21,8 @@ function our_isvalid(s)
 end
 
 struct TestItemDetail
-    name::String
+    uri::URI
+    name::String    
     project_uri::Union{URI,Nothing}
     package_uri::Union{URI,Nothing}
     package_name::String
@@ -33,7 +34,8 @@ struct TestItemDetail
 end
 
 struct TestSetupDetail
-    name::Symbol
+    uri::URI
+    name::Symbol    
     package_uri::Union{URI,Nothing}
     package_name::String
     range::UnitRange{Int}
@@ -41,6 +43,7 @@ struct TestSetupDetail
 end
 
 struct TestErrorDetail
+    uri::URI
     message::String
     range::UnitRange{Int}
 end

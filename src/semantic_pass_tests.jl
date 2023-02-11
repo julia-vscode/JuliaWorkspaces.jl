@@ -9,7 +9,7 @@ using ..URIs2: URI, uri2filepath
 import ...JuliaWorkspaces
 using ...JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail, JuliaPackage, JuliaProject, splitpath
 
-function find_test_detail!(node, project_uri, package_uri, package_name, testitems, testsetups, errors)
+function find_test_detail!(node, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
     if kind(node) == K"macrocall" && length(node.val)>0 && node.val[1].val == Symbol("@testitem")
         range = first_byte(node):last_byte(node)
 
@@ -17,16 +17,16 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
 
         # Check for various syntax errors
         if length(child_nodes)==1
-            push!(errors, TestErrorDetail("Your @testitem is missing a name and code block.", range))
+            push!(errors, TestErrorDetail(uri, "Your @testitem is missing a name and code block.", range))
             return
         elseif length(child_nodes)>1 && !(kind(child_nodes[2]) == K"string")
-            push!(errors, TestErrorDetail("Your @testitem must have a first argument that is of type String for the name.", range))
+            push!(errors, TestErrorDetail(uri, "Your @testitem must have a first argument that is of type String for the name.", range))
             return
         elseif length(child_nodes)==2
-            push!(errors, TestErrorDetail("Your @testitem is missing a code block argument.", range))
+            push!(errors, TestErrorDetail(uri, "Your @testitem is missing a code block argument.", range))
             return
         elseif !(kind(child_nodes[end]) == K"block")
-            push!(errors, TestErrorDetail("The final argument of a @testitem must be a begin end block.", range))
+            push!(errors, TestErrorDetail(uri, "The final argument of a @testitem must be a begin end block.", range))
             return
         else
             option_tags = nothing
@@ -36,18 +36,18 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
             # Now check our keyword args
             for i in child_nodes[3:end-1]
                 if kind(i) != K"="
-                    push!(errors, TestErrorDetail("The arguments to a @testitem must be in keyword format.", range))
+                    push!(errors, TestErrorDetail(uri, "The arguments to a @testitem must be in keyword format.", range))
                     return
                 elseif !(length(i.val)==2)
                     error("This code path should not be possible.")
                 elseif kind(i.val[1]) == K"Identifier" && i.val[1].val == :tags
                     if option_tags!==nothing
-                        push!(errors, TestErrorDetail("The keyword argument tags cannot be specified more than once.", range))
+                        push!(errors, TestErrorDetail(uri, "The keyword argument tags cannot be specified more than once.", range))
                         return
                     end
 
                     if kind(i.val[2]) != K"vect"
-                        push!(errors, TestErrorDetail("The keyword argument tags only accepts a vector of symbols.", range))
+                        push!(errors, TestErrorDetail(uri, "The keyword argument tags only accepts a vector of symbols.", range))
                         return
                     end
 
@@ -55,7 +55,7 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
 
                     for j in i.val[2].val
                         if kind(j) != K"quote" || length(j.val) != 1 || kind(j.val[1]) != K"Identifier"
-                            push!(errors, TestErrorDetail("The keyword argument tags only accepts a vector of symbols.", range))
+                            push!(errors, TestErrorDetail(uri, "The keyword argument tags only accepts a vector of symbols.", range))
                             return
                         end
 
@@ -63,24 +63,24 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
                     end
                 elseif kind(i.val[1]) == K"Identifier" && i.val[1].val == :default_imports
                     if option_default_imports !== nothing
-                        push!(errors, TestErrorDetail("The keyword argument default_imports cannot be specified more than once.", range))
+                        push!(errors, TestErrorDetail(uri, "The keyword argument default_imports cannot be specified more than once.", range))
                         return
                     end
 
                     if !(i.val[2].val in (true, false))
-                        push!(errors, TestErrorDetail("The keyword argument default_imports only accepts bool values.", range))
+                        push!(errors, TestErrorDetail(uri, "The keyword argument default_imports only accepts bool values.", range))
                         return
                     end
 
                     option_default_imports = i.val[2].val
                 elseif kind(i.val[1]) == K"Identifier" && i.val[1].val == :setup
                     if option_setup!==nothing
-                        push!(errors, TestErrorDetail("The keyword argument setup cannot be specified more than once.", range))
+                        push!(errors, TestErrorDetail(uri, "The keyword argument setup cannot be specified more than once.", range))
                         return
                     end
 
                     if kind(i.val[2]) != K"vect"
-                        push!(errors, TestErrorDetail("The keyword argument `setup` only accepts a vector of `@testsetup module` names.", range))
+                        push!(errors, TestErrorDetail(uri, "The keyword argument `setup` only accepts a vector of `@testsetup module` names.", range))
                         return
                     end
 
@@ -88,14 +88,14 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
 
                     for j in i.val[2].val
                         if kind(j) != K"Identifier"
-                            push!(errors, TestErrorDetail("The keyword argument `setup` only accepts a vector of `@testsetup module` names.", range))
+                            push!(errors, TestErrorDetail(uri, "The keyword argument `setup` only accepts a vector of `@testsetup module` names.", range))
                             return
                         end
 
                         push!(option_setup, j.val)
                     end
                 else
-                    push!(errors, TestErrorDetail("Unknown keyword argument.", range))
+                    push!(errors, TestErrorDetail(uri, "Unknown keyword argument.", range))
                     return
                 end
             end
@@ -116,6 +116,7 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
 
             push!(testitems, 
                 TestItemDetail(
+                    uri,
                     node[2,1].val,
                     project_uri,
                     package_uri,
@@ -135,10 +136,10 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
 
         # Check for various syntax errors
         if length(child_nodes)==1
-            push!(errors, TestErrorDetail("Your `@testsetup` is missing a `module ... end` block.", range))
+            push!(errors, TestErrorDetail(uri, "Your `@testsetup` is missing a `module ... end` block.", range))
             return
         elseif length(child_nodes)>2 || kind(child_nodes[2]) != K"module" || length(child_nodes[2].val) < 3 || child_nodes[2].val[1] == false
-            push!(errors, TestErrorDetail("Your `@testsetup` must have a single `module ... end` argument.", range))
+            push!(errors, TestErrorDetail(uri, "Your `@testsetup` must have a single `module ... end` argument.", range))
             return
         else
             # TODO + 1 here is from the space before the module block. We might have to detect that,
@@ -149,6 +150,7 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
             push!(
                 testsetups,
                 TestSetupDetail(
+                    uri,
                     mod_name,
                     package_uri,
                     package_name,
@@ -158,12 +160,12 @@ function find_test_detail!(node, project_uri, package_uri, package_name, testite
             )
         end
     elseif kind(node) == K"toplevel"
-        find_test_detail!(node.val[1], project_uri, package_uri, package_name, testitems, testsetups, errors)
+        find_test_detail!(node.val[1], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
     elseif kind(node) == K"module"
-        find_test_detail!(node.val[3], project_uri, package_uri, package_name, testitems, testsetups, errors)
+        find_test_detail!(node.val[3], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
     elseif kind(node) == K"block"
         for i in node.val
-            find_test_detail!(i, project_uri, package_uri, package_name, testitems, testsetups, errors)
+            find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
         end
     end
 end
@@ -260,7 +262,7 @@ function semantic_pass_tests(workspace_folders::Set{URI}, syntax_trees::Dict{URI
             testsetups = []
             testerrors = []
 
-            find_test_detail!(syntax_trees[uri], project_uri, package_uri, package_name, testitems, testsetups, testerrors)
+            find_test_detail!(syntax_trees[uri], uri, project_uri, package_uri, package_name, testitems, testsetups, testerrors)
 
             all_testitems[uri] = testitems
             all_testsetups[uri] = testsetups
