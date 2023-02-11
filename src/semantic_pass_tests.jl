@@ -160,7 +160,9 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
             )
         end
     elseif kind(node) == K"toplevel"
-        find_test_detail!(node.val[1], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+        for i in node.val
+            find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+        end
     elseif kind(node) == K"module"
         find_test_detail!(node.val[3], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
     elseif kind(node) == K"block"
