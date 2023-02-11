@@ -102,3 +102,31 @@ if VERSION < v"1.1" || Sys.iswindows() && VERSION < v"1.3"
     joinpath(a::AbstractString, b::AbstractString) = joinpath(String(a), String(b))
     joinpath(a, b, c, paths...) = joinpath(joinpath(a, b), c, paths...)
 end
+
+@static if Sys.iswindows() && VERSION < v"1.3"
+    function _splitdir_nodrive(a::String, b::String)
+        m = match(r"^(.*?)([/\\]+)([^/\\]*)$", b)
+        m === nothing && return (a, b)
+        a = string(a, isempty(m.captures[1]) ? m.captures[2][1] : m.captures[1])
+        a, String(m.captures[3])
+    end
+    function _dirname(path::String)
+        m = match(r"^([^\\]+:|\\\\[^\\]+\\[^\\]+|\\\\\?\\UNC\\[^\\]+\\[^\\]+|\\\\\?\\[^\\]+:|)(.*)$"s, path)
+        m === nothing && return ""
+        a, b = String(m.captures[1]), String(m.captures[2])
+        _splitdir_nodrive(a, b)[1]
+    end
+    function _splitdrive(path::String)
+        m = match(r"^([^\\]+:|\\\\[^\\]+\\[^\\]+|\\\\\?\\UNC\\[^\\]+\\[^\\]+|\\\\\?\\[^\\]+:|)(.*)$"s, path)
+        m === nothing && return "", path
+        String(m.captures[1]), String(m.captures[2])
+    end
+    function _splitdir(path::String)
+        a, b = _splitdrive(path)
+        _splitdir_nodrive(a, b)
+    end
+else
+    _dirname = dirname
+    _splitdir = splitdir
+    _splitdrive = splitdrive
+end
