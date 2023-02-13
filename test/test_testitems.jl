@@ -229,19 +229,28 @@ end
 end
 
 @testitem "@testitem project detection" begin
+    using Pkg
     using JuliaWorkspaces: JuliaWorkspace
     using JuliaWorkspaces.URIs2: @uri_str, filepath2uri
 
-    jw = JuliaWorkspace([filepath2uri(joinpath(@__DIR__, "data", "project_detection"))])
+    mktempdir() do root_path
+        cp(joinpath(@__DIR__, "data", "project_detection"), joinpath(root_path, "project_detection"))
 
-    file1_uri = filepath2uri(joinpath(@__DIR__, "data", "project_detection", "TestPackage2", "src", "TestPackage2.jl"))
-    file2_uri = filepath2uri(joinpath(@__DIR__, "data", "project_detection", "TestPackage3", "src", "TestPackage3.jl"))
-    file3_uri = filepath2uri(joinpath(@__DIR__, "data", "project_detection", "TestPackage4", "src", "TestPackage4.jl"))
+        Pkg.activate(joinpath(root_path, "project_detection", "TestPackage2"))
+        Pkg.instantiate()
 
-    # TODO Figure out whether we can relax this
-    if VERSION >= v"1.6"
-        @test jw._testitems[file1_uri][1].project_uri == filepath2uri(joinpath(@__DIR__, "data", "project_detection", "TestPackage2"))
-        @test jw._testitems[file2_uri][1].project_uri == filepath2uri(joinpath(@__DIR__, "data", "project_detection"))
+        Pkg.activate(joinpath(root_path, "project_detection"))
+        Pkg.develop(path=joinpath(root_path, "project_detection", "TestPackage3"))
+        Pkg.instantiate()
+
+        jw = JuliaWorkspace([filepath2uri(root_path)])
+
+        file1_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage2", "src", "TestPackage2.jl"))
+        file2_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage3", "src", "TestPackage3.jl"))
+        file3_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage4", "src", "TestPackage4.jl"))
+
+        @test jw._testitems[file1_uri][1].project_uri == filepath2uri(joinpath(root_path, "project_detection", "TestPackage2"))
+        @test jw._testitems[file2_uri][1].project_uri == filepath2uri(joinpath(root_path, "project_detection"))
         @test jw._testitems[file3_uri][1].project_uri === nothing
     end
 end
