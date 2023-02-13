@@ -250,7 +250,8 @@ function semantic_pass_tests(workspace_folders::Set{URI}, syntax_trees::Dict{URI
                 package_name = packages[package_uri].name
             end
 
-            if haskey(projects, project_uri)
+            if project_uri == package_uri
+            elseif haskey(projects, project_uri)
                 relevant_project = projects[project_uri]
 
                 if !haskey(relevant_project.deved_packages, package_uri)
