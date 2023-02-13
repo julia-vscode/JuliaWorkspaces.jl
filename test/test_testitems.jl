@@ -240,7 +240,7 @@ end
         Pkg.instantiate()
 
         Pkg.activate(joinpath(root_path, "project_detection"))
-        Pkg.develop(path=joinpath(root_path, "project_detection", "TestPackage3"))
+        Pkg.develop(PackageSpec(path=joinpath(root_path, "project_detection", "TestPackage3")))
         Pkg.instantiate()
 
         jw = JuliaWorkspace([filepath2uri(root_path)])
