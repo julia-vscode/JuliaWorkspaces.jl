@@ -127,7 +127,7 @@ function JuliaWorkspace(workspace_folders::Set{URI})
         end
     end
 
-    new_packages, new_projects = semantic_pass_toml_files(new_toml_syntax_trees)
+    new_packages, new_projects = SemanticPassTomlFiles.semantic_pass_toml_files(new_toml_syntax_trees)
 
     new_jw = JuliaWorkspace(
         workspace_folders,
@@ -237,7 +237,7 @@ function add_workspace_folder(jw::JuliaWorkspace, folder::URI)
 
     new_text_documents = merge(jw._text_documents, additional_documents)
 
-    new_packages, new_projects = semantic_pass_toml_files(new_toml_syntax_trees)
+    new_packages, new_projects = SemanticPassTomlFiles.semantic_pass_toml_files(new_toml_syntax_trees)
 
     new_jw = JuliaWorkspace(
         new_roots,
@@ -272,7 +272,7 @@ function remove_workspace_folder(jw::JuliaWorkspace, folder::URI)
         return haskey(new_text_documents, i.first)
     end
 
-    new_packages, new_projects = semantic_pass_toml_files(new_toml_syntax_trees)
+    new_packages, new_projects = SemanticPassTomlFiles.semantic_pass_toml_files(new_toml_syntax_trees)
 
     new_jw = JuliaWorkspace(
         new_roots,
@@ -318,7 +318,7 @@ function add_file(jw::JuliaWorkspace, uri::URI, text_document::TextDocument)
             end
         end
 
-        new_packages, new_projects = semantic_pass_toml_files(new_toml_syntax_trees)
+        new_packages, new_projects = SemanticPassTomlFiles.semantic_pass_toml_files(new_toml_syntax_trees)
 
         new_jw =  JuliaWorkspace(
             jw._workspace_folders,
@@ -380,7 +380,7 @@ function update_file(jw::JuliaWorkspace, uri::URI)
             end
         end
 
-        new_packages, new_projects = semantic_pass_toml_files(new_toml_syntax_trees)
+        new_packages, new_projects = SemanticPassTomlFiles.semantic_pass_toml_files(new_toml_syntax_trees)
 
         new_jw = JuliaWorkspace(
             jw._workspace_folders,
@@ -420,7 +420,7 @@ function delete_file(jw::JuliaWorkspace, uri::URI)
         delete!(new_diagnostics, uri)
     end
 
-    new_packages, new_projects = semantic_pass_toml_files(new_toml_syntax_trees)
+    new_packages, new_projects = SemanticPassTomlFiles.semantic_pass_toml_files(new_toml_syntax_trees)
 
     new_jw = JuliaWorkspace(
         jw._workspace_folders,

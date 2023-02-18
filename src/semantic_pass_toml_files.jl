@@ -1,3 +1,14 @@
+module SemanticPassTomlFiles
+
+import UUIDs
+using UUIDs: UUID
+
+import ..URIs2
+using ..URIs2: URI, uri2filepath, filepath2uri
+
+import ...JuliaWorkspaces
+using ...JuliaWorkspaces: JuliaPackage, JuliaProject
+
 function semantic_pass_toml_files(toml_syntax_trees)
     # Extract all packages & paths with a manifest
     packages = Dict{URI,JuliaPackage}()
@@ -71,4 +82,6 @@ function semantic_pass_toml_files(toml_syntax_trees)
     end
 
     return packages, projects
+end
+
 end
