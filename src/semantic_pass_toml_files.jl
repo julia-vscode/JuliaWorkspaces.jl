@@ -7,7 +7,7 @@ import ..URIs2
 using ..URIs2: URI, uri2filepath, filepath2uri
 
 import ...JuliaWorkspaces
-using ...JuliaWorkspaces: JuliaPackage, JuliaProject
+using ...JuliaWorkspaces: JuliaPackage, JuliaProject, JuliaDevedPackage
 
 function semantic_pass_toml_files(toml_syntax_trees)
     # Extract all packages & paths with a manifest
