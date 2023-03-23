@@ -10,7 +10,7 @@ import ...JuliaWorkspaces
 using ...JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail, JuliaPackage, JuliaProject, splitpath
 
 function find_test_detail!(node, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
-    if kind(node) == K"macrocall" && length(node.val)>0 && node.val[1].val == Symbol("@testitem")
+    if kind(node) == K"macrocall" && length(node.children)>0 && node.children[1].val == Symbol("@testitem")
         range = first_byte(node):last_byte(node)
 
         child_nodes = children(node)
@@ -38,55 +38,55 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
                 if kind(i) != K"="
                     push!(errors, TestErrorDetail(uri, "The arguments to a @testitem must be in keyword format.", range))
                     return
-                elseif !(length(i.val)==2)
+                elseif !(length(i.children)==2)
                     error("This code path should not be possible.")
-                elseif kind(i.val[1]) == K"Identifier" && i.val[1].val == :tags
+                elseif kind(i.children[1]) == K"Identifier" && i.children[1].val == :tags
                     if option_tags!==nothing
                         push!(errors, TestErrorDetail(uri, "The keyword argument tags cannot be specified more than once.", range))
                         return
                     end
 
-                    if kind(i.val[2]) != K"vect"
+                    if kind(i.children[2]) != K"vect"
                         push!(errors, TestErrorDetail(uri, "The keyword argument tags only accepts a vector of symbols.", range))
                         return
                     end
 
                     option_tags = Symbol[]
 
-                    for j in i.val[2].val
-                        if kind(j) != K"quote" || length(j.val) != 1 || kind(j.val[1]) != K"Identifier"
+                    for j in i.children[2].children
+                        if kind(j) != K"quote" || length(j.children) != 1 || kind(j.children[1]) != K"Identifier"
                             push!(errors, TestErrorDetail(uri, "The keyword argument tags only accepts a vector of symbols.", range))
                             return
                         end
 
-                        push!(option_tags, j.val[1].val)
+                        push!(option_tags, j.children[1].val)
                     end
-                elseif kind(i.val[1]) == K"Identifier" && i.val[1].val == :default_imports
+                elseif kind(i.children[1]) == K"Identifier" && i.children[1].val == :default_imports
                     if option_default_imports !== nothing
                         push!(errors, TestErrorDetail(uri, "The keyword argument default_imports cannot be specified more than once.", range))
                         return
                     end
 
-                    if !(i.val[2].val in (true, false))
+                    if !(i.children[2].val in (true, false))
                         push!(errors, TestErrorDetail(uri, "The keyword argument default_imports only accepts bool values.", range))
                         return
                     end
 
-                    option_default_imports = i.val[2].val
-                elseif kind(i.val[1]) == K"Identifier" && i.val[1].val == :setup
+                    option_default_imports = i.children[2].val
+                elseif kind(i.children[1]) == K"Identifier" && i.children[1].val == :setup
                     if option_setup!==nothing
                         push!(errors, TestErrorDetail(uri, "The keyword argument setup cannot be specified more than once.", range))
                         return
                     end
 
-                    if kind(i.val[2]) != K"vect"
+                    if kind(i.children[2]) != K"vect"
                         push!(errors, TestErrorDetail(uri, "The keyword argument `setup` only accepts a vector of `@testsetup module` names.", range))
                         return
                     end
 
                     option_setup = Symbol[]
 
-                    for j in i.val[2].val
+                    for j in i.children[2].children
                         if kind(j) != K"Identifier"
                             push!(errors, TestErrorDetail(uri, "The keyword argument `setup` only accepts a vector of `@testsetup module` names.", range))
                             return
@@ -112,7 +112,7 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
                 option_setup = Symbol[]
             end
 
-            code_range = first_byte(child_nodes[end].val[1]):last_byte(child_nodes[end].val[end])
+            code_range = first_byte(child_nodes[end].children[1]):last_byte(child_nodes[end].children[end])
 
             push!(testitems, 
                 TestItemDetail(
@@ -129,7 +129,7 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
                 )
             )
         end
-    elseif kind(node) == K"macrocall" && length(node.val)>0 && node.val[1].val == Symbol("@testsetup")
+    elseif kind(node) == K"macrocall" && length(node.children)>0 && node.children[1].val == Symbol("@testsetup")
         range = first_byte(node):last_byte(node)
 
         child_nodes = children(node)
@@ -138,15 +138,15 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
         if length(child_nodes)==1
             push!(errors, TestErrorDetail(uri, "Your `@testsetup` is missing a `module ... end` block.", range))
             return
-        elseif length(child_nodes)>2 || kind(child_nodes[2]) != K"module" || length(child_nodes[2].val) < 3 || child_nodes[2].val[1] == false
+        elseif length(child_nodes)>2 || kind(child_nodes[2]) != K"module" || length(child_nodes[2].children) < 3 || child_nodes[2].children[1] == false
             push!(errors, TestErrorDetail(uri, "Your `@testsetup` must have a single `module ... end` argument.", range))
             return
         else
             # TODO + 1 here is from the space before the module block. We might have to detect that,
             # not sure whether that is always assigned to the module end EXPR
             mod = child_nodes[2]
-            mod_name = mod.val[2].val
-            code_range = first_byte(mod.val[3]):last_byte(mod.val[end])
+            mod_name = mod.children[2].val
+            code_range = first_byte(mod.children[3]):last_byte(mod.children[end])
             push!(
                 testsetups,
                 TestSetupDetail(
@@ -160,13 +160,13 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
             )
         end
     elseif kind(node) == K"toplevel"
-        for i in node.val
+        for i in node.children
             find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
         end
     elseif kind(node) == K"module"
-        find_test_detail!(node.val[3], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+        find_test_detail!(node.children[3], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
     elseif kind(node) == K"block"
-        for i in node.val
+        for i in node.children
             find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
         end
     end
