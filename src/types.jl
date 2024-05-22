@@ -39,6 +39,7 @@ end
 
 struct JuliaProject
     project_file_uri::URI
+    manifest_file_uri::URI
     deved_packages::Dict{URI,JuliaDevedPackage}
 end
 
@@ -59,57 +60,29 @@ struct TextChange
     new_text::String
 end
 
-struct Documents
-    _sourcetexts::Dict{URI,SourceText}
-    _text_files::Set{URI}
-    _notebook_files::Set{URI}
-end
-
-abstract type AbstractDocumentChange end
-
-struct DocumentChangeAddTextFile <: AbstractDocumentChange
+struct TextFile
     uri::URI
     content::SourceText
 end
 
-struct DocumentChangeAddNotebookFile <: AbstractDocumentChange
+struct NotebookFile
     uri::URI
-    content::Vector{Pair{URI,SourceText}}
-end
-
-struct DocumentChangeModifyTextFile <: AbstractDocumentChange
-    uri::URI
-    changes::Vector{TextChange}
-end
-
-struct DocumentChangeDeleteTextFile <: AbstractDocumentChange
-    uri::URI
-end
-
-struct JuliaSyntaxTrees
-    _julia_syntax_trees::Dict{URI,SyntaxNode}
-    # TODO Replace this with a concrete syntax tree for TOML
-    _toml_syntax_trees::Dict{URI,Dict}
-
-    # diagnostics
-    _diagnostics::Dict{URI,Vector{JuliaSyntax.Diagnostic}}
-end
-
-struct JuliaSemantics
-    _packages::Dict{URI,JuliaPackage} # For now we just record all the packages, later we would want to extract the semantic content
-    _projects::Dict{URI,JuliaProject} # For now we just record all the projects, later we would want to extract the semantic content
-    _testitems::Dict{URI,Vector{TestItemDetail}}
-    _testsetups::Dict{URI,Vector{TestSetupDetail}}
-    _testerrors::Dict{URI,Vector{TestErrorDetail}}
+    cells::Vector{SourceText}
 end
 
 struct JuliaWorkspace
-    # Text content
-    _documents::Documents
+    runtime::Salsa.Runtime
 
-    # Parsed syntax trees
-    _julia_syntax_trees::Dict{URI,JuliaSyntaxTrees}
+    function JuliaWorkspace()
+        rt = Salsa.Runtime()
 
-    # Semantic information
-    _julia_semantics::JuliaSemantics
+        set_input_files!(rt, Set{URI}())
+        set_input_fallback_test_project!(rt, uri"file://something")
+
+        new(rt)
+    end
+end
+
+function get_test_items(jw::JuliaWorkspace, uri::URI)
+    derived_testitems(jw.runtime, uri)
 end

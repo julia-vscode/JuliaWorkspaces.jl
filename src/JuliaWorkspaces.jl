@@ -3,6 +3,7 @@ module JuliaWorkspaces
 import UUIDs, JuliaSyntax
 using UUIDs: UUID
 using JuliaSyntax: SyntaxNode
+using Salsa
 
 include("compat.jl")
 
@@ -14,33 +15,33 @@ using .URIs2: filepath2uri, uri2filepath
 
 using .URIs2: URI, @uri_str
 
-export SourceText, TextChange, with_changes, Documents, AbstractDocumentChange, DocumentChangeAddTextFile
-
-# include("textdocument.jl")
-
-# function our_isvalid(s)
-#     return isvalid(s) && !occursin('\0', s)
-# end
+export JuliaWorkspace,
+    add_text_file, 
+    remove_file!,
+    remove_all_children!,
+    with_changes, TextFile, SourceText, TextChange, 
+    workspace_from_folders, 
+    add_folder_from_disc!,
+    add_file_from_disc!,
+    update_file_from_disc!,
+    get_text_files,
+    get_text_file,
+    get_julia_syntax_tree,
+    get_toml_syntax_tree,
+    get_packages,
+    get_projects,
+    get_test_items
 
 include("types.jl")
 include("sourcetext.jl")
-include("documents.jl")
-# include("semantic_pass_tests.jl")
-# include("semantic_pass_toml_files.jl")
+include("files.jl")
+include("inputs.jl")
+include("layer_files.jl")
+include("layer_syntax_trees.jl")
+include("layer_projects.jl")
+include("layer_testitems.jl")
+include("fileio.jl")
 
-
-# JuliaWorkspace() = JuliaWorkspace(
-#     Set{URI}(),
-#     Dict{URI,TextDocument}(),
-#     Dict{URI,SyntaxNode}(),
-#     Dict{URI,Dict}(),
-#     Dict{URI,Vector{JuliaSyntax.Diagnostic}}(),
-#     Dict{URI,JuliaPackage}(),
-#     Dict{URI,JuliaProject}(),
-#     Dict{URI,Vector{TestItemDetail}}(),
-#     Dict{URI,Vector{TestSetupDetail}}(),
-#     Dict{URI,Vector{TestErrorDetail}}()
-# )
 
 # function JuliaWorkspace(workspace_folders::AbstractVector{URI})
 #     return JuliaWorkspace(Set(workspace_folders))
@@ -90,23 +91,7 @@ include("documents.jl")
 #     return Pkg.TOML.parse(content)
 # end
 
-# function is_path_project_file(path)
-#     basename_lower_case = basename(lowercase(path))
 
-#     return basename_lower_case=="project.toml" || basename_lower_case=="juliaproject.toml"
-# end
-
-# function is_path_manifest_file(path)
-#     basename_lower_case = basename(lowercase(path))
-
-#     return basename_lower_case=="manifest.toml" || basename_lower_case=="juliamanifest.toml"
-# end
-
-# function is_path_julia_file(path)
-#     _, ext = splitext(lowercase(path))
-
-#     return ext == ".jl"
-# end
 
 # function read_textdocument_from_uri(uri::URI)
 #     path = uri2filepath(uri)

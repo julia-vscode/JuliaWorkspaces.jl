@@ -1,33 +1,32 @@
-@testitem "Documents constructor" begin
-    d = Documents()
-
-    @test isempty(d._sourcetexts)
-    @test isempty(d._text_files)
-    @test isempty(d._notebook_files)
-end
-
 @testitem "Documents add text file" begin
     using JuliaWorkspaces.URIs2
-    d_original = Documents()
+    jw = JuliaWorkspace()
 
     uri = URI("file://foo.jl")
     content = "using Pkg"
 
-    d1 = with_changes(d_original, AbstractDocumentChange[DocumentChangeAddTextFile(uri, SourceText(content, "julia"))])
-    @test uri in d1._text_files
-    @test d1._sourcetexts[uri].content == content
-    @test d1._sourcetexts[uri].language_id == "julia"    
+    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+
+    text_file = get_text_file(jw, uri)
+
+    @test text_file.uri == uri
+    @test text_file.content.content == content
+    @test text_file.content.language_id == "julia"
+
+    a = get_julia_syntax_tree(jw, uri)
+
+    @test a !== nothing
 end
 
 @testitem "Documents add duplicate file" begin
     using JuliaWorkspaces.URIs2
-    d_original = Documents()
+    jw = JuliaWorkspace()
 
     uri = URI("file://foo.jl")
     content = "using Pkg"
 
-    d1 = with_changes(d_original, AbstractDocumentChange[DocumentChangeAddTextFile(uri, SourceText(content, "julia"))])
+    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
 
-    @test_throws ErrorException with_changes(d_original, AbstractDocumentChange[DocumentChangeAddTextFile(uri, SourceText(content, "julia"))])
+    @test_throws ErrorException add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
 end
 

@@ -1,5 +1,3 @@
-module SemanticPassTests
-
 import JuliaSyntax
 using JuliaSyntax: @K_str, kind, children, haschildren, first_byte, last_byte, SyntaxNode
 
@@ -185,11 +183,9 @@ function vec_startswith(a, b)
     return true
 end
 
-function find_package_for_file(packages::Dict{URI,JuliaPackage}, file::URI)
+function find_package_for_file(packages::Vector{URI}, file::URI)
     file_path = uri2filepath(file)
     package = packages |>
-        keys |>
-        collect |>
         x -> map(x) do i
             package_folder_path = uri2filepath(i)
             parts = splitpath(package_folder_path)
@@ -204,11 +200,9 @@ function find_package_for_file(packages::Dict{URI,JuliaPackage}, file::URI)
     return package
 end
 
-function find_project_for_file(projects::Dict{URI,JuliaProject}, file::URI)
+function find_project_for_file(projects::Vector{URI}, file::URI)
     file_path = uri2filepath(file)
     project = projects |>
-        keys |>
-        collect |>
         x -> map(x) do i
             project_folder_path = uri2filepath(i)
             parts = splitpath(project_folder_path)
@@ -223,57 +217,41 @@ function find_project_for_file(projects::Dict{URI,JuliaProject}, file::URI)
     return project
 end
 
-function semantic_pass_tests(workspace_folders::Set{URI}, syntax_trees::Dict{URI,SyntaxNode}, packages::Dict{URI,JuliaPackage}, projects::Dict{URI,JuliaProject}, fallback_project_uri::URI)
-    all_testitems = Dict{URI,Vector{TestItemDetail}}()
-    all_testsetups = Dict{URI,Vector{TestSetupDetail}}()
-    all_testerrors = Dict{URI,Vector{TestErrorDetail}}()
-    for uri in keys(syntax_trees)
-        # Find which workspace folder the doc is in.
-        parent_workspaceFolders = sort(filter(f -> startswith(string(uri), string(f)), collect(workspace_folders)), by=length ∘ string, rev=true)
+Salsa.@derived function derived_testitems(rt, uri)
+    projects = derived_project_folders(rt)
+    packages = derived_package_folders(rt)
 
-        # If the file is not in the workspace, we don't report nothing
-        if isempty(parent_workspaceFolders)
-            all_testitems[uri] = []
-            all_testsetups[uri] = []
-            all_testerrors[uri] = []
-        else
-            project_uri = find_project_for_file(projects, uri)
-            package_uri = find_package_for_file(packages, uri)
+    project_uri = find_project_for_file(projects, uri)
+    package_uri = find_package_for_file(packages, uri)
 
-            if project_uri === nothing
-                project_uri = fallback_project_uri
-            end
-
-            if package_uri === nothing
-                package_name = ""
-            else
-                package_name = packages[package_uri].name
-            end
-
-            if project_uri == package_uri
-            elseif haskey(projects, project_uri)
-                relevant_project = projects[project_uri]
-
-                if !haskey(relevant_project.deved_packages, package_uri)
-                    project_uri = nothing
-                end
-            else
-                project_uri = nothing
-            end
-
-            testitems = []
-            testsetups = []
-            testerrors = []
-
-            find_test_detail!(syntax_trees[uri], uri, project_uri, package_uri, package_name, testitems, testsetups, testerrors)
-
-            all_testitems[uri] = testitems
-            all_testsetups[uri] = testsetups
-            all_testerrors[uri] = testerrors
-        end
+    if project_uri === nothing
+        project_uri = input_fallback_test_project(rt)
     end
 
-    return all_testitems, all_testsetups, all_testerrors
-end
+    if package_uri === nothing
+        package_name = ""
+    else
+        package_name = derived_package(rt, package_uri).name
+    end
 
+    if project_uri == package_uri
+    elseif project_uri in projects
+        relevant_project = derived_project(rt, project_uri)
+
+        if !haskey(relevant_project.deved_packages, package_uri)
+            project_uri = nothing
+        end
+    else
+        project_uri = nothing
+    end
+
+    testitems = []
+    testsetups = []
+    testerrors = []
+
+    syntax_tree = derived_julia_syntax_tree(rt, uri)
+
+    find_test_detail!(syntax_tree[1], uri, project_uri, package_uri, package_name, testitems, testsetups, testerrors)
+
+    return (testitems=testitems, testsetups=testsetups, testerrors=testerrors)
 end
