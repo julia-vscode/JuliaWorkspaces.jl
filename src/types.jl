@@ -43,7 +43,7 @@ struct JuliaProject
     deved_packages::Dict{URI,JuliaDevedPackage}
 end
 
-struct SourceText
+@auto_hash_equals struct SourceText
     content::String
     line_indices::Vector{Int}
     language_id::String
@@ -60,7 +60,7 @@ struct TextChange
     new_text::String
 end
 
-struct TextFile
+@auto_hash_equals struct TextFile
     uri::URI
     content::SourceText
 end

@@ -5,6 +5,8 @@ using UUIDs: UUID
 using JuliaSyntax: SyntaxNode
 using Salsa
 
+using AutoHashEquals
+
 include("compat.jl")
 
 import Pkg

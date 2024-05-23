@@ -1,10 +1,12 @@
 module URIs2
 
+using AutoHashEquals
+
 include("vendored_from_uris.jl")
 
 export URI, uri2filepath, filepath2uri, @uri_str
 
-struct URI
+@auto_hash_equals struct URI
     scheme::Union{String,Nothing}
     authority::Union{String,Nothing}
     path::String
