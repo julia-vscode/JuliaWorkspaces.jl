@@ -110,10 +110,12 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
                 option_setup = Symbol[]
             end
 
-            # TODO SALSA Properly fix this
-            code_range = haschildren(child_nodes[end]) > 0 ?
-                ( first_byte(child_nodes[end][1]):last_byte(child_nodes[end][end]) ) :
-                first_byte(child_nodes[end]:last_byte(child_nodes[end]))
+            code_block = child_nodes[end]
+            code_range = if haschildren(code_block) && length(children(code_block)) > 0
+                first_byte(code_block[1]):last_byte(code_block[end])
+            else
+                (first_byte(code_block)+5):(last_byte(code_block)-3)
+            end
 
             push!(testitems,
                 TestItemDetail(
