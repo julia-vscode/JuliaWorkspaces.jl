@@ -56,7 +56,7 @@ end
 end
 
 struct TextChange
-    span::UnitRange{Int}
+    span::Union{UnitRange{Int},Nothing}
     new_text::String
 end
 
