@@ -1,6 +1,6 @@
 struct TestItemDetail
     uri::URI
-    name::String    
+    name::String
     project_uri::Union{URI,Nothing}
     package_uri::Union{URI,Nothing}
     package_name::String
@@ -13,7 +13,7 @@ end
 
 struct TestSetupDetail
     uri::URI
-    name::Symbol    
+    name::Symbol
     package_uri::Union{URI,Nothing}
     package_name::String
     range::UnitRange{Int}
@@ -77,7 +77,7 @@ struct JuliaWorkspace
         rt = Salsa.Runtime()
 
         set_input_files!(rt, Set{URI}())
-        set_input_fallback_test_project!(rt, uri"file://something")
+        set_input_fallback_test_project!(rt, nothing)
 
         new(rt)
     end
