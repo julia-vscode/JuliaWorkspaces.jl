@@ -141,15 +141,15 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
         if length(child_nodes)==1
             push!(errors, TestErrorDetail(uri, "Your `@testsetup` is missing a `module ... end` block.", range))
             return
-        elseif length(child_nodes)>2 || kind(child_nodes[2]) != K"module" || length(children(child_nodes[2])) < 3 || child_nodes[2][1] == false
+        elseif length(child_nodes)>2 || kind(child_nodes[2]) != K"module" || length(children(child_nodes[2])) != 2 || child_nodes[2][1] == false
             push!(errors, TestErrorDetail(uri, "Your `@testsetup` must have a single `module ... end` argument.", range))
             return
         else
             # TODO + 1 here is from the space before the module block. We might have to detect that,
             # not sure whether that is always assigned to the module end EXPR
             mod = child_nodes[2]
-            mod_name = mod[2].val
-            code_range = first_byte(mod[3]):last_byte(mod[end])
+            mod_name = mod[1].val
+            code_range = first_byte(mod[2]):last_byte(mod[2])
             push!(
                 testsetups,
                 TestSetupDetail(
@@ -167,7 +167,7 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
             find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
         end
     elseif kind(node) == K"module"
-        find_test_detail!(node[3], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+        find_test_detail!(node[2], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
     elseif kind(node) == K"block"
         for i in children(node)
             find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
