@@ -6,7 +6,7 @@ include("vendored_from_uris.jl")
 
 export URI, uri2filepath, filepath2uri, @uri_str
 
-@auto_hash_equals struct URI
+struct URI
     scheme::Union{String,Nothing}
     authority::Union{String,Nothing}
     path::String
@@ -41,6 +41,18 @@ end
         else
             return hash((a.scheme, a.authority, a.path, a.query, a.fragment), h)
         end
+    end
+else
+    function Base.:(==)(a::URI, b::URI)
+        return a.scheme == b.scheme &&
+            a.authority == b.authority &&
+            a.path == b.path &&
+            a.query == b.query &&
+            a.fragment == b.fragment
+    end
+
+    function Base.hash(a::URI, h::UInt)
+        return hash((a.scheme, a.authority, a.path, a.query, a.fragment), h)
     end
 end
 
