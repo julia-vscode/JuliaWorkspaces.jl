@@ -16,7 +16,7 @@ function _compute_line_indices(text)
     return line_indices
 end
 
-function with_changes(source::SourceText, changes::Vector{TextChange})
+function with_changes(source::SourceText, changes::Vector{TextChange}, language_id::String)
     # TODO Optimize for scenario with 0 changes
 
     new_content = source.content
@@ -33,5 +33,5 @@ function with_changes(source::SourceText, changes::Vector{TextChange})
         end
     end
 
-    return SourceText(new_content, source.language_id)
+    return SourceText(new_content, language_id)
 end

@@ -41,7 +41,7 @@ end
 @testitem "Test with_change with no TextChange" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    st2 = with_changes(st, TextChange[])
+    st2 = with_changes(st, TextChange[], "julia")
 
     @test st.content == st2.content
     @test st.language_id == st2.language_id
@@ -51,7 +51,7 @@ end
 @testitem "Test with_change with empty TextChange" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    st2 = with_changes(st, [TextChange(1:0, "")])
+    st2 = with_changes(st, [TextChange(1:0, "")], "julia")
 
     @test st.content == st2.content
     @test st.language_id == st2.language_id
@@ -61,7 +61,7 @@ end
 @testitem "Test with_change with insert TextChange at beginning" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    st2 = with_changes(st, [TextChange(1:0, "uiop")])
+    st2 = with_changes(st, [TextChange(1:0, "uiop")], "julia")
 
     @test st2.content == "uiopasdf\nasdf\nasdf\n"
 end
@@ -69,7 +69,7 @@ end
 @testitem "Test with_change with insert TextChange at end" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    st2 = with_changes(st, [TextChange(16:0, "uiop")])
+    st2 = with_changes(st, [TextChange(16:0, "uiop")], "julia")
 
     @test st2.content == "asdf\nasdf\nasdf\nuiop"
 end
@@ -77,7 +77,7 @@ end
 @testitem "Test with_change with insert TextChange in middle" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    st2 = with_changes(st, [TextChange(7:6, "uiop")])
+    st2 = with_changes(st, [TextChange(7:6, "uiop")], "julia")
 
     @test st2.content == "asdf\nauiopsdf\nasdf\n"
 end
@@ -85,7 +85,7 @@ end
 @testitem "Test with_change with replace TextChange at beginning" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    st2 = with_changes(st, [TextChange(1:2, "uiop")])
+    st2 = with_changes(st, [TextChange(1:2, "uiop")], "julia")
 
     @test st2.content == "uiopdf\nasdf\nasdf\n"
 end
@@ -93,7 +93,7 @@ end
 @testitem "Test with_change with replace TextChange at end" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    st2 = with_changes(st, [TextChange(7:15, "uiop")])
+    st2 = with_changes(st, [TextChange(7:15, "uiop")], "julia")
 
     @test st2.content == "asdf\nauiop"
 end
@@ -101,7 +101,7 @@ end
 @testitem "Test with_change with replace TextChange in middle" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    st2 = with_changes(st, [TextChange(7:9, "uiop")])
+    st2 = with_changes(st, [TextChange(7:9, "uiop")], "julia")
 
     @test st2.content == "asdf\nauiop\nasdf\n"
 end

@@ -10,10 +10,10 @@ function add_text_file(jw::JuliaWorkspace, file::TextFile)
     set_input_text_file!(jw.runtime, file.uri, file)
 end
 
-function update_text_file!(jw::JuliaWorkspace, uri::URI, changes::Vector{TextChange})
+function update_text_file!(jw::JuliaWorkspace, uri::URI, changes::Vector{TextChange}, language_id::String)
     file = input_text_file(jw.runtime, uri)
 
-    new_file = with_changes(file, changes)
+    new_file = with_changes(file, changes, language_id)
 
     set_input_text_file!(jw.runtime, new_file.uri, new_file)
 end

@@ -82,7 +82,7 @@ function update_file_from_disc!(jw::JuliaWorkspace, path)
 
     old_content = get_text_file(jw, uri)
 
-    update_text_file!(jw, uri, [TextChange(1:lastindex(old_content.content.content), text_file.content.content)])
+    update_text_file!(jw, uri, [TextChange(1:lastindex(old_content.content.content), text_file.content.content)], old_content.content.language_id)
 end
 
 function add_folder_from_disc!(jw::JuliaWorkspace, path)
