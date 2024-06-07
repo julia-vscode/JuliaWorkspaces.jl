@@ -15,7 +15,7 @@ Salsa.@derived function derived_potential_project_folders(rt)
         folder_path = dirname(file_path)
         fodler_uri = filepath2uri(folder_path)
 
-        if is_path_project_file(file_path)            
+        if is_path_project_file(file_path)
             if !haskey(pf, folder_path) || endswith(lowercase(file_path), "juliaproject.toml")
                 pf[fodler_uri] =file_uri
             end
@@ -41,7 +41,10 @@ Salsa.@derived function derived_package(rt, uri)
     if haskey(syntax_tree, "name") && haskey(syntax_tree, "uuid") && haskey(syntax_tree, "version")
         parsed_uuid = tryparse(UUID, syntax_tree["uuid"])
         if parsed_uuid!==nothing
-            return JuliaPackage(project_file, syntax_tree["name"], parsed_uuid)
+            project_text_content = input_text_file(rt, project_file)
+            project_content_hash = hash(project_text_content.content.content)
+
+            return JuliaPackage(project_file, syntax_tree["name"], parsed_uuid, project_content_hash)
         end
     end
 
@@ -95,7 +98,11 @@ Salsa.@derived function derived_project(rt, uri)
         deved_packages[uri_of_deved_package] = JuliaDevedPackage(k_entry, uuid_of_deved_package)
     end
 
-    return JuliaProject(project_file, manifest_file, deved_packages)
+    manifest_text_content = input_text_file(rt, manifest_file)
+    project_text_content = input_text_file(rt, project_file)
+    project_content_hash = hash(project_text_content.content.content, hash(manifest_text_content.content.content))
+
+    JuliaProject(project_file, manifest_file, project_content_hash, deved_packages)
 end
 
 Salsa.@derived function derived_package_folders(rt)

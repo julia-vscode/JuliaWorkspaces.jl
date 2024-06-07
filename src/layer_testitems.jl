@@ -7,7 +7,7 @@ using ..URIs2: URI, uri2filepath
 import ...JuliaWorkspaces
 using ...JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail, JuliaPackage, JuliaProject, splitpath
 
-function find_test_detail!(node, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+function find_test_detail!(node, uri, testitems, testsetups, errors)
     if kind(node) == K"macrocall" && haschildren(node) && node[1].val == Symbol("@testitem")
         range = first_byte(node):last_byte(node)
 
@@ -121,9 +121,6 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
                 TestItemDetail(
                     uri,
                     node[2,1].val,
-                    project_uri,
-                    package_uri,
-                    package_name,
                     range,
                     code_range,
                     option_default_imports,
@@ -155,8 +152,6 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
                 TestSetupDetail(
                     uri,
                     mod_name,
-                    package_uri,
-                    package_name,
                     range,
                     code_range
                 )
@@ -164,13 +159,13 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
         end
     elseif kind(node) == K"toplevel"
         for i in children(node)
-            find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+            find_test_detail!(i, uri, testitems, testsetups, errors)
         end
     elseif kind(node) == K"module"
-        find_test_detail!(node[2], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+        find_test_detail!(node[2], uri, testitems, testsetups, errors)
     elseif kind(node) == K"block"
         for i in children(node)
-            find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+            find_test_detail!(i, uri, testitems, testsetups, errors)
         end
     end
 end
@@ -223,6 +218,18 @@ function find_project_for_file(projects::Vector{URI}, file::URI)
 end
 
 Salsa.@derived function derived_testitems(rt, uri)
+    testitems = []
+    testsetups = []
+    testerrors = []
+
+    syntax_tree = derived_julia_syntax_tree(rt, uri)
+
+    find_test_detail!(syntax_tree[1], uri, testitems, testsetups, testerrors)
+
+    return (testitems=testitems, testsetups=testsetups, testerrors=testerrors)
+end
+
+Salsa.@derived function derived_testenv(rt, uri)
     projects = derived_project_folders(rt)
     packages = derived_package_folders(rt)
 
@@ -250,13 +257,12 @@ Salsa.@derived function derived_testitems(rt, uri)
         project_uri = nothing
     end
 
-    testitems = []
-    testsetups = []
-    testerrors = []
+    env_content_hash = isnothing(project_uri) ? nothing : derived_project(rt, project_uri).content_hash
+    if package_uri===nothing
+        env_content_hash = hash(nothing, env_content_hash)
+    else
+        env_content_hash = hash(derived_package(rt, package_uri).content_hash)
+    end
 
-    syntax_tree = derived_julia_syntax_tree(rt, uri)
-
-    find_test_detail!(syntax_tree[1], uri, project_uri, package_uri, package_name, testitems, testsetups, testerrors)
-
-    return (testitems=testitems, testsetups=testsetups, testerrors=testerrors)
+    return JuliaTestEnv(package_name, package_uri, project_uri, env_content_hash)
 end

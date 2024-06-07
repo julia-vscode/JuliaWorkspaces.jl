@@ -33,6 +33,16 @@ function get_files(jw::JuliaWorkspace)
     return input_files(jw.runtime)
 end
 
+Salsa.@derived function derived_has_file(rt, uri)
+    files = input_files(rt)
+
+    return uri in files
+end
+
+function has_file(jw, uri)
+    return derived_has_file(jw.runtime, uri)
+end
+
 function get_text_file(jw::JuliaWorkspace, uri::URI)
     files = input_files(jw.runtime)
 

@@ -1,9 +1,6 @@
 struct TestItemDetail
     uri::URI
     name::String
-    project_uri::Union{URI,Nothing}
-    package_uri::Union{URI,Nothing}
-    package_name::String
     range::UnitRange{Int}
     code_range::UnitRange{Int}
     option_default_imports::Bool
@@ -14,8 +11,6 @@ end
 struct TestSetupDetail
     uri::URI
     name::Symbol
-    package_uri::Union{URI,Nothing}
-    package_name::String
     range::UnitRange{Int}
     code_range::UnitRange{Int}
 end
@@ -30,6 +25,7 @@ struct JuliaPackage
     project_file_uri::URI
     name::String
     uuid::UUID
+    content_hash::UInt
 end
 
 struct JuliaDevedPackage
@@ -40,7 +36,15 @@ end
 struct JuliaProject
     project_file_uri::URI
     manifest_file_uri::URI
+    content_hash::UInt
     deved_packages::Dict{URI,JuliaDevedPackage}
+end
+
+@auto_hash_equals struct JuliaTestEnv
+    package_name::String
+    package_uri::Union{URI,Nothing}
+    project_uri::Union{URI,Nothing}
+    env_content_hash::Union{UInt,Nothing}
 end
 
 @auto_hash_equals struct SourceText
@@ -85,4 +89,8 @@ end
 
 function get_test_items(jw::JuliaWorkspace, uri::URI)
     derived_testitems(jw.runtime, uri)
+end
+
+function get_test_env(jw::JuliaWorkspace, uri::URI)
+    derived_testenv(jw.runtime, uri)
 end
