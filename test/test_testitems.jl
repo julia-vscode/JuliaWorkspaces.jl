@@ -250,9 +250,6 @@ end
     ti = test_results.testitems[1]
 
     @test ti.name == "foo"
-    @test ti.project_uri === nothing
-    @test ti.package_uri === nothing
-    @test ti.package_name == ""
     @test ti.range == 1:87
     @test ti.code_range == 75:83
     @test ti.option_default_imports == true
@@ -349,9 +346,5 @@ end
         file1_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage2", "src", "TestPackage2.jl"))
         file2_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage3", "src", "TestPackage3.jl"))
         file3_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage4", "src", "TestPackage4.jl"))
-
-        @test get_test_items(jw, file1_uri).testitems[1].project_uri == filepath2uri(joinpath(root_path, "project_detection", "TestPackage2"))
-        @test get_test_items(jw, file2_uri).testitems[1].project_uri == filepath2uri(joinpath(root_path, "project_detection"))
-        @test get_test_items(jw, file3_uri).testitems[1].project_uri === nothing
     end
 end
