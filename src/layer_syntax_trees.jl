@@ -20,7 +20,7 @@ Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
             range(i),
             i.level,
             i.message,
-            "parser"
+            "JuliaSyntax.jl"
         )
     end
 
