@@ -20,8 +20,8 @@
     @test jl_file_with_error_file_uri in text_files
 
     # @test length(jw._julia_syntax_trees) == 2
-    @test get_julia_syntax_tree(jw, jl_package_file_uri) isa Tuple
-    @test get_julia_syntax_tree(jw, jl_file_with_error_file_uri) isa Tuple
+    @test get_julia_syntax_tree(jw, jl_package_file_uri) isa JuliaWorkspaces.JuliaSyntax.SyntaxNode
+    @test get_julia_syntax_tree(jw, jl_file_with_error_file_uri) isa JuliaWorkspaces.JuliaSyntax.SyntaxNode
 
     # @test length(jw._toml_syntax_trees) == 1
     @test get_toml_syntax_tree(jw, project_file_uri) isa Dict
@@ -61,8 +61,8 @@ end
     @test jl_file_with_error_file_uri in text_files
 
     # @test length(jw._julia_syntax_trees) == 2
-    @test get_julia_syntax_tree(jw, jl_package_file_uri) isa Tuple
-    @test get_julia_syntax_tree(jw, jl_file_with_error_file_uri) isa Tuple
+    @test get_julia_syntax_tree(jw, jl_package_file_uri) isa JuliaWorkspaces.JuliaSyntax.SyntaxNode
+    @test get_julia_syntax_tree(jw, jl_file_with_error_file_uri) isa JuliaWorkspaces.JuliaSyntax.SyntaxNode
 
     # @test length(jw._toml_syntax_trees) == 1
     @test get_toml_syntax_tree(jw, project_file_uri) isa Dict
@@ -107,8 +107,8 @@ end
     @test jl_file_with_error_file_uri in text_files
 
     # @test length(jw._julia_syntax_trees) == 2
-    @test get_julia_syntax_tree(jw, jl_package_file_uri) isa Tuple
-    @test get_julia_syntax_tree(jw, jl_file_with_error_file_uri) isa Tuple
+    @test get_julia_syntax_tree(jw, jl_package_file_uri) isa JuliaWorkspaces.JuliaSyntax.SyntaxNode
+    @test get_julia_syntax_tree(jw, jl_file_with_error_file_uri) isa JuliaWorkspaces.JuliaSyntax.SyntaxNode
 
     # @test length(jw._toml_syntax_trees) == 1
     @test get_toml_syntax_tree(jw, project_file_uri) isa Dict

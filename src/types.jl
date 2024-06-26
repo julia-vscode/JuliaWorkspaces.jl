@@ -74,6 +74,13 @@ struct NotebookFile
     cells::Vector{SourceText}
 end
 
+@auto_hash_equals struct Diagnostic
+    range::UnitRange{Int64}
+    severity::Symbol
+    message::String
+    source::String
+end
+
 struct JuliaWorkspace
     runtime::Salsa.Runtime
 

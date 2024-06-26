@@ -224,7 +224,7 @@ Salsa.@derived function derived_testitems(rt, uri)
 
     syntax_tree = derived_julia_syntax_tree(rt, uri)
 
-    find_test_detail!(syntax_tree[1], uri, testitems, testsetups, testerrors)
+    find_test_detail!(syntax_tree, uri, testitems, testsetups, testerrors)
 
     return (testitems=testitems, testsetups=testsetups, testerrors=testerrors)
 end

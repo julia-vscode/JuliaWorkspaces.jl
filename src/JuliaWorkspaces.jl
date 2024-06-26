@@ -31,10 +31,13 @@ export JuliaWorkspace,
     get_text_file,
     get_julia_syntax_tree,
     get_toml_syntax_tree,
+    get_diagnostic,
     get_packages,
     get_projects,
     get_test_items,
-    get_test_env
+    get_test_env,
+    TextFile,
+    SourceText
 
 include("types.jl")
 include("sourcetext.jl")
@@ -42,6 +45,7 @@ include("files.jl")
 include("inputs.jl")
 include("layer_files.jl")
 include("layer_syntax_trees.jl")
+include("layer_diagnostics.jl")
 include("layer_projects.jl")
 include("layer_testitems.jl")
 include("fileio.jl")

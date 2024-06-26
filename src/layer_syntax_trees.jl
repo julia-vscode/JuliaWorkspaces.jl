@@ -1,9 +1,30 @@
-Salsa.@derived function derived_julia_syntax_tree(rt, uri)
+Salsa.@derived function derived_julia_parse_result(rt, uri)
     tf = input_text_file(rt, uri)
     
     content = tf.content.content
 
     return JuliaSyntax.parse!(SyntaxNode, IOBuffer(content))
+end
+
+Salsa.@derived function derived_julia_syntax_tree(rt, uri)
+    parse_result = derived_julia_parse_result(rt, uri)
+
+    return parse_result[1]
+end
+
+Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
+    parse_result = derived_julia_parse_result(rt, uri)
+
+    diag_results = map(parse_result[2]) do i
+        Diagnostic(
+            i.first_byte:i.last_byte,
+            i.level,
+            i.message,
+            "parser"
+        )
+    end
+
+    return diag_results
 end
 
 Salsa.@derived function derived_toml_syntax_tree(rt, uri)
