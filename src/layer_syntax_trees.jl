@@ -17,7 +17,7 @@ Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
 
     diag_results = map(parse_result[2]) do i
         Diagnostic(
-            i.first_byte:i.last_byte,
+            range(i),
             i.level,
             i.message,
             "parser"
