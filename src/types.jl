@@ -59,6 +59,19 @@ end
     end
 end
 
+function position_at(source_text::SourceText, x)
+    line_indices = source_text.line_indices
+
+    # TODO Implement a more efficient algorithm
+    for line in length(line_indices):-1:1
+        if x >= line_indices[line]
+            return line, x - line_indices[line] + 1
+        end
+    end
+
+    error("This should never happen")
+end
+
 struct TextChange
     span::Union{UnitRange{Int},Nothing}
     new_text::String

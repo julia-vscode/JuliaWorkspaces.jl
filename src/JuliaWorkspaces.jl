@@ -36,6 +36,7 @@ export JuliaWorkspace,
     get_projects,
     get_test_items,
     get_test_env,
+    position_at,
     TextFile,
     SourceText
 
