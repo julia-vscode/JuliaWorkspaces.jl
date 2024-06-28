@@ -13,5 +13,5 @@
     @test diags[1].range == 19:24
     @test diags[1].severity == :error
     @test diags[1].message == "extra tokens after end of expression"
-    @test diags[1].source == "parser"
+    @test diags[1].source == "JuliaSyntax.jl"
 end
