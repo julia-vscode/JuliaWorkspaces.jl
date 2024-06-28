@@ -1,5 +1,3 @@
-module SemanticPassTests
-
 import JuliaSyntax
 using JuliaSyntax: @K_str, kind, children, haschildren, first_byte, last_byte, SyntaxNode
 
@@ -9,7 +7,7 @@ using ..URIs2: URI, uri2filepath
 import ...JuliaWorkspaces
 using ...JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail, JuliaPackage, JuliaProject, splitpath
 
-function find_test_detail!(node, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+function find_test_detail!(node, uri, testitems, testsetups, errors)
     if kind(node) == K"macrocall" && haschildren(node) && node[1].val == Symbol("@testitem")
         range = first_byte(node):last_byte(node)
 
@@ -112,15 +110,17 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
                 option_setup = Symbol[]
             end
 
-            code_range = first_byte(child_nodes[end][1]):last_byte(child_nodes[end][end])
+            code_block = child_nodes[end]
+            code_range = if haschildren(code_block) && length(children(code_block)) > 0
+                first_byte(code_block[1]):last_byte(code_block[end])
+            else
+                (first_byte(code_block)+5):(last_byte(code_block)-3)
+            end
 
-            push!(testitems, 
+            push!(testitems,
                 TestItemDetail(
                     uri,
                     node[2,1].val,
-                    project_uri,
-                    package_uri,
-                    package_name, 
                     range,
                     code_range,
                     option_default_imports,
@@ -138,22 +138,20 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
         if length(child_nodes)==1
             push!(errors, TestErrorDetail(uri, "Your `@testsetup` is missing a `module ... end` block.", range))
             return
-        elseif length(child_nodes)>2 || kind(child_nodes[2]) != K"module" || length(children(child_nodes[2])) < 3 || child_nodes[2][1] == false
+        elseif length(child_nodes)>2 || kind(child_nodes[2]) != K"module" || length(children(child_nodes[2])) != 2 || child_nodes[2][1] == false
             push!(errors, TestErrorDetail(uri, "Your `@testsetup` must have a single `module ... end` argument.", range))
             return
         else
             # TODO + 1 here is from the space before the module block. We might have to detect that,
             # not sure whether that is always assigned to the module end EXPR
             mod = child_nodes[2]
-            mod_name = mod[2].val
-            code_range = first_byte(mod[3]):last_byte(mod[end])
+            mod_name = mod[1].val
+            code_range = first_byte(mod[2]):last_byte(mod[2])
             push!(
                 testsetups,
                 TestSetupDetail(
                     uri,
                     mod_name,
-                    package_uri,
-                    package_name,
                     range,
                     code_range
                 )
@@ -161,13 +159,13 @@ function find_test_detail!(node, uri, project_uri, package_uri, package_name, te
         end
     elseif kind(node) == K"toplevel"
         for i in children(node)
-            find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+            find_test_detail!(i, uri, testitems, testsetups, errors)
         end
     elseif kind(node) == K"module"
-        find_test_detail!(node[3], uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+        find_test_detail!(node[2], uri, testitems, testsetups, errors)
     elseif kind(node) == K"block"
         for i in children(node)
-            find_test_detail!(i, uri, project_uri, package_uri, package_name, testitems, testsetups, errors)
+            find_test_detail!(i, uri, testitems, testsetups, errors)
         end
     end
 end
@@ -185,11 +183,9 @@ function vec_startswith(a, b)
     return true
 end
 
-function find_package_for_file(packages::Dict{URI,JuliaPackage}, file::URI)
+function find_package_for_file(packages::Vector{URI}, file::URI)
     file_path = uri2filepath(file)
     package = packages |>
-        keys |>
-        collect |>
         x -> map(x) do i
             package_folder_path = uri2filepath(i)
             parts = splitpath(package_folder_path)
@@ -204,11 +200,9 @@ function find_package_for_file(packages::Dict{URI,JuliaPackage}, file::URI)
     return package
 end
 
-function find_project_for_file(projects::Dict{URI,JuliaProject}, file::URI)
+function find_project_for_file(projects::Vector{URI}, file::URI)
     file_path = uri2filepath(file)
     project = projects |>
-        keys |>
-        collect |>
         x -> map(x) do i
             project_folder_path = uri2filepath(i)
             parts = splitpath(project_folder_path)
@@ -223,57 +217,52 @@ function find_project_for_file(projects::Dict{URI,JuliaProject}, file::URI)
     return project
 end
 
-function semantic_pass_tests(workspace_folders::Set{URI}, syntax_trees::Dict{URI,SyntaxNode}, packages::Dict{URI,JuliaPackage}, projects::Dict{URI,JuliaProject}, fallback_project_uri::URI)
-    all_testitems = Dict{URI,Vector{TestItemDetail}}()
-    all_testsetups = Dict{URI,Vector{TestSetupDetail}}()
-    all_testerrors = Dict{URI,Vector{TestErrorDetail}}()
-    for uri in keys(syntax_trees)
-        # Find which workspace folder the doc is in.
-        parent_workspaceFolders = sort(filter(f -> startswith(string(uri), string(f)), collect(workspace_folders)), by=length ∘ string, rev=true)
+Salsa.@derived function derived_testitems(rt, uri)
+    testitems = []
+    testsetups = []
+    testerrors = []
 
-        # If the file is not in the workspace, we don't report nothing
-        if isempty(parent_workspaceFolders)
-            all_testitems[uri] = []
-            all_testsetups[uri] = []
-            all_testerrors[uri] = []
-        else
-            project_uri = find_project_for_file(projects, uri)
-            package_uri = find_package_for_file(packages, uri)
+    syntax_tree = derived_julia_syntax_tree(rt, uri)
 
-            if project_uri === nothing
-                project_uri = fallback_project_uri
-            end
+    find_test_detail!(syntax_tree, uri, testitems, testsetups, testerrors)
 
-            if package_uri === nothing
-                package_name = ""
-            else
-                package_name = packages[package_uri].name
-            end
-
-            if project_uri == package_uri
-            elseif haskey(projects, project_uri)
-                relevant_project = projects[project_uri]
-
-                if !haskey(relevant_project.deved_packages, package_uri)
-                    project_uri = nothing
-                end
-            else
-                project_uri = nothing
-            end
-
-            testitems = []
-            testsetups = []
-            testerrors = []
-
-            find_test_detail!(syntax_trees[uri], uri, project_uri, package_uri, package_name, testitems, testsetups, testerrors)
-
-            all_testitems[uri] = testitems
-            all_testsetups[uri] = testsetups
-            all_testerrors[uri] = testerrors
-        end
-    end
-
-    return all_testitems, all_testsetups, all_testerrors
+    return (testitems=testitems, testsetups=testsetups, testerrors=testerrors)
 end
 
+Salsa.@derived function derived_testenv(rt, uri)
+    projects = derived_project_folders(rt)
+    packages = derived_package_folders(rt)
+
+    project_uri = find_project_for_file(projects, uri)
+    package_uri = find_package_for_file(packages, uri)
+
+    if project_uri === nothing
+        project_uri = input_fallback_test_project(rt)
+    end
+
+    if package_uri === nothing
+        package_name = ""
+    else
+        package_name = derived_package(rt, package_uri).name
+    end
+
+    if project_uri == package_uri
+    elseif project_uri in projects
+        relevant_project = derived_project(rt, project_uri)
+
+        if !haskey(relevant_project.deved_packages, package_uri)
+            project_uri = nothing
+        end
+    else
+        project_uri = nothing
+    end
+
+    env_content_hash = isnothing(project_uri) ? nothing : derived_project(rt, project_uri).content_hash
+    if package_uri===nothing
+        env_content_hash = hash(nothing, env_content_hash)
+    else
+        env_content_hash = hash(derived_package(rt, package_uri).content_hash)
+    end
+
+    return JuliaTestEnv(package_name, package_uri, project_uri, env_content_hash)
 end

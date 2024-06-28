@@ -1,5 +1,7 @@
 module URIs2
 
+using AutoHashEquals
+
 include("vendored_from_uris.jl")
 
 export URI, uri2filepath, filepath2uri, @uri_str
@@ -39,6 +41,18 @@ end
         else
             return hash((a.scheme, a.authority, a.path, a.query, a.fragment), h)
         end
+    end
+else
+    function Base.:(==)(a::URI, b::URI)
+        return a.scheme == b.scheme &&
+            a.authority == b.authority &&
+            a.path == b.path &&
+            a.query == b.query &&
+            a.fragment == b.fragment
+    end
+
+    function Base.hash(a::URI, h::UInt)
+        return hash((a.scheme, a.authority, a.path, a.query, a.fragment), h)
     end
 end
 
