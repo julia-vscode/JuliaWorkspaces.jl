@@ -38,7 +38,8 @@ export JuliaWorkspace,
     get_test_env,
     position_at,
     TextFile,
-    SourceText
+    SourceText,
+    Diagnostic
 
 include("types.jl")
 include("sourcetext.jl")
