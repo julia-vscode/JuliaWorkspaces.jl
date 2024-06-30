@@ -3,7 +3,11 @@ Salsa.@derived function derived_julia_parse_result(rt, uri)
     
     content = tf.content.content
 
-    return JuliaSyntax.parse!(SyntaxNode, IOBuffer(content))
+    stream = JuliaSyntax.ParseStream(content; version=VERSION)
+    JuliaSyntax.parse!(stream; rule=:all)
+    tree = JuliaSyntax.build_tree(SyntaxNode, stream)
+
+    return tree, stream.diagnostics
 end
 
 Salsa.@derived function derived_julia_syntax_tree(rt, uri)
