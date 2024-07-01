@@ -22,6 +22,18 @@ function is_path_julia_file(path)
     return ext == ".jl"
 end
 
+function is_path_markdown_file(path)
+    _, ext = splitext(lowercase(path))
+
+    return ext == ".md"
+end
+
+function is_path_juliamarkdown_file(path)
+    _, ext = splitext(lowercase(path))
+
+    return ext == ".jmd"
+end
+
 function read_text_file_from_uri(uri::URI)
     path = uri2filepath(uri)
 
@@ -31,6 +43,10 @@ function read_text_file_from_uri(uri::URI)
         "toml"
     elseif is_path_manifest_file(path)
         "toml"
+    elseif is_path_markdown_file(path)
+        "markdown"
+    elseif is_path_juliamarkdown_file(path)
+        "juliamarkdown"
     else
         error("Unknown file")
     end
@@ -57,7 +73,12 @@ function read_path_into_textdocuments(uri::URI)
     for (root, _, files) in walkdir(path, onerror=x -> x)
         for file in files            
             filepath = joinpath(root, file)
-            if is_path_julia_file(filepath) || is_path_project_file(filepath) || is_path_manifest_file(filepath)
+            if is_path_julia_file(filepath) || 
+                        is_path_project_file(filepath) || 
+                        is_path_manifest_file(filepath) || 
+                        is_path_markdown_file(filepath) || 
+                        is_path_juliamarkdown_file(filepath)
+
                 uri = filepath2uri(filepath)
                 text_file = read_text_file_from_uri(uri)
                 text_file === nothing && continue
