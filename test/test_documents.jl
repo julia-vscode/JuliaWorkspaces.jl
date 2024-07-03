@@ -27,6 +27,6 @@ end
 
     add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
 
-    @test_throws ErrorException add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    @test_throws JuliaWorkspaces.JWDuplicateFile add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
 end
 
