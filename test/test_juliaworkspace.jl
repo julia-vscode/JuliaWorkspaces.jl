@@ -14,7 +14,7 @@
     jw = workspace_from_folders([pkg_root])
 
     text_files = get_text_files(jw)
-    @test length(text_files) == 3
+    @test length(text_files) == 4
     @test project_file_uri in text_files
     @test jl_package_file_uri in text_files
     @test jl_file_with_error_file_uri in text_files
@@ -55,7 +55,7 @@ end
     add_folder_from_disc!(jw, pkg_root)
 
     text_files = get_text_files(jw)
-    @test length(text_files) == 3
+    @test length(text_files) == 4
     @test project_file_uri in text_files
     @test jl_package_file_uri in text_files
     @test jl_file_with_error_file_uri in text_files
@@ -101,7 +101,7 @@ end
     remove_all_children!(jw, filepath2uri(second_folder))
 
     text_files = get_text_files(jw)
-    @test length(text_files) == 3
+    @test length(text_files) == 4
     @test project_file_uri in text_files
     @test jl_package_file_uri in text_files
     @test jl_file_with_error_file_uri in text_files

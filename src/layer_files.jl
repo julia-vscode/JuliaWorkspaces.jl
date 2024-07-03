@@ -1,11 +1,11 @@
 function add_text_file(jw::JuliaWorkspace, file::TextFile)
     files = input_files(jw.runtime)
 
-    file.uri in files && error("Duplicate file $(file.uri)")
+    file.uri in files && throw(JWDuplicateFile("Duplicate file $(file.uri)"))
 
-    push!(files, file.uri)
+    new_files = Set{URI}([files...;file.uri])
 
-    set_input_files!(jw.runtime, files)
+    set_input_files!(jw.runtime, new_files)
 
     set_input_text_file!(jw.runtime, file.uri, file)
 end
@@ -46,7 +46,7 @@ end
 function get_text_file(jw::JuliaWorkspace, uri::URI)
     files = input_files(jw.runtime)
 
-    uri in files = input_files(jw.runtime) || error("Unknown file")
+    uri in files || throw(JWUnknownFile("Unknown file $uri"))
 
     return input_text_file(jw.runtime, uri)
 end
@@ -54,7 +54,7 @@ end
 function remove_file!(jw::JuliaWorkspace, uri::URI)
     files = input_files(jw.runtime)
 
-    uri in files || error("Trying to remove non-existing file")
+    uri in files || throw(JWUnknownFile("Trying to remove non-existing file $uri"))
 
     pop!(files, uri)
 

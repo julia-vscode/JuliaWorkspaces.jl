@@ -1,4 +1,4 @@
-struct TestItemDetail
+@auto_hash_equals struct TestItemDetail
     uri::URI
     name::String
     range::UnitRange{Int}
@@ -8,32 +8,32 @@ struct TestItemDetail
     option_setup::Vector{Symbol}
 end
 
-struct TestSetupDetail
+@auto_hash_equals struct TestSetupDetail
     uri::URI
     name::Symbol
     range::UnitRange{Int}
     code_range::UnitRange{Int}
 end
 
-struct TestErrorDetail
+@auto_hash_equals struct TestErrorDetail
     uri::URI
     message::String
     range::UnitRange{Int}
 end
 
-struct JuliaPackage
+@auto_hash_equals struct JuliaPackage
     project_file_uri::URI
     name::String
     uuid::UUID
     content_hash::UInt
 end
 
-struct JuliaDevedPackage
+@auto_hash_equals struct JuliaDevedPackage
     name::String
     uuid::UUID
 end
 
-struct JuliaProject
+@auto_hash_equals struct JuliaProject
     project_file_uri::URI
     manifest_file_uri::URI
     content_hash::UInt
@@ -82,7 +82,7 @@ end
     content::SourceText
 end
 
-struct NotebookFile
+@auto_hash_equals struct NotebookFile
     uri::URI
     cells::Vector{SourceText}
 end

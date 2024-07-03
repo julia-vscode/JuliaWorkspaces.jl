@@ -48,7 +48,7 @@ function read_text_file_from_uri(uri::URI)
     elseif is_path_juliamarkdown_file(path)
         "juliamarkdown"
     else
-        error("Unknown file")
+        throw(JWUnknownFileType("Unknown file type for $uri"))
     end
 
     content = try

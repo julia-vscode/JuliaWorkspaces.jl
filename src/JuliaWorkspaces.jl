@@ -41,6 +41,7 @@ export JuliaWorkspace,
     SourceText,
     Diagnostic
 
+include("exception_types.jl")
 include("types.jl")
 include("sourcetext.jl")
 include("files.jl")
