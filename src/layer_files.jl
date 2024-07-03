@@ -25,8 +25,19 @@ Salsa.@derived function derived_text_files(rt)
     return [file for file in files]
 end
 
+Salsa.@derived function derived_julia_files(rt)
+    files = input_files(rt)
+
+    # TODO Actually filter this properly
+    return [file for file in files if endswith(string(file), ".jl")]
+end
+
 function get_text_files(jw::JuliaWorkspace)
     return derived_text_files(jw.runtime)
+end
+
+function get_julia_files(jw::JuliaWorkspace)
+    return derived_julia_files(jw.runtime)
 end
 
 function get_files(jw::JuliaWorkspace)

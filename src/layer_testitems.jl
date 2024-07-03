@@ -229,6 +229,17 @@ Salsa.@derived function derived_testitems(rt, uri)
     return (testitems=testitems, testsetups=testsetups, testerrors=testerrors)
 end
 
+Salsa.@derived function derived_all_testitems(rt)
+    files = derived_julia_files(rt)
+
+    res = Dict{URI,@NamedTuple(testitems::Vector{TestItemDetailt},testsetups::Vector{TestSetupDetail},testerrors::Vector{TestErrorDetail})}(
+        uri => derived_testitems(rt, uri)
+        for uri in files
+    )
+
+    return res
+end
+
 Salsa.@derived function derived_testenv(rt, uri)
     projects = derived_project_folders(rt)
     packages = derived_package_folders(rt)

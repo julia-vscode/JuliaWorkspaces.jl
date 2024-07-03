@@ -111,6 +111,10 @@ function get_test_items(jw::JuliaWorkspace, uri::URI)
     derived_testitems(jw.runtime, uri)
 end
 
+function get_test_items(jw::JuliaWorkspace)
+    derived_all_testitems(jw.runtime)
+end
+
 function get_test_env(jw::JuliaWorkspace, uri::URI)
     derived_testenv(jw.runtime, uri)
 end
