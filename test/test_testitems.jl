@@ -257,12 +257,12 @@ end
     @test ti.option_setup == [:FooSetup]
 end
 
-@testitem "@testsetup macro missing module arg" begin
+@testitem "@testmodule macro missing begin end" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
-    content = """@testsetup
+    content = """@testmodule
     """
 
     jw = JuliaWorkspace()
@@ -275,15 +275,16 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "Your `@testsetup` is missing a `module ... end` block.", 1:length(content)-1)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "Your @testmodule is missing a name and code block.", 1:length(content)-1)
 end
 
-@testitem "@testsetup macro extra args" begin
+@testitem "@testsnippet macro missing begin end block" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
-    content = """@testsetup "Foo" module end"""
+    content = """@testsnippet
+    """
 
     jw = JuliaWorkspace()
 
@@ -295,19 +296,55 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "Your `@testsetup` must have a single `module ... end` argument.", 1:length(content))
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "Your @testsnippet is missing a name and code block.", 1:length(content)-1)
 end
 
-@testitem "@testsetup all correct" begin
+@testitem "@testmodule macro extra args" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
-    content = """@testsetup module Foo
-        const BAR = 1
-        qux() = 2
-    end
-    """
+    content = """@testmodule "Foo" begin end"""
+
+    jw = JuliaWorkspace()
+
+    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testitems) == 0
+    @test length(test_results.testsetups) == 0
+    @test length(test_results.testerrors) == 1
+
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "Your @testmodule must have a first argument that is an identifier for the name.", 1:length(content))
+end
+
+@testitem "@testsnippet macro extra args" begin
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces.URIs2: @uri_str
+
+    uri = uri"file://src/foo.jl"
+    content = """@testsnippet "Foo" begin end"""
+
+    jw = JuliaWorkspace()
+
+    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testitems) == 0
+    @test length(test_results.testsetups) == 0
+    @test length(test_results.testerrors) == 1
+
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "Your @testsnippet must have a first argument that is an identifier for the name.", 1:length(content))
+end
+
+@testitem "@testmodule all correct" begin
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces.URIs2: @uri_str
+
+    uri = uri"file://src/foo.jl"
+    content = """@testmodule Foo begin const BAR = 1 end"""
 
     jw = JuliaWorkspace()
 
@@ -322,8 +359,34 @@ end
     tsd = test_results.testsetups[1]
 
     @test tsd.name == :Foo
-    @test tsd.range == 1:length(content)-1
-    @test tsd.code_range == (length("@testsetup module Foo") + 1):(length(content) - 4)
+    @test tsd.kind == :module
+    @test tsd.range == 1:length(content)
+    @test tsd.code_range == (length("@testmodule Foo begin ") + 1):(length(content) - 4)
+end
+
+@testitem "@testsnippet all correct" begin
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces.URIs2: @uri_str
+
+    uri = uri"file://src/foo.jl"
+    content = """@testsnippet Foo begin const BAR = 1 end"""
+
+    jw = JuliaWorkspace()
+
+    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testitems) == 0
+    @test length(test_results.testsetups) == 1
+    @test length(test_results.testerrors) == 0
+
+    tsd = test_results.testsetups[1]
+
+    @test tsd.name == :Foo
+    @test tsd.kind == :snippet
+    @test tsd.range == 1:length(content)
+    @test tsd.code_range == (length("@testsnippet Foo begin ") + 1):(length(content) - 4)
 end
 
 @testitem "@testitem project detection" begin

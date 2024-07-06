@@ -129,29 +129,63 @@ function find_test_detail!(node, uri, testitems, testsetups, errors)
                 )
             )
         end
-    elseif kind(node) == K"macrocall" && haschildren(node) && node[1].val == Symbol("@testsetup")
+    elseif kind(node) == K"macrocall" && haschildren(node) && (node[1].val == Symbol("@testmodule") || node[1].val == Symbol("@testsnippet"))
         range = first_byte(node):last_byte(node)
+
+        testkind = node[1].val
 
         child_nodes = children(node)
 
         # Check for various syntax errors
         if length(child_nodes)==1
-            push!(errors, TestErrorDetail(uri, "Your `@testsetup` is missing a `module ... end` block.", range))
+            push!(errors, TestErrorDetail(uri, "Your $testkind is missing a name and code block.", range))
             return
-        elseif length(child_nodes)>2 || kind(child_nodes[2]) != K"module" || length(children(child_nodes[2])) != 2 || child_nodes[2][1] == false
-            push!(errors, TestErrorDetail(uri, "Your `@testsetup` must have a single `module ... end` argument.", range))
+        elseif length(child_nodes)>1 && !(kind(child_nodes[2]) == K"Identifier")
+            println("THE KIND IS $(kind(child_nodes[2]))")
+            push!(errors, TestErrorDetail(uri, "Your $testkind must have a first argument that is an identifier for the name.", range))
+            return
+        elseif length(child_nodes)==2
+            push!(errors, TestErrorDetail(uri, "Your $testkind is missing a code block argument.", range))
+            return
+        elseif !(kind(child_nodes[end]) == K"block")
+            push!(errors, TestErrorDetail(uri, "The final argument of a $testkind must be a begin end block.", range))
             return
         else
-            # TODO + 1 here is from the space before the module block. We might have to detect that,
-            # not sure whether that is always assigned to the module end EXPR
-            mod = child_nodes[2]
-            mod_name = mod[1].val
-            code_range = first_byte(mod[2]):last_byte(mod[2])
+            # Now check our keyword args
+            for i in child_nodes[3:end-1]
+                if kind(i) != K"="
+                    push!(errors, TestErrorDetail(uri, "The arguments to a $testkind must be in keyword format.", range))
+                    return
+                elseif !(length(children(i))==2)
+                    error("This code path should not be possible.")
+                else
+                    push!(errors, TestErrorDetail(uri, "Unknown keyword argument.", range))
+                    return
+                end
+            end
+
+            mod_name = child_nodes[2].val
+            code_block = child_nodes[end]
+            code_range = if haschildren(code_block) && length(children(code_block)) > 0
+                first_byte(code_block[1]):last_byte(code_block[end])
+            else
+                (first_byte(code_block)+5):(last_byte(code_block)-3)
+            end
+
+            testkind2 = if testkind==Symbol("@testmodule")
+                :module
+            elseif testkind==Symbol("@testsnippet")
+                :snippet
+            else
+                error("Unknown testkind")
+            end
+
             push!(
                 testsetups,
                 TestSetupDetail(
                     uri,
                     mod_name,
+                    testkind2,
                     range,
                     code_range
                 )

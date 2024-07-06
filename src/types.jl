@@ -11,6 +11,7 @@ end
 @auto_hash_equals struct TestSetupDetail
     uri::URI
     name::Symbol
+    kind::Symbol
     range::UnitRange{Int}
     code_range::UnitRange{Int}
 end
