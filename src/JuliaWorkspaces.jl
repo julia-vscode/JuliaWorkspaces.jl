@@ -1,6 +1,6 @@
 module JuliaWorkspaces
 
-import UUIDs, JuliaSyntax
+import UUIDs, JuliaSyntax, TestItemDetection
 using UUIDs: UUID
 using JuliaSyntax: SyntaxNode
 using Salsa
