@@ -20,7 +20,7 @@ JuliaSyntax = "0.4"
 julia = "1.6"
 AutoHashEquals = "1,2"
 Salsa = "2.2.0"
-TestItemDetection = "1"
+TestItemDetection = "1.0.2"
 
 [targets]
 test = ["Test", "TestItemRunner"]

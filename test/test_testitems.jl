@@ -411,3 +411,30 @@ end
         file3_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage4", "src", "TestPackage4.jl"))
     end
 end
+
+@testitem "module behind docstring" begin
+    using JuliaWorkspaces: JuliaWorkspace
+    using JuliaWorkspaces.URIs2: @uri_str
+
+    uri = uri"file://src/foo.jl"
+    content = """
+        "Foo"
+        module Foo
+            @testitem "Test1" begin
+                @test 1 + 1 == 2
+            end
+        end
+    """
+
+    jw = JuliaWorkspace()
+
+    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testitems) == 1
+
+    ti = test_results.testitems[1]
+
+    @test ti.name == "Test1"
+end
