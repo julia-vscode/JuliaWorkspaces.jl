@@ -73,11 +73,6 @@ function position_at(source_text::SourceText, x)
     error("This should never happen")
 end
 
-struct TextChange
-    span::Union{UnitRange{Int},Nothing}
-    new_text::String
-end
-
 @auto_hash_equals struct TextFile
     uri::URI
     content::SourceText

@@ -8,7 +8,7 @@
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -29,7 +29,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -50,7 +50,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -71,7 +71,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -92,7 +92,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -113,7 +113,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -134,7 +134,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -155,7 +155,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -176,7 +176,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -197,7 +197,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -218,7 +218,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -239,7 +239,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -267,7 +267,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -288,7 +288,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -308,7 +308,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -328,7 +328,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -348,7 +348,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -373,7 +373,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 
@@ -428,7 +428,7 @@ end
 
     jw = JuliaWorkspace()
 
-    add_text_file(jw, TextFile(uri, SourceText(content, "julia")))
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
 
     test_results = get_test_items(jw, uri)
 

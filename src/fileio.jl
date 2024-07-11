@@ -94,16 +94,14 @@ function add_file_from_disc!(jw::JuliaWorkspace, path)
     uri = filepath2uri(path)
     text_file = read_text_file_from_uri(uri)
 
-    add_text_file(jw, text_file)
+    add_file!(jw, text_file)
 end
 
 function update_file_from_disc!(jw::JuliaWorkspace, path)
     uri = filepath2uri(path)
     text_file = read_text_file_from_uri(uri)
 
-    old_content = get_text_file(jw, uri)
-
-    update_text_file!(jw, uri, [TextChange(1:lastindex(old_content.content.content), text_file.content.content)], old_content.content.language_id)
+    update_file!(jw, text_file)
 end
 
 function add_folder_from_disc!(jw::JuliaWorkspace, path)
@@ -112,7 +110,7 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path)
     files = read_path_into_textdocuments(path_uri)
 
     for i in files
-        add_text_file(jw, i)
+        add_file!(jw, i)
     end
 end
 

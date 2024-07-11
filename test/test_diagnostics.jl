@@ -5,7 +5,7 @@
     uri = URI("foo:bar")
 
     jw = JuliaWorkspace()
-    JuliaWorkspaces.add_text_file(jw, TextFile(uri, SourceText(source, "julia")))
+    JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
 
     diags = get_diagnostic(jw, uri)
 

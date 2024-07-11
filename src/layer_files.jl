@@ -1,4 +1,4 @@
-function add_text_file(jw::JuliaWorkspace, file::TextFile)
+function add_file!(jw::JuliaWorkspace, file::TextFile)
     files = input_files(jw.runtime)
 
     file.uri in files && throw(JWDuplicateFile("Duplicate file $(file.uri)"))
@@ -10,12 +10,10 @@ function add_text_file(jw::JuliaWorkspace, file::TextFile)
     set_input_text_file!(jw.runtime, file.uri, file)
 end
 
-function update_text_file!(jw::JuliaWorkspace, uri::URI, changes::Vector{TextChange}, language_id::String)
-    file = input_text_file(jw.runtime, uri)
+function update_file!(jw::JuliaWorkspace, file::TextFile)
+    has_file(jw, file.uri) || throw(JWUnknownFile("Cannot update unknown file $(file.uri)."))
 
-    new_file = with_changes(file, changes, language_id)
-
-    set_input_text_file!(jw.runtime, new_file.uri, new_file)
+    set_input_text_file!(jw.runtime, file.uri, file)
 end
 
 Salsa.@derived function derived_text_files(rt)

@@ -18,10 +18,10 @@ using .URIs2: filepath2uri, uri2filepath
 using .URIs2: URI, @uri_str
 
 export JuliaWorkspace,
-    add_text_file,
+    add_file!,
     remove_file!,
     remove_all_children!,
-    with_changes, TextFile, SourceText, TextChange,
+    TextFile, SourceText,
     workspace_from_folders,
     add_folder_from_disc!,
     add_file_from_disc!,
@@ -45,7 +45,6 @@ export JuliaWorkspace,
 include("exception_types.jl")
 include("types.jl")
 include("sourcetext.jl")
-include("files.jl")
 include("inputs.jl")
 include("layer_files.jl")
 include("layer_syntax_trees.jl")
