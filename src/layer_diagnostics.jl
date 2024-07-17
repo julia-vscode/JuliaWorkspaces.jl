@@ -53,31 +53,33 @@ Salsa.@derived function derived_diagnostics(rt, uri)
 
     results = Diagnostic[]
 
-    if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "syntax-errors", true) == true || get(lint_config, "syntax-warnings", false) == true
-        syntax_diagnostics = derived_julia_syntax_diagnostics(rt, uri)
+    if uri.scheme == "file"
+        if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "syntax-errors", true) == true || get(lint_config, "syntax-warnings", false) == true
+            syntax_diagnostics = derived_julia_syntax_diagnostics(rt, uri)
 
-        if get(lint_config, "syntax-errors", true) == true
-            append!(results, i for i in syntax_diagnostics if i.severity==:error)
+            if get(lint_config, "syntax-errors", true) == true
+                append!(results, i for i in syntax_diagnostics if i.severity==:error)
+            end
+
+            if get(lint_config, "syntax-warnings", false) == true
+                append!(results, i for i in syntax_diagnostics if i.severity==:warning)
+            end
         end
 
-        if get(lint_config, "syntax-warnings", false) == true
-            append!(results, i for i in syntax_diagnostics if i.severity==:warning)
+        if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "testitem-errors", true) == true
+            tis = derived_testitems(rt, uri)
+            append!(results, Diagnostic(i.range, :error, i.message, "Testitem") for i in tis.testerrors)
         end
-    end
 
-    if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "testitem-errors", true) == true
-        tis = derived_testitems(rt, uri)
-        append!(results, Diagnostic(i.range, :error, i.message, "Testitem") for i in tis.testerrors)
-    end
+        if (is_path_lintconfig_file(uri2filepath(uri)) || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri)) ) && get(lint_config, "toml-syntax-errors", true) == true
+            toml_syntax_errors = derived_toml_syntax_diagnostics(rt, uri)
+            append!(results, toml_syntax_errors)
+        end
 
-    if (is_path_lintconfig_file(uri2filepath(uri)) || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri)) ) && get(lint_config, "toml-syntax-errors", true) == true
-        toml_syntax_errors = derived_toml_syntax_diagnostics(rt, uri)
-        append!(results, toml_syntax_errors)
-    end
-
-    if is_path_lintconfig_file(uri2filepath(uri)) && get(lint_config, "lint-config-errors", true) == true
-        lint_config_errors = derived_lintconfig_diagnostics(rt, uri)
-        append!(results, lint_config_errors)
+        if is_path_lintconfig_file(uri2filepath(uri)) && get(lint_config, "lint-config-errors", true) == true
+            lint_config_errors = derived_lintconfig_diagnostics(rt, uri)
+            append!(results, lint_config_errors)
+        end
     end
 
     return results
