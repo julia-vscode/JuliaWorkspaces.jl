@@ -1,8 +1,6 @@
 Salsa.@derived function derived_lintconfig_files(rt)
     files = derived_text_files(rt)
 
-    println(files)
-
     return [file for file in files if file.scheme=="file" && is_path_lintconfig_file(uri2filepath(file))]
 end
 
@@ -85,6 +83,22 @@ Salsa.@derived function derived_diagnostics(rt, uri)
     return results
 end
 
+Salsa.@derived function derived_diagnostics(rt)
+    files = derived_text_files(rt)
+
+    results = Diagnostic[]
+
+    for f in files
+        append!(results, derived_diagnostics(rt, f))
+    end
+    
+    return results
+end
+
 function get_diagnostic(jw::JuliaWorkspace, uri::URI)
     return derived_diagnostics(jw.runtime, uri)
+end
+
+function get_diagnostics(jw::JuliaWorkspace)
+    return derived_diagnostics(jw.runtime)
 end
