@@ -83,9 +83,11 @@ Salsa.@derived function derived_testitems(rt, uri)
             ) for i in testsetups],
         testerrors=[TestErrorDetail(
             uri,
-            i.message,
-            i.range
-            ) for i in testerrors]
+            "$uri:error$i",
+            te.name,
+            te.message,
+            te.range
+            ) for (i,te) in enumerate(testerrors)]
     )
 end
 

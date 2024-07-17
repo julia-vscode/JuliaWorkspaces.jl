@@ -19,6 +19,8 @@ end
 
 @auto_hash_equals struct TestErrorDetail
     uri::URI
+    id::String
+    name::Union{Nothing,String}
     message::String
     range::UnitRange{Int}
 end
