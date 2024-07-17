@@ -112,8 +112,6 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path)
     for i in files
         add_file!(jw, i)
     end
-
-    return files
 end
 
 function workspace_from_folders(workspace_folders::Vector{String})
