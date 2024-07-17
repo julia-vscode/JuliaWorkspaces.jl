@@ -66,13 +66,14 @@ Salsa.@derived function derived_testitems(rt, uri)
     return (
         testitems=[TestItemDetail(
             uri,
-            i.name,
-            i.range,
-            i.code_range,
-            i.option_default_imports,
-            i.option_tags,
-            i.option_setup
-            ) for i in testitems],
+            "$uri:$i",
+            ti.name,
+            ti.range,
+            ti.code_range,
+            ti.option_default_imports,
+            ti.option_tags,
+            ti.option_setup
+            ) for (i,ti) in enumerate(testitems)],
         testsetups=[TestSetupDetail(
             uri,
             i.name,

@@ -1,5 +1,6 @@
 @auto_hash_equals struct TestItemDetail
     uri::URI
+    id::String
     name::String
     range::UnitRange{Int}
     code_range::UnitRange{Int}

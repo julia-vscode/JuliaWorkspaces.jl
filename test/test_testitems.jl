@@ -250,6 +250,7 @@ end
     ti = test_results.testitems[1]
 
     @test ti.name == "foo"
+    @test ti.id == "file://src/foo.jl:1"
     @test ti.range == 1:87
     @test ti.code_range == 75:83
     @test ti.option_default_imports == true
