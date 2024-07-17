@@ -15,3 +15,17 @@
     @test diags[1].message == "extra tokens after end of expression"
     @test diags[1].source == "JuliaSyntax.jl"
 end
+
+@testitem "Basic synta error 2" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("file", nothing, "/test/test.jl", nothing, nothing)
+
+    jw = JuliaWorkspace()
+    JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "julia")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file", nothing, "/test/.JuliaLint.toml", nothing, nothing), SourceText("syntax-errors = false", "toml")))
+
+    diags = get_diagnostic(jw, uri)
+
+    @test length(diags) == 0
+end    

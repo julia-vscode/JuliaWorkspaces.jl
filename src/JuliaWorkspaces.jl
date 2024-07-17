@@ -48,9 +48,9 @@ include("sourcetext.jl")
 include("inputs.jl")
 include("layer_files.jl")
 include("layer_syntax_trees.jl")
-include("layer_diagnostics.jl")
 include("layer_projects.jl")
 include("layer_testitems.jl")
+include("layer_diagnostics.jl")
 include("fileio.jl")
 
 end
