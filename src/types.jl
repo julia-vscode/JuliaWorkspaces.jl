@@ -25,6 +25,12 @@ end
     range::UnitRange{Int}
 end
 
+@auto_hash_equals struct TestDetails
+    testitems::Vector{TestItemDetail}
+    testsetups::Vector{TestSetupDetail}
+    testerrors::Vector{TestErrorDetail}
+end
+
 @auto_hash_equals struct JuliaPackage
     project_file_uri::URI
     name::String

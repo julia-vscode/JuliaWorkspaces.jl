@@ -63,8 +63,8 @@ Salsa.@derived function derived_testitems(rt, uri)
 
     TestItemDetection.find_test_detail!(syntax_tree, testitems, testsetups, testerrors)
 
-    return (
-        testitems=[TestItemDetail(
+    return TestDetails(
+        [TestItemDetail(
             uri,
             "$uri:$i",
             ti.name,
@@ -74,14 +74,14 @@ Salsa.@derived function derived_testitems(rt, uri)
             ti.option_tags,
             ti.option_setup
             ) for (i,ti) in enumerate(testitems)],
-        testsetups=[TestSetupDetail(
+        [TestSetupDetail(
             uri,
             i.name,
             i.kind,
             i.range,
             i.code_range
             ) for i in testsetups],
-        testerrors=[TestErrorDetail(
+        [TestErrorDetail(
             uri,
             "$uri:error$i",
             te.name,
@@ -138,4 +138,47 @@ Salsa.@derived function derived_testenv(rt, uri)
     end
 
     return JuliaTestEnv(package_name, package_uri, project_uri, env_content_hash)
+end
+
+Salsa.@derived function derived_testitems_updated_since_mark(rt)
+    current_text_files = derived_julia_files(rt)
+    marked_versions = input_marked_testitems(rt)
+
+    old_text_files = collect(keys(marked_versions))
+
+    deleted_files = setdiff(old_text_files, current_text_files)
+    updated_files = Set{URI}()
+
+    for uri in current_text_files
+        if !(uri in old_text_files)
+            push!(updated_files, uri)
+        else
+            new_diag = derived_testitems(rt, uri)
+
+            if hash(marked_versions[uri]) != hash(new_diag)
+                push!(updated_files, uri)
+            end
+        end
+    end
+
+    return updated_files, deleted_files
+end
+
+function mark_current_testitems(jw::JuliaWorkspace)
+    files = derived_julia_files(jw.runtime)
+
+    results = Dict{URI,TestDetails}()
+
+    for f in files
+        results[f] = derived_testitems(jw.runtime, f)
+    end
+
+    set_input_marked_testitems!(jw.runtime, results)
+end
+
+function get_files_with_updated_testitems(jw::JuliaWorkspace)
+    # @info "get_files_with_updated_testitems" string.(input_files(jw.runtime))
+    # graph = Salsa.Inspect.build_graph(jw.runtime)
+    # println(stderr, graph)
+    return derived_testitems_updated_since_mark(jw.runtime)
 end

@@ -24,7 +24,7 @@ Salsa.@derived function derived_text_files(rt)
 end
 
 Salsa.@derived function derived_julia_files(rt)
-    files = input_files(rt)
+    files = derived_text_files(rt)
 
     # TODO Actually filter this properly
     return [file for file in files if endswith(string(file), ".jl")]
@@ -65,9 +65,9 @@ function remove_file!(jw::JuliaWorkspace, uri::URI)
 
     uri in files || throw(JWUnknownFile("Trying to remove non-existing file $uri"))
 
-    pop!(files, uri)
+    new_files = filter(i->i!=uri, files)
 
-    set_input_files!(jw.runtime, files)
+    set_input_files!(jw.runtime, new_files)
 
     delete_input_text_file!(jw.runtime, uri)
 end
