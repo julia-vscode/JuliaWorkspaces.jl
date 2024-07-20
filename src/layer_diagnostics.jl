@@ -28,7 +28,7 @@ end
 Salsa.@derived function derived_lint_configuration(rt, uri)
     config_files = derived_lintconfig_files(rt)
 
-    sort!(config_files, by=i->length(string(i)))
+    config_files = sort(config_files, by=i->length(string(i)))
 
     configs = Dict{String,Any}()
     for config_file in config_files
