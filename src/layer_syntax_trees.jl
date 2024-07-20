@@ -56,11 +56,3 @@ Salsa.@derived function derived_toml_syntax_diagnostics(rt, uri)
 
     return parse_result[2]
 end
-
-function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
-    return derived_julia_syntax_tree(jw.runtime, uri)
-end
-
-function get_toml_syntax_tree(jw::JuliaWorkspace, uri::URI)
-    return derived_toml_syntax_tree(jw.runtime, uri)
-end

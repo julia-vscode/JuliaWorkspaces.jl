@@ -1,5 +1,3 @@
-
-
 function our_isvalid(s)
     return isvalid(s) && !occursin('\0', s)
 end

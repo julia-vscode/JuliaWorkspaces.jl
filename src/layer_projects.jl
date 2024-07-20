@@ -112,11 +112,3 @@ end
 Salsa.@derived function derived_project_folders(rt)
     return URI[i for i in keys(derived_potential_project_folders(rt)) if derived_project(rt, i)!==nothing]
 end
-
-function get_packages(jw::JuliaWorkspace)
-    return derived_package_folders(jw.runtime)
-end
-
-function get_projects(jw::JuliaWorkspace)
-    return derived_project_folders(jw.runtime)
-end

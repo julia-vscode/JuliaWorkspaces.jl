@@ -118,26 +118,3 @@ Salsa.@derived function derived_diagnostic_updated_since_mark(rt)
 
     return updated_files, deleted_files
 end
-
-function get_diagnostic(jw::JuliaWorkspace, uri::URI)
-    return derived_diagnostics(jw.runtime, uri)
-end
-
-function get_diagnostics(jw::JuliaWorkspace)
-    return derived_all_diagnostics(jw.runtime)
-end
-
-function mark_current_diagnostics(jw::JuliaWorkspace)
-    files = derived_text_files(jw.runtime)
-
-    results = Dict{URI,Vector{Diagnostic}}()
-
-    for f in files
-        results[f] = derived_diagnostics(jw.runtime, f)
-    end
-    set_input_marked_diagnostics!(jw.runtime, DiagnosticsMark(uuid4(), results))
-end
-
-function get_files_with_updated_diagnostics(jw::JuliaWorkspace)
-    return derived_diagnostic_updated_since_mark(jw.runtime)
-end

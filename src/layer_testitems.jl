@@ -164,21 +164,3 @@ Salsa.@derived function derived_testitems_updated_since_mark(rt)
     return updated_files, deleted_files
 end
 
-function mark_current_testitems(jw::JuliaWorkspace)
-    files = derived_julia_files(jw.runtime)
-
-    results = Dict{URI,TestDetails}()
-
-    for f in files
-        results[f] = derived_testitems(jw.runtime, f)
-    end
-
-    set_input_marked_testitems!(jw.runtime, TestitemsMark(uuid4(), results))
-end
-
-function get_files_with_updated_testitems(jw::JuliaWorkspace)
-    # @info "get_files_with_updated_testitems" string.(input_files(jw.runtime))
-    # graph = Salsa.Inspect.build_graph(jw.runtime)
-    # println(stderr, graph)
-    return derived_testitems_updated_since_mark(jw.runtime)
-end
