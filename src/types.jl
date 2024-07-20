@@ -112,12 +112,12 @@ struct JuliaWorkspace
     end
 end
 
-struct DiagnosticsMark
+@auto_hash_equals struct DiagnosticsMark
     id::UUID
     data::Dict{URI,Vector{Diagnostic}}
 end
 
-struct TestitemsMark
+@auto_hash_equals struct TestitemsMark
     id::UUID
     data::Dict{URI,TestDetails}
 end
