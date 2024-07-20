@@ -83,7 +83,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
     return results
 end
 
-Salsa.@derived function derived_diagnostics(rt)
+Salsa.@derived function derived_all_diagnostics(rt)
     files = derived_text_files(rt)
 
     results = Diagnostic[]
@@ -96,9 +96,9 @@ Salsa.@derived function derived_diagnostics(rt)
 end
 
 Salsa.@derived function derived_diagnostic_updated_since_mark(rt)
-    marked_versions = input_marked_diagnostics(rt)
+    marked_versions = input_marked_diagnostics(rt).data
 
-    old_text_files = keys(marked_versions)
+    old_text_files = collect(keys(marked_versions))
     current_text_files = derived_text_files(rt)
 
     deleted_files = setdiff(old_text_files, current_text_files)
@@ -124,7 +124,7 @@ function get_diagnostic(jw::JuliaWorkspace, uri::URI)
 end
 
 function get_diagnostics(jw::JuliaWorkspace)
-    return derived_diagnostics(jw.runtime)
+    return derived_all_diagnostics(jw.runtime)
 end
 
 function mark_current_diagnostics(jw::JuliaWorkspace)
@@ -135,7 +135,7 @@ function mark_current_diagnostics(jw::JuliaWorkspace)
     for f in files
         results[f] = derived_diagnostics(jw.runtime, f)
     end
-    set_input_marked_diagnostics!(jw.runtime, results)
+    set_input_marked_diagnostics!(jw.runtime, DiagnosticsMark(uuid4(), results))
 end
 
 function get_files_with_updated_diagnostics(jw::JuliaWorkspace)

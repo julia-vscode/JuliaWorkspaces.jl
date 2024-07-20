@@ -142,7 +142,7 @@ end
 
 Salsa.@derived function derived_testitems_updated_since_mark(rt)
     current_text_files = derived_julia_files(rt)
-    marked_versions = input_marked_testitems(rt)
+    marked_versions = input_marked_testitems(rt).data
 
     old_text_files = collect(keys(marked_versions))
 
@@ -173,7 +173,7 @@ function mark_current_testitems(jw::JuliaWorkspace)
         results[f] = derived_testitems(jw.runtime, f)
     end
 
-    set_input_marked_testitems!(jw.runtime, results)
+    set_input_marked_testitems!(jw.runtime, TestitemsMark(uuid4(), results))
 end
 
 function get_files_with_updated_testitems(jw::JuliaWorkspace)

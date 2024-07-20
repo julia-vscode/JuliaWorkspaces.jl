@@ -112,6 +112,16 @@ struct JuliaWorkspace
     end
 end
 
+struct DiagnosticsMark
+    id::UUID
+    data::Dict{URI,Vector{Diagnostic}}
+end
+
+struct TestitemsMark
+    id::UUID
+    data::Dict{URI,TestDetails}
+end
+
 function get_test_items(jw::JuliaWorkspace, uri::URI)
     derived_testitems(jw.runtime, uri)
 end
