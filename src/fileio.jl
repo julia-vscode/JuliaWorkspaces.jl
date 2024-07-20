@@ -57,16 +57,8 @@ function read_text_file_from_uri(uri::URI)
         throw(JWUnknownFileType("Unknown file type for $uri"))
     end
 
-    content = try
-        s = read(path, String)
-        our_isvalid(s) || return nothing
-        s
-    catch err
-        # TODO Reenable this
-        # is_walkdir_error(err) || rethrow()
-        # return nothing
-        rethrow()
-    end
+    content = read(path, String)
+    our_isvalid(content) || throw(JWInvalidFileContent("Invalid content in file $uri."))
 
     return TextFile(uri, SourceText(content, language_id))
 end
@@ -77,13 +69,13 @@ function read_path_into_textdocuments(uri::URI)
     result = TextFile[]
 
     for (root, _, files) in walkdir(path, onerror=x -> x)
-        for file in files            
+        for file in files
             filepath = joinpath(root, file)
-            if is_path_julia_file(filepath) || 
-                        is_path_project_file(filepath) || 
+            if is_path_julia_file(filepath) ||
+                        is_path_project_file(filepath) ||
                         is_path_manifest_file(filepath) ||
                         is_path_lintconfig_file(filepath) ||
-                        is_path_markdown_file(filepath) || 
+                        is_path_markdown_file(filepath) ||
                         is_path_juliamarkdown_file(filepath)
 
                 uri = filepath2uri(filepath)
@@ -130,4 +122,3 @@ function workspace_from_folders(workspace_folders::Vector{String})
 
     return jw
 end
-
