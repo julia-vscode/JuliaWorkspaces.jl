@@ -130,7 +130,7 @@ Salsa.@derived function derived_testenv(rt, uri)
         project_uri = nothing
     end
 
-    env_content_hash = isnothing(project_uri) ? nothing : derived_project(rt, project_uri).content_hash
+    env_content_hash = isnothing(project_uri) ? hash(nothing) : derived_project(rt, project_uri).content_hash
     if package_uri===nothing
         env_content_hash = hash(nothing, env_content_hash)
     else
@@ -163,4 +163,3 @@ Salsa.@derived function derived_testitems_updated_since_mark(rt)
 
     return updated_files, deleted_files
 end
-
