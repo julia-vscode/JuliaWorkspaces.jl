@@ -38,7 +38,12 @@ function is_path_juliamarkdown_file(path)
     return ext == ".jmd"
 end
 
-function read_text_file_from_uri(uri::URI)
+is_walkdir_error(_) = false
+is_walkdir_error(::Base.IOError) = true
+is_walkdir_error(::Base.SystemError) = true
+is_walkdir_error(err::Base.TaskFailedException) = is_walkdir_error(err.task.exception)
+
+function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
     path = uri2filepath(uri)
 
     language_id = if is_path_julia_file(path)
@@ -57,13 +62,28 @@ function read_text_file_from_uri(uri::URI)
         throw(JWUnknownFileType("Unknown file type for $uri"))
     end
 
-    content = read(path, String)
-    our_isvalid(content) || throw(JWInvalidFileContent("Invalid content in file $uri."))
+    content = try
+        read(path, String)
+    catch err
+        if return_nothing_on_io_error && is_walkdir_error(err)
+            return nothing
+        else
+            rethrow(err)
+        end
+    end
+
+    if !our_isvalid(content)
+        if return_nothing_on_io_error
+            return nothing
+        else
+            throw(JWInvalidFileContent("Invalid content in file $uri."))
+        end
+    end
 
     return TextFile(uri, SourceText(content, language_id))
 end
 
-function read_path_into_textdocuments(uri::URI)
+function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
     path = uri2filepath(uri)
 
     result = TextFile[]
@@ -79,7 +99,7 @@ function read_path_into_textdocuments(uri::URI)
                         is_path_juliamarkdown_file(filepath)
 
                 uri = filepath2uri(filepath)
-                text_file = read_text_file_from_uri(uri)
+                text_file = read_text_file_from_uri(uri, return_nothing_on_io_error=ignore_io_errors)
                 text_file === nothing && continue
                 push!(result, text_file)
             end
@@ -103,10 +123,10 @@ function update_file_from_disc!(jw::JuliaWorkspace, path)
     update_file!(jw, text_file)
 end
 
-function add_folder_from_disc!(jw::JuliaWorkspace, path)
+function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
     path_uri = filepath2uri(path)
 
-    files = read_path_into_textdocuments(path_uri)
+    files = read_path_into_textdocuments(path_uri, ignore_io_errors=ignore_io_errors)
 
     for i in files
         add_file!(jw, i)
