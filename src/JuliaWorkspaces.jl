@@ -1,6 +1,6 @@
 module JuliaWorkspaces
 
-import UUIDs, JuliaSyntax, TestItemDetection
+import UUIDs, JuliaSyntax, TestItemDetection, JuliaFormatter
 using UUIDs: UUID, uuid4
 using JuliaSyntax: SyntaxNode
 using Salsa
@@ -25,6 +25,7 @@ include("layer_files.jl")
 include("layer_syntax_trees.jl")
 include("layer_projects.jl")
 include("layer_testitems.jl")
+include("layer_formatting.jl")
 include("layer_diagnostics.jl")
 include("fileio.jl")
 include("public.jl")

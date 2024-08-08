@@ -171,3 +171,13 @@ function get_files_with_updated_testitems(jw::JuliaWorkspace)
     # println(stderr, graph)
     return derived_testitems_updated_since_mark(jw.runtime)
 end
+
+function get_formatted_content(jw::JuliaWorkspace, uri::URI)
+    config = derived_formatter_configuration(jw.runtime, uri)
+
+    if config===nothing
+        return nothing
+    end
+
+
+end
