@@ -98,7 +98,7 @@ end
 Salsa.@derived function derived_diagnostic_updated_since_mark(rt)
     marked_versions = input_marked_diagnostics(rt).data
 
-    old_text_files = collect(keys(marked_versions))
+    old_text_files = Set{URI}(keys(marked_versions))
     current_text_files = derived_text_files(rt)
 
     deleted_files = setdiff(old_text_files, current_text_files)

@@ -2,14 +2,14 @@ Salsa.@derived function derived_text_files(rt)
     files = input_files(rt)
 
     # TODO Actually filter this properly
-    return [file for file in files]
+    return Set{URI}(file for file in files)
 end
 
 Salsa.@derived function derived_julia_files(rt)
     files = derived_text_files(rt)
 
     # TODO Actually filter this properly
-    return [file for file in files if endswith(string(file), ".jl")]
+    return Set{URI}(file for file in files if endswith(string(file), ".jl"))
 end
 
 Salsa.@derived function derived_has_file(rt, uri)

@@ -144,7 +144,7 @@ Salsa.@derived function derived_testitems_updated_since_mark(rt)
     current_text_files = derived_julia_files(rt)
     marked_versions = input_marked_testitems(rt).data
 
-    old_text_files = collect(keys(marked_versions))
+    old_text_files = Set{URI}(keys(marked_versions))
 
     deleted_files = setdiff(old_text_files, current_text_files)
     updated_files = Set{URI}()
