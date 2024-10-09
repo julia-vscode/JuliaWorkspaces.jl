@@ -94,7 +94,7 @@ end
 Salsa.@derived function derived_all_testitems(rt)
     files = derived_julia_files(rt)
 
-    res = Dict{URI,@NamedTuple{testitems::Vector{TestItemDetail},testsetups::Vector{TestSetupDetail},testerrors::Vector{TestErrorDetail}}}(
+    res = Dict{URI,TestDetails}(
         uri => derived_testitems(rt, uri)
         for uri in files
     )
