@@ -1,6 +1,13 @@
 Salsa.@derived function derived_project_files(rt)
     files = input_files(rt)
 
+    # Diagnostic code
+    for file in files
+        if uri2filepath(file)===nothing
+            error("Invalid uri $file")
+        end
+    end
+
     return [file for file in files if is_path_project_file(uri2filepath(file)) || is_path_manifest_file(uri2filepath(file))]
 end
 
