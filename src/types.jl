@@ -38,16 +38,33 @@ end
     content_hash::UInt
 end
 
-@auto_hash_equals struct JuliaDevedPackage
+@auto_hash_equals struct JuliaProjectEntryDevedPackage
     name::String
     uuid::UUID
+    uri::URI
+    version::String
+end
+
+@auto_hash_equals struct JuliaProjectEntryRegularPackage
+    name::String
+    uuid::UUID
+    version::String
+    git_tree_sha1::String
+end
+
+@auto_hash_equals struct JuliaProjectEntryStdlibPackage
+    name::String
+    uuid::UUID
+    version::Union{Nothing,String}
 end
 
 @auto_hash_equals struct JuliaProject
     project_file_uri::URI
     manifest_file_uri::URI
     content_hash::UInt
-    deved_packages::Dict{URI,JuliaDevedPackage}
+    deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
+    regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
+    stdlib_packages::Dict{String,JuliaProjectEntryStdlibPackage}
 end
 
 @auto_hash_equals struct JuliaTestEnv

@@ -65,7 +65,10 @@ Salsa.@derived function derived_project(rt, uri)
 
     # manifest_content isa Dict || return nothing
 
-    deved_packages = Dict{URI,JuliaDevedPackage}()
+    deved_packages = Dict{String,JuliaProjectEntryDevedPackage}()
+    regular_packages = Dict{String,JuliaProjectEntryRegularPackage}()
+    stdlib_packages = Dict{String,JuliaProjectEntryStdlibPackage}()
+
     manifest_version = get(manifest_content, "manifest_format", "1.0")
 
     manifest_deps = if manifest_version=="1.0"
@@ -80,29 +83,50 @@ Salsa.@derived function derived_project(rt, uri)
         v_entry isa Vector || continue
         length(v_entry)==1 || continue
         v_entry[1] isa Dict || continue
-        haskey(v_entry[1], "path") || continue
-        haskey(v_entry[1], "uuid") || continue
-        uuid_of_deved_package = tryparse(UUID, v_entry[1]["uuid"])
-        uuid_of_deved_package !== nothing || continue
 
-        path_of_deved_package = v_entry[1]["path"]
-        if !isabspath(path_of_deved_package)
-            path_of_deved_package = normpath(joinpath(dirname(uri2filepath(manifest_file)), path_of_deved_package))
-            if endswith(path_of_deved_package, '\\') || endswith(path_of_deved_package, '/')
-                path_of_deved_package = path_of_deved_package[1:end-1]
+        if haskey(v_entry[1], "path") && haskey(v_entry[1], "uuid")
+            uuid_of_deved_package = tryparse(UUID, v_entry[1]["uuid"])
+            uuid_of_deved_package !== nothing || continue
+
+            path_of_deved_package = v_entry[1]["path"]
+            if !isabspath(path_of_deved_package)
+                path_of_deved_package = normpath(joinpath(dirname(uri2filepath(manifest_file)), path_of_deved_package))
+                if endswith(path_of_deved_package, '\\') || endswith(path_of_deved_package, '/')
+                    path_of_deved_package = path_of_deved_package[1:end-1]
+                end
             end
+
+            uri_of_deved_package = filepath2uri(path_of_deved_package)
+
+            version_of_deved_package = v_entry[1]["version"]
+
+            deved_packages[k_entry] = JuliaProjectEntryDevedPackage(k_entry, uuid_of_deved_package, uri_of_deved_package, version_of_deved_package)
+        elseif haskey(v_entry[1], "git-tree-sha1") && haskey(v_entry[1], "uuid") && haskey(v_entry[1], "version")
+            uuid_of_regular_package = tryparse(UUID, v_entry[1]["uuid"])
+            uuid_of_regular_package !== nothing || continue
+
+            git_tree_sha1_of_regular_package = v_entry[1]["git-tree-sha1"]
+
+            version_of_regular_package = v_entry[1]["version"]
+            
+            regular_packages[k_entry] = JuliaProjectEntryRegularPackage(k_entry, uuid_of_regular_package, version_of_regular_package, git_tree_sha1_of_regular_package)
+        elseif haskey(v_entry[1], "uuid")
+            uuid_of_stdlib_package = tryparse(UUID, v_entry[1]["uuid"])
+            uuid_of_stdlib_package !== nothing || continue
+
+            version_of_stdlib_package = get(v_entry[1], "version", nothing)
+            
+            stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_stdlib_package, version_of_stdlib_package)
+        else
+            error("Unknown manifest entry type $(keys(e_entry[1]))")
         end
-
-        uri_of_deved_package = filepath2uri(path_of_deved_package)
-
-        deved_packages[uri_of_deved_package] = JuliaDevedPackage(k_entry, uuid_of_deved_package)
     end
 
     manifest_text_content = input_text_file(rt, manifest_file)
     project_text_content = input_text_file(rt, project_file)
     project_content_hash = hash(project_text_content.content.content, hash(manifest_text_content.content.content))
 
-    JuliaProject(project_file, manifest_file, project_content_hash, deved_packages)
+    JuliaProject(project_file, manifest_file, project_content_hash, deved_packages, regular_packages, stdlib_packages)
 end
 
 Salsa.@derived function derived_package_folders(rt)
