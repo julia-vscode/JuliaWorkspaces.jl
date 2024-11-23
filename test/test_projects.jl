@@ -30,7 +30,7 @@ end
 
     mktempdir() do root_path
         cp(joinpath(@__DIR__, "data", "project_detection"), joinpath(root_path, "project_detection"))
-
+    
         Pkg.activate(joinpath(root_path, "project_detection"))
         Pkg.develop(PackageSpec(path=joinpath(root_path, "project_detection", "TestPackage3")))
         Pkg.instantiate()
@@ -45,14 +45,13 @@ end
     
         @test haskey(project_details.regular_packages, "JuliaSyntax") === true
         @test project_details.regular_packages["JuliaSyntax"].name == "JuliaSyntax"
-        # @test project_details.regular_packages["JuliaSyntax"].git_tree_sha1 == "c6ca86ffc29b2fbe9423ff275eaa542057725c7f"
+        @test project_details.regular_packages["JuliaSyntax"].git_tree_sha1 == "e09bf943597f83cc7a1fe3ae6c01c2c008d8cde7"
         @test project_details.regular_packages["JuliaSyntax"].uuid == UUID("70703baa-626e-46a2-a12c-08ffd08c73b4")
         @test project_details.regular_packages["JuliaSyntax"].version == "0.3.5"
     
         @test haskey(project_details.stdlib_packages, "Dates") === true
         @test project_details.stdlib_packages["Dates"].name == "Dates"
         @test project_details.stdlib_packages["Dates"].uuid == UUID("ade2ca70-3891-5945-98fb-dc099432e06a")
-        println("THE VERSION IS ", project_details.stdlib_packages["Dates"].version)
         if VERSION >= v"1.11.0"
             @test VersionNumber(project_details.stdlib_packages["Dates"].version).major == VERSION.major
             @test VersionNumber(project_details.stdlib_packages["Dates"].version).minor == VERSION.minor
