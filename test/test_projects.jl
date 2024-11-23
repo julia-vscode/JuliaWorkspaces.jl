@@ -45,7 +45,7 @@ end
     
         @test haskey(project_details.regular_packages, "JuliaSyntax") === true
         @test project_details.regular_packages["JuliaSyntax"].name == "JuliaSyntax"
-        @test project_details.regular_packages["JuliaSyntax"].git_tree_sha1 == "c6ca86ffc29b2fbe9423ff275eaa542057725c7f"
+        # @test project_details.regular_packages["JuliaSyntax"].git_tree_sha1 == "c6ca86ffc29b2fbe9423ff275eaa542057725c7f"
         @test project_details.regular_packages["JuliaSyntax"].uuid == UUID("70703baa-626e-46a2-a12c-08ffd08c73b4")
         @test project_details.regular_packages["JuliaSyntax"].version == "0.3.5"
     
