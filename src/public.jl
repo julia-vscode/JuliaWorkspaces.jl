@@ -36,6 +36,34 @@ function add_file!(jw::JuliaWorkspace, file::TextFile)
     set_input_files!(jw.runtime, new_files)
 
     set_input_text_file!(jw.runtime, file.uri, file)
+
+    if jw.symbol_cache_path!==nothing
+        required_symbols = derived_required_symbol_info(jw.runtime)
+        already_loaded_symbols = input_package_symbols(jw.runtime)
+        still_need_to_be_loaded = setdiff(required_symbols.regular_packages, already_loaded_symbols)
+
+        for i in still_need_to_be_loaded
+            set_input_symbols_for_package!(jw.runtime, i, @NamedTuple{status::Symbol,data}((:loading, nothing)))
+        end
+
+        new_already_loaded_symbols = Set{JuliaProjectEntryRegularPackage}(union(already_loaded_symbols, still_need_to_be_loaded))
+        set_input_package_symbols!(jw.runtime, new_already_loaded_symbols)
+
+        put!(jw.symbol_cache_channel_requests, still_need_to_be_loaded)
+        if !jw.symbol_cache_async
+            new_symbols = take!(jw.symbol_cache_channel_responses)
+         
+            for i in new_symbols
+                if i.data===nothing
+                    set_input_symbols_for_package!(jw.runtime, i.package, @NamedTuple{status::Symbol,data}((:unavailable, nothing)))
+                else
+                    set_input_symbols_for_package!(jw.runtime, i.package, @NamedTuple{status::Symbol,data}((:loaded, i.data)))
+                end
+            end
+        end
+    end
+
+    # println("Done with add_file!")
 end
 
 function update_file!(jw::JuliaWorkspace, file::TextFile)

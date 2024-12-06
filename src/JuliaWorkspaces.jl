@@ -17,6 +17,9 @@ using .URIs2: filepath2uri, uri2filepath
 
 using .URIs2: URI, @uri_str
 
+include("SymbolServer/SymbolServer.jl")
+import .SymbolServer
+
 include("exception_types.jl")
 include("types.jl")
 include("sourcetext.jl")
@@ -27,6 +30,7 @@ include("layer_projects.jl")
 include("layer_testitems.jl")
 include("layer_diagnostics.jl")
 include("fileio.jl")
+include("layer_symbols.jl")
 include("public.jl")
 
 end

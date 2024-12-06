@@ -4,3 +4,5 @@ Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
 Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
 Salsa.@declare_input input_marked_diagnostics(rt)::DiagnosticsMark
 Salsa.@declare_input input_marked_testitems(rt)::TestitemsMark
+Salsa.@declare_input input_package_symbols(rt)::Set{JuliaProjectEntryRegularPackage}
+Salsa.@declare_input input_symbols_for_package(rt, JuliaProjectEntryRegularPackage)::@NamedTuple{status::Symbol,data}

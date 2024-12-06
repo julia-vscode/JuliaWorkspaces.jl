@@ -133,8 +133,8 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
     end
 end
 
-function workspace_from_folders(workspace_folders::Vector{String})
-    jw = JuliaWorkspace()
+function workspace_from_folders(workspace_folders::Vector{String}; symbol_cache_path=nothing, async_symbol_loading=false)
+    jw = JuliaWorkspace(; symbol_cache_path=symbol_cache_path, async_symbol_loading=async_symbol_loading)
 
     for folder in workspace_folders
         add_folder_from_disc!(jw, folder)
