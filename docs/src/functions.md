@@ -4,7 +4,7 @@
 CurrentModule = JuliaWorkspaces
 ```
 
-# Exported functions
+## Exported functions
 ```@docs
     add_file!
     remove_file!
@@ -22,7 +22,7 @@ CurrentModule = JuliaWorkspaces
     get_test_env
 ```
 
-# Private functions
+## Private functions
 ```@docs
 get_files
 get_diagnostics
@@ -33,7 +33,7 @@ get_files_with_updated_diagnostics
 mark_current_diagnostics
 ```
 
-# URI helper functions
+# URI helper functions (submodule URIs2)
 ```@docs
 URIs2.unescapeuri
 URIs2.escapeuri

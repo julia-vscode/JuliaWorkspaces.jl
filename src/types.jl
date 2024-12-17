@@ -46,12 +46,26 @@ $(TYPEDFIELDS)
     range::UnitRange{Int}
 end
 
+"""
+    struct TestDetails
+
+Details of a test.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct TestDetails
     testitems::Vector{TestItemDetail}
     testsetups::Vector{TestSetupDetail}
     testerrors::Vector{TestErrorDetail}
 end
 
+"""
+    struct JuliaPackage
+
+Details of a Julia package.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaPackage
     project_file_uri::URI
     name::String
@@ -88,6 +102,13 @@ end
     stdlib_packages::Dict{String,JuliaProjectEntryStdlibPackage}
 end
 
+"""
+    struct JuliaTestEnv
+
+Details of a Julia test environment.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaTestEnv
     package_name::String
     package_uri::Union{URI,Nothing}

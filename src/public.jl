@@ -266,11 +266,11 @@ end
 """
     get_test_items(jw::JuliaWorkspace, uri::URI)
 
-Get the test items that belong to a given `uri` of a workspace.
+Get the test items that belong to a given [`URI`](@ref) of a workspace.
 
 Returns
 
-- the struct `TestDetails`
+- an instance of the struct [`TestDetails`](@ref)
 """
 function get_test_items(jw::JuliaWorkspace, uri::URI)
     derived_testitems(jw.runtime, uri)
@@ -283,7 +283,7 @@ Get all test items of the workspace `jw`.
 
 Returns
 
-- an instance of the struct `TestDetails`
+- an instance of the struct [`TestDetails`](@ref)
 """
 function get_test_items(jw::JuliaWorkspace)
     derived_all_testitems(jw.runtime)
@@ -296,7 +296,7 @@ Get the test environment that belongs to the given `uri` of the workspace `jw`.
 
 Returns
 
-- a instance of the struct `JuliaTestEnv`
+- an instance of the struct [`JuliaTestEnv`](@ref)
 """
 function get_test_env(jw::JuliaWorkspace, uri::URI)
     derived_testenv(jw.runtime, uri)

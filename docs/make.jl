@@ -8,13 +8,9 @@ makedocs(
     pages=[
         "Home" => "index.md",
         "Functions" => "functions.md",
-        "Exported Types" => "types.md"
+        "Types" => "types.md"
     ])
 
-    using Documenter
-
-# DocMeta.setdocmeta!(KiteUtils, :DocTestSetup, :(using KiteUtils); recursive=true)
-#
 # makedocs(;
 #     modules=[KiteUtils],
 #     authors="Uwe Fechner <uwe.fechner.msc@gmail.com> and contributors",
