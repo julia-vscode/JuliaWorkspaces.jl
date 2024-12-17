@@ -1,20 +1,14 @@
 # Exported Functions
 
 ```@meta
-CurrentModule = JuliaWorkSpaces
+CurrentModule = JuliaWorkspaces
 ```
 
-# All functions
+# Exported functions
 ```@docs
     add_file!
     remove_file!
     remove_all_children!
-    TextFile 
-    SourceText
-    workspace_from_folders
-    add_folder_from_disc!
-    add_file_from_disc!
-    update_file_from_disc!
     get_text_files
     get_julia_files
     has_file
@@ -26,8 +20,27 @@ CurrentModule = JuliaWorkSpaces
     get_projects
     get_test_items
     get_test_env
-    position_at
     TextFile
-    SourceText
-    Diagnostic
+```
+
+Private functions
+```@docs
+get_files
+get_diagnostics
+get_files_with_updated_testitems
+update_file!
+TestSetupDetail
+TestItemDetail
+mark_current_testitems
+get_files_with_updated_diagnostics
+mark_current_diagnostics
+TestErrorDetail
+```
+
+URI helper functions
+```@docs
+URIs2.unescapeuri
+URIs2.escapeuri
+URIs2._bytes
+URIs2.escapepath
 ```
