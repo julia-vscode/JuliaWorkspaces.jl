@@ -7,7 +7,8 @@ makedocs(
     sitename="JuliaWorkspaces.jl",
     pages=[
         "Home" => "index.md",
-        "Exported Functions" => "functions.md"
+        "Functions" => "functions.md",
+        "Exported Types" => "types.md"
     ])
 
     using Documenter

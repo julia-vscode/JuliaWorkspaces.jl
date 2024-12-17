@@ -1,4 +1,4 @@
-# Exported Functions
+# Functions
 
 ```@meta
 CurrentModule = JuliaWorkspaces
@@ -20,10 +20,9 @@ CurrentModule = JuliaWorkspaces
     get_projects
     get_test_items
     get_test_env
-    TextFile
 ```
 
-Private functions
+# Private functions
 ```@docs
 get_files
 get_diagnostics
@@ -37,7 +36,7 @@ mark_current_diagnostics
 TestErrorDetail
 ```
 
-URI helper functions
+# URI helper functions
 ```@docs
 URIs2.unescapeuri
 URIs2.escapeuri
