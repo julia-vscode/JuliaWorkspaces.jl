@@ -114,6 +114,13 @@ $(TYPEDFIELDS)
     version::Union{Nothing,String}
 end
 
+"""
+    struct JuliaProject
+
+Details of a Julia project.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaProject
     project_file_uri::URI
     manifest_file_uri::URI
@@ -182,11 +189,26 @@ A text file, consisting of its URI and content.
     content::SourceText
 end
 
+"""
+    struct NotebookFile
+
+A notebook file, consisting of its URI and cells.
+
+- `uri::URI`: The [`URI`](@ref) of the file.
+- `cells::Vector{SourceText}`: The cells of the notebook as a vector of [`SourceText`](@ref).
+"""
 @auto_hash_equals struct NotebookFile
     uri::URI
     cells::Vector{SourceText}
 end
 
+"""
+    struct Diagnostic
+
+A diagnostic struct, consisting of range, severity, message, and source.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct Diagnostic
     range::UnitRange{Int64}
     severity::Symbol
@@ -194,6 +216,13 @@ end
     source::String
 end
 
+"""
+    struct JuliaWorkspace
+
+A Julia workspace, consisting of a [`Salsa`](https://github.com/julia-vscode/Salsa.jl) runtime.
+
+$(TYPEDFIELDS)
+"""
 struct JuliaWorkspace
     runtime::Salsa.Runtime
 
