@@ -4,7 +4,7 @@ import UUIDs, JuliaSyntax, TestItemDetection
 using UUIDs: UUID, uuid4
 using JuliaSyntax: SyntaxNode
 using Salsa
-using Documenter, DocStringExtensions
+using DocStringExtensions
 
 using AutoHashEquals
 
