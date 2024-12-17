@@ -26,6 +26,11 @@ export JuliaWorkspace,
 
 # Files
 
+"""
+    add_file!(jw::JuliaWorkspace, file::TextFile)
+
+Add a file to the workspace. If the file already exists, it will throw an error.
+"""
 function add_file!(jw::JuliaWorkspace, file::TextFile)
     files = input_files(jw.runtime)
 
@@ -38,28 +43,73 @@ function add_file!(jw::JuliaWorkspace, file::TextFile)
     set_input_text_file!(jw.runtime, file.uri, file)
 end
 
+"""
+    update_file!(jw::JuliaWorkspace, file::TextFile)
+
+Update a file in the workspace. If the file does not exist, it will throw an error.
+"""
 function update_file!(jw::JuliaWorkspace, file::TextFile)
     has_file(jw, file.uri) || throw(JWUnknownFile("Cannot update unknown file $(file.uri)."))
 
     set_input_text_file!(jw.runtime, file.uri, file)
 end
 
+"""
+    get_text_files(jw::JuliaWorkspace)
+
+Get all text files from the workspace.
+
+# Returns
+
+- A set of URIs.
+"""
 function get_text_files(jw::JuliaWorkspace)
     return derived_text_files(jw.runtime)
 end
 
+"""
+    get_julia_files(jw::JuliaWorkspace)
+
+Get all Julia files from the workspace.
+
+# Returns
+
+- A set of URIs.
+"""
 function get_julia_files(jw::JuliaWorkspace)
     return derived_julia_files(jw.runtime)
 end
 
+"""
+    get_files(jw::JuliaWorkspace)
+
+Get all files from the workspace.
+
+# Returns
+- A set of URIs.
+"""
 function get_files(jw::JuliaWorkspace)
     return input_files(jw.runtime)
 end
 
+"""
+    has_file(jw, uri)
+
+Check if a file exists in the workspace.
+"""
 function has_file(jw, uri)
     return derived_has_file(jw.runtime, uri)
 end
 
+"""
+    get_text_file(jw::JuliaWorkspace, uri::URI)
+
+Get a text file from the workspace. If the file does not exist, it will throw an error.
+
+# Returns
+
+- A [`TextFile`](@ref) struct.
+"""
 function get_text_file(jw::JuliaWorkspace, uri::URI)
     files = input_files(jw.runtime)
 
@@ -68,6 +118,11 @@ function get_text_file(jw::JuliaWorkspace, uri::URI)
     return input_text_file(jw.runtime, uri)
 end
 
+"""
+    remove_file!(jw::JuliaWorkspace, uri::URI)
+
+Remove a file from the workspace. If the file does not exist, it will throw an error.
+"""
 function remove_file!(jw::JuliaWorkspace, uri::URI)
     files = input_files(jw.runtime)
 
@@ -80,6 +135,11 @@ function remove_file!(jw::JuliaWorkspace, uri::URI)
     delete_input_text_file!(jw.runtime, uri)
 end
 
+"""
+    remove_all_children!(jw::JuliaWorkspace, uri::URI)
+
+Remove all children of a folder from the workspace.
+"""
 function remove_all_children!(jw::JuliaWorkspace, uri::URI)
     files = get_files(jw)
 
@@ -96,34 +156,89 @@ end
 
 # Projects
 
+"""
+    get_packages(jw::JuliaWorkspace)
+
+Get all packages from the workspace.
+
+# Returns
+
+- A set of URIs.
+"""
 function get_packages(jw::JuliaWorkspace)
     return derived_package_folders(jw.runtime)
 end
 
+"""
+    get_projects(jw::JuliaWorkspace)
+
+Get all projects from the workspace.
+
+# Returns
+
+- A set of URIs.
+"""
 function get_projects(jw::JuliaWorkspace)
     return derived_project_folders(jw.runtime)
 end
 
 # Syntax trees
 
+"""
+    get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
+
+Get the syntax tree of a Julia file from the workspace.
+
+# Returns
+
+- The tuple `(tree, diagnostics)`, where `tree` is the syntax tree 
+  and `diagnostics` is a vector of `Diagnostic` structs.   
+"""
 function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     return derived_julia_syntax_tree(jw.runtime, uri)
 end
 
+"""
+    get_toml_syntax_tree(jw::JuliaWorkspace, uri::URI)
+
+Get the syntax tree of a TOML file from the workspace.
+"""
 function get_toml_syntax_tree(jw::JuliaWorkspace, uri::URI)
     return derived_toml_syntax_tree(jw.runtime, uri)
 end
 
 # Diagnostics
 
+"""
+    get_diagnostic(jw::JuliaWorkspace, uri::URI)
+
+Get the diagnostics of a file from the workspace.
+
+# Returns
+
+- A vector of `Diagnostic` structs.
+"""
 function get_diagnostic(jw::JuliaWorkspace, uri::URI)
     return derived_diagnostics(jw.runtime, uri)
 end
 
+"""
+    get_diagnostics(jw::JuliaWorkspace)
+
+Get all diagnostics from the workspace.
+
+# Returns
+- A vector of `Diagnostic` structs.
+"""
 function get_diagnostics(jw::JuliaWorkspace)
     return derived_all_diagnostics(jw.runtime)
 end
 
+"""
+    mark_current_diagnostics(jw::JuliaWorkspace)
+
+Mark the current diagnostics in the workspace.
+"""
 function mark_current_diagnostics(jw::JuliaWorkspace)
     files = derived_text_files(jw.runtime)
 
@@ -135,24 +250,63 @@ function mark_current_diagnostics(jw::JuliaWorkspace)
     set_input_marked_diagnostics!(jw.runtime, DiagnosticsMark(uuid4(), results))
 end
 
+"""
+    get_files_with_updated_diagnostics(jw::JuliaWorkspace)
+
+Returns
+
+- a tuple of the updated and the deleted files since calling `mark_current_diagnostics()`
+"""
 function get_files_with_updated_diagnostics(jw::JuliaWorkspace)
     return derived_diagnostic_updated_since_mark(jw.runtime)
 end
 
 # Test items
 
+"""
+    get_test_items(jw::JuliaWorkspace, uri::URI)
+
+Get the test items that belong to a given [`URI`](@ref) of a workspace.
+
+Returns
+
+- an instance of the struct [`TestDetails`](@ref)
+"""
 function get_test_items(jw::JuliaWorkspace, uri::URI)
     derived_testitems(jw.runtime, uri)
 end
 
+"""
+    get_test_items(jw::JuliaWorkspace)
+
+Get all test items of the workspace `jw`.
+
+Returns
+
+- an instance of the struct [`TestDetails`](@ref)
+"""
 function get_test_items(jw::JuliaWorkspace)
     derived_all_testitems(jw.runtime)
 end
 
+"""
+    get_test_env(jw::JuliaWorkspace, uri::URI)
+
+Get the test environment that belongs to the given `uri` of the workspace `jw`.
+
+Returns
+
+- an instance of the struct [`JuliaTestEnv`](@ref)
+"""
 function get_test_env(jw::JuliaWorkspace, uri::URI)
     derived_testenv(jw.runtime, uri)
 end
 
+"""
+    mark_current_testitems(jw::JuliaWorkspace)
+
+Mark all current test items of the workspace `jw`.
+"""
 function mark_current_testitems(jw::JuliaWorkspace)
     files = derived_julia_files(jw.runtime)
 
@@ -165,6 +319,15 @@ function mark_current_testitems(jw::JuliaWorkspace)
     set_input_marked_testitems!(jw.runtime, TestitemsMark(uuid4(), results))
 end
 
+"""
+    get_files_with_updated_testitems(jw::JuliaWorkspace)
+
+Get all files with test items that were updated since marked of the workspace `jw`.
+
+Returns
+
+- the tuple (`updated_files`, `deleted_files`)
+"""
 function get_files_with_updated_testitems(jw::JuliaWorkspace)
     # @info "get_files_with_updated_testitems" string.(input_files(jw.runtime))
     # graph = Salsa.Inspect.build_graph(jw.runtime)

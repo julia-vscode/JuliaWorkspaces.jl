@@ -1,3 +1,10 @@
+"""
+    struct TestItemDetail
+
+Details of a test item.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct TestItemDetail
     uri::URI
     id::String
@@ -9,6 +16,13 @@
     option_setup::Vector{Symbol}
 end
 
+"""
+    struct TestSetupDetail
+
+Details of a test setup.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct TestSetupDetail
     uri::URI
     name::Symbol
@@ -17,6 +31,13 @@ end
     code_range::UnitRange{Int}
 end
 
+"""
+    struct TestErrorDetail
+
+Details of a test error.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct TestErrorDetail
     uri::URI
     id::String
@@ -25,12 +46,26 @@ end
     range::UnitRange{Int}
 end
 
+"""
+    struct TestDetails
+
+Details of a test.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct TestDetails
     testitems::Vector{TestItemDetail}
     testsetups::Vector{TestSetupDetail}
     testerrors::Vector{TestErrorDetail}
 end
 
+"""
+    struct JuliaPackage
+
+Details of a Julia package.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaPackage
     project_file_uri::URI
     name::String
@@ -38,6 +73,13 @@ end
     content_hash::UInt
 end
 
+"""
+    struct JuliaProjectEntryDevedPackage
+
+Details of a Julia project entry for a developed package.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaProjectEntryDevedPackage
     name::String
     uuid::UUID
@@ -45,6 +87,13 @@ end
     version::String
 end
 
+"""
+    struct JuliaProjectEntryRegularPackage
+
+Details of a Julia project entry for a regular package.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaProjectEntryRegularPackage
     name::String
     uuid::UUID
@@ -52,12 +101,26 @@ end
     git_tree_sha1::String
 end
 
+"""
+    struct JuliaProjectEntryStdlibPackage
+
+Details of a Julia project entry for a standard library package.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaProjectEntryStdlibPackage
     name::String
     uuid::UUID
     version::Union{Nothing,String}
 end
 
+"""
+    struct JuliaProject
+
+Details of a Julia project.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaProject
     project_file_uri::URI
     manifest_file_uri::URI
@@ -67,6 +130,13 @@ end
     stdlib_packages::Dict{String,JuliaProjectEntryStdlibPackage}
 end
 
+"""
+    struct JuliaTestEnv
+
+Details of a Julia test environment.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaTestEnv
     package_name::String
     package_uri::Union{URI,Nothing}
@@ -74,6 +144,13 @@ end
     env_content_hash::Union{UInt,Nothing}
 end
 
+"""
+    struct SourceText
+
+A source text, consisting of its content, line indices, and language ID.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct SourceText
     content::String
     line_indices::Vector{Int}
@@ -99,16 +176,39 @@ function position_at(source_text::SourceText, x)
     error("This should never happen")
 end
 
+"""
+    struct TextFile
+
+A text file, consisting of its URI and content.
+
+- `uri::URI`: The [`URI`](@ref) of the file.
+- `content::SourceText`: The content of the file as [`SourceText`](@ref).
+"""
 @auto_hash_equals struct TextFile
     uri::URI
     content::SourceText
 end
 
+"""
+    struct NotebookFile
+
+A notebook file, consisting of its URI and cells.
+
+- `uri::URI`: The [`URI`](@ref) of the file.
+- `cells::Vector{SourceText}`: The cells of the notebook as a vector of [`SourceText`](@ref).
+"""
 @auto_hash_equals struct NotebookFile
     uri::URI
     cells::Vector{SourceText}
 end
 
+"""
+    struct Diagnostic
+
+A diagnostic struct, consisting of range, severity, message, and source.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct Diagnostic
     range::UnitRange{Int64}
     severity::Symbol
@@ -116,6 +216,13 @@ end
     source::String
 end
 
+"""
+    struct JuliaWorkspace
+
+A Julia workspace, consisting of a [`Salsa`](https://github.com/julia-vscode/Salsa.jl) runtime.
+
+$(TYPEDFIELDS)
+"""
 struct JuliaWorkspace
     runtime::Salsa.Runtime
 
