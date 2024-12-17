@@ -6,3 +6,4 @@ cache/docs.cache
 Manifest.toml
 run_julia
 cspell.json
+docs/build/
