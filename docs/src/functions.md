@@ -28,12 +28,9 @@ get_files
 get_diagnostics
 get_files_with_updated_testitems
 update_file!
-TestSetupDetail
-TestItemDetail
 mark_current_testitems
 get_files_with_updated_diagnostics
 mark_current_diagnostics
-TestErrorDetail
 ```
 
 # URI helper functions

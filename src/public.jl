@@ -108,7 +108,7 @@ Get a text file from the workspace. If the file does not exist, it will throw an
 
 # Returns
 
-- A `TextFile` struct.
+- A [`TextFile`](@ref) struct.
 """
 function get_text_file(jw::JuliaWorkspace, uri::URI)
     files = input_files(jw.runtime)
@@ -326,7 +326,7 @@ Get all files with test items that were updated since marked of the workspace `j
 
 Returns
 
-- the tuple (updated_files, deleted_files)
+- the tuple (`updated_files`, `deleted_files`)
 """
 function get_files_with_updated_testitems(jw::JuliaWorkspace)
     # @info "get_files_with_updated_testitems" string.(input_files(jw.runtime))
