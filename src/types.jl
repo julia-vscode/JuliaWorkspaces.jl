@@ -73,6 +73,13 @@ $(TYPEDFIELDS)
     content_hash::UInt
 end
 
+"""
+    struct JuliaProjectEntryDevedPackage
+
+Details of a Julia project entry for a developed package.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaProjectEntryDevedPackage
     name::String
     uuid::UUID
@@ -80,6 +87,13 @@ end
     version::String
 end
 
+"""
+    struct JuliaProjectEntryRegularPackage
+
+Details of a Julia project entry for a regular package.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaProjectEntryRegularPackage
     name::String
     uuid::UUID
@@ -87,6 +101,13 @@ end
     git_tree_sha1::String
 end
 
+"""
+    struct JuliaProjectEntryStdlibPackage
+
+Details of a Julia project entry for a standard library package.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct JuliaProjectEntryStdlibPackage
     name::String
     uuid::UUID
@@ -116,6 +137,13 @@ $(TYPEDFIELDS)
     env_content_hash::Union{UInt,Nothing}
 end
 
+"""
+    struct SourceText
+
+A source text, consisting of its content, line indices, and language ID.
+
+$(TYPEDFIELDS)
+"""
 @auto_hash_equals struct SourceText
     content::String
     line_indices::Vector{Int}
@@ -146,7 +174,8 @@ end
 
 A text file, consisting of its URI and content.
 
-$(TYPEDFIELDS)
+- `uri::URI`: The [`URI`](@ref) of the file.
+- `content::SourceText`: The content of the file as [`SourceText`](@ref).
 """
 @auto_hash_equals struct TextFile
     uri::URI
