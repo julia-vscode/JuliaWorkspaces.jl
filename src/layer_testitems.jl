@@ -59,6 +59,7 @@ Salsa.@derived function derived_testitems(rt, uri)
     testsetups = []
     testerrors = []
 
+    text_file = input_text_file(rt, uri)
     syntax_tree = derived_julia_syntax_tree(rt, uri)
 
     TestItemDetection.find_test_detail!(syntax_tree, testitems, testsetups, testerrors)
@@ -68,6 +69,7 @@ Salsa.@derived function derived_testitems(rt, uri)
             uri,
             "$uri:$i",
             ti.name,
+            text_file.content.content[ti.code_range],
             ti.range,
             ti.code_range,
             ti.option_default_imports,
@@ -78,6 +80,7 @@ Salsa.@derived function derived_testitems(rt, uri)
             uri,
             i.name,
             i.kind,
+            text_file.content.content[i.code_range],
             i.range,
             i.code_range
             ) for i in testsetups],

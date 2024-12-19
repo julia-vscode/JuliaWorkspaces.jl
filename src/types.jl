@@ -2,6 +2,7 @@
     uri::URI
     id::String
     name::String
+    code::String
     range::UnitRange{Int}
     code_range::UnitRange{Int}
     option_default_imports::Bool
@@ -13,6 +14,7 @@ end
     uri::URI
     name::Symbol
     kind::Symbol
+    code::String
     range::UnitRange{Int}
     code_range::UnitRange{Int}
 end
