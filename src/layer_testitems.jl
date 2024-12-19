@@ -123,7 +123,7 @@ Salsa.@derived function derived_testenv(rt, uri)
     elseif project_uri in projects
         relevant_project = derived_project(rt, project_uri)
 
-        if findfirst(i->i.uri == package_uri, values(relevant_project.deved_packages)) === nothing
+        if findfirst(i->i.uri == package_uri, collect(values(relevant_project.deved_packages))) === nothing
             project_uri = nothing
         end
     else
