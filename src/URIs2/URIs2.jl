@@ -6,6 +6,17 @@ include("vendored_from_uris.jl")
 
 export URI, uri2filepath, filepath2uri, @uri_str
 
+"""
+    struct URI
+
+Details of a Unified Resource Identifier.
+
+ - scheme::Union{Nothing, String}
+ - authority::Union{Nothing, String}
+ - path::String
+ - query::Union{Nothing, String}
+ - fragment::Union{Nothing, String}
+"""
 struct URI
     scheme::Union{String,Nothing}
     authority::Union{String,Nothing}
