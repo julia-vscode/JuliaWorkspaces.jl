@@ -1,6 +1,6 @@
 module URIs2
 
-using AutoHashEquals, DocStringExtensions
+using AutoHashEquals
 
 include("vendored_from_uris.jl")
 
@@ -11,7 +11,11 @@ export URI, uri2filepath, filepath2uri, @uri_str
 
 Details of a Unified Resource Identifier.
 
-$(TYPEDFIELDS)
+ - scheme::Union{Nothing, String}
+ - authority::Union{Nothing, String}
+ - path::String
+ - query::Union{Nothing, String}
+ - fragment::Union{Nothing, String}
 """
 struct URI
     scheme::Union{String,Nothing}
