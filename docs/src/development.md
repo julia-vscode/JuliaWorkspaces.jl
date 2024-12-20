@@ -19,4 +19,9 @@ fi
 julia --project="./docs/." -e 'using Pkg; Pkg.instantiate()'
 LANG=en_US julia --project="./docs/." -e 'include("docs/make.jl"); using LiveServer; servedocs()'
 ```
-I suggest to place this script in the `bin` folder, which you might have to create first.
+I suggest to save this script under the name `doc` in the `bin` folder, which you might have to create first.
+You can then build the documentation with the command:
+```
+./bin/doc
+```
+On Linux, you have to make it executable first: `chmod +x ./bin/doc`.
