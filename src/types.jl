@@ -130,13 +130,3 @@ struct JuliaWorkspace
         new(rt)
     end
 end
-
-@auto_hash_equals struct DiagnosticsMark
-    id::UUID
-    data::Dict{URI,Vector{Diagnostic}}
-end
-
-@auto_hash_equals struct TestitemsMark
-    id::UUID
-    data::Dict{URI,TestDetails}
-end

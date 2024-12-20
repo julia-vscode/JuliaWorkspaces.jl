@@ -124,21 +124,6 @@ function get_diagnostics(jw::JuliaWorkspace)
     return derived_all_diagnostics(jw.runtime)
 end
 
-function mark_current_diagnostics(jw::JuliaWorkspace)
-    files = derived_text_files(jw.runtime)
-
-    results = Dict{URI,Vector{Diagnostic}}()
-
-    for f in files
-        results[f] = derived_diagnostics(jw.runtime, f)
-    end
-    set_input_marked_diagnostics!(jw.runtime, DiagnosticsMark(uuid4(), results))
-end
-
-function get_files_with_updated_diagnostics(jw::JuliaWorkspace)
-    return derived_diagnostic_updated_since_mark(jw.runtime)
-end
-
 # Test items
 
 function get_test_items(jw::JuliaWorkspace, uri::URI)
@@ -151,23 +136,4 @@ end
 
 function get_test_env(jw::JuliaWorkspace, uri::URI)
     derived_testenv(jw.runtime, uri)
-end
-
-function mark_current_testitems(jw::JuliaWorkspace)
-    files = derived_julia_files(jw.runtime)
-
-    results = Dict{URI,TestDetails}()
-
-    for f in files
-        results[f] = derived_testitems(jw.runtime, f)
-    end
-
-    set_input_marked_testitems!(jw.runtime, TestitemsMark(uuid4(), results))
-end
-
-function get_files_with_updated_testitems(jw::JuliaWorkspace)
-    # @info "get_files_with_updated_testitems" string.(input_files(jw.runtime))
-    # graph = Salsa.Inspect.build_graph(jw.runtime)
-    # println(stderr, graph)
-    return derived_testitems_updated_since_mark(jw.runtime)
 end
