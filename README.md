@@ -1,4 +1,5 @@
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://julia-vscode.github.io/JuliaWorkspaces.jl/dev)
+[![Build Status](https://github.com/julia-vscode/JuliaWorkspaces.jl/actions/workflows/jlpkgbutler-ci-master-workflow.yml/badge.svg?branch=main)](https://github.com/julia-vscode/JuliaWorkspaces.jl/actions/workflows/jlpkgbutler-ci-master-workflow.yml]])
 
 # JuliaWorkspaces.jl
 
