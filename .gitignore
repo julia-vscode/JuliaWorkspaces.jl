@@ -4,3 +4,5 @@
 cache/docs.cache
 .vscode
 Manifest.toml
+docs/build
+bin/run_julia
