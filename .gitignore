@@ -9,3 +9,4 @@ bin/run_julia
 docs_old
 src_new
 bin/docs
+cspell.json
