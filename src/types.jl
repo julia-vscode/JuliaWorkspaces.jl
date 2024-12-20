@@ -3,7 +3,15 @@
 
 Details of a test item.
 
-$(TYPEDFIELDS)
+- uri::URI
+- id::String
+- name::String
+- code::String
+- range::UnitRange{Int}
+- code_range::UnitRange{Int}
+- `option_default_imports`::Bool
+- option_tags::Vector{Symbol}
+- option_setup::Vector{Symbol}
 """
 @auto_hash_equals struct TestItemDetail
     uri::URI
@@ -22,7 +30,12 @@ end
 
 Details of a test setup.
 
-$(TYPEDFIELDS)
+- uri::URI
+- name::Symbol
+- kind::Symbol
+- code::String
+- range::UnitRange{Int}
+- code_range::UnitRange{Int}
 """
 @auto_hash_equals struct TestSetupDetail
     uri::URI
@@ -38,7 +51,11 @@ end
 
 Details of a test error.
 
-$(TYPEDFIELDS)
+- uri::URI
+- id::String
+- name::Union{Nothing,String}
+- message::String
+- range::UnitRange{Int}
 """
 @auto_hash_equals struct TestErrorDetail
     uri::URI
@@ -53,7 +70,9 @@ end
 
 Details of a test.
 
-$(TYPEDFIELDS)
+- testitems::Vector{TestItemDetail}
+- testsetups::Vector{TestSetupDetail}
+- testerrors::Vector{TestErrorDetail}
 """
 @auto_hash_equals struct TestDetails
     testitems::Vector{TestItemDetail}
@@ -66,7 +85,10 @@ end
 
 Details of a Julia package.
 
-$(TYPEDFIELDS)
+- `project_file_uri`::URI
+- name::String
+- uuid::UUID
+- content_hash::UInt
 """
 @auto_hash_equals struct JuliaPackage
     project_file_uri::URI
@@ -80,7 +102,10 @@ end
 
 Details of a Julia project entry for a developed package.
 
-$(TYPEDFIELDS)
+- name::String
+- uuid::UUID
+- uri::URI
+- version::String
 """
 @auto_hash_equals struct JuliaProjectEntryDevedPackage
     name::String
@@ -94,7 +119,10 @@ end
 
 Details of a Julia project entry for a regular package.
 
-$(TYPEDFIELDS)
+- name::String
+- uuid::UUID
+- version::String
+- `git_tree_sha1`::String
 """
 @auto_hash_equals struct JuliaProjectEntryRegularPackage
     name::String
@@ -108,7 +136,9 @@ end
 
 Details of a Julia project entry for a standard library package.
 
-$(TYPEDFIELDS)
+- name::String
+- uuid::UUID
+- version::Union{Nothing,String}
 """
 @auto_hash_equals struct JuliaProjectEntryStdlibPackage
     name::String
@@ -121,7 +151,12 @@ end
 
 Details of a Julia project.
 
-$(TYPEDFIELDS)
+- `project_file_uri`::URI
+- `manifest_file_uri`::URI
+- content_hash::UInt
+- deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
+- regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
+- stdlib_packages::Dict{String,JuliaProjectEntryStdlibPackage}
 """
 @auto_hash_equals struct JuliaProject
     project_file_uri::URI
@@ -137,7 +172,10 @@ end
 
 Details of a Julia test environment.
 
-$(TYPEDFIELDS)
+- package_name::String
+- package_uri::Union{URI,Nothing}
+- project_uri::Union{URI,Nothing}
+- `env_content_hash`::Union{UInt,Nothing}
 """
 @auto_hash_equals struct JuliaTestEnv
     package_name::String
@@ -151,7 +189,9 @@ end
 
 A source text, consisting of its content, line indices, and language ID.
 
-$(TYPEDFIELDS)
+- content::String
+- line_indices::Vector{Int}
+- language_id::String
 """
 @auto_hash_equals struct SourceText
     content::String
@@ -209,7 +249,10 @@ end
 
 A diagnostic struct, consisting of range, severity, message, and source.
 
-$(TYPEDFIELDS)
+- range::UnitRange{Int64}
+- severity::Symbol
+- message::String
+- source::String
 """
 @auto_hash_equals struct Diagnostic
     range::UnitRange{Int64}
@@ -223,7 +266,7 @@ end
 
 A Julia workspace, consisting of a [`Salsa`](https://github.com/julia-vscode/Salsa.jl) runtime.
 
-$(TYPEDFIELDS)
+- runtime::Salsa.Runtime
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime
