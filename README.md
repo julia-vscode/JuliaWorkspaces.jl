@@ -14,3 +14,7 @@ The second transition is towards a more functional/immutable/incremental computa
 
 ### Goal
 Very roughly, StaticLint/CSTParser/SymbolServer has all the code pre these transitions, and JuliaWorkspaces has the code that is in this new world of the two transitions I mentioned above. So the division is by generation of when stuff was added to the LS, not by functionality. My expectation is that once the transition is finished, StaticLint and SymbolServer will be no more as individual packages but their code will have been incorporated into JuliaWorkspaces. The final design I have in mind is that the [LanguageServer.jl](https://github.com/julia-vscode/LanguageServer.jl) package really only has the code that implements the LSP wire protocol, but not much functionality in it, and all the functionality lives in JuliaWorkspaces. The idea being that we can then create for example CI tools that use the functionality in JuliaWorkspaces directly (like GitHub - julia-actions/julia-lint), or command line apps etc.
+
+### Help wanted
+While the refactoring of the code - a least in the beginning - should be done by the core team, help to improve 
+related packages would be very welcome. For details, have a look at [#47](https://github.com/julia-vscode/JuliaWorkspaces.jl/issues/47).
