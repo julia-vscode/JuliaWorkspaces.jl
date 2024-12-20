@@ -86,35 +86,7 @@ end
 Salsa.@derived function derived_all_diagnostics(rt)
     files = derived_text_files(rt)
 
-    results = Diagnostic[]
-
-    for f in files
-        append!(results, derived_diagnostics(rt, f))
-    end
+    results = Dict{URI,Vector{Diagnostic}}(uri => derived_diagnostics(rt, uri) for uri in files)
 
     return results
-end
-
-Salsa.@derived function derived_diagnostic_updated_since_mark(rt)
-    marked_versions = input_marked_diagnostics(rt).data
-
-    old_text_files = Set{URI}(keys(marked_versions))
-    current_text_files = derived_text_files(rt)
-
-    deleted_files = setdiff(old_text_files, current_text_files)
-    updated_files = Set{URI}()
-
-    for uri in current_text_files
-        if !(uri in old_text_files)
-            push!(updated_files, uri)
-        else
-            new_diag = derived_diagnostics(rt, uri)
-
-            if hash(marked_versions[uri]) != hash(new_diag)
-                push!(updated_files, uri)
-            end
-        end
-    end
-
-    return updated_files, deleted_files
 end
