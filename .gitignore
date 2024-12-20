@@ -6,3 +6,6 @@ cache/docs.cache
 Manifest.toml
 docs/build
 bin/run_julia
+docs_old
+src_new
+bin/docs
