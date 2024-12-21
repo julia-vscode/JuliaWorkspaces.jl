@@ -5,7 +5,7 @@
 
 Underlying engine for [LanguageServer.jl](https://github.com/julia-vscode/LanguageServer.jl) (LS), an implementation of the Microsoft Language Server Protocol for the Julia language. 
 This is the current set of packages used by julia-vscode. After the ongoing refactoring only the packages in green will be used.
-<p align="center"><img src="docs/src/julia-vscode.png" width="500" /></p>
+<p align="center"><img src="https://github.com/ufechner7/JuliaWorkspaces.jl/raw/main/docs/src/julia-vscode.png" width="500" /></p>
 
 ## Design ideas
 
