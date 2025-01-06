@@ -178,7 +178,7 @@ Details of a Julia test environment.
 - `env_content_hash`::Union{UInt,Nothing}
 """
 @auto_hash_equals struct JuliaTestEnv
-    package_name::String
+    package_name::Union{String,Nothing}
     package_uri::Union{URI,Nothing}
     project_uri::Union{URI,Nothing}
     env_content_hash::Union{UInt,Nothing}

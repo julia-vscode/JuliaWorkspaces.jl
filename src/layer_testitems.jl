@@ -116,11 +116,7 @@ Salsa.@derived function derived_testenv(rt, uri)
         project_uri = input_fallback_test_project(rt)
     end
 
-    if package_uri === nothing
-        package_name = ""
-    else
-        package_name = derived_package(rt, package_uri).name
-    end
+    package_name = package_uri === nothing ? nothing : derived_package(rt, package_uri).name
 
     if project_uri == package_uri
     elseif project_uri in projects
