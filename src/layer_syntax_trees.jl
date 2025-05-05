@@ -16,12 +16,18 @@ Salsa.@derived function derived_julia_syntax_tree(rt, uri)
     return parse_result[1]
 end
 
+@static if isdefined(JuliaSyntax, :byte_range)
+    _range(x) = JuliaSyntax.byte_range(x)
+else
+    _range(x) = range(x)
+end
+
 Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
     parse_result = derived_julia_parse_result(rt, uri)
 
     diag_results = map(parse_result[2]) do i
         Diagnostic(
-            range(i),
+            _range(i),
             i.level,
             i.message,
             "JuliaSyntax.jl"
