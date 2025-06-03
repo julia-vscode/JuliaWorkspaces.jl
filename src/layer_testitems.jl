@@ -136,5 +136,7 @@ Salsa.@derived function derived_testenv(rt, uri)
         env_content_hash = hash(derived_package(rt, package_uri).content_hash)
     end
 
-    return JuliaTestEnv(package_name, package_uri, project_uri, env_content_hash)
+    # We construct a string for the env content hash here so that later when we
+    # deserialize it with JSON.jl we don't end up with Int conversion issues
+    return JuliaTestEnv(package_name, package_uri, project_uri, "x$env_content_hash")
 end

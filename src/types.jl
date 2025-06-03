@@ -181,7 +181,7 @@ Details of a Julia test environment.
     package_name::Union{String,Nothing}
     package_uri::Union{URI,Nothing}
     project_uri::Union{URI,Nothing}
-    env_content_hash::Union{UInt,Nothing}
+    env_content_hash::Union{String,Nothing}
 end
 
 """
