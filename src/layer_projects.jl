@@ -92,7 +92,7 @@ Salsa.@derived function derived_project(rt, uri)
             if !isabspath(path_of_deved_package)
                 path_of_deved_package = normpath(joinpath(dirname(uri2filepath(manifest_file)), path_of_deved_package))
                 if endswith(path_of_deved_package, '\\') || endswith(path_of_deved_package, '/')
-                    path_of_deved_package = path_of_deved_package[1:end-1]
+                    path_of_deved_package = path_of_deved_package[1:prevind(path_of_deved_package, lastindex(path_of_deved_package))]
                 end
             end
 
