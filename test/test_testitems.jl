@@ -505,3 +505,52 @@ version = "1.10.0"
     end
 end
 
+@testitem "handle missing manifest gracefully" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    mktempdir() do temp_dir
+        # Create a simple project that will work
+        project_dir = joinpath(temp_dir, "SimpleProject")
+        mkpath(project_dir)
+
+        project_file = joinpath(project_dir, "Project.toml")
+        write(
+            project_file,
+            """
+name = "SimpleProject"
+uuid = "12345678-1234-1234-1234-123456789abc"
+version = "0.1.0"
+""",
+        )
+
+        # NO MANIFEST - this makes derived_project return nothing
+
+        # Create Julia file
+        test_file = joinpath(temp_dir, "test.jl")
+        write(test_file, "# Test file")
+
+        # Add to workspace
+        project_uri = filepath2uri(project_file)
+        test_uri = filepath2uri(test_file)
+        folder_uri = filepath2uri(project_dir)
+
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(project_uri, SourceText(read(project_file, String), "toml")))
+        add_file!(jw, TextFile(test_uri, SourceText("# test", "julia")))
+
+        # Set project as fallback test project
+        JuliaWorkspaces.set_input_fallback_test_project!(jw.runtime, folder_uri)
+
+        rt = jw.runtime
+
+        # Verify derived_project returns nothing (no manifest)
+        derived_result = JuliaWorkspaces.derived_project(rt, folder_uri)
+        @test derived_result === nothing
+
+        # This should work with defensive programming - no crash on .content_hash
+        test_env = get_test_env(jw, test_uri)
+        @test test_env isa JuliaWorkspaces.JuliaTestEnv
+        @test test_env.project_uri === nothing  # Should be set to nothing due to lack of manifest
+    end
+end

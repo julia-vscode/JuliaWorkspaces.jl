@@ -7,6 +7,8 @@ using Salsa
 
 using AutoHashEquals
 
+include("utils.jl")
+
 include("compat.jl")
 
 import Pkg

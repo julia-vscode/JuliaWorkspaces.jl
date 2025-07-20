@@ -109,32 +109,50 @@ Salsa.@derived function derived_testenv(rt, uri)
     projects = derived_project_folders(rt)
     packages = derived_package_folders(rt)
 
-    project_uri = find_project_for_file(projects, uri)
+    project_uri_guess = @something(
+        find_project_for_file(projects, uri),
+        input_fallback_test_project(rt),
+        Some(nothing)
+    )
     package_uri = find_package_for_file(packages, uri)
 
-    if project_uri === nothing
-        project_uri = input_fallback_test_project(rt)
-    end
-
-    package_name = package_uri === nothing ? nothing : derived_package(rt, package_uri).name
-
-    if project_uri == package_uri
-    elseif project_uri in projects
-        relevant_project = derived_project(rt, project_uri)
-
-        if findfirst(i->i.uri == package_uri, collect(values(relevant_project.deved_packages))) === nothing
-            project_uri = nothing
+    package_name =
+        if isnothing(package_uri)
+            nothing
+        else
+            safe_getproperty(derived_package(rt, package_uri), :name)
         end
-    else
-        project_uri = nothing
-    end
 
-    env_content_hash = isnothing(project_uri) ? hash(nothing) : derived_project(rt, project_uri).content_hash
-    if package_uri===nothing
-        env_content_hash = hash(nothing, env_content_hash)
-    else
-        env_content_hash = hash(derived_package(rt, package_uri).content_hash)
-    end
+    project_uri =
+        if project_uri_guess == package_uri
+            project_uri_guess
+        elseif project_uri_guess in projects
+            relevant_project = derived_project(rt, project_uri_guess)
+
+            if isnothing(relevant_project)
+                nothing
+            elseif any(i->i.uri == package_uri, collect(values(relevant_project.deved_packages)))
+                project_uri_guess
+            else
+                nothing
+            end
+        else
+            nothing
+        end
+
+    project_env_content_hash =
+        if isnothing(project_uri)
+            hash(nothing)
+        else
+            safe_getproperty(derived_project(rt, project_uri), :content_hash)
+        end
+
+    env_content_hash = 
+        if isnothing(package_uri)
+            hash(project_env_content_hash)
+        else
+            safe_getproperty(derived_package(rt, package_uri), :content_hash)
+        end
 
     # We construct a string for the env content hash here so that later when we
     # deserialize it with JSON.jl we don't end up with Int conversion issues
