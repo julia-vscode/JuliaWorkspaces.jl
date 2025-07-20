@@ -12,7 +12,7 @@ function is_path_manifest_file(path)
     basename_lower_case = basename(lowercase(path))
 
     # Manifest.toml, Manifest-v1.11.toml, JuliaManifest.toml, etc.
-    return occursin(r"^manifest(\-v\d+(\.\d+)*)?\.toml$", basename_lower_case) || basename_lower_case == "juliamanifest.toml"
+    return occursin(r"^(julia)?manifest(\-v\d+(\.\d+)*)?\.toml$", basename_lower_case)
 end
 
 function is_path_lintconfig_file(path)
