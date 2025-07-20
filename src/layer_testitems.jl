@@ -151,7 +151,7 @@ Salsa.@derived function derived_testenv(rt, uri)
         if isnothing(package_uri)
             hash(project_env_content_hash)
         else
-            safe_getproperty(derived_package(rt, package_uri), :content_hash)
+            hash(safe_getproperty(derived_package(rt, package_uri), :content_hash))
         end
 
     # We construct a string for the env content hash here so that later when we
