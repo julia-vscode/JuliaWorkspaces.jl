@@ -440,59 +440,68 @@ end
     @test ti.name == "Test1"
 end
 
-@testitem "fallback project without manifest causes content_hash error" begin
+@testitem "versioned manifest files are detected" begin
     using JuliaWorkspaces
     using JuliaWorkspaces.URIs2: filepath2uri
 
     mktempdir() do temp_dir
-        # Create fallback project with Project.toml but NO Manifest.toml
-        fallback_dir = joinpath(temp_dir, "FallbackProject")
-        mkpath(fallback_dir)
-
-        fallback_project_toml = joinpath(fallback_dir, "Project.toml")
-        write(
-            fallback_project_toml,
-            """
-name = "FallbackProject"
+        # Create project with versioned manifest
+        project_dir = joinpath(temp_dir, "VersionedProject")
+        mkpath(project_dir)
+        
+        project_file = joinpath(project_dir, "Project.toml")
+        write(project_file, """
+name = "VersionedProject"
 uuid = "12345678-1234-1234-1234-123456789abc"
 version = "0.1.0"
-""",
-        )
-        # NO MANIFEST - this makes derived_project return nothing
 
-        # Create a Julia file in a completely separate directory (not under any project)
-        separate_dir = joinpath(temp_dir, "SeparateDir")
-        mkpath(separate_dir)
-        julia_file = joinpath(separate_dir, "isolated.jl")
-        write(julia_file, "# Julia file not under any project")
+[deps]
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+""")
+        
+        # Create versioned manifest
+        versioned_manifest = joinpath(project_dir, "Manifest-v$(VERSION.major).$(VERSION.minor).toml")
+        write(versioned_manifest, """
+julia_version = "$(VERSION.major).$(VERSION.minor).$(VERSION.patch)"
+manifest_format = "2.0"
+project_hash = "test"
 
-        # Add files to workspace
-        fallback_project_uri = filepath2uri(fallback_project_toml)
-        julia_uri = filepath2uri(julia_file)
-        fallback_folder_uri = filepath2uri(fallback_dir)
+[[deps.Random]]
+deps = ["SHA", "Serialization"]
+uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+version = "1.10.0"
 
+[[deps.SHA]]
+uuid = "ea8e919c-285b-4e28-92e2-21d1dda8b7a7"
+version = "0.7.0"
+
+[[deps.Serialization]]
+uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+version = "1.10.0"
+""")
+        
+        # Add to workspace
+        project_uri = filepath2uri(project_file)
+        manifest_uri = filepath2uri(versioned_manifest)
+        folder_uri = filepath2uri(project_dir)
+        
         jw = JuliaWorkspace()
-        add_file!(
-            jw,
-            TextFile(
-                fallback_project_uri,
-                SourceText(read(fallback_project_toml, String), "toml"),
-            ),
-        )
-        add_file!(jw, TextFile(julia_uri, SourceText("# test", "julia")))
-
-        # Set the no-manifest project as fallback
-        JuliaWorkspaces.set_input_fallback_test_project!(jw.runtime, fallback_folder_uri)
-
-        # Manually trigger the exact bug condition that was demonstrated in final_bug_reproducer.jl
+        add_file!(jw, TextFile(project_uri, SourceText(read(project_file, String), "toml")))
+        add_file!(jw, TextFile(manifest_uri, SourceText(read(versioned_manifest, String), "toml")))
+        
+        # Test that versioned manifest IS now detected
         rt = jw.runtime
-        fallback = JuliaWorkspaces.input_fallback_test_project(rt)
-
-        # Verify bug conditions: fallback exists but derived_project returns nothing
-        fallback_derived = JuliaWorkspaces.derived_project(rt, fallback)
-        @test fallback_derived === nothing
-
-        # This line mimics what happens on line 132 of derived_testenv when the bug occurs
-        @test_throws "type Nothing has no field content_hash" fallback_derived.content_hash
+        potential_projects = JuliaWorkspaces.derived_potential_project_folders(rt)
+        
+        @test haskey(potential_projects, folder_uri)
+        project_info = potential_projects[folder_uri]
+        @test project_info.project_file !== nothing
+        @test project_info.manifest_file !== nothing  # FIXED: versioned manifest now detected
+        
+        # This should now return a valid project
+        derived_result = JuliaWorkspaces.derived_project(rt, folder_uri)
+        @test derived_result !== nothing
+        @test derived_result isa JuliaWorkspaces.JuliaProject
     end
 end
+
