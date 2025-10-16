@@ -129,11 +129,18 @@ Salsa.@derived function derived_testenv(rt, uri)
         project_uri = nothing
     end
 
-    env_content_hash = isnothing(project_uri) ? hash(nothing) : derived_project(rt, project_uri).content_hash
+    derivedproj = derived_project(rt, project_uri)
+
+    env_content_hash = isnothing(project_uri) || isnothing(derivedproj) ? hash(nothing) : derivedproj.content_hash
     if package_uri===nothing
         env_content_hash = hash(nothing, env_content_hash)
     else
-        env_content_hash = hash(derived_package(rt, package_uri).content_hash)
+        derivedpkg = derived_package(rt, package_uri)
+        if isnothing(derivedpkg)
+            env_content_hash = hash(nothing, env_content_hash)
+        else
+            env_content_hash = hash(derivedpkg.content_hash)
+        end
     end
 
     # We construct a string for the env content hash here so that later when we
