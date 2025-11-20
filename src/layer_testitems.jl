@@ -117,7 +117,7 @@ Salsa.@derived function derived_testenv(rt, uri)
 
         # Sometimes the fallback project is actually not a fallback project
         # because there is no manifest, here we check for that
-        if project_uri !== nothing && derived_project(rt, project_uri) === nothing
+        if project_uri === nothing || derived_project(rt, project_uri) === nothing
             project_uri = nothing
         end
     end
