@@ -38,7 +38,7 @@ Salsa.@derived function derived_static_lint_meta(rt)
         env = derived_external_env(rt, file)
 
         StaticLint.check_all(cst, StaticLint.LintOptions(), env, meta_dict)
-    end  
+    end
 
     return meta_dict
 end
@@ -56,11 +56,11 @@ Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
     res = Diagnostic[]
 
     for err in errs
-        rng = err[1]:err[1]+err[2].fullspan
+        rng = err[1]+1:err[1]+err[2].fullspan+1
         if StaticLint.headof(err[2]) === :errortoken
             # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
         elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
-            push!(res, Diagnostic(rng, :Warning, "Missing reference: $(err[2].val)", "StaticLint.jl"))
+            push!(res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", "StaticLint.jl"))
             # push!(out, Diagnostic(rng, DiagnosticSeverities.Warning, missing, missing, "Julia", "Missing reference: $(err[2].val)", missing, missing))
         elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
             code = StaticLint.errorof(err[2], meta_dict)
@@ -76,7 +76,7 @@ Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
             #     missing
             # end
             # push!(out, Diagnostic(rng, severity, string(code), code_details, "Julia", description, tags, missing))
-            push!(res, Diagnostic(rng, :Warning, string(code), "StaticLint.jl"))
+            push!(res, Diagnostic(rng, :warning, string(code), "StaticLint.jl"))
         end
     end
 
