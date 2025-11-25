@@ -1,8 +1,8 @@
-function arg_type(arg, ismethod)
+function arg_type(arg, ismethod, meta_dict)
     if ismethod
-        if hasbinding(arg)
-            if bindingof(arg) isa Binding && bindingof(arg).type !== nothing
-                type = bindingof(arg).type
+        if hasbinding(arg, meta_dict)
+            if bindingof(arg, meta_dict) isa Binding && bindingof(arg, meta_dict).type !== nothing
+                type = bindingof(arg, meta_dict).type
                 if type isa Binding && type.val isa SymbolServer.DataTypeStore
                     type = type.val
                 end
@@ -10,9 +10,9 @@ function arg_type(arg, ismethod)
             end
         end
     else
-        if hasref(arg)
-            if refof(arg) isa Binding && refof(arg).type !== nothing
-                type = refof(arg).type
+        if hasref(arg, meta_dict)
+            if refof(arg, meta_dict) isa Binding && refof(arg, meta_dict).type !== nothing
+                type = refof(arg, meta_dict).type
                 if type isa Binding && type.val isa SymbolServer.DataTypeStore
                     type = type.val
                 end
@@ -56,11 +56,11 @@ function call_arg_types(call::EXPR, ismethod)
             push!(kws, call.args[2].args[i].args[1])
         end
         for i = 3:length(call.args)
-            push!(types, arg_type(call.args[i], ismethod))
+            push!(types, arg_type(call.args[i], ismethod, meta_dict))
         end
     else
         for i = 2:length(call.args)
-            push!(types, arg_type(call.args[i], ismethod))
+            push!(types, arg_type(call.args[i], ismethod, meta_dict))
         end
     end
     types, kws
@@ -75,17 +75,17 @@ function method_arg_types(call::EXPR)
         end
         for i = 3:length(call.args)
             if CSTParser.iskwarg(call.args[i])
-                push!(opts, arg_type(call.args[i].args[1], true))
+                push!(opts, arg_type(call.args[i].args[1], true, meta_dict))
             else
-                push!(types, arg_type(call.args[i], true))
+                push!(types, arg_type(call.args[i], true, meta_dict))
             end
         end
     else
         for i = 2:length(call.args)
             if CSTParser.iskwarg(call.args[i])
-                push!(opts, arg_type(call.args[i].args[1], true))
+                push!(opts, arg_type(call.args[i].args[1], true, meta_dict))
             else
-                push!(types, arg_type(call.args[i], true))
+                push!(types, arg_type(call.args[i], true, meta_dict))
             end
         end
     end
@@ -96,7 +96,7 @@ function find_methods(x::EXPR, store)
     possibles = []
     if iscall(x)
         length(x.args) === 0 && return possibles
-        func_ref = refof_call_func(x)
+        func_ref = refof_call_func(x, meta_dict)
         func_ref === nothing && return possibles
         args, kws = call_arg_types(x, false)
         if func_ref isa Binding && func_ref.val isa SymbolServer.FunctionStore ||
@@ -177,7 +177,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store)
                 end
                 return true
             end
-            push!(margs, arg_type(arg, true))
+            push!(margs, arg_type(arg, true, meta_dict))
         end
     else
         sig = CSTParser.rem_decl(CSTParser.get_sig(method))
@@ -211,11 +211,11 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store)
     return false
 end
 
-function refof_call_func(x)
-    if isidentifier(first(x.args)) && hasref(first(x.args))
-        return refof(first(x.args))
-    elseif is_getfield_w_quotenode(x.args[1]) && (rhs = rhs_of_getfield(x.args[1])) !== nothing && hasref(rhs)
-        return refof(rhs)
+function refof_call_func(x, meta_dict)
+    if isidentifier(first(x.args)) && hasref(first(x.args), meta_dict)
+        return refof(first(x.args), meta_dict)
+    elseif is_getfield_w_quotenode(x.args[1]) && (rhs = rhs_of_getfield(x.args[1])) !== nothing && hasref(rhs, meta_dict)
+        return refof(rhs, meta_dict)
     else
         return
     end

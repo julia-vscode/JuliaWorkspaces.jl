@@ -1,17 +1,25 @@
 module JuliaWorkspaces
 
-import UUIDs, JuliaSyntax, TestItemDetection
+import UUIDs, JuliaSyntax, TestItemDetection, CSTParser
 using UUIDs: UUID, uuid4
 using JuliaSyntax: SyntaxNode
 using Salsa
 
 using AutoHashEquals
 
+include("URIs2/URIs2.jl")
+
+include("SymbolServer/SymbolServer.jl")
+import .SymbolServer
+
+include("StaticLint/StaticLint.jl")
+import .StaticLint
+
 include("compat.jl")
 
 import Pkg
 
-include("URIs2/URIs2.jl")
+
 import .URIs2
 using .URIs2: filepath2uri, uri2filepath
 
@@ -23,6 +31,7 @@ include("sourcetext.jl")
 include("inputs.jl")
 include("layer_files.jl")
 include("layer_syntax_trees.jl")
+include("layer_semantics.jl")
 include("layer_projects.jl")
 include("layer_testitems.jl")
 include("layer_diagnostics.jl")

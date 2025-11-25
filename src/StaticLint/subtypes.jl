@@ -39,8 +39,8 @@ function _super(b::Binding, store)
     StaticLint.CoreTypes.isdatatype(b.type) || error()
     b.val isa Binding && return _super(b.val, store)
     sup = _super(b.val, store)
-    if sup isa EXPR && StaticLint.hasref(sup)
-        StaticLint.refof(sup)
+    if sup isa EXPR && StaticLint.hasref(sup, meta_dict)
+        StaticLint.refof(sup, meta_dict)
     else
         store[:Core][:Any]
     end

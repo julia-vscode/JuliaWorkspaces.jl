@@ -37,6 +37,16 @@ Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
     return diag_results
 end
 
+Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
+    tf = input_text_file(rt, uri)
+
+    content = tf.content.content
+
+    cst = CSTParser.parse(content, true)
+
+    return cst
+end
+
 Salsa.@derived function derived_toml_parse_result(rt, uri)
     tf = input_text_file(rt, uri)
 

@@ -43,7 +43,7 @@ function addmoduletoscope!(s::Scope, m, mname::Symbol)
     s.modules[mname] = m
 end
 addmoduletoscope!(s::Scope, m::SymbolServer.ModuleStore) = addmoduletoscope!(s, m, m.name.name)
-addmoduletoscope!(s::Scope, m::EXPR) =  CSTParser.defines_module(m) && addmoduletoscope!(s, scopeof(m), Symbol(valof(CSTParser.get_name(m))))
+addmoduletoscope!(s::Scope, m::EXPR) =  CSTParser.defines_module(m) && addmoduletoscope!(s, scopeof(m, meta_dict), Symbol(valof(CSTParser.get_name(m))))
 addmoduletoscope!(s::Scope, s1::Scope) = CSTParser.defines_module(s1.expr) && addmoduletoscope!(s, s1, Symbol(valof(CSTParser.get_name(s1.expr))))
 
 
@@ -69,7 +69,7 @@ function introduces_scope(x::EXPR, state)
         return true
     elseif CSTParser.defines_anon_function(x)
         return true
-    elseif CSTParser.iswhere(x) 
+    elseif CSTParser.iswhere(x)
         # unless in func def signature
         return !_in_func_or_struct_def(x)
     elseif CSTParser.istuple(x) && CSTParser.hastrivia(x) && ispunctuation(x.trivia[1]) && length(x.args) > 0 && isassignment(x.args[1])
@@ -93,16 +93,14 @@ function introduces_scope(x::EXPR, state)
 end
 
 
-hasscope(x::EXPR) = hasmeta(x) && hasscope(x.meta)
-scopeof(x) = nothing
-scopeof(x::EXPR) = scopeof(x.meta)
+hasscope(x::EXPR, meta_dict) = hasmeta(x, meta_dict) && hasscope(getmeta(x, meta_dict))
+scopeof(x, meta_dict) = nothing
+scopeof(x::EXPR, meta_dict) = hasmeta(x, meta_dict) ? scopeof(getmeta(x, meta_dict)) : nothing
 CSTParser.parentof(s::Scope) = s.parent
 
-function setscope!(x::EXPR, s)
-    if !hasmeta(x)
-        x.meta = Meta()
-    end
-    x.meta.scope = s
+function setscope!(x::EXPR, s, meta_dict)
+    ensuremeta(x, meta_dict)
+    getmeta(x, meta_dict).scope = s
 end
 
 """
@@ -110,20 +108,20 @@ end
 
 Called when traversing the syntax tree and handles the association of
 scopes with expressions. On the first pass this will add scopes as
-necessary, on following passes it empties it. 
+necessary, on following passes it empties it.
 """
-function scopes(x::EXPR, state)
-    clear_scope(x)
-    if scopeof(x) === nothing && introduces_scope(x, state)
-        setscope!(x, Scope(x))
+function scopes(x::EXPR, state, meta_dict)
+    clear_scope(x, meta_dict)
+    if scopeof(x, meta_dict) === nothing && introduces_scope(x, state)
+        setscope!(x, Scope(x), meta_dict)
     end
     s0 = state.scope
     if headof(x) === :file
-        setscope!(x, state.scope)
+        setscope!(x, state.scope, meta_dict)
         add_eval_method(x, state)
-    elseif scopeof(x) isa Scope
-        scopeof(x) != s0 && setparent!(scopeof(x), s0)
-        state.scope = scopeof(x)
+    elseif scopeof(x, meta_dict) isa Scope
+        scopeof(x, meta_dict) != s0 && setparent!(scopeof(x, meta_dict), s0)
+        state.scope = scopeof(x, meta_dict)
         if headof(x) === :module && headof(x.args[1]) === :TRUE # Add default modules to a new module
             state.scope.modules = Dict{Symbol,Any}() # TODO: only create new Dict if not assigned?
             state.scope.modules[:Base] = getsymbols(state)[:Base]
@@ -134,10 +132,10 @@ function scopes(x::EXPR, state)
             state.scope.modules[:Core] = getsymbols(state)[:Core]
             add_eval_method(x, state)
         end
-        if headof(x) === :module && bindingof(x) !== nothing # Add reference to out of scope binding (i.e. itself)
+        if headof(x) === :module && bindingof(x, meta_dict) !== nothing # Add reference to out of scope binding (i.e. itself)
             # state.scope.names[bindingof(x).name] = bindingof(x)
             # TODO: move this to the binding stage
-            add_binding(x, state)
+            add_binding(x, state, meta_dict)
         # elseif headof(x) === :flatten && headof(x[1]) === CSTParser.Generator && length(x[1]) > 0 && headof(x[1][1]) === CSTParser.Generator
         #     setscope!(x[1][1], nothing)
         end

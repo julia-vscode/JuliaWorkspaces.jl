@@ -1,12 +1,12 @@
 quoted(x) = headof(x) === :quote || headof(x) === :quotenode
 unquoted(x) = isunarycall(x) && valof(x.args[1]) == "\$"
 
-function remove_ref(x::EXPR)
-    if hasref(x) && refof(x) isa Binding && refof(x).refs isa Vector
-        for ia in enumerate(refof(x).refs)
+function remove_ref(x::EXPR, meta_dict)
+    if hasref(x, meta_dict) && refof(x, meta_dict) isa Binding && refof(x, meta_dict).refs isa Vector
+        for ia in enumerate(refof(x, meta_dict).refs)
             if ia[2] == x
-                deleteat!(refof(x).refs, ia[1])
-                setref!(x, nothing)
+                deleteat!(refof(x, meta_dict).refs, ia[1])
+                setref!(x, nothing, meta_dict)
                 return
             end
         end
@@ -14,68 +14,68 @@ function remove_ref(x::EXPR)
     end
 end
 
-function clear_binding(x::EXPR)
-    if bindingof(x) isa Binding
-        for r in bindingof(x).refs
+function clear_binding(x::EXPR, meta_dict)
+    if bindingof(x, meta_dict) isa Binding
+        for r in bindingof(x, meta_dict).refs
             if r isa EXPR
-                setref!(r, nothing)
+                setref!(r, nothing, meta_dict)
             elseif r isa Binding
-                if r.type == bindingof(x)
+                if r.type == bindingof(x, meta_dict)
                     r.type = nothing
                 else
-                    clear_binding(r)
+                    clear_binding(r, meta_dict)
                 end
             end
         end
-        x.meta.binding = nothing
+        getmeta(x, meta_dict).binding = nothing
     end
 end
-function clear_scope(x::EXPR)
-    if hasmeta(x) && scopeof(x) isa Scope
-        setparent!(scopeof(x), nothing)
-        empty!(scopeof(x).names)
-        if headof(x) === :file && scopeof(x).modules isa Dict && scopehasmodule(scopeof(x), :Base) && scopehasmodule(scopeof(x), :Core)
-            m1, m2 = getscopemodule(scopeof(x), :Base), getscopemodule(scopeof(x), :Core)
-            empty!(scopeof(x).modules)
-            addmoduletoscope!(scopeof(x), m1)
-            addmoduletoscope!(scopeof(x), m2)
+function clear_scope(x::EXPR, meta_dict)
+    if hasmeta(x, meta_dict) && scopeof(x, meta_dict) isa Scope
+        setparent!(scopeof(x, meta_dict), nothing)
+        empty!(scopeof(x, meta_dict).names)
+        if headof(x) === :file && scopeof(x, meta_dict).modules isa Dict && scopehasmodule(scopeof(x, meta_dict), :Base) && scopehasmodule(scopeof(x, meta_dict), :Core)
+            m1, m2 = getscopemodule(scopeof(x, meta_dict), :Base), getscopemodule(scopeof(x, meta_dict), :Core)
+            empty!(scopeof(x, meta_dict).modules)
+            addmoduletoscope!(scopeof(x, meta_dict), m1)
+            addmoduletoscope!(scopeof(x, meta_dict), m2)
         else
-            scopeof(x).modules = nothing
+            scopeof(x, meta_dict).modules = nothing
         end
-        if scopeof(x).overloaded !== nothing
-            empty!(scopeof(x).overloaded)
+        if scopeof(x, meta_dict).overloaded !== nothing
+            empty!(scopeof(x, meta_dict).overloaded)
         end
     end
 end
 
-function clear_ref(x::EXPR)
-    if refof(x) isa Binding
-        if refof(x).refs isa Vector
-            for i in 1:length(refof(x).refs)
-                if refof(x).refs[i] == x
-                    deleteat!(refof(x).refs, i)
+function clear_ref(x::EXPR, meta_dict)
+    if refof(x, meta_dict) isa Binding
+        if refof(x, meta_dict).refs isa Vector
+            for i in 1:length(refof(x, meta_dict).refs)
+                if refof(x, meta_dict).refs[i] == x
+                    deleteat!(refof(x, meta_dict).refs, i)
                     break
                 end
             end
         end
-        setref!(x, nothing)
-    elseif refof(x) !== nothing
-        setref!(x, nothing)
+        setref!(x, nothing, meta_dict)
+    elseif refof(x, meta_dict) !== nothing
+        setref!(x, nothing, meta_dict)
     end
 end
-function clear_error(x::EXPR)
-    if hasmeta(x) && x.meta.error !== nothing
-        x.meta.error = nothing
+function clear_error(x::EXPR, meta_dict)
+    if hasmeta(x, meta_dict) && getmeta(x, meta_dict).error !== nothing
+        getmeta(x, meta_dict).error = nothing
     end
 end
-function clear_meta(x::EXPR)
-    clear_binding(x)
-    clear_ref(x)
-    clear_scope(x)
-    clear_error(x)
+function clear_meta(x::EXPR, meta_dict)
+    clear_binding(x, meta_dict)
+    clear_ref(x, meta_dict)
+    clear_scope(x, meta_dict)
+    clear_error(x, meta_dict)
     if x.args !== nothing
         for a in x.args
-            clear_meta(a)
+            clear_meta(a, meta_dict)
         end
     end
     # if x.trivia !== nothing
@@ -85,11 +85,11 @@ function clear_meta(x::EXPR)
     # end
 end
 
-function get_root_method(b, server)
+function get_root_method(b)
     return b
 end
 
-function get_root_method(b::Binding, server)
+function get_root_method(b::Binding)
     if CoreTypes.isfunction(b.type) && !isempty(b.refs)
         first(b.refs)
     else
@@ -97,24 +97,24 @@ function get_root_method(b::Binding, server)
     end
 end
 
-function retrieve_delayed_scope(x)
-    if (CSTParser.defines_function(x) || CSTParser.defines_macro(x)) && scopeof(x) !== nothing
-        if parentof(scopeof(x)) !== nothing
-            return parentof(scopeof(x))
+function retrieve_delayed_scope(x, meta_dict)
+    if (CSTParser.defines_function(x) || CSTParser.defines_macro(x)) && scopeof(x, meta_dict) !== nothing
+        if parentof(scopeof(x, meta_dict)) !== nothing
+            return parentof(scopeof(x, meta_dict))
         else
-            return scopeof(x)
+            return scopeof(x, meta_dict)
         end
     else
-        return retrieve_scope(x)
+        return retrieve_scope(x, meta_dict)
     end
     return nothing
 end
 
-function retrieve_scope(x)
-    if scopeof(x) !== nothing
-        return scopeof(x)
+function retrieve_scope(x, meta_dict)
+    if scopeof(x, meta_dict) !== nothing
+        return scopeof(x, meta_dict)
     elseif parentof(x) isa EXPR
-        return retrieve_scope(parentof(x))
+        return retrieve_scope(parentof(x), meta_dict)
     end
     return
 end
@@ -153,7 +153,7 @@ function find_exported_names(x::EXPR)
         expr = x.args[3].args[i]
         if headof(expr) === :export
             for j = 2:length(expr.args)
-                if isidentifier(expr.args[j]) && hasref(expr.args[j])
+                if isidentifier(expr.args[j]) && hasref(expr.args[j], meta_dict)
                     push!(exported_vars, expr.args[j])
                 end
             end
@@ -186,17 +186,17 @@ isexportedby(k::String, m::SymbolServer.ModuleStore) = isexportedby(Symbol(k), m
 isexportedby(x::EXPR, m::SymbolServer.ModuleStore) = isexportedby(valof(x), m)
 isexportedby(k, m::SymbolServer.ModuleStore) = false
 
-function retrieve_toplevel_scope(x::EXPR)
-    if scopeof(x) !== nothing && is_toplevel_scope(x)
-        return scopeof(x)
+function retrieve_toplevel_scope(x::EXPR, meta_dict)
+    if scopeof(x, meta_dict) !== nothing && is_toplevel_scope(x)
+        return scopeof(x, meta_dict)
     elseif parentof(x) isa EXPR
-        return retrieve_toplevel_scope(parentof(x))
+        return retrieve_toplevel_scope(parentof(x), meta_dict)
     else
         @info "Tried to reach toplevel scope, no scope found. Final expression $(headof(x))"
         return nothing
     end
 end
-retrieve_toplevel_scope(s::Scope) = (is_toplevel_scope(s) || !(parentof(s) isa Scope)) ? s : retrieve_toplevel_scope(parentof(s))
+retrieve_toplevel_scope(s::Scope, meta_dict) = (is_toplevel_scope(s) || !(parentof(s) isa Scope)) ? s : retrieve_toplevel_scope(parentof(s), meta_dict)
 retrieve_toplevel_or_func_scope(s::Scope) = (is_toplevel_scope(s) || defines_function(s.expr) || !(parentof(s) isa Scope)) ? s : retrieve_toplevel_or_func_scope(parentof(s))
 
 is_toplevel_scope(s::Scope) = is_toplevel_scope(s.expr)
@@ -302,9 +302,9 @@ function is_nameof_func(name)
     f !== nothing && CSTParser.get_name(f) == name
 end
 
-function loose_refs(b::Binding)
+function loose_refs(b::Binding, meta_dict, root_dict, rt)
     b.val isa EXPR || return b.refs # to account for `#global` binding which doesn't have a val
-    scope = retrieve_scope(b.val)
+    scope = retrieve_scope(b.val, meta_dict)
     scope isa Scope && isidentifier(b.name) || return b.refs
     name_str = valofid(b.name)
     name_str isa String || return b.refs
@@ -313,7 +313,7 @@ function loose_refs(b::Binding)
         scope = parentof(scope)
     end
     state = LooseRefs(scope.expr, name_str, scope, [])
-    state(scope.expr)
+    state(scope.expr, meta_dict, root_dict, rt)
     vcat([r.refs for r in state.result]...)
 end
 
@@ -324,14 +324,14 @@ mutable struct LooseRefs
     result::Vector{Binding}
 end
 
-function (state::LooseRefs)(x::EXPR)
-    if hasbinding(x)
-        ex = bindingof(x).name
+function (state::LooseRefs)(x::EXPR, meta_dict, root_dict, rt)
+    if hasbinding(x, meta_dict)
+        ex = bindingof(x, meta_dict).name
         if isidentifier(ex) && valofid(ex) == state.name
-            push!(state.result, bindingof(x))
+            push!(state.result, bindingof(x, meta_dict))
         end
     end
-    if !hasscope(x) || (hasscope(x) && ((is_soft_scope(scopeof(x)) && !scopehasbinding(scopeof(x), state.name)) || scopeof(x) == state.scope))
-        traverse(x, state)
+    if !hasscope(x, meta_dict) || (hasscope(x, meta_dict) && ((is_soft_scope(scopeof(x, meta_dict)) && !scopehasbinding(scopeof(x, meta_dict), state.name)) || scopeof(x, meta_dict) == state.scope))
+        traverse(x, state, meta_dict, root_dict, rt)
     end
 end

@@ -1,14 +1,12 @@
-function resolve_import_block(x::EXPR, state::State, root, usinged, markfinal=true)
+function resolve_import_block(x::EXPR, state::State, root, usinged, meta_dict, markfinal=true)
     if x.head == :as
-        resolve_import_block(x.args[1], state, root, usinged, markfinal)
-        if x.args[2].meta === nothing
-            x.args[2].meta = Meta()
-        end
-        if hasbinding(last(x.args[1].args)) && CSTParser.isidentifier(x.args[2])
-            lhsbinding = bindingof(last(x.args[1].args))
-            x.args[2].meta.binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
-            setref!(x.args[2], bindingof(x.args[2]))
-            last(x.args[1].args).meta.binding = nothing
+        resolve_import_block(x.args[1], state, root, usinged, markfinal, meta_dict)
+        ensuremeta(x.args[2], meta_dict)
+        if hasbinding(last(x.args[1].args), meta_dict) && CSTParser.isidentifier(x.args[2])
+            lhsbinding = bindingof(last(x.args[1].args), meta_dict)
+            getameta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
+            setref!(x.args[2], bindingof(x.args[2], meta_dict), meta_dict)
+            getmeta(last(x.args[1].args), meta_dict).binding = nothing
         end
         return
     end
@@ -23,11 +21,11 @@ function resolve_import_block(x::EXPR, state::State, root, usinged, markfinal=tr
                 root = parentof(root)
             else
                 # Too many dots
-                seterror!(arg, RelativeImportTooManyDots)
+                seterror!(arg, RelativeImportTooManyDots, meta_dict)
                 return
             end
         elseif isidentifier(arg) || (i == n && (CSTParser.ismacroname(arg) || isoperator(arg)))
-            cand = hasref(arg) ? refof(arg) : _get_field(root, arg, state)
+            cand = hasref(arg, meta_dict) ? refof(arg, meta_dict) : _get_field(root, arg, state, meta_dict)
             if cand === nothing
                 # Cannot resolve now (e.g. sibling not yet defined). Schedule a retry.
                 if state isa Toplevel
@@ -43,10 +41,10 @@ function resolve_import_block(x::EXPR, state::State, root, usinged, markfinal=tr
                 return
             end
             root = maybe_lookup(cand, state)
-            setref!(arg, root)
+            setref!(arg, root, meta_dict)
             if i == n
-                markfinal && _mark_import_arg(arg, root, state, usinged)
-                return refof(arg)
+                markfinal && _mark_import_arg(arg, root, state, usinged, meta_dict)
+                return refof(arg, meta_dict)
             end
         else
             return
@@ -54,11 +52,11 @@ function resolve_import_block(x::EXPR, state::State, root, usinged, markfinal=tr
     end
 end
 
-function resolve_import(x::EXPR, state::State, root=getsymbols(state))
+function resolve_import(x::EXPR, state::State, meta_dict, root=getsymbols(state))
     if (headof(x) === :using || headof(x) === :import)
         usinged = (headof(x) === :using)
         if length(x.args) > 0 && isoperator(headof(x.args[1])) && valof(headof(x.args[1])) == ":"
-            root2 = resolve_import_block(x.args[1].args[1], state, root, false, false)
+            root2 = resolve_import_block(x.args[1].args[1], state, root, false, meta_dict, false)
             if root2 === nothing
                 # schedule a retry like above
                 if state isa Toplevel
@@ -69,17 +67,17 @@ function resolve_import(x::EXPR, state::State, root=getsymbols(state))
                 return
             end
             for i = 2:length(x.args[1].args)
-                resolve_import_block(x.args[1].args[i], state, root2, usinged)
+                resolve_import_block(x.args[1].args[i], state, root2, usinged, meta_dict)
             end
         else
             for i = 1:length(x.args)
-                resolve_import_block(x.args[i], state, root, usinged)
+                resolve_import_block(x.args[i], state, root, usinged, meta_dict)
             end
         end
     end
 end
 
-function _mark_import_arg(arg, par, state, usinged)
+function _mark_import_arg(arg, par, state, usinged, meta_dict)
     if par !== nothing && CSTParser.is_id_or_macroname(arg)
         if par isa Binding # mark reference to binding
             push!(par.refs, arg)
@@ -88,12 +86,10 @@ function _mark_import_arg(arg, par, state, usinged)
             par = SymbolServer._lookup(par, getsymbols(state), true)
             !(par isa SymbolServer.SymStore) && return
         end
-        if bindingof(arg) === nothing
-            if !hasmeta(arg)
-                arg.meta = Meta()
-            end
-            arg.meta.binding = Binding(arg, par, _typeof(par, state), [])
-            setref!(arg, bindingof(arg))
+        if bindingof(arg, meta_dict) === nothing
+            ensuremeta(arg, meta_dict)
+            getmeta(arg, meta_dict).binding = Binding(arg, par, _typeof(par, state), [])
+            setref!(arg, bindingof(arg, meta_dict), meta_dict)
         end
 
         if usinged
@@ -102,24 +98,24 @@ function _mark_import_arg(arg, par, state, usinged)
             elseif par isa Binding && par.val isa SymbolServer.ModuleStore
                 add_to_imported_modules(state.scope, Symbol(valofid(arg)), par.val)
             elseif par isa Binding && par.val isa EXPR && CSTParser.defines_module(par.val)
-                add_to_imported_modules(state.scope, Symbol(valofid(arg)), scopeof(par.val))
+                add_to_imported_modules(state.scope, Symbol(valofid(arg)), scopeof(par.val, meta_dict))
             elseif par isa Binding && par.val isa Binding && par.val.val isa EXPR && CSTParser.defines_module(par.val.val)
-                add_to_imported_modules(state.scope, Symbol(valofid(arg)), scopeof(par.val.val))
+                add_to_imported_modules(state.scope, Symbol(valofid(arg)), scopeof(par.val.val, meta_dict))
             end
         else
            # import binds the name in the current scope
-           state.scope.names[valofid(arg)] = bindingof(arg)
+           state.scope.names[valofid(arg)] = bindingof(arg, meta_dict)
         end
     end
 end
 
 function has_workspace_package(server, name)
     haskey(server.workspacepackages, name) &&
-    hasscope(getcst(server.workspacepackages[name])) &&
-    haskey(scopeof(getcst(server.workspacepackages[name])).names, name) &&
-    scopeof(getcst(server.workspacepackages[name])).names[name] isa Binding &&
-    scopeof(getcst(server.workspacepackages[name])).names[name].val isa EXPR &&
-    CSTParser.defines_module(scopeof(getcst(server.workspacepackages[name])).names[name].val)
+    hasscope(getcst(server.workspacepackages[name]), meta_dict) &&
+    haskey(scopeof(getcst(server.workspacepackages[name]), meta_dict).names, name) &&
+    scopeof(getcst(server.workspacepackages[name]), meta_dict).names[name] isa Binding &&
+    scopeof(getcst(server.workspacepackages[name]), meta_dict).names[name].val isa EXPR &&
+    CSTParser.defines_module(scopeof(getcst(server.workspacepackages[name]), meta_dict).names[name].val)
 end
 
 function add_to_imported_modules(scope::Scope, name::Symbol, val)
@@ -145,11 +141,11 @@ function get_named_toplevel_module(s::Scope, name::String)
     end
     return nothing
 end
-function _get_field(par, arg, state)
+function _get_field(par, arg, state, meta_dict)
     arg_str_rep = CSTParser.str_value(arg)
     if par isa SymbolServer.EnvStore
-        if (arg_scope = retrieve_scope(arg)) !== nothing && (tlm = get_named_toplevel_module(arg_scope, arg_str_rep)) !== nothing && hasbinding(tlm)
-            return bindingof(tlm)
+        if (arg_scope = retrieve_scope(arg, meta_dict)) !== nothing && (tlm = get_named_toplevel_module(arg_scope, arg_str_rep)) !== nothing && hasbinding(tlm, meta_dict)
+            return bindingof(tlm, meta_dict)
         # elseif has_workspace_package(state.server, arg_str_rep)
         #     return scopeof(getcst(state.server.workspacepackages[arg_str_rep])).names[arg_str_rep]
         elseif haskey(par, Symbol(arg_str_rep))
@@ -187,17 +183,17 @@ function _get_field(par, arg, state)
         end
     elseif par isa Binding
         if par.val isa Binding
-            return _get_field(par.val, arg, state)
-        elseif par.val isa EXPR && CSTParser.defines_module(par.val) && scopeof(par.val) isa Scope
-            return _get_field(scopeof(par.val), arg, state)
+            return _get_field(par.val, arg, state, meta_dict)
+        elseif par.val isa EXPR && CSTParser.defines_module(par.val) && scopeof(par.val, meta_dict) isa Scope
+            return _get_field(scopeof(par.val, meta_dict), arg, state, meta_dict)
         elseif par.val isa EXPR && isassignment(par.val)
-            if hasref(par.val.args[2])
-                return _get_field(refof(par.val.args[2]), arg, state)
+            if hasref(par.val.args[2], meta_dict)
+                return _get_field(refof(par.val.args[2], meta_dict), arg, state, meta_dict)
             elseif is_getfield_w_quotenode(par.val.args[2])
-                return _get_field(refof_maybe_getfield(par.val.args[2]), arg, state)
+                return _get_field(refof_maybe_getfield(par.val.args[2], meta_dict), arg, state, meta_dict)
             end
         elseif par.val isa SymbolServer.ModuleStore
-            return _get_field(par.val, arg, state)
+            return _get_field(par.val, arg, state, meta_dict)
         end
     end
     return

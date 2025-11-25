@@ -69,6 +69,11 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             append!(results, Diagnostic(i.range, :error, i.message, "Testitem") for i in tis.testerrors)
         end
 
+        if is_path_julia_file(uri2filepath(uri))
+            sl = derived_static_lint_diagnostics(rt, uri)
+            append!(results, sl)
+        end
+
         if (is_path_lintconfig_file(uri2filepath(uri)) || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri)) ) && get(lint_config, "toml-syntax-errors", true) == true
             toml_syntax_errors = derived_toml_syntax_diagnostics(rt, uri)
             append!(results, toml_syntax_errors)

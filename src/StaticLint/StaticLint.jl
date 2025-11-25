@@ -1,13 +1,16 @@
 module StaticLint
 
+function hasfile end
+
 include("exception_types.jl")
 
-using SymbolServer, CSTParser
+using ..SymbolServer, CSTParser, ..URIs2
+using ..URIs2: URI
 
 using CSTParser: EXPR, isidentifier, setparent!, valof, headof, hastrivia, parentof, isoperator, ispunctuation, to_codeobject
 # CST utils
 using CSTParser: is_getfield, isassignment, isdeclaration, isbracketed, iskwarg, iscall, iscurly, isunarycall, isunarysyntax, isbinarycall, isbinarysyntax, issplat, defines_function, is_getfield_w_quotenode, iswhere, iskeyword, isstringliteral, isparameters, isnonstdid, istuple
-using SymbolServer: VarRef
+using ..SymbolServer: VarRef
 
 const noname = EXPR(:noname, nothing, nothing, 0, 0, nothing, nothing, nothing)
 
@@ -33,7 +36,9 @@ function Base.show(io::IO, m::Meta)
     m.scope !== nothing && printstyled(io, " new scope", color = :green)
     m.error !== nothing && printstyled(io, " lint ", color = :red)
 end
-hasmeta(x::EXPR) = x.meta isa Meta
+hasmeta(x::EXPR, meta_dict::Dict{UInt64,StaticLint.Meta}) = haskey(meta_dict, objectid(x))
+getmeta(x::EXPR, meta_dict) = meta_dict[objectid(x)]
+ensuremeta(x::EXPR, meta_dict) = hasmeta(x, meta_dict) || (meta_dict[objectid(x)] = Meta())
 hasbinding(m::Meta) = m.binding isa Binding
 hasref(m::Meta) = m.ref !== nothing
 hasscope(m::Meta) = m.scope isa Scope
@@ -52,32 +57,41 @@ mutable struct ExternalEnv
     project_deps::Vector{Symbol}
 end
 
+getsymbols(env::ExternalEnv) = env.symbols
+getsymbolextendeds(env::ExternalEnv) = env.extended_methods
+
+
 abstract type State end
-mutable struct Toplevel{T} <: State
-    file::T
-    included_files::Vector{String}
+
+getsymbols(state::State) = getsymbols(state.env)
+getsymbolextendeds(state::State) = getsymbolextendeds(state.env)
+
+mutable struct Toplevel <: State
+    uri::URI
+    included_files::Vector{URI}
     scope::Scope
     in_modified_expr::Bool
     modified_exprs::Union{Nothing,Vector{EXPR}}
     delayed::Vector{EXPR}
     resolveonly::Vector{EXPR}
     env::ExternalEnv
-    server
     flags::Int
 end
 
-Toplevel(file, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, server) =
-    Toplevel(file, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, server, 0)
+getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
-function (state::Toplevel)(x::EXPR)
-    resolve_import(x, state)
-    mark_bindings!(x, state)
-    add_binding(x, state)
+Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env) =
+    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, 0)
+
+function (state::Toplevel)(x::EXPR, meta_dict, root_dict, rt)
+    resolve_import(x, state, meta_dict)
+    mark_bindings!(x, state, meta_dict)
+    add_binding(x, state, meta_dict)
     mark_globals(x, state)
-    handle_macro(x, state)
-    s0 = scopes(x, state)
-    resolve_ref(x, state)
-    followinclude(x, state)
+    handle_macro(x, state, meta_dict, root_dict, rt)
+    s0 = scopes(x, state, meta_dict)
+    resolve_ref(x, state, meta_dict)
+    followinclude(x, state, meta_dict, root_dict, rt)
 
     old_in_modified_expr = state.in_modified_expr
     if state.modified_exprs !== nothing && x in state.modified_exprs
@@ -91,7 +105,7 @@ function (state::Toplevel)(x::EXPR)
         end
     else
         old = flag!(state, x)
-        traverse(x, state)
+        traverse(x, state, meta_dict, root_dict, rt)
         state.flags = old
     end
 
@@ -103,28 +117,27 @@ end
 mutable struct Delayed <: State
     scope::Scope
     env::ExternalEnv
-    server
     flags::Int
 end
 
-Delayed(scope, env, server) = Delayed(scope, env, server, 0)
+Delayed(scope, env) = Delayed(scope, env, 0)
 
-function (state::Delayed)(x::EXPR)
-    mark_bindings!(x, state)
-    add_binding(x, state)
+function (state::Delayed)(x::EXPR, meta_dict, root_dict, rt)
+    mark_bindings!(x, state, meta_dict)
+    add_binding(x, state, meta_dict)
     mark_globals(x, state)
     handle_macro(x, state)
-    s0 = scopes(x, state)
+    s0 = scopes(x, state, meta_dict)
 
-    resolve_ref(x, state)
+    resolve_ref(x, state, meta_dict)
 
     old = flag!(state, x)
-    traverse(x, state)
+    traverse(x, state, meta_dict, root_dict, rt)
     state.flags = old
     if state.scope != s0
         for b in values(state.scope.names)
-            infer_type_by_use(b, state.env)
-            check_unused_binding(b, state.scope)
+            infer_type_by_use(b, state.env, meta_dict)
+            check_unused_binding(b, state.scope, meta_dict, root_dict, rt)
         end
         state.scope = s0
     end
@@ -134,23 +147,22 @@ end
 mutable struct ResolveOnly <: State
     scope::Scope
     env::ExternalEnv
-    server
 end
 
-function (state::ResolveOnly)(x::EXPR)
-    if hasscope(x)
+function (state::ResolveOnly)(x::EXPR, meta_dict, root_dict, rt)
+    if hasscope(x, meta_dict)
         s0 = state.scope
-        state.scope = scopeof(x)
+        state.scope = scopeof(x, meta_dict)
     else
         s0 = state.scope
     end
 
     # NEW: late import resolution (idempotent for already-resolved imports)
-    resolve_import(x, state)
+    resolve_import(x, state, meta_dict)
 
-    resolve_ref(x, state)
+    resolve_ref(x, state, meta_dict)
 
-    traverse(x, state)
+    traverse(x, state, meta_dict, root_dict, rt)
     if state.scope != s0
         state.scope = s0
     end
@@ -173,29 +185,27 @@ end
 
 Performs a semantic pass across a project from the entry point `file`. A first pass traverses the top-level scope after which secondary passes handle delayed scopes (e.g. functions). These secondary passes can be, optionally, very light and only seek to resovle references (e.g. link symbols to bindings). This can be done by supplying a list of expressions on which the full secondary pass should be made (`modified_expr`), all others will receive the light-touch version.
 """
-function semantic_pass(file, modified_expr = nothing)
-    server = file.server
-    env = getenv(file, server)
-    setscope!(getcst(file), Scope(nothing, getcst(file), Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing))
-    state = Toplevel(file, [getpath(file)], scopeof(getcst(file)), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, server)
-    state(getcst(file))
+function semantic_pass(uri, cst, env, meta_dict, root_dict, rt, modified_expr = nothing)
+    setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
+    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env)
+    state(cst, meta_dict, root_dict, rt)
     for x in state.delayed
-        if hasscope(x)
-            traverse(x, Delayed(scopeof(x), env, server))
-            for (k, b) in scopeof(x).names
-                infer_type_by_use(b, env)
-                check_unused_binding(b, scopeof(x))
+        if hasscope(x, meta_dict)
+            traverse(x, Delayed(scopeof(x, meta_dict), env), meta_dict, root_dict, rt)
+            for (k, b) in scopeof(x, meta_dict).names
+                infer_type_by_use(b, env, meta_dict)
+                check_unused_binding(b, scopeof(x, meta_dict), meta_dict, root_dict, rt)
             end
         else
-            traverse(x, Delayed(retrieve_delayed_scope(x), env, server))
+            traverse(x, Delayed(retrieve_delayed_scope(x, meta_dict), env), meta_dict, root_dict, rt)
         end
     end
     if state.resolveonly !== nothing
         for x in state.resolveonly
-            if hasscope(x)
-                traverse(x, ResolveOnly(scopeof(x), env, server))
+            if hasscope(x, meta_dict)
+                traverse(x, ResolveOnly(scopeof(x, meta_dict), env), meta_dict, root_dict, rt)
             else
-                traverse(x, ResolveOnly(retrieve_delayed_scope(x), env, server))
+                traverse(x, ResolveOnly(retrieve_delayed_scope(x, meta_dict), env), meta_dict, root_dict, rt)
             end
         end
     end
@@ -207,44 +217,44 @@ end
 Iterates across the child nodes of an EXPR in execution order (rather than
 storage order) calling `state` on each node.
 """
-function traverse(x::EXPR, state)
+function traverse(x::EXPR, state, meta_dict, root_dict, rt)
     if (isassignment(x) && !(CSTParser.is_func_call(x.args[1]) || CSTParser.iscurly(x.args[1]))) || CSTParser.isdeclaration(x)
-        state(x.args[2])
-        state(x.args[1])
+        state(x.args[2], meta_dict, root_dict, rt)
+        state(x.args[1], meta_dict, root_dict, rt)
     elseif CSTParser.iswhere(x)
         for i = 2:length(x.args)
-            state(x.args[i])
+            state(x.args[i], meta_dict, root_dict, rt)
         end
-        state(x.args[1])
+        state(x.args[1], meta_dict, root_dict, rt)
     elseif headof(x) === :generator || headof(x) === :filter
         @inbounds for i = 2:length(x.args)
-            state(x.args[i])
+            state(x.args[i], meta_dict, root_dict, rt)
         end
-        state(x.args[1])
+        state(x.args[1], meta_dict, root_dict, rt)
     elseif headof(x) === :call && length(x.args) > 1 && headof(x.args[2]) === :parameters
-        state(x.args[1])
+        state(x.args[1], meta_dict, root_dict, rt)
         @inbounds for i = 3:length(x.args)
-            state(x.args[i])
+            state(x.args[i], meta_dict, root_dict, rt)
         end
-        state(x.args[2])
+        state(x.args[2], meta_dict, root_dict, rt)
     elseif x.args !== nothing && length(x.args) > 0
         @inbounds for i = 1:length(x.args)
-            state(x.args[i])
+            state(x.args[i], meta_dict, root_dict, rt)
         end
     end
 end
 
-function check_filesize(x, path)
+function check_filesize(x, path, meta_dict)
     nb = try
         filesize(path)
     catch
-        seterror!(x, FileNotAvailable)
+        seterror!(x, FileNotAvailable, meta_dict)
         return false
     end
 
     toobig = nb > LARGE_FILE_LIMIT
     if toobig
-        seterror!(x, FileTooBig)
+        seterror!(x, FileTooBig, meta_dict)
     end
     return !toobig
 end
@@ -257,17 +267,17 @@ If successful it checks whether a file with that path is loaded on the server
 or a file exists on the disc that can be loaded.
 If this is successful it traverses the code associated with the loaded file.
 """
-function followinclude(x, state::State)
+function followinclude(x, state::State, meta_dict, root_dict, rt)
     # this runs on the `include` symbol instead of a function call so that we
     # can be sure the ref has already been resolved
     isinclude = isincludet = false
     p = x
-    if isidentifier(x) && hasref(x)
-        r = x.meta.ref
+    if isidentifier(x) && hasref(x, meta_dict)
+        r = getmeta(x, meta_dict).ref
 
         if is_in_fexpr(x, iscall)
             p = get_parent_fexpr(x, iscall)
-            if r == refof_call_func(p)
+            if r == refof_call_func(p, meta_dict)
                 isinclude = r.name == SymbolServer.VarRef(SymbolServer.VarRef(nothing, :Base), :include)
                 isincludet = r.name == SymbolServer.VarRef(SymbolServer.VarRef(nothing, :Revise), :includet)
             end
@@ -280,68 +290,69 @@ function followinclude(x, state::State)
 
     x = p
 
-    init_path = path = get_path(x, state)
+    init_path = path = get_path(x, state, meta_dict)
     if isempty(path)
     elseif isabspath(path)
-        if hasfile(state.server, path)
-        elseif canloadfile(state.server, path)
-            if check_filesize(x, path)
-                loadfile(state.server, path)
-            else
-                return
-            end
+        if hasfile(rt, path)
+        # elseif canloadfile(state.server, path)
+        #     if check_filesize(x, path)
+        #         loadfile(state.server, path)
+        #     else
+        #         return
+        #     end
         else
             path = ""
         end
-    elseif !isempty(getpath(state.file)) && isabspath(joinpath(dirname(getpath(state.file)), path))
+    elseif !isempty(getpath(state)) && isabspath(joinpath(dirname(getpath(state)), path))
         # Relative path from current
-        if hasfile(state.server, joinpath(dirname(getpath(state.file)), path))
-            path = joinpath(dirname(getpath(state.file)), path)
-        elseif canloadfile(state.server, joinpath(dirname(getpath(state.file)), path))
-            path = joinpath(dirname(getpath(state.file)), path)
-            if check_filesize(x, path)
-                loadfile(state.server, path)
-            else
-                return
-            end
+        if hasfile(rt, joinpath(dirname(getpath(state)), path))
+            path = joinpath(dirname(getpath(state)), path)
+        # elseif canloadfile(state.server, joinpath(dirname(getpath(state.file)), path))
+        #     path = joinpath(dirname(getpath(state.file)), path)
+        #     if check_filesize(x, path)
+        #         loadfile(state.server, path)
+        #     else
+        #         return
+        #     end
         else
             path = ""
         end
-    elseif !isempty((basepath = _is_in_basedir(getpath(state.file)); basepath))
+    elseif !isempty((basepath = _is_in_basedir(getpath(state)); basepath))
         # Special handling for include method used within Base
         path = joinpath(basepath, path)
-        if hasfile(state.server, path)
+        if hasfile(rt, path)
             # skip
-        elseif canloadfile(state.server, path)
-            loadfile(state.server, path)
+        # elseif canloadfile(state.server, path)
+        #     loadfile(state.server, path)
         else
             path = ""
         end
     else
         path = ""
     end
-    if hasfile(state.server, path)
-        if path in state.included_files
-            seterror!(x, IncludeLoop)
-            return
-        end
-        f = getfile(state.server, path)
+    # TODO DA FIX
+    # if hasfile(rt, path)
+    #     if path in state.included_files
+    #         seterror!(x, IncludeLoop)
+    #         return
+    #     end
+    #     f = getfile(state.server, path)
 
-        if f.cst.fullspan > LARGE_FILE_LIMIT
-            seterror!(x, FileTooBig)
-            return
-        end
-        oldfile = state.file
-        state.file = f
-        push!(state.included_files, getpath(state.file))
-        setroot(state.file, getroot(oldfile))
-        setscope!(getcst(state.file), nothing)
-        state(getcst(state.file))
-        state.file = oldfile
-        pop!(state.included_files)
-    elseif !is_in_fexpr(x, CSTParser.defines_function) && !isempty(init_path)
-        seterror!(x, MissingFile)
-    end
+    #     if f.cst.fullspan > LARGE_FILE_LIMIT
+    #         seterror!(x, FileTooBig)
+    #         return
+    #     end
+    #     oldfile = state.file
+    #     state.file = f
+    #     push!(state.included_files, getpath(state))
+    #     root_dict[state.file] = root_dict[oldfile]
+    #     setscope!(getcst(state.file), nothing)
+    #     state(getcst(state.file))
+    #     state.file = oldfile
+    #     pop!(state.included_files)
+    # elseif !is_in_fexpr(x, CSTParser.defines_function) && !isempty(init_path)
+    #     seterror!(x, MissingFile)
+    # end
 end
 
 """
@@ -350,13 +361,13 @@ end
 Usually called on the argument to `include` calls, and attempts to determine
 the path of the file to be included. Has limited support for `joinpath` calls.
 """
-function get_path(x::EXPR, state)
+function get_path(x::EXPR, state, meta_dict)
     if CSTParser.iscall(x) && length(x.args) == 2
         parg = x.args[2]
 
         if CSTParser.isstringliteral(parg)
             if occursin("\0", valof(parg))
-                seterror!(parg, IncludePathContainsNULL)
+                seterror!(parg, IncludePathContainsNULL, meta_dict)
                 return ""
             end
             path = CSTParser.str_value(parg)
@@ -365,7 +376,7 @@ function get_path(x::EXPR, state)
             return path
         elseif CSTParser.ismacrocall(parg) && valof(parg.args[1]) == "@raw_str" && CSTParser.isstringliteral(parg.args[3])
             if occursin("\0", valof(parg.args[3]))
-                seterror!(parg.args[3], IncludePathContainsNULL)
+                seterror!(parg.args[3], IncludePathContainsNULL, meta_dict)
                 return ""
             end
             path = normpath(CSTParser.str_value(parg.args[3]))
@@ -377,10 +388,10 @@ function get_path(x::EXPR, state)
             for i = 2:length(parg.args)
                 arg = parg[i]
                 if _is_macrocall_to_BaseDIR(arg) # Assumes @__DIR__ points to Base macro.
-                    push!(path_elements, dirname(getpath(state.file)))
+                    push!(path_elements, dirname(getpath(state)))
                 elseif CSTParser.isstringliteral(arg)
                     if occursin("\0", valof(arg))
-                        seterror!(arg, IncludePathContainsNULL)
+                        seterror!(arg, IncludePathContainsNULL, meta_dict)
                         return ""
                     end
                     push!(path_elements, string(valof(arg)))
@@ -398,12 +409,10 @@ function get_path(x::EXPR, state)
     return ""
 end
 
-include("server.jl")
 include("imports.jl")
 include("references.jl")
 include("macros.jl")
 include("linting/checks.jl")
 include("type_inf.jl")
 include("utils.jl")
-include("interface.jl")
 end

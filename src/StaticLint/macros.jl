@@ -1,18 +1,18 @@
 function handle_macro(@nospecialize(x), state) end
-function handle_macro(x::EXPR, state)
+function handle_macro(x::EXPR, state, meta_dict, root_dict, rt)
     !CSTParser.ismacrocall(x) && return
     if headof(x.args[1]) === :globalrefdoc
         if length(x.args) == 4
-            if isidentifier(x.args[4]) && !resolve_ref(x.args[4], state)
+            if isidentifier(x.args[4]) && !resolve_ref(x.args[4], state, meta_dict)
                 if state isa Toplevel
                     push!(state.resolveonly, x)
                 end
             elseif CSTParser.is_func_call(x.args[4])
                 sig = (x.args[4])
                 if sig isa EXPR 
-                    hasscope(sig) && return # We've already done this, don't repeat
-                    setscope!(sig, Scope(sig))
-                    mark_sig_args!(sig)                    
+                    hasscope(sig, meta_dict) && return # We've already done this, don't repeat
+                    setscope!(sig, Scope(sig), meta_dict)
+                    mark_sig_args!(sig, meta_dict)                    
                 end
                 if state isa Toplevel
                     push!(state.resolveonly, x)
@@ -20,70 +20,70 @@ function handle_macro(x::EXPR, state)
             end
         end
     elseif CSTParser.ismacroname(x.args[1])
-        state(x.args[1])
-        if _points_to_Base_macro(x.args[1], Symbol("@deprecate"), state) && length(x.args) == 4
-            if bindingof(x.args[3]) !== nothing
+        state(x.args[1], meta_dict, root_dict, rt)
+        if _points_to_Base_macro(x.args[1], Symbol("@deprecate"), state, meta_dict) && length(x.args) == 4
+            if bindingof(x.args[3], meta_dict) !== nothing
                 return
             elseif CSTParser.is_func_call(x.args[3])
                 # add deprecated method
                 # add deprecated function binding and args in new scope
-                mark_binding!(x.args[3], x)
-                mark_sig_args!(x.args[3])
+                mark_binding!(x.args[3], meta_dict, x)
+                mark_sig_args!(x.args[3], meta_dict)
                 s0 = state.scope # store previous scope
                 state.scope = Scope(s0, x, Dict(), nothing, nothing)
-                setscope!(x, state.scope) # tag new scope to generating expression
+                setscope!(x, state.scope, meta_dict) # tag new scope to generating expression
                 state(x.args[3])
                 state(x.args[4])
                 state.scope = s0
             elseif isidentifier(x.args[3])
-                mark_binding!(x.args[3], x)
+                mark_binding!(x.args[3], meta_dict, x)
             end
-        elseif _points_to_Base_macro(x.args[1], Symbol("@deprecate_binding"), state) && length(x.args) == 4 && isidentifier(x.args[3]) && isidentifier(x.args[4])
-            setref!(x.args[3], refof(x.args[4]))
-        elseif _points_to_Base_macro(x.args[1], Symbol("@eval"), state) && length(x.args) == 3 && state isa Toplevel
+        elseif _points_to_Base_macro(x.args[1], Symbol("@deprecate_binding"), state, meta_dict) && length(x.args) == 4 && isidentifier(x.args[3]) && isidentifier(x.args[4])
+            setref!(x.args[3], refof(x.args[4], meta_dict), meta_dict)
+        elseif _points_to_Base_macro(x.args[1], Symbol("@eval"), state, meta_dict) && length(x.args) == 3 && state isa Toplevel
             # Create scope around eval'ed expression. This ensures anybindings are
             # correctly hoisted to the top-level scope.
-            setscope!(x, Scope(x))
-            setparent!(scopeof(x), state.scope)
+            setscope!(x, Scope(x), meta_dict)
+            setparent!(scopeof(x, meta_dict), state.scope)
             s0 = state.scope
-            state.scope = scopeof(x)
+            state.scope = scopeof(x, meta_dict)
             interpret_eval(x.args[3], state)
             state.scope = s0
-        elseif _points_to_Base_macro(x.args[1], Symbol("@irrational"), state) && length(x.args) == 5
-            mark_binding!(x.args[3], x)
-        elseif _points_to_Base_macro(x.args[1], Symbol("@enum"), state)
+        elseif _points_to_Base_macro(x.args[1], Symbol("@irrational"), state, meta_dict) && length(x.args) == 5
+            mark_binding!(x.args[3], meta_dict, x)
+        elseif _points_to_Base_macro(x.args[1], Symbol("@enum"), state, meta_dict)
             for i = 3:length(x.args)
-                if bindingof(x.args[i]) !== nothing
+                if bindingof(x.args[i], meta_dict) !== nothing
                     break
                 end
                 if i == 4 && headof(x.args[4]) === :block
                     for j in 1:length(x.args[4].args)
-                        mark_binding!(x.args[4].args[j], x)
+                        mark_binding!(x.args[4].args[j], meta_dict, x)
                     end
                     break
                 end
-                mark_binding!(x.args[i], x)
+                mark_binding!(x.args[i], meta_dict, x)
             end
-        elseif _points_to_Base_macro(x.args[1], Symbol("@goto"), state)
+        elseif _points_to_Base_macro(x.args[1], Symbol("@goto"), state, meta_dict)
             if length(x.args) == 3 && isidentifier(x.args[3])
-                setref!(x.args[3], Binding(noname, nothing, nothing, EXPR[]))
+                setref!(x.args[3], Binding(noname, nothing, nothing, EXPR[]), meta_dict)
             end
-        elseif _points_to_Base_macro(x.args[1], Symbol("@label"), state)
+        elseif _points_to_Base_macro(x.args[1], Symbol("@label"), state, meta_dict)
             if length(x.args) == 3 && isidentifier(x.args[3])
-                mark_binding!(x.args[3])
+                mark_binding!(x.args[3], meta_dict)
             end
-        elseif _points_to_Base_macro(x.args[1], Symbol("@NamedTuple"), state) && length(x.args) > 2 && headof(x.args[3]) == :braces
+        elseif _points_to_Base_macro(x.args[1], Symbol("@NamedTuple"), state, meta_dict) && length(x.args) > 2 && headof(x.args[3]) == :braces
             for a in x.args[3].args
-                if CSTParser.isdeclaration(a) && isidentifier(a.args[1]) && !hasref(a.args[1])
-                    setref!(a.args[1], Binding(noname, nothing, nothing, EXPR[]))
+                if CSTParser.isdeclaration(a) && isidentifier(a.args[1]) && !hasref(a.args[1], meta_dict)
+                    setref!(a.args[1], Binding(noname, nothing, nothing, EXPR[]), meta_dict)
                 end
             end
         elseif is_nospecialize(x.args[1])
             for i = 2:length(x.args)
-                if bindingof(x.args[i]) !== nothing
+                if bindingof(x.args[i], meta_dict) !== nothing
                     break
                 end
-                mark_binding!(x.args[i], x)
+                mark_binding!(x.args[i], meta_dict, x)
             end
         # elseif _points_to_arbitrary_macro(x.args[1], :Turing, :model, state) && length(x) == 3 &&
         #     isassignment(x.args[3]) &&
@@ -129,29 +129,29 @@ is_nospecialize(x) = isidentifier(x) && valofid(x) == "@nospecialize"
 
 function _mark_JuMP_binding(arg)
     if isidentifier(arg) || headof(arg) === :ref
-        mark_binding!(_rem_ref(arg))
+        mark_binding!(_rem_ref(arg), meta_dict)
     elseif isbinarycall(arg, "==") || isbinarycall(arg, "<=")  || isbinarycall(arg, ">=")
         if isidentifier(arg.args[1]) || headof(arg.args[1]) === :ref
-            mark_binding!(_rem_ref(arg.args[1]))
+            mark_binding!(_rem_ref(arg.args[1]), meta_dict)
         else
-            mark_binding!(_rem_ref(arg.args[3]))
+            mark_binding!(_rem_ref(arg.args[3]), meta_dict)
         end
     elseif headof(arg) === :comparision && length(arg.args) == 5
-        mark_binding!(_rem_ref(arg.args[3]))
+        mark_binding!(_rem_ref(arg.args[3]), meta_dict)
     end
 end
 
-function _points_to_Base_macro(x::EXPR, name, state)
-    CSTParser.is_getfield_w_quotenode(x) && return _points_to_Base_macro(x.args[2].args[1], name, state)
+function _points_to_Base_macro(x::EXPR, name, state, meta_dict)
+    CSTParser.is_getfield_w_quotenode(x) && return _points_to_Base_macro(x.args[2].args[1], name, state, meta_dict)
     haskey(getsymbols(state)[:Base], name) || return false
     targetmacro =  maybe_lookup(getsymbols(state)[:Base][name], state)
-    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x)) !== nothing &&
+    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x, meta_dict)) !== nothing &&
     (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
 end
 
 function _points_to_arbitrary_macro(x::EXPR, module_name, name, state)
-    length(x.args) == 2 && isidentifier(x.args[2]) && valof(x.args[2]) == name && haskey(getsymbols(state), Symbol(module_name)) && haskey(getsymbols(state)[Symbol(module_name)], Symbol("@", name)) && (refof(x.args[2]) == maybe_lookup(getsymbols(state)[Symbol(module_name)][Symbol("@", name)], state) ||
-    (refof(x.args[2]) isa Binding && refof(x.args[2]).val == maybe_lookup(getsymbols(state)[Symbol(module_name)][Symbol("@", name)], state)))
+    length(x.args) == 2 && isidentifier(x.args[2]) && valof(x.args[2]) == name && haskey(getsymbols(state), Symbol(module_name)) && haskey(getsymbols(state)[Symbol(module_name)], Symbol("@", name)) && (refof(x.args[2], meta_dict) == maybe_lookup(getsymbols(state)[Symbol(module_name)][Symbol("@", name)], state) ||
+    (refof(x.args[2], meta_dict) isa Binding && refof(x.args[2], meta_dict).val == maybe_lookup(getsymbols(state)[Symbol(module_name)][Symbol("@", name)], state)))
 end
 
 maybe_lookup(x, env::ExternalEnv) = x isa SymbolServer.VarRef ? SymbolServer._lookup(x, getsymbols(env), true) : x
@@ -206,23 +206,23 @@ any bindings made within the scope of `x` to the toplevel and replaces
 function interpret_eval(x::EXPR, state)
     # make sure we have bindings etc
     state(x)
-    tls = retrieve_toplevel_scope(x)
-    for ex in collect_expr_with_bindings(x)
-        b = bindingof(ex)
+    tls = retrieve_toplevel_scope(x, meta_dict)
+    for ex in collect_expr_with_bindings(x, meta_dict)
+        b = bindingof(ex, meta_dict)
         if isidentifier(b.name)
             # The name of the binding is fixed
-            add_binding(ex, state, tls)
+            add_binding(ex, state, meta_dict, tls)
         elseif isunarysyntax(b.name) && valof(headof(b.name)) == "\$"
             # The name of the binding is variable, we need to work out what the
             # interpolated symbol points to.
             variable_name = b.name.args[1]
-            resolve_ref(variable_name, state.scope, state)
-            if (ref = refof(variable_name)) isa Binding
+            resolve_ref(variable_name, state.scope, state, meta_dict)
+            if (ref = refof(variable_name, meta_dict)) isa Binding
                 if isassignment(ref.val) && (rhs = maybeget_quotedsymbol(ref.val.args[2])) !== nothing
                     # `name = :something`
                     toplevel_binding = Binding(rhs, b.val, nothing, [])
                     settype!(toplevel_binding, b.type)
-                    infer_type(toplevel_binding, tls, state)
+                    infer_type(toplevel_binding, tls, state, meta_dict)
                     if scopehasbinding(tls, valofid(toplevel_binding.name))
                         tls.names[valofid(toplevel_binding.name)] = toplevel_binding # TODO: do we need to check whether this adds a method?
                     else
@@ -233,7 +233,7 @@ function interpret_eval(x::EXPR, state)
                     for name in names
                         toplevel_binding = Binding(name, b.val, nothing, [])
                         settype!(toplevel_binding, b.type)
-                        infer_type(toplevel_binding, tls, state)
+                        infer_type(toplevel_binding, tls, state, meta_dict)
                         if scopehasbinding(tls, valofid(toplevel_binding.name))
                             tls.names[valofid(toplevel_binding.name)] = toplevel_binding # TODO: do we need to check whether this adds a method?
                         else
@@ -255,8 +255,8 @@ function rhs_of_iterator(x::EXPR)
     end
 end
 
-function collect_expr_with_bindings(x, bound_exprs=EXPR[])
-    if hasbinding(x)
+function collect_expr_with_bindings(x, meta_dict, bound_exprs=EXPR[])
+    if hasbinding(x, meta_dict)
         push!(bound_exprs, x)
         # Assuming here that if an expression has a binding we don't want anything bound to chlid nodes.
     elseif x.args !== nothing && !((CSTParser.defines_function(x) && !is_eventually_interpolated(x.args[1])) || CSTParser.defines_macro(x) || headof(x) === :export)
