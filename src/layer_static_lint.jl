@@ -57,23 +57,18 @@ Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
         if StaticLint.headof(err[2]) === :errortoken
             # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
         elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
-            push!(res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", "StaticLint.jl"))
-            # push!(out, Diagnostic(rng, DiagnosticSeverities.Warning, missing, missing, "Julia", "Missing reference: $(err[2].val)", missing, missing))
+            push!(res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
         elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
             code = StaticLint.errorof(err[2], meta_dict)
-            # description = get(StaticLint.LintCodeDescriptions, code, "")
-            # severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
-            #     DiagnosticSeverities.Hint, [DiagnosticTags.Unnecessary]
-            # else
-            #     DiagnosticSeverities.Information, missing
-            # end
-            # code_details = if isdefined(StaticLint, :IndexFromLength) && code === StaticLint.IndexFromLength
-            #     CodeDescription(URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex"))
-            # else
-            #     missing
-            # end
+            description = get(StaticLint.LintCodeDescriptions, code, "")
+            severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
+                :hint, Symbol[:Unnecessary]
+            else
+                :information, Symbol[]
+            end
+            code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
             # push!(out, Diagnostic(rng, severity, string(code), code_details, "Julia", description, tags, missing))
-            push!(res, Diagnostic(rng, :warning, string(code), "StaticLint.jl"))
+            push!(res, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
         end
     end
 

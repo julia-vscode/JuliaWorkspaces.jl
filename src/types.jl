@@ -252,12 +252,16 @@ A diagnostic struct, consisting of range, severity, message, and source.
 - range::UnitRange{Int64}
 - severity::Symbol
 - message::String
+- uri::Union{Nothing,URI}
+- tags::Vector{Symbol}
 - source::String
 """
 @auto_hash_equals struct Diagnostic
     range::UnitRange{Int64}
     severity::Symbol
     message::String
+    uri::Union{Nothing,URI}
+    tags::Vector{Symbol}
     source::String
 end
 

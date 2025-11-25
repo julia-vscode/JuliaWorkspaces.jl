@@ -14,11 +14,11 @@ Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
 
     for (k,v) in pairs(toml_content)
         if !(k in valid_lint_configs)
-            push!(res, Diagnostic(1:1, :error, "Invalid lint configuration $k.", "JuliaWorkspaces.jl"))
+            push!(res, Diagnostic(1:1, :error, "Invalid lint configuration $k.", nothing, Symbol[], "JuliaWorkspaces.jl"))
         end
 
         if !(v isa Bool)
-            push!(res, Diagnostic(1:1, :error, "Invalid lint configuration value for $k, ony `true` or `false` are valid.", "JuliaWorkspaces.jl"))
+            push!(res, Diagnostic(1:1, :error, "Invalid lint configuration value for $k, ony `true` or `false` are valid.", nothing, Symbol[], "JuliaWorkspaces.jl"))
         end
     end
 
@@ -66,7 +66,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
 
         if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "testitem-errors", true) == true
             tis = derived_testitems(rt, uri)
-            append!(results, Diagnostic(i.range, :error, i.message, "Testitem") for i in tis.testerrors)
+            append!(results, Diagnostic(i.range, :error, i.message, nothing, Symbol[], "Testitem") for i in tis.testerrors)
         end
 
         if is_path_julia_file(uri2filepath(uri))
