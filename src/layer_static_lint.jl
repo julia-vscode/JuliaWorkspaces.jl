@@ -62,12 +62,11 @@ Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
             code = StaticLint.errorof(err[2], meta_dict)
             description = get(StaticLint.LintCodeDescriptions, code, "")
             severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
-                :hint, Symbol[:Unnecessary]
+                :hint, Symbol[:unnecessary]
             else
                 :information, Symbol[]
             end
             code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
-            # push!(out, Diagnostic(rng, severity, string(code), code_details, "Julia", description, tags, missing))
             push!(res, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
         end
     end
