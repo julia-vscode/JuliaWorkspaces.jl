@@ -20,7 +20,6 @@ Salsa.@derived function derived_static_lint_meta(rt)
     end
 
     for uri in julia_files
-        # setroot(doc, doc)
         root_dict[uri] = uri
     end
 
@@ -29,8 +28,6 @@ Salsa.@derived function derived_static_lint_meta(rt)
         env = derived_external_env(rt, uri)
 
         StaticLint.semantic_pass(uri, cst, env, meta_dict, root_dict, rt)
-
-        # lint!
     end
 
     for file in julia_files
