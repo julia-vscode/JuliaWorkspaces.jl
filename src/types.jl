@@ -276,7 +276,7 @@ struct JuliaWorkspace
     runtime::Salsa.Runtime
     dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace(dynamic=false)
+    function JuliaWorkspace(;dynamic=false)
         rt = Salsa.Runtime()
 
         set_input_files!(rt, Set{URI}())

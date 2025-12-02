@@ -17,6 +17,7 @@ Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 REPL = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"
 LibGit2 = "76f85450-5226-5b5a-8eaa-529ad045b433"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+JSONRPC = "b9b8584e-8fd3-41f9-ad0c-7255d428e418"
 
 [extras]
 TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
@@ -35,6 +36,7 @@ Sockets = "<0.0.1, 1"
 REPL = "<0.0.1, 1"
 LibGit2 = "<0.0.1, 1"
 InteractiveUtils = "<0.0.1, 1"
+JSONRPC = "2"
 
 [targets]
 test = ["Test", "TestItemRunner"]

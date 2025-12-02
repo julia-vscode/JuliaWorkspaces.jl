@@ -19,6 +19,7 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 Unicode = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 
 [compat]
 julia = "1"

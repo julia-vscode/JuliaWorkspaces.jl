@@ -10,10 +10,10 @@ import Sockets, UUIDs
 # moved there
 using REPL
 
-include("faketypes.jl")
-include("symbols.jl")
-include("utils.jl")
-include("serialize.jl")
+include("../../shared/symbolserver/faketypes.jl")
+include("../../shared/symbolserver/symbols.jl")
+include("../../shared/symbolserver/utils.jl")
+include("../../shared/symbolserver/serialize.jl")
 using .CacheStore
 
 mutable struct SymbolServerInstance
@@ -299,7 +299,7 @@ function pipe_name()
     return pipename
 end
 
-function load_project_packages_into_store!(ssi::SymbolServerInstance, environment_path, store, progress_callback = nothing)
+function load_project_packages_into_store!(store_path, depot_path, environment_path, store, progress_callback = nothing)
     project_filename = isfile(joinpath(environment_path, "JuliaProject.toml")) ? joinpath(environment_path, "JuliaProject.toml") : joinpath(environment_path, "Project.toml")
     project = try
         Pkg.API.read_project(project_filename)
@@ -315,18 +315,18 @@ function load_project_packages_into_store!(ssi::SymbolServerInstance, environmen
     num_uuids = length(values(deps(project)))
     t0 = time()
     for (i, uuid) in enumerate(uuids)
-        load_package_from_cache_into_store!(ssi, uuid isa UUID ? uuid : UUID(uuid), environment_path, manifest, store, progress_callback, round(Int, 100 * (i - 1) / num_uuids))
+        load_package_from_cache_into_store!(store_path, depot_path, uuid isa UUID ? uuid : UUID(uuid), environment_path, manifest, store, progress_callback, round(Int, 100 * (i - 1) / num_uuids))
     end
     took = round(time() - t0, sigdigits = 2)
     progress_callback("Loaded all packages into cache in $(took)s", 100)
 end
 
 """
-    load_package_from_cache_into_store!(ssp::SymbolServerInstance, uuid, store)
+    load_package_from_cache_into_store!(store_path, depot_path, uuid, store)
 
 Tries to load the on-disc stored cache for a package (uuid). Attempts to generate (and save to disc) a new cache if the file does not exist or is unopenable.
 """
-function load_package_from_cache_into_store!(ssi::SymbolServerInstance, uuid::UUID, environment_path, manifest, store, progress_callback = nothing, percentage = missing)
+function load_package_from_cache_into_store!(store_path, depot_path, uuid::UUID, environment_path, manifest, store, progress_callback = nothing, percentage = missing)
     yield()
     isinmanifest(manifest, uuid) || return
     pe = frommanifest(manifest, uuid)
@@ -335,7 +335,7 @@ function load_package_from_cache_into_store!(ssi::SymbolServerInstance, uuid::UU
 
 
     # further existence checks needed?
-    cache_path = joinpath(ssi.store_path, get_cache_path(manifest, uuid)...)
+    cache_path = joinpath(store_path, get_cache_path(manifest, uuid)...)
     if isfile(cache_path)
         t0 = time()
         progress_callback("Loading $pe_name from cache...", percentage)
@@ -346,7 +346,7 @@ function load_package_from_cache_into_store!(ssi::SymbolServerInstance, uuid::UU
 
             pkg_path = Base.locate_package(Base.PkgId(uuid, pe_name))
             if pkg_path === nothing || !isfile(pkg_path)
-                pkg_path = get_pkg_path(Base.PkgId(uuid, pe_name), environment_path, ssi.depot_path)
+                pkg_path = get_pkg_path(Base.PkgId(uuid, pe_name), environment_path, depot_path)
             end
             if pkg_path !== nothing
                 modify_dirs(package_data.val, f -> modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
@@ -361,7 +361,7 @@ function load_package_from_cache_into_store!(ssi::SymbolServerInstance, uuid::UU
             progress_callback(msg, percentage)
             t0 = time()
             for dep in deps(pe)
-                load_package_from_cache_into_store!(ssi, packageuuid(dep), environment_path, manifest, store, progress_callback, percentage)
+                load_package_from_cache_into_store!(store_path, depot_path, packageuuid(dep), environment_path, manifest, store, progress_callback, percentage)
             end
         catch err
             Base.display_error(stderr, err, catch_backtrace())

@@ -636,20 +636,20 @@ function get_pkg_path(pkg::Base.PkgId, env, depot_path)
     return nothing
 end
 
-function load_package(c::Pkg.Types.Context, uuid, conn, loadingbay, percentage = missing)
+function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay, percentage = missing)
     isinmanifest(c, uuid isa String ? Base.UUID(uuid) : uuid) || return
     pe_name = packagename(c, uuid)
 
     pid = Base.PkgId(uuid isa String ? Base.UUID(uuid) : uuid, pe_name)
     if pid in keys(Base.loaded_modules)
-        conn !== nothing && println(conn, "PROCESSPKG;$pe_name;$uuid;noversion;$percentage")
+        progress_callback !== nothing && progress_callback(:PROCESSPKG, pe_name, uuid, :noversion, percentage)
         loadingbay.eval(:($(Symbol(pe_name)) = $(Base.loaded_modules[pid])))
         m = Base.invokelatest(() -> getfield(loadingbay, Symbol(pe_name)))
     else
         m = try
-            conn !== nothing && println(conn, "STARTLOAD;$pe_name;$uuid;noversion;$percentage")
+            progress_callback !== nothing && progress_callback(:STARTLOAD, pe_name, uuid, :noversion, percentage)
             loadingbay.eval(:(import $(Symbol(pe_name))))
-            conn !== nothing && println(conn, "STOPLOAD;$pe_name")
+            progress_callback !== nothing && progress_callback(:STOPLOAD, pe_name)
             m = Base.invokelatest(() -> getfield(loadingbay, Symbol(pe_name)))
         catch
             return
