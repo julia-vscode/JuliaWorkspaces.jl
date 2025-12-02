@@ -8,3 +8,4 @@ docs/build
 bin/run_julia
 bin/docs
 cspell.json
+!scripts/Manifest.toml
