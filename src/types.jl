@@ -274,13 +274,17 @@ A Julia workspace, consisting of a [`Salsa`](https://github.com/julia-vscode/Sal
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime
+    dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace()
+    function JuliaWorkspace(dynamic=false)
         rt = Salsa.Runtime()
 
         set_input_files!(rt, Set{URI}())
         set_input_fallback_test_project!(rt, nothing)
 
-        new(rt)
+        dynamic_feature = dynamic ? DynamicFeature() : nothing
+        dynamic_feature === nothing || start(dynamic_feature)
+
+        new(rt, dynamic_feature)
     end
 end
