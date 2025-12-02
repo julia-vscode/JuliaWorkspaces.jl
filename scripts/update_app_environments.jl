@@ -15,18 +15,18 @@ julia_versions = [
 ]
 
 for i in julia_versions
-    version_path = normpath(joinpath(@__DIR__, "../testprocess/environments/v$i"))
+    version_path = normpath(joinpath(@__DIR__, "../juliadynamicanalysisprocess/environments/v$i"))
     mkpath(version_path)
 
-    run(Cmd(`julia +$i --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../TestItemServer"))'`, dir=version_path))
+    run(Cmd(`julia +$i --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../JuliaDynamicAnalysisProcess"))'`, dir=version_path))
 end
 
-version_path = normpath(joinpath(@__DIR__, "../testprocess/environments/fallback"))
+version_path = normpath(joinpath(@__DIR__, "../juliadynamicanalysisprocess/environments/fallback"))
 mkpath(version_path)
-run(Cmd(`julia +nightly --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../TestItemServer"))'`, dir=version_path))
+run(Cmd(`julia +nightly --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../JuliaDynamicAnalysisProcess"))'`, dir=version_path))
 
 function replace_backslash_in_manifest(version)
-    filename = joinpath(@__DIR__, "../testprocess/environments/v$version/Manifest.toml")
+    filename = joinpath(@__DIR__, "../juliadynamicanalysisprocess/environments/v$version/Manifest.toml")
     manifest_content = read(filename, String)
 
     new_content = replace(manifest_content, "\\\\"=>'/')
