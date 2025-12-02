@@ -29,7 +29,7 @@ deps = ["Markdown"]
 uuid = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 
 [[JuliaDynamicAnalysisProcess]]
-deps = ["Base64", "Dates", "Distributed", "FileWatching", "InteractiveUtils", "LibGit2", "Logging", "Mmap", "Pkg", "REPL", "Random", "Sockets", "Test", "UUIDs", "Unicode"]
+deps = ["Base64", "Dates", "Distributed", "FileWatching", "InteractiveUtils", "LibGit2", "Logging", "Mmap", "Pkg", "REPL", "Random", "SHA", "Sockets", "Test", "UUIDs", "Unicode"]
 path = "../../JuliaDynamicAnalysisProcess"
 uuid = "d3729fb9-06c0-4e86-aa34-36de5a1c1049"
 version = "1.0.0"
