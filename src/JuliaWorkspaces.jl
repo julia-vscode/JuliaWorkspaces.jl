@@ -26,6 +26,7 @@ using .URIs2: filepath2uri, uri2filepath
 using .URIs2: URI, @uri_str
 
 include("exception_types.jl")
+include("../shared/julia_dynamic_analysis_process_protocol.jl")
 include("dynamic_feature.jl")
 include("types.jl")
 include("sourcetext.jl")

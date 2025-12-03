@@ -6,7 +6,7 @@ import ..JSONRPC.JSON
 using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
 
 @dict_readable struct GetStoreParams <: JSONRPC.Outbound
-    projectUri::String
+    projectPath::String
     storePath::String
 end
 

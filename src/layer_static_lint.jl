@@ -3,7 +3,13 @@ function StaticLint.hasfile(rt, path)
 end
 
 Salsa.@derived function derived_external_env(rt, uri)
-    return StaticLint.ExternalEnv(Dict{Symbol,SymbolServer.ModuleStore}(:Base => SymbolServer.stdlibs[:Base], :Core => SymbolServer.stdlibs[:Core]), SymbolServer.collect_extended_methods(SymbolServer.stdlibs), Symbol[])
+    envs = input_project_environments(rt)
+
+    if uri in envs
+        return derived_input_project_environment(rt, uri)
+    else
+        return StaticLint.ExternalEnv(Dict{Symbol,SymbolServer.ModuleStore}(:Base => SymbolServer.stdlibs[:Base], :Core => SymbolServer.stdlibs[:Core]), SymbolServer.collect_extended_methods(SymbolServer.stdlibs), Symbol[])
+    end
 end
 
 Salsa.@derived function derived_static_lint_meta(rt)

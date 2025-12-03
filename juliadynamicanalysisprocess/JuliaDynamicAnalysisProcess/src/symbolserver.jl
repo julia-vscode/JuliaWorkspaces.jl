@@ -4,10 +4,6 @@ module SymbolServer
 
 start_time = time_ns()
 
-
-module LoadingBay
-end
-
 using Pkg, SHA
 using Base: UUID
 
@@ -26,6 +22,8 @@ else
 end
 
 function get_store(store_path::String, progress_callback)
+    loading_bay = Module(:LoadingBay)
+
     ctx = try
         Pkg.Types.Context()
     catch err
@@ -80,7 +78,7 @@ function get_store(store_path::String, progress_callback)
     # Load all packages together
     # This is important, or methods added to functions in other packages that are loaded earlier would not be in the cache
     for (i, uuid) in enumerate(packages_to_load)
-        load_package(ctx, uuid, progress_callback, LoadingBay, round(Int, 100*(i - 1)/length(packages_to_load)))
+        load_package(ctx, uuid, progress_callback, loading_bay, round(Int, 100*(i - 1)/length(packages_to_load)))
     end
 
     # Create image of whole package env. This creates the module structure only.

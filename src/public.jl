@@ -32,6 +32,8 @@ export JuliaWorkspace,
 Add a file to the workspace. If the file already exists, it will throw an error.
 """
 function add_file!(jw::JuliaWorkspace, file::TextFile)
+    process_from_dynamic(jw)
+
     files = input_files(jw.runtime)
 
     file.uri in files && throw(JWDuplicateFile("Duplicate file $(file.uri)"))
@@ -49,6 +51,8 @@ end
 Update a file in the workspace. If the file does not exist, it will throw an error.
 """
 function update_file!(jw::JuliaWorkspace, file::TextFile)
+    process_from_dynamic(jw)
+
     has_file(jw, file.uri) || throw(JWUnknownFile("Cannot update unknown file $(file.uri)."))
 
     set_input_text_file!(jw.runtime, file.uri, file)
@@ -231,6 +235,8 @@ Get all diagnostics from the workspace.
 - A vector of `Diagnostic` structs.
 """
 function get_diagnostics(jw::JuliaWorkspace)
+    process_from_dynamic(jw)
+    
     return derived_all_diagnostics(jw.runtime)
 end
 

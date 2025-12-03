@@ -318,7 +318,7 @@ function load_project_packages_into_store!(store_path, depot_path, environment_p
         load_package_from_cache_into_store!(store_path, depot_path, uuid isa UUID ? uuid : UUID(uuid), environment_path, manifest, store, progress_callback, round(Int, 100 * (i - 1) / num_uuids))
     end
     took = round(time() - t0, sigdigits = 2)
-    progress_callback("Loaded all packages into cache in $(took)s", 100)
+    progress_callback === nothing || progress_callback("Loaded all packages into cache in $(took)s", 100)
 end
 
 """
@@ -338,7 +338,7 @@ function load_package_from_cache_into_store!(store_path, depot_path, uuid::UUID,
     cache_path = joinpath(store_path, get_cache_path(manifest, uuid)...)
     if isfile(cache_path)
         t0 = time()
-        progress_callback("Loading $pe_name from cache...", percentage)
+        progress_callback === nothing || progress_callback("Loading $pe_name from cache...", percentage)
         try
             package_data = open(cache_path) do io
                 CacheStore.read(io)
@@ -358,7 +358,7 @@ function load_package_from_cache_into_store!(store_path, depot_path, uuid::UUID,
             if took > 0.01
                 msg *= " (took $(took)s)"
             end
-            progress_callback(msg, percentage)
+            progress_callback === nothing || progress_callback(msg, percentage)
             t0 = time()
             for dep in deps(pe)
                 load_package_from_cache_into_store!(store_path, depot_path, packageuuid(dep), environment_path, manifest, store, progress_callback, percentage)

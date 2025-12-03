@@ -648,13 +648,15 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
     else
         m = try
             progress_callback !== nothing && progress_callback(:STARTLOAD, pe_name, uuid, :noversion, percentage)
-            loadingbay.eval(:(import $(Symbol(pe_name))))
+            Core.eval(loadingbay, (:(import $(Symbol(pe_name)))))
             progress_callback !== nothing && progress_callback(:STOPLOAD, pe_name)
             m = Base.invokelatest(() -> getfield(loadingbay, Symbol(pe_name)))
-        catch
+        catch err
             return
         end
     end
+
+    return m
 end
 
 function write_cache(uuid, pkg::Package, outpath)

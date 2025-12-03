@@ -1,11 +1,11 @@
 mutable struct DynamicJuliaProcess
-    project_uri::String
+    project_path::String
     proc::Union{Nothing, Base.Process}
     endpoint::Union{Nothing, JSONRPC.JSONRPCEndpoint}
 
-    function DynamicJuliaProcess(project_uri::String)
+    function DynamicJuliaProcess(project_path::String)
         return new(
-            project_uri,
+            project_path,
             nothing,
             nothing
         )
@@ -13,18 +13,17 @@ mutable struct DynamicJuliaProcess
 end
 
 function get_store(djp::DynamicJuliaProcess, store_path::String, depot_path)
-    @info "Calling get_store" store_path, depot_path
     JSONRPC.send(
         djp.endpoint,
         JuliaDynamicAnalysisProtocol.get_store_request_type,
         JuliaDynamicAnalysisProtocol.GetStoreParams(
-            projectUri = djp.project_uri,
-            storePath = store_path
+            djp.project_path,
+            store_path
         )
     )
 
     new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
-    SymbolServer.load_project_packages_into_store!(store_path, depot_path, djp.project_uri, new_store, nothing)
+    SymbolServer.load_project_packages_into_store!(store_path, depot_path, djp.project_path, new_store, nothing)
 
     return new_store
 end
@@ -63,7 +62,6 @@ function start(djp::DynamicJuliaProcess)
     error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
     crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
 
-    @debug "Launch proc"
     djp.proc = open(
         pipeline(
             Cmd(`julia --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false),
@@ -249,14 +247,13 @@ function start(df::DynamicFeature)
                     djp = DynamicJuliaProcess(i)
                     df.procs[i] = djp
 
-                    @info "Adding proc for" i
                     start(djp)
                 end
 
                 for i in msg.environments
-                    env = get_store(df.procs[i], joinpath(homeidr(), "djpstore"), joinpath(homedir(), ".julia"))
+                    env = get_store(df.procs[i], joinpath(homedir(), "djpstore"), joinpath(homedir(), ".julia"))
 
-                    @info "WE GOT ENV FOR $i"
+                    put!(df.out_channel, (command=:environment_ready, path=i, environment=env))
                 end
             else
                 error("Unknown message: $msg")
@@ -267,13 +264,5 @@ function start(df::DynamicFeature)
         bt = catch_backtrace()
         Base.display_error(err, bt)
         flush(stderr)
-    end
-end
-
-function update_dynamic(jw::JuliaWorkspace)
-    projects = uri2filepath.(derived_project_folders(jw.runtime))
-
-    if jw.dynamic_feature !== nothing
-        put!(jw.dynamic_feature.in_channel, (command = :set_environments, environments = projects))
     end
 end

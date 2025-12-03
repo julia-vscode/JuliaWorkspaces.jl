@@ -1,5 +1,7 @@
 module JuliaDynamicAnalysisProcess
 
+import Sockets, Pkg
+
 include("pkg_imports.jl")
 include("../../../shared/julia_dynamic_analysis_process_protocol.jl")
 include("symbolserver.jl")
@@ -8,7 +10,7 @@ struct JuliaDynamicAnalysisProcessState
 end
 
 function get_store_request(params::JuliaDynamicAnalysisProtocol.GetStoreParams, state::JuliaDynamicAnalysisProcessState, token)
-    Pkg.activate(uri2filepath(params.projectUri))
+    Pkg.activate(params.projectPath)
 
     SymbolServer.get_store(params.storePath, nothing)
 end

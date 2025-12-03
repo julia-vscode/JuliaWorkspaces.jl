@@ -280,11 +280,46 @@ struct JuliaWorkspace
         rt = Salsa.Runtime()
 
         set_input_files!(rt, Set{URI}())
+        set_input_project_environments!(rt, Set{URI}())
         set_input_fallback_test_project!(rt, nothing)
 
         dynamic_feature = dynamic ? DynamicFeature() : nothing
         dynamic_feature === nothing || start(dynamic_feature)
 
         new(rt, dynamic_feature)
+    end
+end
+
+function update_dynamic(jw::JuliaWorkspace)
+    projects = uri2filepath.(derived_project_folders(jw.runtime))
+
+    if jw.dynamic_feature !== nothing
+        put!(jw.dynamic_feature.in_channel, (command = :set_environments, environments = projects))
+    end
+end
+
+function process_from_dynamic(jw::JuliaWorkspace)
+    if jw.dynamic_feature !== nothing
+        while isready(jw.dynamic_feature.out_channel)
+            msg = take!(jw.dynamic_feature.out_channel)
+
+            if msg.command == :environment_ready
+                env = msg.environment
+
+                old_environments = input_project_environments(jw.runtime)
+                new_environments = Set{URI}([old_environments...; filepath2uri(msg.path)])
+                set_input_project_environments!(jw.runtime, new_environments)
+
+                ext_env = StaticLint.ExternalEnv(
+                    env,
+                    SymbolServer.collect_extended_methods(env),
+                    collect(keys(env))
+                )
+
+                set_input_project_environment!(jw.runtime, filepath2uri(msg.path), ext_env)
+            else
+                error("Unknown message: $msg")
+            end
+        end
     end
 end
