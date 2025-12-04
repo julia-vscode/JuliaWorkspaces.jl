@@ -153,6 +153,7 @@ Details of a Julia project.
 
 - `project_file_uri`::URI
 - `manifest_file_uri`::URI
+- `julia_version`::Union{Nothing,VersionNumber}
 - content_hash::UInt
 - deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
 - regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
@@ -161,6 +162,7 @@ Details of a Julia project.
 @auto_hash_equals struct JuliaProject
     project_file_uri::URI
     manifest_file_uri::URI
+    julia_version::Union{Nothing,VersionNumber}
     content_hash::UInt
     deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
     regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
@@ -294,7 +296,7 @@ function update_dynamic(jw::JuliaWorkspace)
     projects = uri2filepath.(derived_project_folders(jw.runtime))
 
     if jw.dynamic_feature !== nothing
-        put!(jw.dynamic_feature.in_channel, (command = :set_environments, environments = projects))
+        put!(jw.dynamic_feature.in_channel, (command = :set_environments, environments = Dict{String,JuliaProject}(i => derived_project(jw.runtime, i) for i in projects)))
     end
 end
 
@@ -304,6 +306,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
             msg = take!(jw.dynamic_feature.out_channel)
 
             if msg.command == :environment_ready
+                @info "Processeing new env" msg.path msg.environment
                 env = msg.environment
 
                 old_environments = input_project_environments(jw.runtime)

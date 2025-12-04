@@ -1,11 +1,13 @@
 mutable struct DynamicJuliaProcess
     project_path::String
+    julia_version::Union{Nothing,VersionNumber}
     proc::Union{Nothing, Base.Process}
     endpoint::Union{Nothing, JSONRPC.JSONRPCEndpoint}
 
-    function DynamicJuliaProcess(project_path::String)
+    function DynamicJuliaProcess(project_path::String, julia_version::Union{Nothing,VersionNumber})
         return new(
             project_path,
+            julia_version,
             nothing,
             nothing
         )
@@ -62,9 +64,11 @@ function start(djp::DynamicJuliaProcess)
     error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
     crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
 
+    julia_version = djp.julia_version === nothing ? [] : [string(djp.julia_version)]
+
     djp.proc = open(
         pipeline(
-            Cmd(`julia --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false),
+            Cmd(`julia $(julia_version...)--startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false),
             # stdout = pipe_out,
             # stderr = pipe_out
         )
@@ -237,20 +241,20 @@ function start(df::DynamicFeature)
 
             if msg.command == :set_environments
                 # Delete Julia procs we no longer need
-                foreach(setdiff(keys(df.procs), msg.environments)) do i
+                foreach(setdiff(keys(df.procs), keys(msg.environments))) do i
                     kill(procs[i])
                     delete!(df.procs, i)
                 end
 
                 # Add new required procs
-                foreach(setdiff(msg.environments, keys(df.procs))) do i
-                    djp = DynamicJuliaProcess(i)
+                foreach(setdiff(keys(msg.environments), keys(df.procs))) do i
+                    djp = DynamicJuliaProcess(i, msg.environments[i].julia_version)
                     df.procs[i] = djp
 
                     start(djp)
                 end
 
-                for i in msg.environments
+                for i in keys(msg.environments)
                     env = get_store(df.procs[i], joinpath(homedir(), "djpstore"), joinpath(homedir(), ".julia"))
 
                     put!(df.out_channel, (command=:environment_ready, path=i, environment=env))
