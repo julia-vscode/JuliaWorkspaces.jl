@@ -293,10 +293,10 @@ struct JuliaWorkspace
 end
 
 function update_dynamic(jw::JuliaWorkspace)
-    projects = uri2filepath.(derived_project_folders(jw.runtime))
+    project_uris = derived_project_folders(jw.runtime)
 
     if jw.dynamic_feature !== nothing
-        put!(jw.dynamic_feature.in_channel, (command = :set_environments, environments = Dict{String,JuliaProject}(i => derived_project(jw.runtime, i) for i in projects)))
+        put!(jw.dynamic_feature.in_channel, (command = :set_environments, environments = Dict{String,JuliaProject}(uri2filepath(i) => derived_project(jw.runtime, i) for i in project_uris)))
     end
 end
 

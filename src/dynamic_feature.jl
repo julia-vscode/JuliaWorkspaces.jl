@@ -64,11 +64,17 @@ function start(djp::DynamicJuliaProcess)
     error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
     crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
 
-    julia_version = djp.julia_version === nothing ? [] : [string(djp.julia_version)]
+    julia_version = djp.julia_version === nothing ? [] : ["+$(djp.julia_version)"]
+
+    env_to_use = copy(ENV)
+
+    if haskey(env_to_use, "JULIA_DEPOT_PATH")
+        delete!(env_to_use, "JULIA_DEPOT_PATH")
+    end
 
     djp.proc = open(
         pipeline(
-            Cmd(`julia $(julia_version...)--startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false),
+            Cmd(`julia $(julia_version...) --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
             # stdout = pipe_out,
             # stderr = pipe_out
         )
@@ -252,9 +258,7 @@ function start(df::DynamicFeature)
                     df.procs[i] = djp
 
                     start(djp)
-                end
 
-                for i in keys(msg.environments)
                     env = get_store(df.procs[i], joinpath(homedir(), "djpstore"), joinpath(homedir(), ".julia"))
 
                     put!(df.out_channel, (command=:environment_ready, path=i, environment=env))

@@ -643,7 +643,7 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
     pid = Base.PkgId(uuid isa String ? Base.UUID(uuid) : uuid, pe_name)
     if pid in keys(Base.loaded_modules)
         progress_callback !== nothing && progress_callback(:PROCESSPKG, pe_name, uuid, :noversion, percentage)
-        loadingbay.eval(:($(Symbol(pe_name)) = $(Base.loaded_modules[pid])))
+        Core.eval(loadingbay, :($(Symbol(pe_name)) = $(Base.loaded_modules[pid])))
         m = Base.invokelatest(() -> getfield(loadingbay, Symbol(pe_name)))
     else
         m = try
