@@ -43,8 +43,6 @@ function add_file!(jw::JuliaWorkspace, file::TextFile)
     set_input_files!(jw.runtime, new_files)
 
     set_input_text_file!(jw.runtime, file.uri, file)
-
-    update_dynamic(jw)
 end
 
 """
@@ -58,8 +56,6 @@ function update_file!(jw::JuliaWorkspace, file::TextFile)
     has_file(jw, file.uri) || throw(JWUnknownFile("Cannot update unknown file $(file.uri)."))
 
     set_input_text_file!(jw.runtime, file.uri, file)
-
-    update_dynamic(jw)
 end
 
 """
@@ -153,8 +149,6 @@ function remove_file!(jw::JuliaWorkspace, uri::URI)
     set_input_files!(jw.runtime, new_files)
 
     delete_input_text_file!(jw.runtime, uri)
-
-    update_dynamic(jw)
 end
 
 """
@@ -176,8 +170,6 @@ function remove_all_children!(jw::JuliaWorkspace, uri::URI)
             remove_file!(jw, file)
         end
     end
-
-    update_dynamic(jw)
 end
 
 # Projects

@@ -31,7 +31,7 @@ function serve(pipename, error_handler=nothing)
         msg = JSONRPC.get_next_message(endpoint)
         dispatch_msg(endpoint, msg, state)
 
-        if msg.method == "testserver/shutdown"
+        if msg.method == "shutdown"
             break
         end
     end

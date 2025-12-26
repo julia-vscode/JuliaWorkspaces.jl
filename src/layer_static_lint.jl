@@ -2,16 +2,6 @@ function StaticLint.hasfile(rt, path)
     return derived_has_file(rt, filepath2uri(path))
 end
 
-Salsa.@derived function derived_external_env(rt, uri)
-    envs = input_project_environments(rt)
-
-    if uri in envs
-        return derived_input_project_environment(rt, uri)
-    else
-        return StaticLint.ExternalEnv(Dict{Symbol,SymbolServer.ModuleStore}(:Base => SymbolServer.stdlibs[:Base], :Core => SymbolServer.stdlibs[:Core]), SymbolServer.collect_extended_methods(SymbolServer.stdlibs), Symbol[])
-    end
-end
-
 Salsa.@derived function derived_static_lint_meta(rt)
     meta_dict = Dict{UInt64,StaticLint.Meta}()
     root_dict = Dict{URI,URI}()
@@ -31,14 +21,14 @@ Salsa.@derived function derived_static_lint_meta(rt)
 
     for uri in julia_files
         cst = derived_julia_legacy_syntax_tree(rt, uri)
-        env = derived_external_env(rt, uri)
+        env = input_project_environment(rt, uri)
 
         StaticLint.semantic_pass(uri, cst, env, meta_dict, root_dict, rt)
     end
 
     for file in julia_files
         cst = derived_julia_legacy_syntax_tree(rt, file)
-        env = derived_external_env(rt, file)
+        env = input_project_environment(rt, file)
 
         StaticLint.check_all(cst, StaticLint.LintOptions(), env, meta_dict)
     end
@@ -51,7 +41,7 @@ Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
     meta_dict = derived_static_lint_meta(rt)
 
     cst = derived_julia_legacy_syntax_tree(rt, uri)
-    env = derived_external_env(rt, uri)
+    env = input_project_environment(rt, uri)
 
     # errs = StaticLint.collect_hints(cst, getenv(doc), doc.server.lint_missingrefs)
     errs = StaticLint.collect_hints(cst, env, meta_dict, false)

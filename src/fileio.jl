@@ -116,8 +116,6 @@ function add_file_from_disc!(jw::JuliaWorkspace, path)
     text_file = read_text_file_from_uri(uri)
 
     add_file!(jw, text_file)
-
-    update_dynamic(jw)
 end
 
 function update_file_from_disc!(jw::JuliaWorkspace, path)
@@ -127,8 +125,6 @@ function update_file_from_disc!(jw::JuliaWorkspace, path)
     text_file = read_text_file_from_uri(uri)
 
     update_file!(jw, text_file)
-
-    update_dynamic(jw)
 end
 
 function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
@@ -141,8 +137,6 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
     for i in files
         add_file!(jw, i)
     end
-
-    update_dynamic(jw)
 end
 
 function workspace_from_folders(workspace_folders::Vector{String}; dynamic=false)
@@ -151,7 +145,5 @@ function workspace_from_folders(workspace_folders::Vector{String}; dynamic=false
     for folder in workspace_folders
         add_folder_from_disc!(jw, folder)
     end
-
-    update_dynamic(jw)
     return jw
 end

@@ -267,6 +267,10 @@ A diagnostic struct, consisting of range, severity, message, and source.
     source::String
 end
 
+struct SContext
+    dynamic_feature::Union{Nothing,DynamicFeature}
+end
+
 """
     struct JuliaWorkspace
 
@@ -275,28 +279,19 @@ A Julia workspace, consisting of a [`Salsa`](https://github.com/julia-vscode/Sal
 - runtime::Salsa.Runtime
 """
 struct JuliaWorkspace
-    runtime::Salsa.Runtime
+    runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
 
     function JuliaWorkspace(;dynamic=false)
-        rt = Salsa.Runtime()
-
-        set_input_files!(rt, Set{URI}())
-        set_input_project_environments!(rt, Set{URI}())
-        set_input_fallback_test_project!(rt, nothing)
-
-        dynamic_feature = dynamic ? DynamicFeature() : nothing
+        dynamic_feature = dynamic ? DynamicFeature(joinpath(homedir(), "djpstore"), joinpath(homedir(), ".julia")) : nothing
         dynamic_feature === nothing || start(dynamic_feature)
 
+        rt = Salsa.Runtime{SContext}(SContext(dynamic_feature))
+
+        set_input_files!(rt, Set{URI}())
+        set_input_fallback_test_project!(rt, nothing)
+
         new(rt, dynamic_feature)
-    end
-end
-
-function update_dynamic(jw::JuliaWorkspace)
-    project_uris = derived_project_folders(jw.runtime)
-
-    if jw.dynamic_feature !== nothing
-        put!(jw.dynamic_feature.in_channel, (command = :set_environments, environments = Dict{String,JuliaProject}(uri2filepath(i) => derived_project(jw.runtime, i) for i in project_uris)))
     end
 end
 
@@ -308,10 +303,6 @@ function process_from_dynamic(jw::JuliaWorkspace)
             if msg.command == :environment_ready
                 @info "Processeing new env" msg.path msg.environment
                 env = msg.environment
-
-                old_environments = input_project_environments(jw.runtime)
-                new_environments = Set{URI}([old_environments...; filepath2uri(msg.path)])
-                set_input_project_environments!(jw.runtime, new_environments)
 
                 ext_env = StaticLint.ExternalEnv(
                     env,

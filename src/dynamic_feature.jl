@@ -1,13 +1,11 @@
 mutable struct DynamicJuliaProcess
     project_path::String
-    julia_version::Union{Nothing,VersionNumber}
     proc::Union{Nothing, Base.Process}
     endpoint::Union{Nothing, JSONRPC.JSONRPCEndpoint}
 
-    function DynamicJuliaProcess(project_path::String, julia_version::Union{Nothing,VersionNumber})
+    function DynamicJuliaProcess(project_path::String)
         return new(
             project_path,
-            julia_version,
             nothing,
             nothing
         )
@@ -64,8 +62,6 @@ function start(djp::DynamicJuliaProcess)
     error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
     crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
 
-    julia_version = djp.julia_version === nothing ? [] : ["+$(djp.julia_version)"]
-
     env_to_use = copy(ENV)
 
     if haskey(env_to_use, "JULIA_DEPOT_PATH")
@@ -74,7 +70,7 @@ function start(djp::DynamicJuliaProcess)
 
     djp.proc = open(
         pipeline(
-            Cmd(`julia $(julia_version...) --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
+            Cmd(`julia --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
             # stdout = pipe_out,
             # stderr = pipe_out
         )
@@ -225,12 +221,16 @@ function Base.kill(djp::DynamicJuliaProcess)
 end
 
 struct DynamicFeature
+    store_path::String
+    depot_path::String
     in_channel::Channel{Any}
     out_channel::Channel{Any}
     procs::Dict{String,DynamicJuliaProcess}
 
-    function DynamicFeature()
+    function DynamicFeature(store_path::String, depot_path::String)
         return new(
+            store_path,
+            depot_path,
             Channel{Any}(Inf),
             Channel{Any}(Inf),
             Dict{String,DynamicJuliaProcess}()
@@ -245,24 +245,16 @@ function start(df::DynamicFeature)
 
             @info "Processing message" msg
 
-            if msg.command == :set_environments
-                # Delete Julia procs we no longer need
-                foreach(setdiff(keys(df.procs), keys(msg.environments))) do i
-                    kill(procs[i])
-                    delete!(df.procs, i)
-                end
+            if msg.command == :watch_environment
+                
+                djp = DynamicJuliaProcess(msg.project_path)
+                df.procs[msg.project_path] = djp
 
-                # Add new required procs
-                foreach(setdiff(keys(msg.environments), keys(df.procs))) do i
-                    djp = DynamicJuliaProcess(i, msg.environments[i].julia_version)
-                    df.procs[i] = djp
+                start(djp)
 
-                    start(djp)
+                env = get_store(djp, df.store_path, df.depot_path)
 
-                    env = get_store(df.procs[i], joinpath(homedir(), "djpstore"), joinpath(homedir(), ".julia"))
-
-                    put!(df.out_channel, (command=:environment_ready, path=i, environment=env))
-                end
+                put!(df.out_channel, (command=:environment_ready, path=msg.project_path, environment=env))
             else
                 error("Unknown message: $msg")
             end
