@@ -962,12 +962,12 @@ function check_const(x::EXPR, meta_dict)
     end
 end
 
-function check_unused_binding(b::Binding, scope::Scope, meta_dict, root_dict, rt)
+function check_unused_binding(b::Binding, scope::Scope, meta_dict, rt)
     if headof(scope.expr) !== :struct && headof(scope.expr) !== :tuple && !all_underscore(valof(b.name))
-        refs = loose_refs(b, meta_dict, root_dict, rt)
+        refs = loose_refs(b, meta_dict, rt)
         if (isempty(refs) || length(refs) == 1 && refs[1] == b.name) &&
                 !is_sig_arg(b.name) && !is_overwritten_in_loop(b.name, meta_dict) &&
-                !is_overwritten_subsequently(b, scope, meta_dict, root_dict, rt) && !is_kw_of_macrocall(b)
+                !is_overwritten_subsequently(b, scope, meta_dict, rt) && !is_kw_of_macrocall(b)
             seterror!(b.name, UnusedBinding, meta_dict)
         end
     end
@@ -1036,7 +1036,7 @@ mutable struct ComesBefore
     result::Int
 end
 
-function (state::ComesBefore)(x::EXPR, meta_dict, root_dict, rt)
+function (state::ComesBefore)(x::EXPR, meta_dict, rt)
     state.result > 0 && return
     if x == state.x1
         state.result = 1
@@ -1046,7 +1046,7 @@ function (state::ComesBefore)(x::EXPR, meta_dict, root_dict, rt)
         return
     end
     if !hasscope(x, meta_dict)
-        traverse(x, state, meta_dict, root_dict, rt)
+        traverse(x, state, meta_dict, rt)
         state.result > 0 && return
     end
 end
@@ -1068,10 +1068,10 @@ end
 
 
 
-function is_overwritten_subsequently(b::Binding, scope::Scope, meta_dict, root_dict, rt)
+function is_overwritten_subsequently(b::Binding, scope::Scope, meta_dict, rt)
     valof(b.name) === nothing && return false
     s = BoundAfter(b.name, valof(b.name), 0)
-    traverse(scope.expr, s, meta_dict, root_dict, rt)
+    traverse(scope.expr, s, meta_dict, rt)
     return s.result == 2
 end
 
@@ -1086,7 +1086,7 @@ mutable struct BoundAfter
     result::Int
 end
 
-function (state::BoundAfter)(x::EXPR, meta_dict, root_dict, rt)
+function (state::BoundAfter)(x::EXPR, meta_dict, rt)
     state.result > 1 && return
     if x == state.x1
         state.result = 1
@@ -1096,5 +1096,5 @@ function (state::BoundAfter)(x::EXPR, meta_dict, root_dict, rt)
         state.result = 2
         return
     end
-    traverse(x, state, meta_dict, root_dict, rt)
+    traverse(x, state, meta_dict, rt)
 end

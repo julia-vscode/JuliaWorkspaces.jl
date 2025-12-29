@@ -1,5 +1,5 @@
 function handle_macro(@nospecialize(x), state) end
-function handle_macro(x::EXPR, state, meta_dict, root_dict, rt)
+function handle_macro(x::EXPR, state, meta_dict, rt)
     !CSTParser.ismacrocall(x) && return
     if headof(x.args[1]) === :globalrefdoc
         if length(x.args) == 4
@@ -20,7 +20,7 @@ function handle_macro(x::EXPR, state, meta_dict, root_dict, rt)
             end
         end
     elseif CSTParser.ismacroname(x.args[1])
-        state(x.args[1], meta_dict, root_dict, rt)
+        state(x.args[1], meta_dict, rt)
         if _points_to_Base_macro(x.args[1], Symbol("@deprecate"), state, meta_dict) && length(x.args) == 4
             if bindingof(x.args[3], meta_dict) !== nothing
                 return

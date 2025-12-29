@@ -2,9 +2,8 @@ function StaticLint.hasfile(rt, path)
     return derived_has_file(rt, filepath2uri(path))
 end
 
-Salsa.@derived function derived_static_lint_meta(rt)
+Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     meta_dict = Dict{UInt64,StaticLint.Meta}()
-    root_dict = Dict{URI,URI}()
 
     julia_files = derived_julia_files(rt)
 
@@ -15,55 +14,55 @@ Salsa.@derived function derived_static_lint_meta(rt)
         StaticLint.getmeta(cst, meta_dict).error = :doc # TODO WHAT IS OUR DOC??
     end
 
-    for uri in julia_files
-        root_dict[uri] = uri
-    end
+    cst = derived_julia_legacy_syntax_tree(rt, uri)
 
-    for uri in julia_files
-        cst = derived_julia_legacy_syntax_tree(rt, uri)
-        env = input_project_environment(rt, uri)
+    # TODO Replace this with proper logic, but for now this should be not too bad.
+    project_uri = derived_project_uri_for_root(rt, uri)
 
-        StaticLint.semantic_pass(uri, cst, env, meta_dict, root_dict, rt)
-    end
+    env = input_project_environment(rt, project_uri)
+
+    StaticLint.semantic_pass(uri, cst, env, meta_dict, rt)
 
     for file in julia_files
-        cst = derived_julia_legacy_syntax_tree(rt, file)
-        env = input_project_environment(rt, file)
+        cst2 = derived_julia_legacy_syntax_tree(rt, file)
 
-        StaticLint.check_all(cst, StaticLint.LintOptions(), env, meta_dict)
+        StaticLint.check_all(cst2, StaticLint.LintOptions(), env, meta_dict)
     end
 
     return meta_dict
 end
 
 Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
-
-    meta_dict = derived_static_lint_meta(rt)
-
     cst = derived_julia_legacy_syntax_tree(rt, uri)
-    env = input_project_environment(rt, uri)
-
-    # errs = StaticLint.collect_hints(cst, getenv(doc), doc.server.lint_missingrefs)
-    errs = StaticLint.collect_hints(cst, env, meta_dict, false)
-
     res = Diagnostic[]
 
-    for err in errs
-        rng = err[1]+1:err[1]+err[2].fullspan+1
-        if StaticLint.headof(err[2]) === :errortoken
-            # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
-        elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
-            push!(res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
-        elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
-            code = StaticLint.errorof(err[2], meta_dict)
-            description = get(StaticLint.LintCodeDescriptions, code, "")
-            severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
-                :hint, Symbol[:unnecessary]
-            else
-                :information, Symbol[]
+    for root in derived_roots(rt)
+        meta_dict = derived_static_lint_meta_for_root(rt, root)
+
+        project_uri = derived_project_uri_for_root(rt, uri)
+
+        env = input_project_environment(rt, project_uri)
+
+        # errs = StaticLint.collect_hints(cst, getenv(doc), doc.server.lint_missingrefs)
+        errs = StaticLint.collect_hints(cst, env, meta_dict, false)
+
+        for err in errs
+            rng = err[1]+1:err[1]+err[2].fullspan+1
+            if StaticLint.headof(err[2]) === :errortoken
+                # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
+            elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
+                push!(res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
+            elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
+                code = StaticLint.errorof(err[2], meta_dict)
+                description = get(StaticLint.LintCodeDescriptions, code, "")
+                severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
+                    :hint, Symbol[:unnecessary]
+                else
+                    :information, Symbol[]
+                end
+                code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
+                push!(res, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
             end
-            code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
-            push!(res, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
         end
     end
 

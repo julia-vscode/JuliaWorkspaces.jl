@@ -289,6 +289,7 @@ struct JuliaWorkspace
         rt = Salsa.Runtime{SContext}(SContext(dynamic_feature))
 
         set_input_files!(rt, Set{URI}())
+        set_input_active_project!(rt, nothing)
         set_input_fallback_test_project!(rt, nothing)
 
         new(rt, dynamic_feature)

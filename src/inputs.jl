@@ -1,5 +1,9 @@
 Salsa.@declare_input input_files(rt)::Set{URI}
-Salsa.@declare_input input_text_file(rt, uri)::TextFile
+
+Salsa.@declare_input input_text_file(rt, uri)::Union{TextFile,Nothing}
+
+Salsa.@declare_input input_active_project(rt)::Union{URI,Nothing}
+
 Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
 Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
 Salsa.@declare_input input_project_environment(rt, uri)::StaticLint.ExternalEnv function(ctx, uri)
@@ -25,11 +29,11 @@ Salsa.@declare_input input_project_environment(rt, uri)::StaticLint.ExternalEnv 
         collect(keys(new_store)))
 end
 
-Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String)::ModuleStore function(ctx, name, uuid, version, git_tree_sha1)
+Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String)::SymbolServer.ModuleStore function(ctx, name, uuid, version, git_tree_sha1)
     @info "Lazy load package metadata for" name uuid version git_tree_sha1
 
     if ctx.dynamic_feature !== nothing
-        cache_path = joinpath(ctx.dynamic_feature.store_path, uppercase(string(name)[1]), string(name, "_", uuid), string"v", ver, "_", git_tree_sha1, ".jstore")
+        cache_path = joinpath(ctx.dynamic_feature.store_path, uppercase(string(name)[1]), string(name, "_", uuid), string("v", ver, "_", git_tree_sha1, ".jstore"))
 
         if isfile(cache_path)
             package_data = open(cache_path) do io
