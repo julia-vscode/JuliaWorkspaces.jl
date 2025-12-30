@@ -29,18 +29,18 @@ Salsa.@declare_input input_project_environment(rt, uri)::StaticLint.ExternalEnv 
         collect(keys(new_store)))
 end
 
-Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String)::SymbolServer.ModuleStore function(ctx, name, uuid, version, git_tree_sha1)
+Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String)::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
     @info "Lazy load package metadata for" name uuid version git_tree_sha1
 
     if ctx.dynamic_feature !== nothing
-        cache_path = joinpath(ctx.dynamic_feature.store_path, uppercase(string(name)[1]), string(name, "_", uuid), string("v", ver, "_", git_tree_sha1, ".jstore"))
+        cache_path = joinpath(ctx.dynamic_feature.store_path, uppercase(string(name)[1:1]), string(name, "_", uuid), string("v", version, "_", git_tree_sha1, ".jstore"))
 
         if isfile(cache_path)
             package_data = open(cache_path) do io
                 SymbolServer.CacheStore.read(io)
             end
 
-            pkg_path = Base.locate_package(Base.PkgId(uuid, pe_name))
+            pkg_path = Base.locate_package(Base.PkgId(uuid, string(name)))
 
             # TODO Reenable this
             # if pkg_path === nothing || !isfile(pkg_path)
@@ -48,7 +48,7 @@ Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, ver
             # end
 
             if pkg_path !== nothing
-                SymbolServer.modify_dirs(package_data.val, f -> modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
+                SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
             end
 
             return package_data

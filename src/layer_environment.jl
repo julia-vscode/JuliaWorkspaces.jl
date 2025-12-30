@@ -1,16 +1,18 @@
 Salsa.@derived function derived_environment(rt, uri)
     project = derived_project(rt, uri)
     
-    metadata_packages = SymbolServer.ModuleStore[]
-    for i in project.regular_packages
-        x = input_package_metadata(rt, i.name, i.uuid, i.version, i.git_tree_sha1)
-        push!(metadata_packages, x)
+    metadata_packages = SymbolServer.Package[]
+    for (k,v) in project.regular_packages
+        x = input_package_metadata(rt, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1)
+        if x!==nothing
+            push!(metadata_packages, x)
+        end
     end
 
-    new_store = recursive_copy(stdlibs)
+    new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
 
     for i in metadata_packages
-        new_store[i.name.name] = i.val
+        new_store[Symbol(i.name)] = i.val
     end    
 
     return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))

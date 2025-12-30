@@ -19,7 +19,7 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     # TODO Replace this with proper logic, but for now this should be not too bad.
     project_uri = derived_project_uri_for_root(rt, uri)
 
-    env = input_project_environment(rt, project_uri)
+    env = derived_environment(rt, project_uri)
 
     StaticLint.semantic_pass(uri, cst, env, meta_dict, rt)
 
