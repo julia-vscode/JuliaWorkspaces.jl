@@ -302,7 +302,7 @@ function is_nameof_func(name)
     f !== nothing && CSTParser.get_name(f) == name
 end
 
-function loose_refs(b::Binding, meta_dict, rt)
+function loose_refs(b::Binding, meta_dict)
     b.val isa EXPR || return b.refs # to account for `#global` binding which doesn't have a val
     scope = retrieve_scope(b.val, meta_dict)
     scope isa Scope && isidentifier(b.name) || return b.refs
@@ -312,19 +312,22 @@ function loose_refs(b::Binding, meta_dict, rt)
     if is_soft_scope(scope) && parentof(scope) isa Scope && scopehasbinding(parentof(scope), name_str) && !scopehasbinding(scope, name_str)
         scope = parentof(scope)
     end
-    state = LooseRefs(scope.expr, name_str, scope, [])
-    state(scope.expr, meta_dict, rt)
+    state = LooseRefs(scope.expr, name_str, scope, [], meta_dict)
+    process_EXPR(scope.expr, state)
     vcat([r.refs for r in state.result]...)
 end
 
-mutable struct LooseRefs
+mutable struct LooseRefs <: TraverseState
     x::EXPR
     name::String
     scope::Scope
     result::Vector{Binding}
+    meta_dict::Dict{UInt64,Meta}
 end
 
-function (state::LooseRefs)(x::EXPR, meta_dict, rt)
+function process_EXPR(x::EXPR, state::LooseRefs)
+    meta_dict = state.meta_dict
+
     if hasbinding(x, meta_dict)
         ex = bindingof(x, meta_dict).name
         if isidentifier(ex) && valofid(ex) == state.name
@@ -332,6 +335,6 @@ function (state::LooseRefs)(x::EXPR, meta_dict, rt)
         end
     end
     if !hasscope(x, meta_dict) || (hasscope(x, meta_dict) && ((is_soft_scope(scopeof(x, meta_dict)) && !scopehasbinding(scopeof(x, meta_dict), state.name)) || scopeof(x, meta_dict) == state.scope))
-        traverse(x, state, meta_dict, rt)
+        traverse(x, state)
     end
 end

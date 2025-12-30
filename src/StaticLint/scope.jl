@@ -110,7 +110,9 @@ Called when traversing the syntax tree and handles the association of
 scopes with expressions. On the first pass this will add scopes as
 necessary, on following passes it empties it.
 """
-function scopes(x::EXPR, state, meta_dict)
+function scopes(x::EXPR, state)
+    meta_dict = state.meta_dict
+
     clear_scope(x, meta_dict)
     if scopeof(x, meta_dict) === nothing && introduces_scope(x, state)
         setscope!(x, Scope(x), meta_dict)
@@ -135,7 +137,7 @@ function scopes(x::EXPR, state, meta_dict)
         if headof(x) === :module && bindingof(x, meta_dict) !== nothing # Add reference to out of scope binding (i.e. itself)
             # state.scope.names[bindingof(x).name] = bindingof(x)
             # TODO: move this to the binding stage
-            add_binding(x, state, meta_dict)
+            add_binding(x, state)
         # elseif headof(x) === :flatten && headof(x[1]) === CSTParser.Generator && length(x[1]) > 0 && headof(x[1][1]) === CSTParser.Generator
         #     setscope!(x[1][1], nothing)
         end

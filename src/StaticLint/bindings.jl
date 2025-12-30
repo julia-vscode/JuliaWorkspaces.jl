@@ -47,7 +47,9 @@ end
 
 Checks whether the expression `x` should introduce new names and marks them as needed. Generally this marks expressions that would introdce names to the current scope (i.e. that x sits in) but in cases marks expressions that will add names to lower scopes. This is done when it is not knowable that a child node of `x` will introduce a new name without the context of where it sits in `x` -for example the arguments of the signature of a function definition.
 """
-function mark_bindings!(x::EXPR, state, meta_dict)
+function mark_bindings!(x::EXPR, state)
+    meta_dict = state.meta_dict
+    
     if hasbinding(x, meta_dict)
         return
     end
@@ -94,7 +96,7 @@ function mark_bindings!(x::EXPR, state, meta_dict)
     elseif CSTParser.defines_datatype(x)
         name = CSTParser.get_name(x)
         getmeta(x, meta_dict).binding = Binding(name, x, CoreTypes.DataType, [])
-        kwdef = parentof(x) isa EXPR && _points_to_Base_macro(parentof(x).args[1], Symbol("@kwdef"), state, meta_dict)
+        kwdef = parentof(x) isa EXPR && _points_to_Base_macro(parentof(x).args[1], Symbol("@kwdef"), state)
         if isidentifier(name)
             setref!(name, bindingof(x, meta_dict), meta_dict)
         end
@@ -266,7 +268,9 @@ Add the binding of `x` to the current scope. Special handling is required for:
 
 Some simple type inference is run.
 """
-function add_binding(x, state, meta_dict, scope=state.scope)
+function add_binding(x, state, scope=state.scope)
+    meta_dict = state.meta_dict
+
     if bindingof(x, meta_dict) isa Binding
         b = bindingof(x, meta_dict)
         if isidentifier(b.name)
@@ -294,7 +298,7 @@ function add_binding(x, state, meta_dict, scope=state.scope)
             tls = retrieve_toplevel_or_func_scope(scope)
             tls === nothing && return @warn "top-level scope not retrieved"
             if name_is_getfield(b.name)
-                resolve_ref(parentof(parentof(b.name)).args[1], scope, state, meta_dict)
+                resolve_ref(parentof(parentof(b.name)).args[1], scope, state)
                 lhs_ref = refof_maybe_getfield(parentof(parentof(b.name)).args[1], meta_dict)
                 if lhs_ref isa SymbolServer.ModuleStore && haskey(lhs_ref.vals, Symbol(name))
                     # Overloading
@@ -344,7 +348,7 @@ function add_binding(x, state, meta_dict, scope=state.scope)
                 end
                 if CSTParser.defines_struct(scope.expr) && parentof(scope) isa Scope
                     # hoist binding for inner constructor to parent scope
-                    return add_binding(x, state, meta_dict, parentof(scope))
+                    return add_binding(x, state, parentof(scope))
                 end
             end
         elseif scopehasbinding(scope, name)
@@ -353,11 +357,11 @@ function add_binding(x, state, meta_dict, scope=state.scope)
 
             scope.names[name] = b
         elseif is_soft_scope(scope) && parentof(scope) isa Scope && isidentifier(b.name) && scopehasbinding(parentof(scope), valofid(b.name)) && !enforce_hard_scope(x, scope)
-            add_binding(x, state, meta_dict, scope.parent)
+            add_binding(x, state, scope.parent)
         else
             scope.names[name] = b
         end
-        infer_type(b, scope, state, meta_dict)
+        infer_type(b, scope, state)
     elseif bindingof(x, meta_dict) isa SymbolServer.SymStore
         scope.names[valofid(x)] = bindingof(x, meta_dict)
     end

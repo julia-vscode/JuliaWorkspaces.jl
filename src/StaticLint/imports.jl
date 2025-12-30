@@ -1,6 +1,8 @@
-function resolve_import_block(x::EXPR, state::State, root, usinged, meta_dict, markfinal=true)
+function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, markfinal=true)
+    meta_dict = state.meta_dict
+
     if x.head == :as
-        resolve_import_block(x.args[1], state, root, usinged, markfinal, meta_dict)
+        resolve_import_block(x.args[1], state, root, usinged, markfinal)
         ensuremeta(x.args[2], meta_dict)
         if hasbinding(last(x.args[1].args), meta_dict) && CSTParser.isidentifier(x.args[2])
             lhsbinding = bindingof(last(x.args[1].args), meta_dict)
@@ -25,7 +27,7 @@ function resolve_import_block(x::EXPR, state::State, root, usinged, meta_dict, m
                 return
             end
         elseif isidentifier(arg) || (i == n && (CSTParser.ismacroname(arg) || isoperator(arg)))
-            cand = hasref(arg, meta_dict) ? refof(arg, meta_dict) : _get_field(root, arg, state, meta_dict)
+            cand = hasref(arg, meta_dict) ? refof(arg, meta_dict) : _get_field(root, arg, state)
             if cand === nothing
                 # Cannot resolve now (e.g. sibling not yet defined). Schedule a retry.
                 if state isa Toplevel
@@ -52,11 +54,11 @@ function resolve_import_block(x::EXPR, state::State, root, usinged, meta_dict, m
     end
 end
 
-function resolve_import(x::EXPR, state::State, meta_dict, root=getsymbols(state))
+function resolve_import(x::EXPR, state::TraverseState, root=getsymbols(state))
     if (headof(x) === :using || headof(x) === :import)
         usinged = (headof(x) === :using)
         if length(x.args) > 0 && isoperator(headof(x.args[1])) && valof(headof(x.args[1])) == ":"
-            root2 = resolve_import_block(x.args[1].args[1], state, root, false, meta_dict, false)
+            root2 = resolve_import_block(x.args[1].args[1], state, root, false, false)
             if root2 === nothing
                 # schedule a retry like above
                 if state isa Toplevel
@@ -67,11 +69,11 @@ function resolve_import(x::EXPR, state::State, meta_dict, root=getsymbols(state)
                 return
             end
             for i = 2:length(x.args[1].args)
-                resolve_import_block(x.args[1].args[i], state, root2, usinged, meta_dict)
+                resolve_import_block(x.args[1].args[i], state, root2, usinged)
             end
         else
             for i = 1:length(x.args)
-                resolve_import_block(x.args[i], state, root, usinged, meta_dict)
+                resolve_import_block(x.args[i], state, root, usinged)
             end
         end
     end
@@ -141,7 +143,8 @@ function get_named_toplevel_module(s::Scope, name::String)
     end
     return nothing
 end
-function _get_field(par, arg, state, meta_dict)
+function _get_field(par, arg, state)
+    meta_dict = state.meta_dict
     arg_str_rep = CSTParser.str_value(arg)
     if par isa SymbolServer.EnvStore
         if (arg_scope = retrieve_scope(arg, meta_dict)) !== nothing && (tlm = get_named_toplevel_module(arg_scope, arg_str_rep)) !== nothing && hasbinding(tlm, meta_dict)
@@ -183,17 +186,17 @@ function _get_field(par, arg, state, meta_dict)
         end
     elseif par isa Binding
         if par.val isa Binding
-            return _get_field(par.val, arg, state, meta_dict)
+            return _get_field(par.val, arg, state)
         elseif par.val isa EXPR && CSTParser.defines_module(par.val) && scopeof(par.val, meta_dict) isa Scope
-            return _get_field(scopeof(par.val, meta_dict), arg, state, meta_dict)
+            return _get_field(scopeof(par.val, meta_dict), arg, state)
         elseif par.val isa EXPR && isassignment(par.val)
             if hasref(par.val.args[2], meta_dict)
-                return _get_field(refof(par.val.args[2], meta_dict), arg, state, meta_dict)
+                return _get_field(refof(par.val.args[2], meta_dict), arg, state)
             elseif is_getfield_w_quotenode(par.val.args[2])
-                return _get_field(refof_maybe_getfield(par.val.args[2], meta_dict), arg, state, meta_dict)
+                return _get_field(refof_maybe_getfield(par.val.args[2], meta_dict), arg, state)
             end
         elseif par.val isa SymbolServer.ModuleStore
-            return _get_field(par.val, arg, state, meta_dict)
+            return _get_field(par.val, arg, state)
         end
     end
     return

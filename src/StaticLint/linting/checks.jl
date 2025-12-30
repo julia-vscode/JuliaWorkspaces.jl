@@ -677,7 +677,7 @@ function should_mark_missing_getfield_ref(x, env, meta_dict)
             elseif lhsref.type isa SymbolServer.DataTypeStore && !(isempty(lhsref.type.fieldnames) || isunionfaketype(lhsref.type.name) || has_getproperty_method(lhsref.type, env))
                 return true
             elseif lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
-                # We may have infered the lhs type after the semantic pass that was resolving references. Copied from `resolve_getfield(x::EXPR, parent_type::EXPR, state::State)::Bool`.
+                # We may have infered the lhs type after the semantic pass that was resolving references. Copied from `resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Bool`.
                 if scopehasbinding(scopeof(lhsref.type.val, meta_dict), valof(x))
                     setref!(x, scopeof(lhsref.type.val, meta_dict).names[valof(x)], meta_dict)
                     return false
@@ -962,12 +962,12 @@ function check_const(x::EXPR, meta_dict)
     end
 end
 
-function check_unused_binding(b::Binding, scope::Scope, meta_dict, rt)
+function check_unused_binding(b::Binding, scope::Scope, meta_dict)
     if headof(scope.expr) !== :struct && headof(scope.expr) !== :tuple && !all_underscore(valof(b.name))
-        refs = loose_refs(b, meta_dict, rt)
+        refs = loose_refs(b, meta_dict)
         if (isempty(refs) || length(refs) == 1 && refs[1] == b.name) &&
                 !is_sig_arg(b.name) && !is_overwritten_in_loop(b.name, meta_dict) &&
-                !is_overwritten_subsequently(b, scope, meta_dict, rt) && !is_kw_of_macrocall(b)
+                !is_overwritten_subsequently(b, scope, meta_dict) && !is_kw_of_macrocall(b)
             seterror!(b.name, UnusedBinding, meta_dict)
         end
     end
@@ -1030,13 +1030,16 @@ end
 
 Check whether x1 comes before x2
 """
-mutable struct ComesBefore
+mutable struct ComesBefore <: TraverseState
     x1::EXPR
     x2::EXPR
     result::Int
+    meta_dict::Dict{UInt64,Meta}
 end
 
-function (state::ComesBefore)(x::EXPR, meta_dict, rt)
+function process_EXPR(x::EXPR, state::ComesBefore)
+    meta_dict = state.meta_dict
+
     state.result > 0 && return
     if x == state.x1
         state.result = 1
@@ -1046,7 +1049,7 @@ function (state::ComesBefore)(x::EXPR, meta_dict, rt)
         return
     end
     if !hasscope(x, meta_dict)
-        traverse(x, state, meta_dict, rt)
+        traverse(x, state)
         state.result > 0 && return
     end
 end
@@ -1066,12 +1069,10 @@ function check_parent_scopes_for(s::Scope, name)
     end
 end
 
-
-
-function is_overwritten_subsequently(b::Binding, scope::Scope, meta_dict, rt)
+function is_overwritten_subsequently(b::Binding, scope::Scope, meta_dict)
     valof(b.name) === nothing && return false
-    s = BoundAfter(b.name, valof(b.name), 0)
-    traverse(scope.expr, s, meta_dict, rt)
+    s = BoundAfter(b.name, valof(b.name), 0, meta_dict)
+    traverse(scope.expr, s)
     return s.result == 2
 end
 
@@ -1080,13 +1081,14 @@ end
 
 Check whether x1 comes before x2
 """
-mutable struct BoundAfter
+mutable struct BoundAfter <: TraverseState
     x1::EXPR
     name::String
     result::Int
+    meta_dict::Dict{UInt64,Meta}
 end
 
-function (state::BoundAfter)(x::EXPR, meta_dict, rt)
+function process_EXPR(x::EXPR, state::BoundAfter)
     state.result > 1 && return
     if x == state.x1
         state.result = 1
@@ -1096,5 +1098,5 @@ function (state::BoundAfter)(x::EXPR, meta_dict, rt)
         state.result = 2
         return
     end
-    traverse(x, state, meta_dict, rt)
+    traverse(x, state)
 end

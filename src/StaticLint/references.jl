@@ -14,9 +14,9 @@ end
 # refers to. If it remains unresolved and is in a delayed evaluation scope
 # (i.e. a function) it gets pushed to list (.urefs) to be resolved after we've
 # run over the entire top-level scope.
-function resolve_ref(x, state, meta_dict)
+function resolve_ref(x, state)
     if !(parentof(x) isa EXPR && headof(parentof(x)) === :quotenode)
-        resolve_ref(x, state.scope, state, meta_dict)
+        resolve_ref(x, state.scope, state)
     end
 end
 
@@ -33,7 +33,8 @@ end
 # The return value is a boolean that is false if x should point to something but
 # can't be resolved.
 
-function resolve_ref(x::EXPR, scope::Scope, state::State, meta_dict)::Bool
+function resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
     # if the current scope is a soft scope we should check the parent scope first
     # before trying to resolve the ref locally
     # if is_soft_scope(scope) && parentof(scope) isa Scope
@@ -44,7 +45,7 @@ function resolve_ref(x::EXPR, scope::Scope, state::State, meta_dict)::Bool
     resolved = false
 
     if is_getfield(x)
-        return resolve_getfield(x, scope, state, meta_dict)
+        return resolve_getfield(x, scope, state)
     elseif iskwarg(x)
         # Note to self: this seems wronge - Binding should be attached to entire Kw EXPR.
         if isidentifier(x.args[1]) && !hasbinding(x.args[1], meta_dict)
@@ -72,18 +73,20 @@ function resolve_ref(x::EXPR, scope::Scope, state::State, meta_dict)::Bool
         resolved = true
     elseif scope.modules isa Dict && length(scope.modules) > 0
         for m in values(scope.modules)
-            resolved = resolve_ref_from_module(x, m, state, meta_dict)
+            resolved = resolve_ref_from_module(x, m, state)
             resolved && return true
         end
     end
     if !resolved && !CSTParser.defines_module(scope.expr) && parentof(scope) isa Scope
-        return resolve_ref(x, parentof(scope), state, meta_dict)
+        return resolve_ref(x, parentof(scope), state)
     end
     return resolved
 end
 
 # Searches a module store for a binding/variable that matches the reference `x1`.
-function resolve_ref_from_module(x1::EXPR, m::SymbolServer.ModuleStore, state::State, meta_dict)::Bool
+function resolve_ref_from_module(x1::EXPR, m::SymbolServer.ModuleStore, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
+
     hasref(x1, meta_dict) && return true
 
     if CSTParser.ismacroname(x1)
@@ -112,7 +115,8 @@ function resolve_ref_from_module(x1::EXPR, m::SymbolServer.ModuleStore, state::S
     return false
 end
 
-function resolve_ref_from_module(x::EXPR, scope::Scope, state::State, meta_dict)::Bool
+function resolve_ref_from_module(x::EXPR, scope::Scope, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
 
     mn = nameof_expr_to_resolve(x)
@@ -176,7 +180,8 @@ function initial_pass_on_exports(x::EXPR, name, state)
 end
 
 # Fallback method
-function resolve_ref(x::EXPR, m, state::State, meta_dict)::Bool
+function resolve_ref(x::EXPR, m, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
     return hasref(x, meta_dict)::Bool
 end
 
@@ -184,16 +189,17 @@ rhs_of_getfield(x::EXPR) = CSTParser.is_getfield_w_quotenode(x) ? x.args[2].args
 lhs_of_getfield(x::EXPR) = rhs_of_getfield(x.args[1])
 
 """
-    resolve_getfield(x::EXPR, parent::Union{EXPR,Scope,ModuleStore,Binding}, state::State)::Bool
+    resolve_getfield(x::EXPR, parent::Union{EXPR,Scope,ModuleStore,Binding}, state::TraverseState)::Bool
 
 Given an expression of the form `parent.x` try to resolve `x`. The method
 called with `parent::EXPR` resolves the reference for `parent`, other methods
 then check whether the Binding/Scope/ModuleStore to which `parent` points has
 a field matching `x`.
 """
-function resolve_getfield(x::EXPR, scope::Scope, state::State, meta_dict)::Bool
+function resolve_getfield(x::EXPR, scope::Scope, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
-    resolved = resolve_ref(x.args[1], scope, state, meta_dict)
+    resolved = resolve_ref(x.args[1], scope, state)
     if isidentifier(x.args[1])
         lhs = x.args[1]
     elseif CSTParser.is_getfield_w_quotenode(x.args[1])
@@ -202,18 +208,20 @@ function resolve_getfield(x::EXPR, scope::Scope, state::State, meta_dict)::Bool
         return resolved
     end
     if resolved && (rhs = rhs_of_getfield(x)) !== nothing
-        resolved = resolve_getfield(rhs, refof(lhs, meta_dict), state, meta_dict)
+        resolved = resolve_getfield(rhs, refof(lhs, meta_dict), state)
     end
     return resolved
 end
 
 
-function resolve_getfield(x::EXPR, parent_type::EXPR, state::State, meta_dict)::Bool
+function resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
+
     hasref(x, meta_dict) && return true
     resolved = false
     if isidentifier(x)
         if CSTParser.defines_module(parent_type) && scopeof(parent_type, meta_dict) isa Scope
-            resolved = resolve_ref(x, scopeof(parent_type), state, meta_dict)
+            resolved = resolve_ref(x, scopeof(parent_type), state)
         elseif CSTParser.defines_struct(parent_type)
             if scopehasbinding(scopeof(parent_type, meta_dict), valofid(x))
                 setref!(x, scopeof(parent_type, meta_dict).names[valofid(x)], meta_dict)
@@ -225,23 +233,24 @@ function resolve_getfield(x::EXPR, parent_type::EXPR, state::State, meta_dict)::
 end
 
 
-function resolve_getfield(x::EXPR, b::Binding, state::State, meta_dict)::Bool
+function resolve_getfield(x::EXPR, b::Binding, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     resolved = false
     if b.val isa Binding
-        resolved = resolve_getfield(x, b.val, state, meta_dict)
+        resolved = resolve_getfield(x, b.val, state)
     elseif b.val isa SymbolServer.ModuleStore || (b.val isa EXPR && CSTParser.defines_module(b.val))
-        resolved = resolve_getfield(x, b.val, state, meta_dict)
+        resolved = resolve_getfield(x, b.val, state)
     elseif b.type isa Binding
-        resolved = resolve_getfield(x, b.type.val, state, meta_dict)
+        resolved = resolve_getfield(x, b.type.val, state)
     elseif b.type isa SymbolServer.DataTypeStore
-        resolved = resolve_getfield(x, b.type, state, meta_dict)
+        resolved = resolve_getfield(x, b.type, state)
     end
     return resolved
 end
 
-function resolve_getfield(x::EXPR, parent_type, state::State, meta_dict)::Bool
-    hasref(x, meta_dict)
+function resolve_getfield(x::EXPR, parent_type, state::TraverseState)::Bool
+    hasref(x, state.meta_dict)
 end
 
 function is_overloaded(val::SymbolServer.SymStore, scope::Scope)
@@ -249,7 +258,8 @@ function is_overloaded(val::SymbolServer.SymStore, scope::Scope)
     haskey(scope.overloaded, vr)
 end
 
-function resolve_getfield(x::EXPR, m::SymbolServer.ModuleStore, state::State, meta_dict)::Bool
+function resolve_getfield(x::EXPR, m::SymbolServer.ModuleStore, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     resolved = false
     if CSTParser.ismacroname(x) && (val = maybe_lookup(SymbolServer.maybe_getfield(Symbol(valofid(x)), m, getsymbols(state)), state)) !== nothing
@@ -277,7 +287,8 @@ function resolve_getfield(x::EXPR, m::SymbolServer.ModuleStore, state::State, me
     return resolved
 end
 
-function resolve_getfield(x::EXPR, parent::SymbolServer.DataTypeStore, state::State, meta_dict)::Bool
+function resolve_getfield(x::EXPR, parent::SymbolServer.DataTypeStore, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     resolved = false
     if isidentifier(x) && Symbol(valof(x)) in parent.fieldnames

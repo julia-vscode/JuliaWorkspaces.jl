@@ -1,10 +1,8 @@
 Salsa.@derived function derived_includes(rt, uri)
-    meta_dict = Dict{UInt64,StaticLint.Meta}()
-
     cst = derived_julia_legacy_syntax_tree(rt, uri)
 
     state = StaticLint.IncludeOnly(uri)
-    state(cst, meta_dict, rt)
+    StaticLint.process_EXPR(cst, state)
 
     return state.included_files
 end

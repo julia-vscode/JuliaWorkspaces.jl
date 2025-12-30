@@ -7,7 +7,7 @@ function settype!(b::Binding, type)
     b.type = type
 end
 
-function infer_type(binding::Binding, scope, state, meta_dict)
+function infer_type(binding::Binding, scope, state)
     if binding isa Binding
         binding.type !== nothing && return
         if binding.val isa EXPR && CSTParser.defines_module(binding.val)
@@ -21,10 +21,10 @@ function infer_type(binding::Binding, scope, state, meta_dict)
                 if CSTParser.is_func_call(binding.val.args[1])
                     settype!(binding, CoreTypes.Function)
                 else
-                    infer_type_assignment_rhs(binding, state, scope, meta_dict)
+                    infer_type_assignment_rhs(binding, state, scope)
                 end
             elseif binding.val.head isa EXPR && valof(binding.val.head) == "::"
-                infer_type_decl(binding, state, scope, meta_dict)
+                infer_type_decl(binding, state, scope)
             elseif iswhere(parentof(binding.val))
                 settype!(binding, CoreTypes.DataType)
             end
@@ -32,16 +32,17 @@ function infer_type(binding::Binding, scope, state, meta_dict)
     end
 end
 
-function infer_type_assignment_rhs(binding, state, scope, meta_dict)
+function infer_type_assignment_rhs(binding, state, scope)
+    meta_dict = state.meta_dict
     is_destructuring = false
     lhs = binding.val.args[1]
     rhs = binding.val.args[2]
     if is_loop_iter_assignment(binding.val)
-        settype!(binding, infer_eltype(rhs, state, meta_dict))
+        settype!(binding, infer_eltype(rhs, state))
     elseif headof(rhs) === :ref && length(rhs.args) > 1
         ref = refof_maybe_getfield(rhs.args[1], meta_dict)
         if ref isa Binding && ref.val isa EXPR
-            settype!(binding, infer_eltype(ref.val, state, meta_dict))
+            settype!(binding, infer_eltype(ref.val, state))
         end
     else
         if CSTParser.is_func_call(rhs)
@@ -54,7 +55,7 @@ function infer_type_assignment_rhs(binding, state, scope, meta_dict)
             end
             callname = CSTParser.get_name(rhs)
             if isidentifier(callname)
-                resolve_ref(callname, scope, state, meta_dict)
+                resolve_ref(callname, scope, state)
                 if hasref(callname, meta_dict)
                     rb = get_root_method(refof(callname, meta_dict))
                     if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
@@ -127,17 +128,18 @@ function infer_destructuring_type(binding::Binding, rb::EXPR)
 end
 infer_destructuring_type(binding, rb::Binding) = infer_destructuring_type(binding, rb.val)
 
-function infer_type_decl(binding, state, scope, meta_dict)
+function infer_type_decl(binding, state, scope)
+    meta_dict = state.meta_dict
     t = binding.val.args[2]
     if isidentifier(t)
-        resolve_ref(t, scope, state, meta_dict)
+        resolve_ref(t, scope, state)
     end
     if iscurly(t)
         t = t.args[1]
-        resolve_ref(t, scope, state, meta_dict)
+        resolve_ref(t, scope, state)
     end
     if CSTParser.is_getfield_w_quotenode(t)
-        resolve_getfield(t, scope, state, meta_dict)
+        resolve_getfield(t, scope, state)
         t = t.args[2].args[1]
     end
     if refof(t, meta_dict) isa Binding
@@ -293,12 +295,13 @@ end
 # Assumes x.head.val == "="
 is_loop_iter_assignment(x::EXPR) = x.parent isa EXPR && ((x.parent.head == :for || x.parent.head == :generator) || (x.parent.head == :block && x.parent.parent isa EXPR && (x.parent.parent.head == :for || x.parent.parent.head == :generator)))
 
-function infer_eltype(x::EXPR, state, meta_dict)
+function infer_eltype(x::EXPR, state)
+    meta_dict = state.meta_dict
     if isidentifier(x) && hasref(x, meta_dict) # assume is IDENT
         r = refof(x, meta_dict)
         if r isa Binding && r.val isa EXPR
             if isassignment(r.val) && r.val.args[2] != x
-                return infer_eltype(r.val.args[2], state, meta_dict)
+                return infer_eltype(r.val.args[2], state)
             end
         end
     elseif headof(x) === :ref && hasref(x.args[1], meta_dict)

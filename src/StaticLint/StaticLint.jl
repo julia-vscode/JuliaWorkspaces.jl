@@ -19,6 +19,7 @@ include("bindings.jl")
 include("scope.jl")
 include("subtypes.jl")
 include("methodmatching.jl")
+include("traverse.jl")
 
 const LARGE_FILE_LIMIT = 2_000_000 # bytes
 
@@ -60,13 +61,10 @@ end
 getsymbols(env::ExternalEnv) = env.symbols
 getsymbolextendeds(env::ExternalEnv) = env.extended_methods
 
+getsymbols(state::TraverseState) = getsymbols(state.env)
+getsymbolextendeds(state::TraverseState) = getsymbolextendeds(state.env)
 
-abstract type State end
-
-getsymbols(state::State) = getsymbols(state.env)
-getsymbolextendeds(state::State) = getsymbolextendeds(state.env)
-
-mutable struct Toplevel <: State
+mutable struct Toplevel{RT} <: TraverseState
     uri::URI
     included_files::Vector{URI}
     scope::Scope
@@ -76,22 +74,24 @@ mutable struct Toplevel <: State
     resolveonly::Vector{EXPR}
     env::ExternalEnv
     flags::Int
+    meta_dict::Dict{UInt64,Meta}
+    runtime::RT
 end
 
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
-Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env) =
-    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, 0)
+Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, meta_dict, runtime) =
+    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, 0, meta_dict, runtime)
 
-function (state::Toplevel)(x::EXPR, meta_dict, rt)
-    resolve_import(x, state, meta_dict)
-    mark_bindings!(x, state, meta_dict)
-    add_binding(x, state, meta_dict)
+function process_EXPR(x::EXPR, state::Toplevel)
+    resolve_import(x, state)
+    mark_bindings!(x, state)
+    add_binding(x, state)
     mark_globals(x, state)
-    handle_macro(x, state, meta_dict, rt)
-    s0 = scopes(x, state, meta_dict)
-    resolve_ref(x, state, meta_dict)
-    followinclude(x, state, meta_dict, rt)
+    handle_macro(x, state)
+    s0 = scopes(x, state)
+    resolve_ref(x, state)
+    followinclude(x, state)
 
     old_in_modified_expr = state.in_modified_expr
     if state.modified_exprs !== nothing && x in state.modified_exprs
@@ -105,7 +105,7 @@ function (state::Toplevel)(x::EXPR, meta_dict, rt)
         end
     else
         old = flag!(state, x)
-        traverse(x, state, meta_dict, rt)
+        traverse(x, state)
         state.flags = old
     end
 
@@ -114,42 +114,48 @@ function (state::Toplevel)(x::EXPR, meta_dict, rt)
     return state.scope
 end
 
-mutable struct Delayed <: State
+mutable struct Delayed <: TraverseState
     scope::Scope
     env::ExternalEnv
     flags::Int
+    meta_dict::Dict{UInt64,Meta}
 end
 
-Delayed(scope, env) = Delayed(scope, env, 0)
+Delayed(scope, env, meta_dict) = Delayed(scope, env, 0, meta_dict)
 
-function (state::Delayed)(x::EXPR, meta_dict, rt)
-    mark_bindings!(x, state, meta_dict)
-    add_binding(x, state, meta_dict)
+function process_EXPR(x::EXPR, state::Delayed)
+    meta_dict = state.meta_dict
+
+    mark_bindings!(x, state)
+    add_binding(x, state)
     mark_globals(x, state)
     handle_macro(x, state)
-    s0 = scopes(x, state, meta_dict)
+    s0 = scopes(x, state)
 
-    resolve_ref(x, state, meta_dict)
+    resolve_ref(x, state)
 
     old = flag!(state, x)
-    traverse(x, state, meta_dict, rt)
+    traverse(x, state)
     state.flags = old
     if state.scope != s0
         for b in values(state.scope.names)
             infer_type_by_use(b, state.env, meta_dict)
-            check_unused_binding(b, state.scope, meta_dict, rt)
+            check_unused_binding(b, state.scope, meta_dict)
         end
         state.scope = s0
     end
     return state.scope
 end
 
-mutable struct ResolveOnly <: State
+mutable struct ResolveOnly <: TraverseState
     scope::Scope
     env::ExternalEnv
+    meta_dict::Dict{UInt64,Meta}
 end
 
-function (state::ResolveOnly)(x::EXPR, meta_dict, rt)
+function process_EXPR(x::EXPR, state::ResolveOnly)
+    meta_dict = state.meta_dict
+
     if hasscope(x, meta_dict)
         s0 = state.scope
         state.scope = scopeof(x, meta_dict)
@@ -158,11 +164,11 @@ function (state::ResolveOnly)(x::EXPR, meta_dict, rt)
     end
 
     # NEW: late import resolution (idempotent for already-resolved imports)
-    resolve_import(x, state, meta_dict)
+    resolve_import(x, state)
 
-    resolve_ref(x, state, meta_dict)
+    resolve_ref(x, state)
 
-    traverse(x, state, meta_dict, rt)
+    traverse(x, state)
     if state.scope != s0
         state.scope = s0
     end
@@ -187,59 +193,26 @@ Performs a semantic pass across a project from the entry point `file`. A first p
 """
 function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing)
     setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
-    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env)
-    state(cst, meta_dict, rt)
+    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, meta_dict, rt)
+    process_EXPR(cst, state)
     for x in state.delayed
         if hasscope(x, meta_dict)
-            traverse(x, Delayed(scopeof(x, meta_dict), env), meta_dict, rt)
+            traverse(x, Delayed(scopeof(x, meta_dict), env, meta_dict))
             for (k, b) in scopeof(x, meta_dict).names
                 infer_type_by_use(b, env, meta_dict)
-                check_unused_binding(b, scopeof(x, meta_dict), meta_dict, rt)
+                check_unused_binding(b, scopeof(x, meta_dict), meta_dict)
             end
         else
-            traverse(x, Delayed(retrieve_delayed_scope(x, meta_dict), env), meta_dict, rt)
+            traverse(x, Delayed(retrieve_delayed_scope(x, meta_dict), env, meta_dict))
         end
     end
     if state.resolveonly !== nothing
         for x in state.resolveonly
             if hasscope(x, meta_dict)
-                traverse(x, ResolveOnly(scopeof(x, meta_dict), env), meta_dict, rt)
+                traverse(x, ResolveOnly(scopeof(x, meta_dict), env, meta_dict))
             else
-                traverse(x, ResolveOnly(retrieve_delayed_scope(x, meta_dict), env), meta_dict, rt)
+                traverse(x, ResolveOnly(retrieve_delayed_scope(x, meta_dict), env, meta_dict))
             end
-        end
-    end
-end
-
-"""
-    traverse(x, state)
-
-Iterates across the child nodes of an EXPR in execution order (rather than
-storage order) calling `state` on each node.
-"""
-function traverse(x::EXPR, state, meta_dict, rt)
-    if (isassignment(x) && !(CSTParser.is_func_call(x.args[1]) || CSTParser.iscurly(x.args[1]))) || CSTParser.isdeclaration(x)
-        state(x.args[2], meta_dict, rt)
-        state(x.args[1], meta_dict, rt)
-    elseif CSTParser.iswhere(x)
-        for i = 2:length(x.args)
-            state(x.args[i], meta_dict, rt)
-        end
-        state(x.args[1], meta_dict, rt)
-    elseif headof(x) === :generator || headof(x) === :filter
-        @inbounds for i = 2:length(x.args)
-            state(x.args[i], meta_dict, rt)
-        end
-        state(x.args[1], meta_dict, rt)
-    elseif headof(x) === :call && length(x.args) > 1 && headof(x.args[2]) === :parameters
-        state(x.args[1], meta_dict, rt)
-        @inbounds for i = 3:length(x.args)
-            state(x.args[i], meta_dict, rt)
-        end
-        state(x.args[2], meta_dict, rt)
-    elseif x.args !== nothing && length(x.args) > 0
-        @inbounds for i = 1:length(x.args)
-            state(x.args[i], meta_dict, rt)
         end
     end
 end
@@ -267,7 +240,9 @@ If successful it checks whether a file with that path is loaded on the server
 or a file exists on the disc that can be loaded.
 If this is successful it traverses the code associated with the loaded file.
 """
-function followinclude(x, state::State, meta_dict, rt)
+function followinclude(x, state::Toplevel)
+    meta_dict = state.meta_dict
+    rt = state.runtime
     # this runs on the `include` symbol instead of a function call so that we
     # can be sure the ref has already been resolved
     isinclude = isincludet = false
