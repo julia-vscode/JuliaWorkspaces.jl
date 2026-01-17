@@ -10,8 +10,7 @@ end
 
 function is_path_manifest_file(path)
     basename_lower_case = basename(lowercase(path))
-
-    return basename_lower_case=="manifest.toml" || basename_lower_case=="juliamanifest.toml"
+    return basename_lower_case=="manifest-v$(VERSION.major).$(VERSION.minor).toml" || basename_lower_case=="manifest.toml" || basename_lower_case=="juliamanifest.toml"
 end
 
 function is_path_lintconfig_file(path)
