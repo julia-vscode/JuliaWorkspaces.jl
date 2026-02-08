@@ -79,6 +79,14 @@ Salsa.@derived function derived_project(rt, uri)
         error("")
     end
 
+    julia_version = if manifest_version == "1.0"
+        nothing
+    elseif manifest_version=="2.0" && haskey(manifest_content, "julia_version")
+        tryparse(VersionNumber, manifest_content["julia_version"])
+    else
+        error("")
+    end
+
     for (k_entry, v_entry) in pairs(manifest_deps)
         v_entry isa Vector || continue
         length(v_entry)==1 || continue
@@ -126,7 +134,7 @@ Salsa.@derived function derived_project(rt, uri)
     project_text_content = input_text_file(rt, project_file)
     project_content_hash = hash(project_text_content.content.content, hash(manifest_text_content.content.content))
 
-    JuliaProject(project_file, manifest_file, project_content_hash, deved_packages, regular_packages, stdlib_packages)
+    JuliaProject(project_file, manifest_file, julia_version, project_content_hash, deved_packages, regular_packages, stdlib_packages)
 end
 
 Salsa.@derived function derived_package_folders(rt)

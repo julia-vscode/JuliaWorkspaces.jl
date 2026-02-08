@@ -153,6 +153,7 @@ Details of a Julia project.
 
 - `project_file_uri`::URI
 - `manifest_file_uri`::URI
+- `julia_version`::Union{Nothing,VersionNumber}
 - content_hash::UInt
 - deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
 - regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
@@ -161,6 +162,7 @@ Details of a Julia project.
 @auto_hash_equals struct JuliaProject
     project_file_uri::URI
     manifest_file_uri::URI
+    julia_version::Union{Nothing,VersionNumber}
     content_hash::UInt
     deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
     regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
@@ -252,13 +254,21 @@ A diagnostic struct, consisting of range, severity, message, and source.
 - range::UnitRange{Int64}
 - severity::Symbol
 - message::String
+- uri::Union{Nothing,URI}
+- tags::Vector{Symbol}
 - source::String
 """
 @auto_hash_equals struct Diagnostic
     range::UnitRange{Int64}
     severity::Symbol
     message::String
+    uri::Union{Nothing,URI}
+    tags::Vector{Symbol}
     source::String
+end
+
+struct SContext
+    dynamic_feature::Union{Nothing,DynamicFeature}
 end
 
 """
@@ -269,14 +279,42 @@ A Julia workspace, consisting of a [`Salsa`](https://github.com/julia-vscode/Sal
 - runtime::Salsa.Runtime
 """
 struct JuliaWorkspace
-    runtime::Salsa.Runtime
+    runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
+    dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace()
-        rt = Salsa.Runtime()
+    function JuliaWorkspace(;dynamic=false)
+        dynamic_feature = dynamic ? DynamicFeature(joinpath(homedir(), "djpstore"), joinpath(homedir(), ".julia")) : nothing
+        dynamic_feature === nothing || start(dynamic_feature)
+
+        rt = Salsa.Runtime{SContext}(SContext(dynamic_feature))
 
         set_input_files!(rt, Set{URI}())
+        set_input_active_project!(rt, nothing)
         set_input_fallback_test_project!(rt, nothing)
 
-        new(rt)
+        new(rt, dynamic_feature)
+    end
+end
+
+function process_from_dynamic(jw::JuliaWorkspace)
+    if jw.dynamic_feature !== nothing
+        while isready(jw.dynamic_feature.out_channel)
+            msg = take!(jw.dynamic_feature.out_channel)
+
+            if msg.command == :environment_ready
+                @info "Processeing new env" msg.path msg.environment
+                env = msg.environment
+
+                ext_env = StaticLint.ExternalEnv(
+                    env,
+                    SymbolServer.collect_extended_methods(env),
+                    collect(keys(env))
+                )
+
+                set_input_project_environment!(jw.runtime, filepath2uri(msg.path), ext_env)
+            else
+                error("Unknown message: $msg")
+            end
+        end
     end
 end

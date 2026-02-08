@@ -30,11 +30,23 @@ Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
             _range(i),
             i.level,
             i.message,
+            nothing,
+            Symbol[],
             "JuliaSyntax.jl"
         )
     end
 
     return diag_results
+end
+
+Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
+    tf = input_text_file(rt, uri)
+
+    content = tf.content.content
+
+    cst = CSTParser.parse(content, true)
+
+    return cst
 end
 
 Salsa.@derived function derived_toml_parse_result(rt, uri)
@@ -45,7 +57,7 @@ Salsa.@derived function derived_toml_parse_result(rt, uri)
     parse_result = Pkg.TOML.tryparse(content)
 
     if parse_result isa Pkg.TOML.ParserError
-        return parse_result.table, Diagnostic[Diagnostic(parse_result.pos:parse_result.pos, :error, Base.TOML.format_error_message_for_err_type(parse_result), "TOML.jl")]
+        return parse_result.table, Diagnostic[Diagnostic(parse_result.pos:parse_result.pos, :error, Base.TOML.format_error_message_for_err_type(parse_result), nothing, Symbol[], "TOML.jl")]
     else
         return parse_result, Diagnostic[]
     end

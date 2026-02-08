@@ -14,6 +14,7 @@ export JuliaWorkspace,
     get_julia_syntax_tree,
     get_toml_syntax_tree,
     get_diagnostic,
+    get_diagnostics,
     get_packages,
     get_projects,
     get_test_items,
@@ -32,6 +33,8 @@ export JuliaWorkspace,
 Add a file to the workspace. If the file already exists, it will throw an error.
 """
 function add_file!(jw::JuliaWorkspace, file::TextFile)
+    process_from_dynamic(jw)
+
     files = input_files(jw.runtime)
 
     file.uri in files && throw(JWDuplicateFile("Duplicate file $(file.uri)"))
@@ -49,6 +52,8 @@ end
 Update a file in the workspace. If the file does not exist, it will throw an error.
 """
 function update_file!(jw::JuliaWorkspace, file::TextFile)
+    process_from_dynamic(jw)
+
     has_file(jw, file.uri) || throw(JWUnknownFile("Cannot update unknown file $(file.uri)."))
 
     set_input_text_file!(jw.runtime, file.uri, file)
@@ -64,6 +69,8 @@ Get all text files from the workspace.
 - A set of URIs.
 """
 function get_text_files(jw::JuliaWorkspace)
+    process_from_dynamic(jw)
+
     return derived_text_files(jw.runtime)
 end
 
@@ -77,6 +84,8 @@ Get all Julia files from the workspace.
 - A set of URIs.
 """
 function get_julia_files(jw::JuliaWorkspace)
+    process_from_dynamic(jw)
+
     return derived_julia_files(jw.runtime)
 end
 
@@ -89,6 +98,8 @@ Get all files from the workspace.
 - A set of URIs.
 """
 function get_files(jw::JuliaWorkspace)
+    process_from_dynamic(jw)
+
     return input_files(jw.runtime)
 end
 
@@ -98,6 +109,8 @@ end
 Check if a file exists in the workspace.
 """
 function has_file(jw, uri)
+    process_from_dynamic(jw)
+
     return derived_has_file(jw.runtime, uri)
 end
 
@@ -111,6 +124,8 @@ Get a text file from the workspace. If the file does not exist, it will throw an
 - A [`TextFile`](@ref) struct.
 """
 function get_text_file(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
     files = input_files(jw.runtime)
 
     uri in files || throw(JWUnknownFile("Unknown file $uri"))
@@ -124,6 +139,8 @@ end
 Remove a file from the workspace. If the file does not exist, it will throw an error.
 """
 function remove_file!(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
     files = input_files(jw.runtime)
 
     uri in files || throw(JWUnknownFile("Trying to remove non-existing file $uri"))
@@ -141,6 +158,8 @@ end
 Remove all children of a folder from the workspace.
 """
 function remove_all_children!(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
     files = get_files(jw)
 
     uri_as_string = string(uri)
@@ -166,6 +185,8 @@ Get all packages from the workspace.
 - A set of URIs.
 """
 function get_packages(jw::JuliaWorkspace)
+    process_from_dynamic(jw)
+
     return derived_package_folders(jw.runtime)
 end
 
@@ -179,6 +200,8 @@ Get all projects from the workspace.
 - A set of URIs.
 """
 function get_projects(jw::JuliaWorkspace)
+    process_from_dynamic(jw)
+
     return derived_project_folders(jw.runtime)
 end
 
@@ -195,6 +218,8 @@ Get the syntax tree of a Julia file from the workspace.
   and `diagnostics` is a vector of `Diagnostic` structs.   
 """
 function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
     return derived_julia_syntax_tree(jw.runtime, uri)
 end
 
@@ -204,6 +229,8 @@ end
 Get the syntax tree of a TOML file from the workspace.
 """
 function get_toml_syntax_tree(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
     return derived_toml_syntax_tree(jw.runtime, uri)
 end
 
@@ -219,6 +246,8 @@ Get the diagnostics of a file from the workspace.
 - A vector of `Diagnostic` structs.
 """
 function get_diagnostic(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
     return derived_diagnostics(jw.runtime, uri)
 end
 
@@ -231,6 +260,8 @@ Get all diagnostics from the workspace.
 - A vector of `Diagnostic` structs.
 """
 function get_diagnostics(jw::JuliaWorkspace)
+    process_from_dynamic(jw)
+    
     return derived_all_diagnostics(jw.runtime)
 end
 
@@ -246,6 +277,8 @@ Returns
 - an instance of the struct [`TestDetails`](@ref)
 """
 function get_test_items(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
     derived_testitems(jw.runtime, uri)
 end
 
@@ -259,6 +292,8 @@ Returns
 - an instance of the struct [`TestDetails`](@ref)
 """
 function get_test_items(jw::JuliaWorkspace)
+    process_from_dynamic(jw)
+
     derived_all_testitems(jw.runtime)
 end
 
@@ -272,5 +307,7 @@ Returns
 - an instance of the struct [`JuliaTestEnv`](@ref)
 """
 function get_test_env(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
     derived_testenv(jw.runtime, uri)
 end
