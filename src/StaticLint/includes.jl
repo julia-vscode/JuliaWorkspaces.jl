@@ -1,11 +1,14 @@
-mutable struct IncludeOnly <: TraverseState
+mutable struct IncludeOnly{RT} <: TraverseState
     uri::URI
-    included_files::Vector{URI}
+    included_files::Set{URI}
+    rt::RT
 end
 
 getpath(state::IncludeOnly) = URIs2.uri2filepath(state.uri)
 
-IncludeOnly(uri) = IncludeOnly(uri, URI[])
+IncludeOnly(uri, rt) = IncludeOnly(uri, Set{URI}(), rt)
+
+import ..input_canonical_uri
 
 function process_EXPR(x::EXPR, state::IncludeOnly)
     if (CSTParser.fcall_name(x) == "include" || CSTParser.fcall_name(x) == "includet") && length(x.args) == 2
@@ -23,7 +26,8 @@ function process_EXPR(x::EXPR, state::IncludeOnly)
             end
 
             if path!==nothing
-                push!(state.included_files, filepath2uri(path))
+                can_uri = input_canonical_uri(state.rt, filepath2uri(path))
+                push!(state.included_files, can_uri)
             end
         end
     elseif !(CSTParser.defines_function(x) || CSTParser.defines_macro(x) || headof(x) === :export || headof(x) === :public)
