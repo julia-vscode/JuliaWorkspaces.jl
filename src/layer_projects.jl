@@ -11,6 +11,8 @@ Salsa.@derived function derived_potential_project_folders(rt)
     mf = Dict{URI,URI}()
 
     for file_uri in project_files
+        @assert file_uri.scheme === "file"
+
         file_path = uri2filepath(file_uri)
         folder_path = dirname(file_path)
         fodler_uri = filepath2uri(folder_path)
@@ -57,7 +59,7 @@ Salsa.@derived function derived_project(rt, uri)
     project_file = project_folders[uri].project_file
     manifest_file = project_folders[uri].manifest_file
 
-    if manifest_file===nothing
+    if manifest_file === nothing || manifest_file.scheme != "file"
         return nothing
     end
 
@@ -108,14 +110,14 @@ Salsa.@derived function derived_project(rt, uri)
             git_tree_sha1_of_regular_package = v_entry[1]["git-tree-sha1"]
 
             version_of_regular_package = v_entry[1]["version"]
-            
+
             regular_packages[k_entry] = JuliaProjectEntryRegularPackage(k_entry, uuid_of_regular_package, version_of_regular_package, git_tree_sha1_of_regular_package)
         elseif haskey(v_entry[1], "uuid")
             uuid_of_stdlib_package = tryparse(UUID, v_entry[1]["uuid"])
             uuid_of_stdlib_package !== nothing || continue
 
             version_of_stdlib_package = get(v_entry[1], "version", nothing)
-            
+
             stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_stdlib_package, version_of_stdlib_package)
         else
             error("Unknown manifest entry type $(keys(e_entry[1]))")
