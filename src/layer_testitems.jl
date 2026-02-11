@@ -21,7 +21,10 @@ function vec_startswith(a, b)
 end
 
 function find_package_for_file(packages::Vector{URI}, file::URI)
+    file.scheme != "file" && return nothing
+
     file_path = uri2filepath(file)
+
     package = packages |>
         x -> map(x) do i
             package_folder_path = uri2filepath(i)
@@ -38,6 +41,8 @@ function find_package_for_file(packages::Vector{URI}, file::URI)
 end
 
 function find_project_for_file(projects::Vector{URI}, file::URI)
+    file.scheme != "file" && return nothing
+
     file_path = uri2filepath(file)
     project = projects |>
         x -> map(x) do i

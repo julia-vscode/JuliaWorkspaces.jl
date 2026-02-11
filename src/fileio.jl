@@ -45,6 +45,13 @@ is_walkdir_error(::Base.SystemError) = true
 is_walkdir_error(err::Base.TaskFailedException) = is_walkdir_error(err.task.exception)
 
 function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
+    if uri.scheme !== "file"
+        if ignore_io_errors
+            return nothing
+        else
+            error("Trying to read non-file content from $uri.")
+        end
+    end
     path = uri2filepath(uri)
 
     language_id = if is_path_julia_file(path)
@@ -85,9 +92,17 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
 end
 
 function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
-    path = uri2filepath(uri)
-
     result = TextFile[]
+
+    if uri.scheme !== "file"
+        if ignore_io_errors
+            return result
+        else
+            error("Trying to read non-file content from $uri.")
+        end
+    end
+
+    path = uri2filepath(uri)
 
     for (root, _, files) in walkdir(path, onerror=x -> x)
         for file in files
