@@ -1,7 +1,7 @@
 Salsa.@derived function derived_includes(rt, uri)
     cst = derived_julia_legacy_syntax_tree(rt, uri)
 
-    state = StaticLint.IncludeOnly(uri)
+    state = StaticLint.IncludeOnly(uri, rt)
     StaticLint.process_EXPR(cst, state)
 
     return state.included_files
@@ -22,15 +22,24 @@ end
 Salsa.@derived function derived_roots(rt)
     all_files_included_somewhere = Set{URI}()
 
-    julia_files = derived_julia_files(rt)
+    files_to_check = derived_julia_files(rt)
+    files_already_checked = Set{URI}()
 
-    for i in julia_files
-        for j in derived_includes(rt, i)
-            push!(all_files_included_somewhere, j)
+    while !isempty(files_to_check)
+        current_file = first(files_to_check)
+        delete!(files_to_check, current_file)
+        push!(files_already_checked, current_file)
+
+        for included_file in derived_includes(rt, current_file)
+            push!(all_files_included_somewhere, included_file)
+
+            if !(included_file in files_already_checked) && !(included_file in files_to_check)
+                push!(files_to_check, included_file)
+            end
         end
     end
 
-    roots = setdiff(julia_files, all_files_included_somewhere)
+    roots = setdiff(files_already_checked, all_files_included_somewhere)
 
     return roots
 end
