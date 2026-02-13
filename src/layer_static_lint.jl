@@ -21,6 +21,9 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
 
     env = derived_environment(rt, project_uri)
 
+    # This will trigger the launch of the dynamic process
+    input_project_environment(rt, project_uri)
+
     StaticLint.semantic_pass(uri, cst, env, meta_dict, rt)
 
     for file in julia_files
@@ -39,9 +42,7 @@ Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
     for root in derived_roots(rt)
         meta_dict = derived_static_lint_meta_for_root(rt, root)
 
-        project_uri = derived_project_uri_for_root(rt, uri)
-
-        env = input_project_environment(rt, project_uri)
+        env = derived_environment(rt, derived_project_uri_for_root(rt, root))
 
         # errs = StaticLint.collect_hints(cst, getenv(doc), doc.server.lint_missingrefs)
         errs = StaticLint.collect_hints(cst, env, meta_dict, false)
