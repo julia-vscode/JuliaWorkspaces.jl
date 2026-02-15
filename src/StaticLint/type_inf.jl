@@ -324,11 +324,12 @@ function infer_eltype(x::EXPR, state)
             return CoreTypes.Char
         end
     elseif hasbinding(x, meta_dict) && isdeclaration(x) && length(x.args) == 2
-        return maybe_get_vec_eltype(x.args[2])
+        return maybe_get_vec_eltype(x.args[2], state)
     end
 end
 
-function maybe_get_vec_eltype(t)
+function maybe_get_vec_eltype(t, state)
+    meta_dict = state.meta_dict
     if iscurly(t)
         lhs_ref = refof_maybe_getfield(t.args[1], meta_dict)
         if lhs_ref isa SymbolServer.DataTypeStore && CoreTypes.isarray(lhs_ref) && length(t.args) > 1

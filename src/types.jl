@@ -311,7 +311,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
                     collect(keys(env))
                 )
 
-                set_input_project_environment!(jw.runtime, filepath2uri(msg.path), ext_env)
+                # set_input_project_environment!(jw.runtime, filepath2uri(msg.path), ext_env)
             else
                 error("Unknown message: $msg")
             end

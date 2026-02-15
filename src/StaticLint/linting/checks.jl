@@ -629,7 +629,6 @@ function collect_hints(x::EXPR, env, meta_dict, missingrefs=:all, isquoted=false
         if missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&
             !(valof(x) == "var" && parentof(x) isa EXPR && isnonstdid(parentof(x))) &&
             !((valof(x) == "stdcall" || valof(x) == "cdecl" || valof(x) == "fastcall" || valof(x) == "thiscall" || valof(x) == "llvmcall") && is_in_fexpr(x, x -> iscall(x) && isidentifier(x.args[1]) && valof(x.args[1]) == "ccall"))
-
             push!(errs, (pos, x))
         elseif haserror(x, meta_dict) && errorof(x, meta_dict) isa StaticLint.LintCodes
             # collect lint hints
@@ -665,7 +664,7 @@ function should_mark_missing_getfield_ref(x, env, meta_dict)
             return true
         elseif lhsref isa Binding
             # by-use type inference runs after we've resolved references so we may not have known lhsref's type first time round, lets try and find `x` again
-            resolve_getfield(x, lhsref, ResolveOnly(retrieve_scope(x, meta_dict), env), meta_dict) # FIXME: Setting `server` to nothing might be sketchy?
+            resolve_getfield(x, lhsref, ResolveOnly(retrieve_scope(x, meta_dict), env, meta_dict), meta_dict) # FIXME: Setting `server` to nothing might be sketchy?
             hasref(x, meta_dict) && return false # We've resolved
             if lhsref.val isa Binding
                 lhsref = lhsref.val
@@ -759,7 +758,7 @@ function check_for_pirates(x::EXPR, meta_dict)
             for i = 2:length(sig.args)
                 if hasbinding(sig.args[i], meta_dict) && bindingof(sig.args[i], meta_dict).type isa Binding
                     return
-                elseif refers_to_nonimported_type(sig.args[i])
+                elseif refers_to_nonimported_type(sig.args[i], meta_dict)
                     return
                 end
             end
@@ -779,17 +778,17 @@ function fname_is_noteq(x)
     return false
 end
 
-function refers_to_nonimported_type(arg::EXPR)
+function refers_to_nonimported_type(arg::EXPR, meta_dict)
     arg = CSTParser.rem_wheres(arg)
     if hasref(arg, meta_dict) && refof(arg, meta_dict) isa Binding
         return true
     elseif isunarysyntax(arg) && (valof(headof(arg)) == "::" || valof(headof(arg)) == "<:")
-        return refers_to_nonimported_type(arg.args[1])
+        return refers_to_nonimported_type(arg.args[1], meta_dict)
     elseif isdeclaration(arg)
-        return refers_to_nonimported_type(arg.args[2])
+        return refers_to_nonimported_type(arg.args[2], meta_dict)
     elseif iscurly(arg)
         for i = 1:length(arg.args)
-            if refers_to_nonimported_type(arg.args[i])
+            if refers_to_nonimported_type(arg.args[i], meta_dict)
                 return true
             end
         end
@@ -1094,7 +1093,7 @@ function process_EXPR(x::EXPR, state::BoundAfter)
         state.result = 1
         return
     end
-    if scopeof(x, meta_dict) isa Scope && haskey(scopeof(x, meta_dict).names, state.name)
+    if scopeof(x, state.meta_dict) isa Scope && haskey(scopeof(x, state.meta_dict).names, state.name)
         state.result = 2
         return
     end

@@ -1,5 +1,9 @@
 module StaticLint
 
+import ..derived_has_file
+import ..derived_julia_legacy_syntax_tree
+import ..input_canonical_uri
+
 function hasfile end
 
 include("exception_types.jl")
@@ -75,13 +79,14 @@ mutable struct Toplevel{RT} <: TraverseState
     env::ExternalEnv
     flags::Int
     meta_dict::Dict{UInt64,Meta}
+    include_dict::Dict{UInt64,URI}
     runtime::RT
 end
 
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
-Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, meta_dict, runtime) =
-    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, 0, meta_dict, runtime)
+Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, meta_dict, include_dict, runtime) =
+    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, 0, meta_dict, include_dict, runtime)
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -191,9 +196,9 @@ end
 
 Performs a semantic pass across a project from the entry point `file`. A first pass traverses the top-level scope after which secondary passes handle delayed scopes (e.g. functions). These secondary passes can be, optionally, very light and only seek to resovle references (e.g. link symbols to bindings). This can be done by supplying a list of expressions on which the full secondary pass should be made (`modified_expr`), all others will receive the light-touch version.
 """
-function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing)
+function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr = nothing)
     setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
-    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, meta_dict, rt)
+    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, meta_dict, include_dict, rt)
     process_EXPR(cst, state)
     for x in state.delayed
         if hasscope(x, meta_dict)
@@ -243,145 +248,104 @@ If this is successful it traverses the code associated with the loaded file.
 function followinclude(x, state::Toplevel)
     meta_dict = state.meta_dict
     rt = state.runtime
-    # this runs on the `include` symbol instead of a function call so that we
-    # can be sure the ref has already been resolved
-    isinclude = isincludet = false
-    p = x
-    if isidentifier(x) && hasref(x, meta_dict)
-        r = getmeta(x, meta_dict).ref
+    include_dict = state.include_dict
 
-        if is_in_fexpr(x, iscall)
-            p = get_parent_fexpr(x, iscall)
-            if r == refof_call_func(p, meta_dict)
-                isinclude = r.name == SymbolServer.VarRef(SymbolServer.VarRef(nothing, :Base), :include)
-                isincludet = r.name == SymbolServer.VarRef(SymbolServer.VarRef(nothing, :Revise), :includet)
-            end
-        end
-    end
-
-    if !(isinclude || isincludet)
+    if !haskey(include_dict, objectid(x))
         return
     end
 
-    x = p
+    target_uri = include_dict[objectid(x)]
 
-    init_path = path = get_path(x, dirname(getpath(state)), meta_dict)
-    if path===nothing || isempty(path)
-    elseif isabspath(path)
-        if hasfile(rt, path)
-        # elseif canloadfile(state.server, path)
-        #     if check_filesize(x, path)
-        #         loadfile(state.server, path)
-        #     else
-        #         return
-        #     end
-        else
-            path = ""
-        end
-    elseif !isempty(getpath(state)) && isabspath(joinpath(dirname(getpath(state)), path))
-        # Relative path from current
-        if hasfile(rt, joinpath(dirname(getpath(state)), path))
-            path = joinpath(dirname(getpath(state)), path)
-        # elseif canloadfile(state.server, joinpath(dirname(getpath(state.file)), path))
-        #     path = joinpath(dirname(getpath(state.file)), path)
-        #     if check_filesize(x, path)
-        #         loadfile(state.server, path)
-        #     else
-        #         return
-        #     end
-        else
-            path = ""
-        end
-    elseif !isempty((basepath = _is_in_basedir(getpath(state)); basepath))
-        # Special handling for include method used within Base
-        path = joinpath(basepath, path)
-        if hasfile(rt, path)
-            # skip
-        # elseif canloadfile(state.server, path)
-        #     loadfile(state.server, path)
-        else
-            path = ""
-        end
-    else
-        path = ""
-    end
-    # TODO DA FIX
-    # if hasfile(rt, path)
-    #     if path in state.included_files
-    #         seterror!(x, IncludeLoop)
-    #         return
+    # # this runs on the `include` symbol instead of a function call so that we
+    # # can be sure the ref has already been resolved
+    # isinclude = isincludet = false
+    # p = x
+    # if isidentifier(x) && hasref(x, meta_dict)
+    #     r = getmeta(x, meta_dict).ref
+
+    #     if is_in_fexpr(x, iscall)
+    #         p = get_parent_fexpr(x, iscall)
+    #         if r == refof_call_func(p, meta_dict)
+    #             isinclude = r.name == SymbolServer.VarRef(SymbolServer.VarRef(nothing, :Base), :include)
+    #             isincludet = r.name == SymbolServer.VarRef(SymbolServer.VarRef(nothing, :Revise), :includet)
+    #         end
     #     end
+    # end
+
+    # if !(isinclude || isincludet)
+    #     return
+    # end
+
+    # x = p
+
+    # init_path = path = get_path(x, dirname(getpath(state)), meta_dict)
+    # if path===nothing || isempty(path)
+    # elseif isabspath(path)
+    #     if hasfile(rt, path)
+    #     # elseif canloadfile(state.server, path)
+    #     #     if check_filesize(x, path)
+    #     #         loadfile(state.server, path)
+    #     #     else
+    #     #         return
+    #     #     end
+    #     else
+    #         path = ""
+    #     end
+    # elseif !isempty(getpath(state)) && isabspath(joinpath(dirname(getpath(state)), path))
+    #     # Relative path from current
+    #     if hasfile(rt, joinpath(dirname(getpath(state)), path))
+    #         path = joinpath(dirname(getpath(state)), path)
+    #     # elseif canloadfile(state.server, joinpath(dirname(getpath(state.file)), path))
+    #     #     path = joinpath(dirname(getpath(state.file)), path)
+    #     #     if check_filesize(x, path)
+    #     #         loadfile(state.server, path)
+    #     #     else
+    #     #         return
+    #     #     end
+    #     else
+    #         path = ""
+    #     end
+    # elseif !isempty((basepath = _is_in_basedir(getpath(state)); basepath))
+    #     # Special handling for include method used within Base
+    #     path = joinpath(basepath, path)
+    #     if hasfile(rt, path)
+    #         # skip
+    #     # elseif canloadfile(state.server, path)
+    #     #     loadfile(state.server, path)
+    #     else
+    #         path = ""
+    #     end
+    # else
+    #     path = ""
+    # end
+  
+    # TODO DA FIX
+    if derived_has_file(rt, target_uri)
+        if target_uri in state.included_files
+            seterror!(x, IncludeLoop)
+            return
+        end
+
     #     f = getfile(state.server, path)
 
     #     if f.cst.fullspan > LARGE_FILE_LIMIT
     #         seterror!(x, FileTooBig)
     #         return
     #     end
-    #     oldfile = state.file
-    #     state.file = f
-    #     push!(state.included_files, getpath(state))
+        old_uri = state.uri
+        state.uri = target_uri
+        push!(state.included_files, state.uri)
     #     root_dict[state.file] = root_dict[oldfile]
-    #     setscope!(getcst(state.file), nothing)
-    #     state(getcst(state.file))
-    #     state.file = oldfile
-    #     pop!(state.included_files)
-    # elseif !is_in_fexpr(x, CSTParser.defines_function) && !isempty(init_path)
-    #     seterror!(x, MissingFile)
-    # end
-end
-
-"""
-    get_path(x::EXPR)
-
-Usually called on the argument to `include` calls, and attempts to determine
-the path of the file to be included. Has limited support for `joinpath` calls.
-"""
-function get_path(x::EXPR, file_dir, meta_dict)
-    if CSTParser.iscall(x) && length(x.args) == 2
-        parg = x.args[2]
-
-        if CSTParser.isstringliteral(parg)
-            if occursin("\0", valof(parg))
-                meta_dict !== nothing && seterror!(parg, IncludePathContainsNULL, meta_dict)
-                return nothing
-            end
-            path = CSTParser.str_value(parg)
-            path = normpath(path)
-            Base.containsnul(path) && throw(SLInvalidPath("Couldn't convert '$x' into a valid path. Got '$path'"))
-            return path
-        elseif CSTParser.ismacrocall(parg) && valof(parg.args[1]) == "@raw_str" && CSTParser.isstringliteral(parg.args[3])
-            if occursin("\0", valof(parg.args[3]))
-                meta_dict !== nothing && seterror!(parg.args[3], IncludePathContainsNULL, meta_dict)
-                return nothing
-            end
-            path = normpath(CSTParser.str_value(parg.args[3]))
-            Base.containsnul(path) && throw(SLInvalidPath("Couldn't convert '$x' into a valid path. Got '$path'"))
-            return path
-        elseif CSTParser.iscall(parg) && isidentifier(parg.args[1]) && valofid(parg.args[1]) == "joinpath"
-            path_elements = String[]
-
-            for i = 2:length(parg.args)
-                arg = parg[i]
-                if _is_macrocall_to_BaseDIR(arg) # Assumes @__DIR__ points to Base macro.
-                    push!(path_elements, file_dir)
-                elseif CSTParser.isstringliteral(arg)
-                    if occursin("\0", valof(arg))
-                        meta_dict !== nothing && seterror!(arg, IncludePathContainsNULL, meta_dict)
-                        return nothing
-                    end
-                    push!(path_elements, string(valof(arg)))
-                else
-                    return nothing
-                end
-            end
-            isempty(path_elements) && return nothing
-
-            path = normpath(joinpath(path_elements...))
-            Base.containsnul(path) && throw(SLInvalidPath("Couldn't convert '$x' into a valid path. Got '$path'"))
-            return path
-        end
+        cst_new_file = derived_julia_legacy_syntax_tree(rt, target_uri)
+        setscope!(cst_new_file, nothing, meta_dict)
+        process_EXPR(cst_new_file, state)
+        state.uri = old_uri
+        pop!(state.included_files)
+    # TODO Understand this original code better
+    # elseif !is_in_fexpr(x, CSTParser.defines_function) && !isempty(init_path)    
+    elseif !is_in_fexpr(x, CSTParser.defines_function)
+        seterror!(x, MissingFile)
     end
-    return nothing
 end
 
 include("imports.jl")

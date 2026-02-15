@@ -4,11 +4,15 @@ function setref!(x::EXPR, binding::Binding, meta_dict)
     push!(binding.refs, x)
 end
 
-function setref!(x::EXPR, binding, meta_dict)
+function setref!(x::EXPR, binding::SymbolServer.SymStore, meta_dict)
     ensuremeta(x, meta_dict)
     getmeta(x, meta_dict).ref = binding
 end
 
+function setref!(x::EXPR, binding::Nothing, meta_dict)
+    ensuremeta(x, meta_dict)
+    getmeta(x, meta_dict).ref = nothing
+end
 
 # Main function to be called. Given the `state` tries to determine what `x`
 # refers to. If it remains unresolved and is in a delayed evaluation scope
@@ -221,7 +225,7 @@ function resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Boo
     resolved = false
     if isidentifier(x)
         if CSTParser.defines_module(parent_type) && scopeof(parent_type, meta_dict) isa Scope
-            resolved = resolve_ref(x, scopeof(parent_type), state)
+            resolved = resolve_ref(x, scopeof(parent_type, meta_dict), state)
         elseif CSTParser.defines_struct(parent_type)
             if scopehasbinding(scopeof(parent_type, meta_dict), valofid(x))
                 setref!(x, scopeof(parent_type, meta_dict).names[valofid(x)], meta_dict)

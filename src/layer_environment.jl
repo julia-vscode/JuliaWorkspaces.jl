@@ -17,3 +17,8 @@ Salsa.@derived function derived_environment(rt, uri)
 
     return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
 end
+
+Salsa.@derived function derived_project_uri_for_root(rt, uri)
+    # TODO This needs to handle multi env
+    return input_active_project(rt)
+end

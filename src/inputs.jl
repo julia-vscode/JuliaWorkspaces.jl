@@ -6,14 +6,10 @@ Salsa.@declare_input input_active_project(rt)::Union{URI,Nothing}
 
 Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
 Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
-Salsa.@declare_input input_project_environment(rt, uri)::StaticLint.ExternalEnv function(ctx, uri)
-
-    @info "Lazy load for" uri
-    new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
+Salsa.@declare_input input_project_environment(rt, uri)::Nothing function(ctx, uri)
+    @info "Lazy load environment for" uri
 
     if ctx.dynamic_feature !== nothing
-        SymbolServer.load_project_packages_into_store!(ctx.dynamic_feature.store_path, ctx.dynamic_feature.depot_path, uri2filepath(uri), new_store, nothing)
-
         put!(
             ctx.dynamic_feature.in_channel,
             (
@@ -23,14 +19,11 @@ Salsa.@declare_input input_project_environment(rt, uri)::StaticLint.ExternalEnv 
         )
     end
 
-    return StaticLint.ExternalEnv(
-        new_store,
-        SymbolServer.collect_extended_methods(new_store),
-        collect(keys(new_store)))
+    return nothing
 end
 
 Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String)::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
-    @info "Lazy load package metadata for" name uuid version git_tree_sha1
+    
 
     if ctx.dynamic_feature !== nothing
         cache_path = joinpath(ctx.dynamic_feature.store_path, uppercase(string(name)[1:1]), string(name, "_", uuid), string("v", version, "_", git_tree_sha1, ".jstore"))
@@ -51,10 +44,14 @@ Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, ver
                 SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
             end
 
+            @info "Lazy load package metadata for" name uuid version git_tree_sha1 cache_path
+
             return package_data
         end
         # return ModuleStore(VarRef(nothing, Symbol(pe_name)), Dict{Symbol,Any}(), "$pe_name could not be indexed.", true, Symbol[], Symbol[])
     end
+
+    @info "Lazy load FAILED package metadata for" name uuid version git_tree_sha1
 
     return nothing
 end
