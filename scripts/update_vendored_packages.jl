@@ -19,7 +19,7 @@ packages = Dict(
     # "LoweredCodeUtils" => "JuliaDebug/LoweredCodeUtils.jl",
     # "OrderedCollections" => "JuliaCollections/OrderedCollections.jl",
     # "Revise" => "timholy/Revise.jl",
-    # "TestEnv" => "JuliaTesting/TestEnv.jl",
+    "TestEnv" => "JuliaTesting/TestEnv.jl",
     # "URIParser" => "JuliaWeb/URIParser.jl",
     "CancellationTokens" => "davidanthoff/CancellationTokens.jl"
 )

@@ -7,6 +7,7 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
 
 @dict_readable struct IndexProjectParams <: JSONRPC.Outbound
     projectPath::String
+    package::Union{Nothing,String}
     storePath::String
 end
 

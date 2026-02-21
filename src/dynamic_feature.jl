@@ -1,11 +1,13 @@
 mutable struct DynamicJuliaProcess
     project_path::String
+    package::Union{Nothing,String}
     proc::Union{Nothing, Base.Process}
     endpoint::Union{Nothing, JSONRPC.JSONRPCEndpoint}
 
-    function DynamicJuliaProcess(project_path::String)
+    function DynamicJuliaProcess(project_path::String, package::Union{Nothing,String})
         return new(
             project_path,
+            package,
             nothing,
             nothing
         )
@@ -18,6 +20,7 @@ function index_project(djp::DynamicJuliaProcess, store_path::String, depot_path)
         JuliaDynamicAnalysisProtocol.index_project_request_type,
         JuliaDynamicAnalysisProtocol.IndexProjectParams(
             djp.project_path,
+            djp.package,
             store_path
         )
     )
@@ -220,7 +223,7 @@ struct DynamicFeature
     depot_path::String
     in_channel::Channel{Any}
     out_channel::Channel{Any}
-    procs::Dict{String,DynamicJuliaProcess}
+    procs::Dict{Tuple{String,Union{Nothing,String}},DynamicJuliaProcess}
     missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String}}
 
     function DynamicFeature(store_path::String, depot_path::String)
@@ -243,9 +246,17 @@ function start(df::DynamicFeature)
             @info "Processing message" msg
 
             if msg.command == :watch_environment
-                
-                djp = DynamicJuliaProcess(msg.project_path)
-                df.procs[msg.project_path] = djp
+                djp = DynamicJuliaProcess(msg.project_path, nothing)
+                df.procs[msg.project_path, nothing] = djp
+
+                start(djp)
+
+                index_project(djp, df.store_path, df.depot_path)
+
+                put!(df.out_channel, (;command=:environment_ready))
+            elseif msg.command == :watch_test_environment
+                djp = DynamicJuliaProcess(msg.project_path, msg.package)
+                df.procs[msg.project_path, msg.package] = djp
 
                 start(djp)
 

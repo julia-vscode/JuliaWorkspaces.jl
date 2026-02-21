@@ -5,7 +5,9 @@ Salsa.@declare_input input_text_file(rt, uri)::Union{TextFile,Nothing}
 Salsa.@declare_input input_active_project(rt)::Union{URI,Nothing}
 
 Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
+
 Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
+
 Salsa.@declare_input input_project_environment(rt, uri)::Nothing function(ctx, uri)
     @info "Lazy load environment for" uri
 
@@ -15,6 +17,23 @@ Salsa.@declare_input input_project_environment(rt, uri)::Nothing function(ctx, u
             (
                 command = :watch_environment,
                 project_path = uri2filepath(uri)
+            )
+        )
+    end
+
+    return nothing
+end
+
+Salsa.@declare_input input_project__test_environment(rt, uri, package)::Nothing function(ctx, uri, package)
+    @info "Lazy load environment for project and package" uri package
+
+    if ctx.dynamic_feature !== nothing
+        put!(
+            ctx.dynamic_feature.in_channel,
+            (
+                command = :watch_test_environment,
+                project_path = uri2filepath(uri),
+                package = package
             )
         )
     end

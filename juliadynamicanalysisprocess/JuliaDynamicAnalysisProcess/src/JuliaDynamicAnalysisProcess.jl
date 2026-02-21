@@ -10,11 +10,15 @@ struct JuliaDynamicAnalysisProcessState
 end
 
 function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProjectParams, state::JuliaDynamicAnalysisProcessState, token)
-    Pkg.activate(params.projectPath)
+    if params.package===nothing
+        Pkg.activate(params.projectPath)
 
-    SymbolServer.get_store(params.storePath, nothing)
+        SymbolServer.get_store(params.storePath, nothing)
 
-    return nothing
+        return nothing
+    else
+        
+    end
 end
 
 JSONRPC.@message_dispatcher dispatch_msg begin
