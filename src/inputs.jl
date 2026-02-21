@@ -22,7 +22,7 @@ Salsa.@declare_input input_project_environment(rt, uri)::Nothing function(ctx, u
     return nothing
 end
 
-Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String)::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
+Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String)::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
     
 
     if ctx.dynamic_feature !== nothing
@@ -47,11 +47,14 @@ Salsa.@declare_input input_package_metadata(rt, pe_name::Symbol, uuid::UUID, ver
             @info "Lazy load package metadata for" name uuid version git_tree_sha1 cache_path
 
             return package_data
+        else
+            push!(ctx.dynamic_feature.missing_pkg_metadata, (name=name,uuid=uuid,version=version,git_tree_sha1=git_tree_sha1))
+            @info "Queued package metadata loading" name uuid version git_tree_sha1
+            return nothing
         end
-        # return ModuleStore(VarRef(nothing, Symbol(pe_name)), Dict{Symbol,Any}(), "$pe_name could not be indexed.", true, Symbol[], Symbol[])
     end
 
-    @info "Lazy load FAILED package metadata for" name uuid version git_tree_sha1
+    @info "No package metadata loading because dynamic feature is off" name uuid version git_tree_sha1
 
     return nothing
 end

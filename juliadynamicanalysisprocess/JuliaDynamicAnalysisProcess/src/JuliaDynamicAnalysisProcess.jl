@@ -9,14 +9,16 @@ include("symbolserver.jl")
 struct JuliaDynamicAnalysisProcessState
 end
 
-function get_store_request(params::JuliaDynamicAnalysisProtocol.GetStoreParams, state::JuliaDynamicAnalysisProcessState, token)
+function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProjectParams, state::JuliaDynamicAnalysisProcessState, token)
     Pkg.activate(params.projectPath)
 
     SymbolServer.get_store(params.storePath, nothing)
+
+    return nothing
 end
 
 JSONRPC.@message_dispatcher dispatch_msg begin
-    JuliaDynamicAnalysisProtocol.get_store_request_type => get_store_request
+    JuliaDynamicAnalysisProtocol.index_project_request_type => index_project_request
 end
 
 function serve(pipename, error_handler=nothing)

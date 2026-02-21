@@ -302,16 +302,31 @@ function process_from_dynamic(jw::JuliaWorkspace)
             msg = take!(jw.dynamic_feature.out_channel)
 
             if msg.command == :environment_ready
-                @info "Processeing new env" msg.path msg.environment
-                env = msg.environment
+                @info "Processeing new env"
+                for i in jw.dynamic_feature.missing_pkg_metadata
+                    cache_path = joinpath(jw.dynamic_feature.store_path, uppercase(string(i.name)[1:1]), string(i.name, "_", i.uuid), string("v", i.version, "_", i.git_tree_sha1, ".jstore"))
 
-                ext_env = StaticLint.ExternalEnv(
-                    env,
-                    SymbolServer.collect_extended_methods(env),
-                    collect(keys(env))
-                )
+                    if isfile(cache_path)
+                        package_data = open(cache_path) do io
+                            SymbolServer.CacheStore.read(io)
+                        end
 
-                # set_input_project_environment!(jw.runtime, filepath2uri(msg.path), ext_env)
+                        pkg_path = Base.locate_package(Base.PkgId(i.uuid, string(i.name)))
+
+                        # TODO Reenable this
+                        # if pkg_path === nothing || !isfile(pkg_path)
+                        #     pkg_path = SymbolServer.get_pkg_path(Base.PkgId(uuid, pe_name), environment_path, ctx.dynamic_feature.depot_path)
+                        # end
+
+                        if pkg_path !== nothing
+                            SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
+                        end
+
+                        @info "Now package data is ready" i.name i.uuid i.version i.git_tree_sha1 cache_path
+
+                        set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
+                    end
+                end
             else
                 error("Unknown message: $msg")
             end

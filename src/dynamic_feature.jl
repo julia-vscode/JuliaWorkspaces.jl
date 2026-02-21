@@ -12,20 +12,15 @@ mutable struct DynamicJuliaProcess
     end
 end
 
-function get_store(djp::DynamicJuliaProcess, store_path::String, depot_path)
+function index_project(djp::DynamicJuliaProcess, store_path::String, depot_path)
     JSONRPC.send(
         djp.endpoint,
-        JuliaDynamicAnalysisProtocol.get_store_request_type,
-        JuliaDynamicAnalysisProtocol.GetStoreParams(
+        JuliaDynamicAnalysisProtocol.index_project_request_type,
+        JuliaDynamicAnalysisProtocol.IndexProjectParams(
             djp.project_path,
             store_path
         )
     )
-
-    new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
-    SymbolServer.load_project_packages_into_store!(store_path, depot_path, djp.project_path, new_store, nothing)
-
-    return new_store
 end
 
 function start(djp::DynamicJuliaProcess)
@@ -226,6 +221,7 @@ struct DynamicFeature
     in_channel::Channel{Any}
     out_channel::Channel{Any}
     procs::Dict{String,DynamicJuliaProcess}
+    missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String}}
 
     function DynamicFeature(store_path::String, depot_path::String)
         return new(
@@ -233,7 +229,8 @@ struct DynamicFeature
             depot_path,
             Channel{Any}(Inf),
             Channel{Any}(Inf),
-            Dict{String,DynamicJuliaProcess}()
+            Dict{String,DynamicJuliaProcess}(),
+            Set{URI}()
         )
     end
 end
@@ -252,9 +249,9 @@ function start(df::DynamicFeature)
 
                 start(djp)
 
-                env = get_store(djp, df.store_path, df.depot_path)
+                index_project(djp, df.store_path, df.depot_path)
 
-                put!(df.out_channel, (command=:environment_ready, path=msg.project_path, environment=env))
+                put!(df.out_channel, (;command=:environment_ready))
             else
                 error("Unknown message: $msg")
             end
