@@ -224,7 +224,7 @@ struct DynamicFeature
     in_channel::Channel{Any}
     out_channel::Channel{Any}
     procs::Dict{Tuple{String,Union{Nothing,String}},DynamicJuliaProcess}
-    missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String}}
+    missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}
 
     function DynamicFeature(store_path::String, depot_path::String)
         return new(
@@ -260,9 +260,11 @@ function start(df::DynamicFeature)
 
                 start(djp)
 
-                index_project(djp, df.store_path, df.depot_path)
+                test_project = index_project(djp, df.store_path, df.depot_path)
 
-                put!(df.out_channel, (;command=:environment_ready))
+                test_project_uri = filepath2uri(test_project)
+
+                put!(df.out_channel, (;command=:test_environment_ready, project_uri=filepath2uri(msg.project_path), package=msg.package, test_project_uri=test_project_uri))
             else
                 error("Unknown message: $msg")
             end

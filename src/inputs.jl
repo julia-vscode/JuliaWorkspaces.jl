@@ -24,7 +24,7 @@ Salsa.@declare_input input_project_environment(rt, uri)::Nothing function(ctx, u
     return nothing
 end
 
-Salsa.@declare_input input_project__test_environment(rt, uri, package)::Nothing function(ctx, uri, package)
+Salsa.@declare_input input_project_test_environment(rt, uri, package)::Union{Nothing,URI} function(ctx, uri, package)
     @info "Lazy load environment for project and package" uri package
 
     if ctx.dynamic_feature !== nothing
@@ -41,7 +41,7 @@ Salsa.@declare_input input_project__test_environment(rt, uri, package)::Nothing 
     return nothing
 end
 
-Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::String)::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
+Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{Nothing,String})::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
     
 
     if ctx.dynamic_feature !== nothing
@@ -63,12 +63,12 @@ Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, versio
                 SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
             end
 
-            @info "Lazy load package metadata for" name uuid version git_tree_sha1 cache_path
+            # @info "Lazy load package metadata for" name uuid version git_tree_sha1 cache_path
 
             return package_data
         else
-            push!(ctx.dynamic_feature.missing_pkg_metadata, (name=name,uuid=uuid,version=version,git_tree_sha1=git_tree_sha1))
-            @info "Queued package metadata loading" name uuid version git_tree_sha1
+            push!(ctx.dynamic_feature.missing_pkg_metadata, @NamedTuple{name::Symbol,uuid::UUID,version::VersionNumber,git_tree_sha1::Union{String,Nothing}}((name,uuid,version,git_tree_sha1)))
+            # @info "Queued package metadata loading" name uuid version git_tree_sha1
             return nothing
         end
     end

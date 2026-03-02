@@ -20,23 +20,6 @@ function vec_startswith(a, b)
     return true
 end
 
-function find_package_for_file(packages::Vector{URI}, file::URI)
-    file_path = uri2filepath(file)
-    package = packages |>
-        x -> map(x) do i
-            package_folder_path = uri2filepath(i)
-            parts = splitpath(package_folder_path)
-            return (uri = i, parts = parts)
-        end |>
-        x -> filter(x) do i
-            return vec_startswith(splitpath(file_path), i.parts)
-        end |>
-        x -> sort(x, by=i->length(i.parts), rev=true) |>
-        x -> length(x) == 0 ? nothing : first(x).uri
-
-    return package
-end
-
 function find_project_for_file(projects::Vector{URI}, file::URI)
     file_path = uri2filepath(file)
     project = projects |>
@@ -107,10 +90,9 @@ end
 
 Salsa.@derived function derived_testenv(rt, uri)
     projects = derived_project_folders(rt)
-    packages = derived_package_folders(rt)
 
     project_uri = find_project_for_file(projects, uri)
-    package_uri = find_package_for_file(packages, uri)
+    package_uri = derived_package_for_file(rt, uri)
 
     if project_uri === nothing
         project_uri = input_fallback_test_project(rt)

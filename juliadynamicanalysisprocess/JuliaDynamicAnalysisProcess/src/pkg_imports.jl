@@ -1,5 +1,6 @@
 include("../../../packages/JSON/src/JSON.jl")
 include("../../../packages/CancellationTokens/src/CancellationTokens.jl")
+include("../../../packages/TestEnv/src/TestEnv.jl")
 
 module JSONRPC
 import ..CancellationTokens

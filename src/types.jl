@@ -327,6 +327,12 @@ function process_from_dynamic(jw::JuliaWorkspace)
                         set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
                     end
                 end
+            elseif msg.command == :test_environment_ready
+                @info "Processeing new test env" msg.project_uri msg.package msg.test_project_uri
+
+                add_folder_from_disc!(jw, uri2filepath(msg.test_project_uri))
+
+                set_input_project_test_environment!(jw.runtime, msg.project_uri, msg.package, msg.test_project_uri)
             else
                 error("Unknown message: $msg")
             end

@@ -12,7 +12,7 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
 end
 
 # Messages to the dynamic analysis process
-const index_project_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/indexProject", IndexProjectParams, Nothing)
+const index_project_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/indexProject", IndexProjectParams, String)
 # const testserver_activate_env_request_type = JSONRPC.RequestType("activateEnv", ActivateEnvParams, Nothing)
 # const configure_testrun_request_type = JSONRPC.RequestType("testserver/ConfigureTestRun", ConfigureTestRunRequestParams, Nothing)
 # const testserver_run_testitems_batch_request_type = JSONRPC.RequestType("testserver/runTestItems", RunTestItemsRequestParams, Nothing)
