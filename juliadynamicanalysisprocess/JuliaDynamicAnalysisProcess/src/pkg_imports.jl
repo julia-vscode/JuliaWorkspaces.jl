@@ -2,6 +2,12 @@ include("../../../packages/JSON/src/JSON.jl")
 include("../../../packages/CancellationTokens/src/CancellationTokens.jl")
 include("../../../packages/TestEnv/src/TestEnv.jl")
 
+if VERSION >= v"1.6.0"
+    include("../../../packages/OrderedCollections/src/OrderedCollections.jl")
+else
+    include("../../../packages-old/v1.5/OrderedCollections/src/OrderedCollections.jl")
+end
+
 @static if VERSION >= v"1.10.0"
     include("../../../packages/CodeTracking/src/CodeTracking.jl")
 elseif VERSION >= v"1.6.0"
