@@ -1,0 +1,12 @@
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+docs/build
+docs/site
+*.aux
+*.log
+docs/src/figures/diagram.pdf
+Manifest.toml
+src/aliasnewstruct.jl
+.vscode
+test/envs/use_exputils/Project.toml
