@@ -21,7 +21,8 @@ packages = Dict(
     "Revise" => "timholy/Revise.jl",
     "TestEnv" => "JuliaTesting/TestEnv.jl",
     # "URIParser" => "JuliaWeb/URIParser.jl",
-    "CancellationTokens" => "davidanthoff/CancellationTokens.jl"
+    "CancellationTokens" => "davidanthoff/CancellationTokens.jl",
+    "Preferences" => "JuliaPackaging/Preferences.jl"
 )
 
 latest_versions = Dict{String,VersionNumber}()
