@@ -10,15 +10,15 @@ myauth = GitHub.authenticate(read(creds.password, String))
 Base.shred!(creds.password)
 
 packages = Dict(
-    # "CodeTracking" => "timholy/CodeTracking.jl",
+    "CodeTracking" => "timholy/CodeTracking.jl",
     # "CoverageTools" => "JuliaCI/CoverageTools.jl",
     # "DebugAdapter" => "julia-vscode/DebugAdapter.jl",
     # "JSON" => "", We skip this as we want to stay on an old version that has one less extra dependency
     "JSONRPC" => "julia-vscode/JSONRPC.jl",
-    # "JuliaInterpreter" => "JuliaDebug/JuliaInterpreter.jl",
-    # "LoweredCodeUtils" => "JuliaDebug/LoweredCodeUtils.jl",
+    "JuliaInterpreter" => "JuliaDebug/JuliaInterpreter.jl",
+    "LoweredCodeUtils" => "JuliaDebug/LoweredCodeUtils.jl",
     # "OrderedCollections" => "JuliaCollections/OrderedCollections.jl",
-    # "Revise" => "timholy/Revise.jl",
+    "Revise" => "timholy/Revise.jl",
     "TestEnv" => "JuliaTesting/TestEnv.jl",
     # "URIParser" => "JuliaWeb/URIParser.jl",
     "CancellationTokens" => "davidanthoff/CancellationTokens.jl"
