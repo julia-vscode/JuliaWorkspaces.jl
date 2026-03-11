@@ -83,7 +83,7 @@ Salsa.@derived function derived_project(rt, uri)
         end
     else
         # TODO Handle this case properly
-        error("Unknown manifest version")
+        Dict{String,Any}()
     end
 
     for (k_entry, v_entry) in pairs(manifest_deps)
