@@ -75,10 +75,15 @@ Salsa.@derived function derived_project(rt, uri)
 
     manifest_deps = if manifest_version=="1.0"
         manifest_content
-    elseif manifest_version=="2.0" && haskey(manifest_content, "deps") && manifest_content["deps"] isa Dict
-        manifest_content["deps"]
+    elseif manifest_version=="2.0"
+        if haskey(manifest_content, "deps") && manifest_content["deps"] isa Dict
+            manifest_content["deps"]
+        else
+            Dict{String,Any}()
+        end
     else
-        error("")
+        # TODO Handle this case properly
+        error("Unknown manifest version")
     end
 
     for (k_entry, v_entry) in pairs(manifest_deps)
