@@ -3,12 +3,14 @@ function our_isvalid(s)
 end
 
 function is_path_project_file(path)
+    isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
     return basename_lower_case=="project.toml" || basename_lower_case=="juliaproject.toml"
 end
 
 function is_path_manifest_file(path)
+    isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
     # Manifest.toml, Manifest-v1.11.toml, JuliaManifest.toml, etc.
@@ -16,27 +18,28 @@ function is_path_manifest_file(path)
 end
 
 function is_path_lintconfig_file(path)
+    isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
     return basename_lower_case == ".julialint.toml"
 end
 
 function is_path_julia_file(path)
-    _, ext = splitext(lowercase(path))
+    _, ext = splitext(path)
 
-    return ext == ".jl"
+    return isvalid(ext) && lowercase(ext) == ".jl"
 end
 
 function is_path_markdown_file(path)
-    _, ext = splitext(lowercase(path))
+    _, ext = splitext(path)
 
-    return ext == ".md"
+    return isvalid(ext) && lowercase(ext) == ".md"
 end
 
 function is_path_juliamarkdown_file(path)
-    _, ext = splitext(lowercase(path))
+    _, ext = splitext(path)
 
-    return ext == ".jmd"
+    return isvalid(ext) && lowercase(ext) == ".jmd"
 end
 
 is_walkdir_error(_) = false
