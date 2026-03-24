@@ -1,6 +1,6 @@
 module URIs2
 
-using AutoHashEquals
+using ..AutoHashEquals
 
 include("vendored_from_uris.jl")
 

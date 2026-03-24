@@ -1,12 +1,3 @@
-import JuliaSyntax
-using JuliaSyntax: @K_str, kind, children, haschildren, first_byte, last_byte, SyntaxNode
-
-import ..URIs2
-using ..URIs2: URI, uri2filepath
-
-import ...JuliaWorkspaces
-using ...JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail, JuliaPackage, JuliaProject, splitpath
-
 function vec_startswith(a, b)
     if length(a) < length(b)
         return false
