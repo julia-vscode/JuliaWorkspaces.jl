@@ -79,6 +79,14 @@ function handle_macro(x::EXPR, state)
                     setref!(a.args[1], Binding(noname, nothing, nothing, EXPR[]), meta_dict)
                 end
             end
+        elseif _points_to_arbitrary_macro(x.args[1], :Reexport, Symbol("@reexport"), state)
+            # Treat @reexport using/import as regular using/import
+            for i = 3:length(x.args)
+                arg = x.args[i]
+                if arg isa EXPR && (headof(arg) === :using || headof(arg) === :import)
+                    resolve_import(arg, state)
+                end
+            end
         elseif is_nospecialize(x.args[1])
             for i = 2:length(x.args)
                 if bindingof(x.args[i], meta_dict) !== nothing
@@ -150,9 +158,13 @@ function _points_to_Base_macro(x::EXPR, name, state)
     (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
 end
 
-function _points_to_arbitrary_macro(x::EXPR, module_name, name, state)
-    length(x.args) == 2 && isidentifier(x.args[2]) && valof(x.args[2]) == name && haskey(getsymbols(state), Symbol(module_name)) && haskey(getsymbols(state)[Symbol(module_name)], Symbol("@", name)) && (refof(x.args[2], meta_dict) == maybe_lookup(getsymbols(state)[Symbol(module_name)][Symbol("@", name)], state) ||
-    (refof(x.args[2], meta_dict) isa Binding && refof(x.args[2], meta_dict).val == maybe_lookup(getsymbols(state)[Symbol(module_name)][Symbol("@", name)], state)))
+function _points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, state)
+    CSTParser.is_getfield_w_quotenode(x) && return _points_to_arbitrary_macro(x.args[2].args[1], module_name, name, state)
+    haskey(getsymbols(state), module_name) || return false
+    haskey(getsymbols(state)[module_name], name) || return false
+    targetmacro = maybe_lookup(getsymbols(state)[module_name][name], state)
+    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x, state.meta_dict)) !== nothing &&
+    (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
 end
 
 maybe_lookup(x, env::ExternalEnv) = x isa SymbolServer.VarRef ? SymbolServer._lookup(x, getsymbols(env), true) : x
@@ -205,6 +217,7 @@ any bindings made within the scope of `x` to the toplevel and replaces
 (some) interpolated binding names with the value where possible.
 """
 function interpret_eval(x::EXPR, state)
+    meta_dict = state.meta_dict
     # make sure we have bindings etc
     process_EXPR(x, state)
     tls = retrieve_toplevel_scope(x, meta_dict)
@@ -262,7 +275,7 @@ function collect_expr_with_bindings(x, meta_dict, bound_exprs=EXPR[])
         # Assuming here that if an expression has a binding we don't want anything bound to chlid nodes.
     elseif x.args !== nothing && !((CSTParser.defines_function(x) && !is_eventually_interpolated(x.args[1])) || CSTParser.defines_macro(x) || headof(x) === :export)
         for a in x.args
-            collect_expr_with_bindings(a, bound_exprs)
+            collect_expr_with_bindings(a, meta_dict, bound_exprs)
         end
     end
     return bound_exprs
