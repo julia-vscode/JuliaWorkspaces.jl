@@ -60,8 +60,6 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         package_folder = uri2filepath(package_folder_uri)
         runtests_path = joinpath(package_folder, "test", "runtests.jl")
 
-        @info "Now testing whether we have runtests.jl" lowercase(uri2filepath(uri)) lowercase(runtests_path)
-
         # TODO Is this lowercase the right move? On Windows for sure, not clear about other platforms
         if lowercase(uri2filepath(uri)) == lowercase(runtests_path)
             package_name = derived_package(rt, package_folder_uri).name
