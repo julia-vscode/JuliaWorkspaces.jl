@@ -9,7 +9,7 @@
         try
             jw = workspace_from_folders([pkg_root])
 
-            @test length(get_text_files(jw)) == 3
+            @test length(get_text_files(jw)) == 5
         finally
             rm(invalid_file; force=true)
         end
