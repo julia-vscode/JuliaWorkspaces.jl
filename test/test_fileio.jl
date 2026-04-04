@@ -3,7 +3,7 @@
 
     pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
 
-    if !Sys.iswindows()
+    if Sys.islinux()
         invalid_file = joinpath(pkg_root, "\x9999.invalid.jl")
         touch(invalid_file)
         try
