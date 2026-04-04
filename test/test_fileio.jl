@@ -4,14 +4,13 @@
     pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
 
     if Sys.islinux()
-        invalid_file = joinpath(pkg_root, "\x9999.invalid.jl")
-        touch(invalid_file)
-        try
-            jw = workspace_from_folders([pkg_root])
 
-            @test length(get_text_files(jw)) == 5
-        finally
-            rm(invalid_file; force=true)
+        mktempdir() do temp_dir
+            invalid_file = joinpath(temp_dir, "\x9999.invalid.jl")
+            touch(invalid_file)
+
+            jw = workspace_from_folders([temp_dir])
+            @test length(get_text_files(jw)) == 1
         end
     end
 end
