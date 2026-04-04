@@ -111,14 +111,7 @@ function _mark_import_arg(arg, par, state, usinged, meta_dict)
     end
 end
 
-function has_workspace_package(server, name)
-    haskey(server.workspacepackages, name) &&
-    hasscope(getcst(server.workspacepackages[name]), meta_dict) &&
-    haskey(scopeof(getcst(server.workspacepackages[name]), meta_dict).names, name) &&
-    scopeof(getcst(server.workspacepackages[name]), meta_dict).names[name] isa Binding &&
-    scopeof(getcst(server.workspacepackages[name]), meta_dict).names[name].val isa EXPR &&
-    CSTParser.defines_module(scopeof(getcst(server.workspacepackages[name]), meta_dict).names[name].val)
-end
+
 
 function add_to_imported_modules(scope::Scope, name::Symbol, val)
     if scope.modules isa Dict
@@ -149,8 +142,8 @@ function _get_field(par, arg, state)
     if par isa SymbolServer.EnvStore
         if (arg_scope = retrieve_scope(arg, meta_dict)) !== nothing && (tlm = get_named_toplevel_module(arg_scope, arg_str_rep)) !== nothing && hasbinding(tlm, meta_dict)
             return bindingof(tlm, meta_dict)
-        # elseif has_workspace_package(state.server, arg_str_rep)
-        #     return scopeof(getcst(state.server.workspacepackages[arg_str_rep])).names[arg_str_rep]
+        elseif haskey(state.env.workspace_packages, arg_str_rep)
+            return state.env.workspace_packages[arg_str_rep]
         elseif haskey(par, Symbol(arg_str_rep))
             if isempty(state.env.project_deps) || Symbol(arg_str_rep) in state.env.project_deps
                 return par[Symbol(arg_str_rep)]

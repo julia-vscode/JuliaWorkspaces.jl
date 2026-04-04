@@ -60,7 +60,9 @@ mutable struct ExternalEnv
     symbols::SymbolServer.EnvStore
     extended_methods::Dict{SymbolServer.VarRef,Vector{SymbolServer.VarRef}}
     project_deps::Vector{Symbol}
+    workspace_packages::Dict{String,Any}
 end
+ExternalEnv(symbols, extended_methods, project_deps) = ExternalEnv(symbols, extended_methods, project_deps, Dict{String,Any}())
 
 getsymbols(env::ExternalEnv) = env.symbols
 getsymbolextendeds(env::ExternalEnv) = env.extended_methods

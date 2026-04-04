@@ -2,6 +2,72 @@ function StaticLint.hasfile(rt, path)
     return derived_has_file(rt, filepath2uri(path))
 end
 
+"""
+    merge_meta_dict!(target, source)
+
+Merge `source` meta_dict entries into `target`, shallow-copying `Binding.refs`
+to prevent cross-root mutation when multiple roots share the same cached
+deved package meta.
+"""
+function merge_meta_dict!(target::Dict{UInt64,StaticLint.Meta}, source::Dict{UInt64,StaticLint.Meta})
+    for (k, meta) in source
+        if meta.binding !== nothing
+            # Shallow-copy refs to isolate per-root mutations from _mark_import_arg's push!(par.refs, arg)
+            copied_binding = StaticLint.Binding(meta.binding.name, meta.binding.val, meta.binding.type, copy(meta.binding.refs), meta.binding.is_public)
+            target[k] = StaticLint.Meta(copied_binding, meta.scope, meta.ref, meta.error)
+        else
+            target[k] = meta
+        end
+    end
+end
+
+"""
+    find_module_binding(cst, name, meta_dict)
+
+Find the `Binding` for a top-level `module` definition named `name` in the given CST.
+"""
+function find_module_binding(cst, name::String, meta_dict::Dict{UInt64,StaticLint.Meta})
+    if cst.args !== nothing
+        for arg in cst.args
+            if CSTParser.defines_module(arg) && StaticLint.hasbinding(arg, meta_dict)
+                mod_name = CSTParser.get_name(arg)
+                if CSTParser.isidentifier(mod_name) && CSTParser.valof(mod_name) == name
+                    return StaticLint.bindingof(arg, meta_dict)
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+Salsa.@derived function derived_deved_package_meta(rt, pkg_entry_uri, project_uri)
+    env = derived_environment(rt, project_uri)
+    include_dict = derived_include_dict(rt)
+
+    # Build meta_dict scoped to all workspace files (needed for cross-file include resolution)
+    meta_dict = Dict{UInt64,StaticLint.Meta}()
+    julia_files = derived_all_julia_files(rt)
+    for uri in julia_files
+        cst = derived_julia_legacy_syntax_tree(rt, uri)
+        StaticLint.ensuremeta(cst, meta_dict)
+    end
+
+    cst = derived_julia_legacy_syntax_tree(rt, pkg_entry_uri)
+
+    # Trigger the dynamic process for this environment
+    input_project_environment(rt, project_uri)
+
+    StaticLint.semantic_pass(pkg_entry_uri, cst, env, meta_dict, include_dict, rt)
+
+    # Extract the package name from the URI (src/PackageName.jl -> PackageName)
+    pkg_filename = basename(uri2filepath(pkg_entry_uri))
+    pkg_name = pkg_filename[1:end-3]  # strip ".jl"
+
+    mod_binding = find_module_binding(cst, pkg_name, meta_dict)
+
+    return (meta_dict=meta_dict, module_binding=mod_binding)
+end
+
 Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     meta_dict = Dict{UInt64,StaticLint.Meta}()
     include_dict = derived_include_dict(rt)
@@ -24,6 +90,16 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
 
     # This will trigger the launch of the dynamic process
     input_project_environment(rt, project_uri)
+
+    # Merge cached semantic info for in-workspace deved packages
+    workspace_deved = derived_workspace_deved_packages(rt, project_uri)
+    for (pkg_name, pkg_entry_uri) in workspace_deved
+        result = derived_deved_package_meta(rt, pkg_entry_uri, project_uri)
+        merge_meta_dict!(meta_dict, result.meta_dict)
+        if result.module_binding !== nothing
+            env.workspace_packages[pkg_name] = result.module_binding
+        end
+    end
 
     StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt)
 

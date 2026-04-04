@@ -22,9 +22,33 @@ Salsa.@derived function derived_environment(rt, uri)
         new_store[Symbol(i.name)] = i.val
     end
 
+    project_deps = collect(keys(new_store))
+
+    # Add in-workspace deved packages to project_deps so import resolution considers them valid
+    for (k,v) in project.deved_packages
+        entry_uri = filepath2uri(joinpath(uri2filepath(v.uri), "src", "$(v.name).jl"))
+        if derived_has_file(rt, entry_uri)
+            push!(project_deps, Symbol(v.name))
+        end
+    end
+
     @info "The env for $uri is" keys(new_store)
 
-    return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
+    return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), project_deps)
+end
+
+Salsa.@derived function derived_workspace_deved_packages(rt, project_uri)
+    project = derived_project(rt, project_uri)
+    project === nothing && return Dict{String, URI}()
+
+    result = Dict{String, URI}()
+    for (k, v) in project.deved_packages
+        entry_uri = filepath2uri(joinpath(uri2filepath(v.uri), "src", "$(v.name).jl"))
+        if derived_has_file(rt, entry_uri)
+            result[v.name] = entry_uri
+        end
+    end
+    return result
 end
 
 Salsa.@derived function derived_project_uri_for_root(rt, uri)    
