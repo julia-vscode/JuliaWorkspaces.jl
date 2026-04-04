@@ -315,6 +315,7 @@ function watch_files_via_dir(dirname::AbstractString)
     stillwatching = haskey(watched_files, dirname)
     if stillwatching
         wf = watched_files[dirname]
+        timestamp = updatetime!(wf)
         for (file, id) in wf.trackedfiles
             fullpath = joinpath(dirname, file)
             if isdir(fullpath)
@@ -323,18 +324,18 @@ function watch_files_via_dir(dirname::AbstractString)
                 push!(latestfiles, file=>id)
                 continue
             elseif !file_exists(fullpath)
-                # File may have been deleted. But be very sure.
+                # File may have been deleted. But check again after a very brief pause.
                 sleep(0.1)
                 if !file_exists(fullpath)
                     push!(latestfiles, file=>id)
                     continue
                 end
             end
-            if newer(mtime(fullpath), wf.timestamp)
+            fstat = stat(fullpath)
+            if newer(fstat.mtime, timestamp) || newer(fstat.ctime, timestamp)
                 push!(latestfiles, file=>id)
             end
         end
-        isempty(latestfiles) || updatetime!(wf)  # ref issue #341
     end
     return latestfiles, stillwatching
 end
