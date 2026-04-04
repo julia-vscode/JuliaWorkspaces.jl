@@ -225,6 +225,8 @@ struct DynamicFeature
     out_channel::Channel{Any}
     procs::Dict{Tuple{String,Union{Nothing,String}},DynamicJuliaProcess}
     missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}
+    pending_count::Threads.Atomic{Int}
+    update_channel::Channel{Symbol}
 
     function DynamicFeature(store_path::String, depot_path::String)
         return new(
@@ -233,7 +235,9 @@ struct DynamicFeature
             Channel{Any}(Inf),
             Channel{Any}(Inf),
             Dict{String,DynamicJuliaProcess}(),
-            Set{URI}()
+            Set{URI}(),
+            Threads.Atomic{Int}(0),
+            Channel{Symbol}(100)
         )
     end
 end
@@ -245,6 +249,8 @@ function start(df::DynamicFeature)
 
             @info "Processing message" msg
 
+            Threads.atomic_add!(df.pending_count, 1)
+
             if msg.command == :watch_environment
                 djp = DynamicJuliaProcess(msg.project_path, nothing)
                 df.procs[msg.project_path, nothing] = djp
@@ -253,7 +259,7 @@ function start(df::DynamicFeature)
 
                 index_project(djp, df.store_path, df.depot_path)
 
-                put!(df.out_channel, (;command=:environment_ready))
+                put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path))
             elseif msg.command == :watch_test_environment
                 djp = DynamicJuliaProcess(msg.project_path, msg.package)
                 df.procs[msg.project_path, msg.package] = djp
@@ -268,6 +274,9 @@ function start(df::DynamicFeature)
             else
                 error("Unknown message: $msg")
             end
+
+            Threads.atomic_sub!(df.pending_count, 1)
+            try put!(df.update_channel, :data_available) catch; end
         end
     catch err
         flush(stderr)

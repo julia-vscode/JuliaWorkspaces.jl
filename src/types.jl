@@ -291,6 +291,7 @@ struct JuliaWorkspace
         set_input_files!(rt, Set{URI}())
         set_input_active_project!(rt, nothing)
         set_input_fallback_test_project!(rt, nothing)
+        set_input_env_ready!(rt, false)
 
         new(rt, dynamic_feature)
     end
@@ -327,6 +328,8 @@ function process_from_dynamic(jw::JuliaWorkspace)
                         set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
                     end
                 end
+
+                set_input_env_ready!(jw.runtime, true)
             elseif msg.command == :test_environment_ready
                 @info "Processeing new test env" msg.project_uri msg.package msg.test_project_uri
 

@@ -15,11 +15,15 @@ export JuliaWorkspace,
     get_toml_syntax_tree,
     get_diagnostic,
     get_diagnostics,
+    get_diagnostics_blocking,
     get_packages,
     get_projects,
     get_test_items,
     get_test_env,
     position_at,
+    is_ready,
+    wait_until_ready,
+    get_update_channel,
     TextFile,
     SourceText,
     Diagnostic
@@ -265,6 +269,19 @@ function get_diagnostics(jw::JuliaWorkspace)
     return derived_all_diagnostics(jw.runtime)
 end
 
+"""
+    get_diagnostics_blocking(jw::JuliaWorkspace; timeout::Real=60)
+
+Wait for the dynamic environment to finish loading, then return all diagnostics.
+This is useful for CLI tools that want the full, accurate set of diagnostics.
+Returns `(diagnostics, timed_out)` where `timed_out` indicates whether the
+timeout elapsed before the environment was ready.
+"""
+function get_diagnostics_blocking(jw::JuliaWorkspace; timeout::Real=60)
+    ready = wait_until_ready(jw; timeout=timeout)
+    return get_diagnostics(jw), !ready
+end
+
 # Test items
 
 """
@@ -310,4 +327,56 @@ function get_test_env(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     derived_testenv(jw.runtime, uri)
+end
+
+# Readiness
+
+"""
+    is_ready(jw::JuliaWorkspace)
+
+Check whether the workspace's dynamic environment loading has completed.
+Returns `true` if no dynamic feature is configured, or if the environment
+has finished loading and no tasks are pending.
+"""
+function is_ready(jw::JuliaWorkspace)
+    jw.dynamic_feature === nothing && return true
+    return input_env_ready(jw.runtime) && jw.dynamic_feature.pending_count[] == 0
+end
+
+"""
+    wait_until_ready(jw::JuliaWorkspace; timeout::Real=Inf)
+
+Block until the workspace's dynamic environment loading has completed.
+Returns `true` if the workspace became ready, `false` if `timeout` elapsed first.
+"""
+function wait_until_ready(jw::JuliaWorkspace; timeout::Real=Inf)
+    deadline = time() + timeout
+    while !is_ready(jw)
+        remaining = deadline - time()
+        remaining <= 0 && return false
+        try
+            wait_time = min(remaining, 0.5)
+            timedwait(() -> isready(jw.dynamic_feature.update_channel), wait_time)
+            # Drain the update_channel and process any dynamic results
+            while isready(jw.dynamic_feature.update_channel)
+                take!(jw.dynamic_feature.update_channel)
+            end
+            process_from_dynamic(jw)
+        catch
+            break
+        end
+    end
+    return is_ready(jw)
+end
+
+"""
+    get_update_channel(jw::JuliaWorkspace)
+
+Return the `Channel{Symbol}` that receives notifications when dynamic data
+becomes available.  Returns `nothing` if no dynamic feature is configured.
+Consumers can `take!` or `wait` on this channel to be notified of updates.
+"""
+function get_update_channel(jw::JuliaWorkspace)
+    jw.dynamic_feature === nothing && return nothing
+    return jw.dynamic_feature.update_channel
 end

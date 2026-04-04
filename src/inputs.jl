@@ -8,6 +8,8 @@ Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
 
 Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
 
+Salsa.@declare_input input_env_ready(rt)::Bool
+
 Salsa.@declare_input input_project_environment(rt, uri)::Nothing function(ctx, uri)
     @info "Lazy load environment for" uri
 

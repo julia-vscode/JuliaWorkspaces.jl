@@ -1,3 +1,20 @@
+# StaticLint diagnostics that depend on environment data (package symbols) being fully loaded.
+# These are suppressed until the environment is ready to avoid false positives from unresolved imports.
+const _ENV_DEPENDENT_LINT_MESSAGES = Set{String}([
+    StaticLint.LintCodeDescriptions[StaticLint.IncorrectCallArgs],
+    StaticLint.LintCodeDescriptions[StaticLint.IncorrectIterSpec],
+    StaticLint.LintCodeDescriptions[StaticLint.NothingEquality],
+    StaticLint.LintCodeDescriptions[StaticLint.InvalidTypeDeclaration],
+    StaticLint.LintCodeDescriptions[StaticLint.TypePiracy],
+    StaticLint.LintCodeDescriptions[StaticLint.KwDefaultMismatch],
+])
+
+function _is_env_dependent_diagnostic(d::Diagnostic)
+    d.source != "StaticLint.jl" && return false
+    startswith(d.message, "Missing reference:") && return true
+    return d.message in _ENV_DEPENDENT_LINT_MESSAGES
+end
+
 Salsa.@derived function derived_lintconfig_files(rt)
     files = derived_text_files(rt)
 
@@ -69,9 +86,14 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             append!(results, Diagnostic(i.range, :error, i.message, nothing, Symbol[], "Testitem") for i in tis.testerrors)
         end
 
-        if is_path_julia_file(uri2filepath(uri))
+        if is_path_julia_file(uri2filepath(uri)) && input_active_project(rt) !== nothing
             sl = derived_static_lint_diagnostics(rt, uri)
-            append!(results, sl)
+            env_ready = input_env_ready(rt)
+            if env_ready
+                append!(results, sl)
+            else
+                append!(results, d for d in sl if !_is_env_dependent_diagnostic(d))
+            end
         end
 
         if (is_path_lintconfig_file(uri2filepath(uri)) || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri)) ) && get(lint_config, "toml-syntax-errors", true) == true
