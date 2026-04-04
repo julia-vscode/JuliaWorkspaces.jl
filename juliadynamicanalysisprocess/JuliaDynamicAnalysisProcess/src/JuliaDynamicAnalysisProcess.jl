@@ -29,7 +29,7 @@ function serve(pipename, error_handler=nothing)
     conn = Sockets.connect(pipename)
 
     endpoint = JSONRPC.JSONRPCEndpoint(conn, conn)
-    run(endpoint)
+    JSONRPC.start(endpoint)
 
     state = JuliaDynamicAnalysisProcessState()
 

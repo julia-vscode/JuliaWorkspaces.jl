@@ -197,7 +197,7 @@ function start(djp::DynamicJuliaProcess)
 
     djp.endpoint = JSONRPC.JSONRPCEndpoint(socket, socket)
 
-    run(djp.endpoint)
+    JSONRPC.start(djp.endpoint)
 
     # while true
     #     msg = try

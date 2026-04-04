@@ -66,7 +66,13 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         if lowercase(uri2filepath(uri)) == lowercase(runtests_path)
             package_name = derived_package(rt, package_folder_uri).name
 
-            test_project_uri = input_project_test_environment(rt, active_project, package_name)
+            project_for_test_env = if package_folder_uri in derived_project_folders(rt)
+                package_folder_uri
+            else
+                active_project
+            end
+
+            test_project_uri = input_project_test_environment(rt, project_for_test_env, package_name)
 
             @info "And the thing here is" test_project_uri
 
