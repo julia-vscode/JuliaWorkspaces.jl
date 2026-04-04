@@ -100,7 +100,7 @@ function mark_bindings!(x::EXPR, state)
         if isidentifier(name)
             setref!(name, bindingof(x, meta_dict), meta_dict)
         end
-        mark_parameters(CSTParser.get_sig(x))
+        mark_parameters(CSTParser.get_sig(x), meta_dict)
         if CSTParser.defines_struct(x) # mark field block
             for arg in x.args[3].args
                 CSTParser.defines_function(arg) && continue
@@ -142,9 +142,9 @@ function mark_binding!(x::EXPR, meta_dict, val=x)
     return x
 end
 
-function mark_parameters(sig::EXPR, params = String[])
+function mark_parameters(sig::EXPR, meta_dict, params = String[])
     if CSTParser.issubtypedecl(sig)
-        mark_parameters(sig.args[1], params)
+        mark_parameters(sig.args[1], meta_dict, params)
     elseif iswhere(sig)
         for i = 2:length(sig.args)
             x = mark_binding!(sig.args[i], meta_dict)
@@ -153,7 +153,7 @@ function mark_parameters(sig::EXPR, params = String[])
                 push!(params, val)
             end
         end
-        mark_parameters(sig.args[1], params)
+        mark_parameters(sig.args[1], meta_dict, params)
     elseif CSTParser.iscurly(sig)
         for i = 2:length(sig.args)
             x = mark_binding!(sig.args[i], meta_dict)

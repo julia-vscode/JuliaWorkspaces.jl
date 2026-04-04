@@ -172,6 +172,7 @@ whether a variable is made available by an import statement.
 """
 
 function initial_pass_on_exports(x::EXPR, name, state)
+    meta_dict = state.meta_dict
     for a in x.args[3] # module block expressions
         if headof(a) === :export
             for i = 1:length(a.args)
