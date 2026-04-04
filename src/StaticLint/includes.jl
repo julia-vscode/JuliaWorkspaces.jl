@@ -79,9 +79,9 @@ function process_EXPR(x::EXPR, state::IncludeOnly)
             end
 
             if path!==nothing
-                can_uri = input_canonical_uri(state.rt, filepath2uri(path))
-                push!(state.included_files, can_uri)
-                state.include_dict[objectid(x)] = can_uri
+                uri = filepath2uri(path)
+                push!(state.included_files, uri)
+                state.include_dict[objectid(x)] = uri
             end
         end
     elseif !(CSTParser.defines_function(x) || CSTParser.defines_macro(x) || headof(x) === :export || headof(x) === :public)

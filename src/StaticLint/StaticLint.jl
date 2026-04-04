@@ -2,7 +2,6 @@ module StaticLint
 
 import ..derived_has_file
 import ..derived_julia_legacy_syntax_tree
-import ..input_canonical_uri
 
 function hasfile end
 

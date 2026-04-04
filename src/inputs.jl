@@ -80,9 +80,3 @@ Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, versio
     return nothing
 end
 
-Salsa.@declare_input input_canonical_uri(rt, uri)::URI function(ctx, uri)
-    # TODO We need to track this and then update as needed
-    path = uri2filepath(uri)
-    path2 = realpath(path)
-    return filepath2uri(path2)
-end
