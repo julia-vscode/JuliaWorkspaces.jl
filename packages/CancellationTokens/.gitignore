@@ -6,3 +6,4 @@
 *.ignore.*
 Manifest.toml
 lcov.info
+docs/build
