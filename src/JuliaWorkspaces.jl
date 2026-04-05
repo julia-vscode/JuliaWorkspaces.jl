@@ -1,6 +1,6 @@
 module JuliaWorkspaces
 
-import UUIDs, JuliaSyntax, TestItemDetection, CSTParser, JSONRPC, Sockets
+import UUIDs, JuliaSyntax, TestItemDetection, CSTParser, JSONRPC, Sockets, CancellationTokens
 using UUIDs: UUID, uuid4
 using JuliaSyntax: SyntaxNode
 using Salsa

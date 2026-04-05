@@ -297,6 +297,56 @@ struct JuliaWorkspace
     end
 end
 
+function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1)
+    cache_path = joinpath(store_path, uppercase(string(name)[1:1]), string(name, "_", uuid), string("v", version, "_", git_tree_sha1, ".jstore"))
+
+    if isfile(cache_path)
+        package_data = open(cache_path) do io
+            SymbolServer.CacheStore.read(io)
+        end
+
+        pkg_path = Base.locate_package(Base.PkgId(uuid, string(name)))
+
+        # TODO Reenable this
+        # if pkg_path === nothing || !isfile(pkg_path)
+        #     pkg_path = SymbolServer.get_pkg_path(Base.PkgId(uuid, pe_name), environment_path, ctx.dynamic_feature.depot_path)
+        # end
+
+        if pkg_path !== nothing
+            SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
+        end
+
+        return package_data
+    end
+
+    return nothing
+end
+
+function _load_package_caches_for_project!(jw, project_uri)
+    project = derived_project(jw.runtime, project_uri)
+    project === nothing && return
+
+    store_path = jw.dynamic_feature.store_path
+
+    for (_, v) in project.regular_packages
+        package_data = _try_load_package_cache(store_path, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1)
+        if package_data !== nothing
+            @info "Now package data is ready" v.name v.uuid v.version v.git_tree_sha1
+            set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1, package_data)
+        end
+    end
+
+    for (_, v) in project.stdlib_packages
+        v.version === nothing && continue
+        ver = parse(VersionNumber, v.version)
+        package_data = _try_load_package_cache(store_path, Symbol(v.name), v.uuid, ver, nothing)
+        if package_data !== nothing
+            @info "Now package data is ready (stdlib)" v.name v.uuid v.version
+            set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, ver, nothing, package_data)
+        end
+    end
+end
+
 function process_from_dynamic(jw::JuliaWorkspace)
     if jw.dynamic_feature !== nothing
         while isready(jw.dynamic_feature.out_channel)
@@ -305,26 +355,9 @@ function process_from_dynamic(jw::JuliaWorkspace)
             if msg.command == :environment_ready
                 @info "Processeing new env"
                 for i in jw.dynamic_feature.missing_pkg_metadata
-                    cache_path = joinpath(jw.dynamic_feature.store_path, uppercase(string(i.name)[1:1]), string(i.name, "_", i.uuid), string("v", i.version, "_", i.git_tree_sha1, ".jstore"))
-
-                    if isfile(cache_path)
-                        package_data = open(cache_path) do io
-                            SymbolServer.CacheStore.read(io)
-                        end
-
-                        pkg_path = Base.locate_package(Base.PkgId(i.uuid, string(i.name)))
-
-                        # TODO Reenable this
-                        # if pkg_path === nothing || !isfile(pkg_path)
-                        #     pkg_path = SymbolServer.get_pkg_path(Base.PkgId(uuid, pe_name), environment_path, ctx.dynamic_feature.depot_path)
-                        # end
-
-                        if pkg_path !== nothing
-                            SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
-                        end
-
-                        @info "Now package data is ready" i.name i.uuid i.version i.git_tree_sha1 cache_path
-
+                    package_data = _try_load_package_cache(jw.dynamic_feature.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
+                    if package_data !== nothing
+                        @info "Now package data is ready" i.name i.uuid i.version i.git_tree_sha1
                         set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
                     end
                 end
@@ -336,6 +369,11 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 add_folder_from_disc!(jw, uri2filepath(msg.test_project_uri))
 
                 set_input_project_test_environment!(jw.runtime, msg.project_uri, msg.package, msg.test_project_uri)
+
+                # Preload package caches and mark environment as known for the test project,
+                # so the next get_diagnostics won't trigger another round of background processes.
+                _load_package_caches_for_project!(jw, msg.test_project_uri)
+                set_input_project_environment!(jw.runtime, msg.test_project_uri, nothing)
             else
                 error("Unknown message: $msg")
             end

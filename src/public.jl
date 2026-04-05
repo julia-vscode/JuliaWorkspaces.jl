@@ -270,16 +270,20 @@ function get_diagnostics(jw::JuliaWorkspace)
 end
 
 """
-    get_diagnostics_blocking(jw::JuliaWorkspace; timeout::Real=60)
+    get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
 
 Wait for the dynamic environment to finish loading, then return all diagnostics.
 This is useful for CLI tools that want the full, accurate set of diagnostics.
-Returns `(diagnostics, timed_out)` where `timed_out` indicates whether the
-timeout elapsed before the environment was ready.
+If `cancel_token` is provided, throws `CancellationTokens.OperationCanceledException`
+when the token is cancelled.
 """
-function get_diagnostics_blocking(jw::JuliaWorkspace; timeout::Real=60)
-    ready = wait_until_ready(jw; timeout=timeout)
-    return get_diagnostics(jw), !ready
+function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+    # First call triggers lazy inputs that start background processes
+    get_diagnostics(jw)
+    # Wait for all background processes to complete
+    wait_until_ready(jw; cancel_token=cancel_token)
+    # Second call picks up the results and returns final diagnostics
+    return get_diagnostics(jw)
 end
 
 # Test items
@@ -344,29 +348,25 @@ function is_ready(jw::JuliaWorkspace)
 end
 
 """
-    wait_until_ready(jw::JuliaWorkspace; timeout::Real=Inf)
+    wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
 
 Block until the workspace's dynamic environment loading has completed.
-Returns `true` if the workspace became ready, `false` if `timeout` elapsed first.
+If `cancel_token` is provided, throws `CancellationTokens.OperationCanceledException`
+when the token is cancelled.
 """
-function wait_until_ready(jw::JuliaWorkspace; timeout::Real=Inf)
-    deadline = time() + timeout
+function wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
     while !is_ready(jw)
-        remaining = deadline - time()
-        remaining <= 0 && return false
-        try
-            wait_time = min(remaining, 0.5)
-            timedwait(() -> isready(jw.dynamic_feature.update_channel), wait_time)
-            # Drain the update_channel and process any dynamic results
-            while isready(jw.dynamic_feature.update_channel)
-                take!(jw.dynamic_feature.update_channel)
-            end
-            process_from_dynamic(jw)
-        catch
-            break
+        if cancel_token !== nothing
+            wait(jw.dynamic_feature.update_channel, cancel_token)
+        else
+            wait(jw.dynamic_feature.update_channel)
         end
+        # Drain the update_channel and process any dynamic results
+        while isready(jw.dynamic_feature.update_channel)
+            take!(jw.dynamic_feature.update_channel)
+        end
+        process_from_dynamic(jw)
     end
-    return is_ready(jw)
 end
 
 """
