@@ -31,6 +31,13 @@ export JuliaWorkspace,
     get_environment,
     get_expr_location,
     get_hover_text,
+    get_completions,
+    CompletionResult,
+    CompletionResultItem,
+    CompletionEdit,
+    CompletionKinds,
+    InsertFormats,
+    is_completion_match,
     get_expr1,
     get_typed_definition,
     completion_type,
@@ -553,4 +560,20 @@ no hover information for that position.
 function get_hover_text(jw::JuliaWorkspace, uri::URI, index::Integer)
     process_from_dynamic(jw)
     return _get_hover_text(jw.runtime, uri, index)
+end
+
+# Completions
+
+"""
+    get_completions(jw::JuliaWorkspace, uri::URI, offset::Integer, completion_mode::Symbol=:import)
+
+Return a `CompletionResult` with completion items at the given byte `offset`
+(1-based Julia string index) in the file identified by `uri`.
+
+`completion_mode` may be `:import` (default) or `:qualify` to control whether
+additional `using` statements are inserted for out-of-scope symbols.
+"""
+function get_completions(jw::JuliaWorkspace, uri::URI, offset::Integer, completion_mode::Symbol=:import)
+    process_from_dynamic(jw)
+    return _get_completions(jw.runtime, uri, offset, completion_mode, jw)
 end
