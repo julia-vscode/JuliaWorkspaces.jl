@@ -61,8 +61,73 @@ Salsa.@derived function derived_roots(rt)
  
     roots = setdiff(keys(uri2included), all_files_included_somewhere)
 
-    # DEBUG: log all discovered roots
-    @info "derived_roots" n_total_files=length(uri2included) n_roots=length(roots) roots=collect(roots)
-
     return roots
+end
+
+"""
+    derived_roots_for_uri(rt, uri)
+
+Return the set of roots whose include tree contains `uri`.
+If `uri` is itself a root, it will be included in the result.
+"""
+Salsa.@derived function derived_roots_for_uri(rt, uri)
+    uri2included, _ = derived_all_includes(rt)
+    roots = derived_roots(rt)
+
+    result = Set{URI}()
+
+    for root in roots
+        if root == uri
+            push!(result, root)
+            continue
+        end
+
+        # BFS from root through include tree
+        visited = Set{URI}()
+        queue = URI[root]
+        found = false
+        while !isempty(queue) && !found
+            current = popfirst!(queue)
+            current in visited && continue
+            push!(visited, current)
+            if haskey(uri2included, current)
+                for inc in uri2included[current]
+                    if inc == uri
+                        found = true
+                        break
+                    end
+                    if !(inc in visited)
+                        push!(queue, inc)
+                    end
+                end
+            end
+        end
+
+        if found
+            push!(result, root)
+        end
+    end
+
+    return result
+end
+
+"""
+    derived_best_root_for_uri(rt, uri)
+
+Return the single "best" root for a given URI. Prefers package src/ roots
+over test roots. Returns `nothing` if the URI is not part of any root's
+include tree.
+"""
+Salsa.@derived function derived_best_root_for_uri(rt, uri)
+    roots = derived_roots_for_uri(rt, uri)
+    isempty(roots) && return nothing
+    length(roots) == 1 && return first(roots)
+
+    # Prefer roots that are NOT test files
+    non_test = filter(r -> !contains(string(r), "/test/"), roots)
+    if !isempty(non_test)
+        return first(non_test)
+    end
+
+    return first(roots)
 end

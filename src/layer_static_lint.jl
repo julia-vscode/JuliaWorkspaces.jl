@@ -102,9 +102,6 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         end
     end
 
-    # DEBUG: trace workspace_packages and env contents for Tables resolution
-    @info "derived_static_lint_meta_for_root" uri workspace_packages_keys=collect(keys(workspace_packages)) project_deps=env.project_deps has_Tables_in_symbols=haskey(env.symbols, :Tables)
-
     StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt; workspace_packages)
 
     for file in julia_files

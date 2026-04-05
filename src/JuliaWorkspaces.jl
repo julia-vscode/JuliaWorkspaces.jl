@@ -10,10 +10,8 @@ using AutoHashEquals
 include("URIs2/URIs2.jl")
 
 include("SymbolServer/SymbolServer.jl")
-import .SymbolServer
 
 include("StaticLint/StaticLint.jl")
-import .StaticLint
 
 include("compat.jl")
 

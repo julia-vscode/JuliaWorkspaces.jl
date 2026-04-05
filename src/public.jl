@@ -24,6 +24,11 @@ export JuliaWorkspace,
     is_ready,
     wait_until_ready,
     get_update_channel,
+    get_legacy_cst,
+    get_roots_for_uri,
+    get_best_root_for_uri,
+    get_static_lint_data,
+    get_environment,
     TextFile,
     SourceText,
     Diagnostic
@@ -379,4 +384,102 @@ Consumers can `take!` or `wait` on this channel to be notified of updates.
 function get_update_channel(jw::JuliaWorkspace)
     jw.dynamic_feature === nothing && return nothing
     return jw.dynamic_feature.update_channel
+end
+
+# Static Lint data
+
+"""
+    get_legacy_cst(jw::JuliaWorkspace, uri::URI)
+
+Get the CSTParser legacy syntax tree for a Julia file.
+
+# Returns
+- An `EXPR` (CSTParser expression tree).
+"""
+function get_legacy_cst(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
+    return derived_julia_legacy_syntax_tree(jw.runtime, uri)
+end
+
+"""
+    get_roots_for_uri(jw::JuliaWorkspace, uri::URI)
+
+Get all root files whose include tree contains the given URI.
+
+# Returns
+- A `Set{URI}` of root file URIs.
+"""
+function get_roots_for_uri(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
+    return derived_roots_for_uri(jw.runtime, uri)
+end
+
+"""
+    get_best_root_for_uri(jw::JuliaWorkspace, uri::URI)
+
+Get the single best root file for a given URI.
+Prefers package `src/` roots over test roots when a file is reachable from
+multiple roots. Returns `nothing` if the URI is not part of any root's
+include tree.
+
+# Returns
+- A `URI` or `nothing`.
+"""
+function get_best_root_for_uri(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
+    return derived_best_root_for_uri(jw.runtime, uri)
+end
+
+"""
+    get_static_lint_data(jw::JuliaWorkspace, uri::URI)
+
+Get the static lint analysis data for the best root containing `uri`.
+This includes the metadata dictionary, environment, and workspace packages
+needed by LS request handlers.
+
+# Returns
+- A named tuple `(meta_dict, env, workspace_packages, root)` or `nothing` if no root
+  contains the URI.
+  - `meta_dict::Dict{UInt64, StaticLint.Meta}` — maps EXPR object_id → metadata
+  - `env::StaticLint.ExternalEnv` — resolved environment (symbols, methods, deps)
+  - `workspace_packages::Dict{String,Any}` — deved packages available for import
+  - `root::URI` — the root file that was used
+"""
+function get_static_lint_data(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
+    root = derived_best_root_for_uri(jw.runtime, uri)
+    root === nothing && return nothing
+
+    lint_result = derived_static_lint_meta_for_root(jw.runtime, root)
+    project_uri = derived_project_uri_for_root(jw.runtime, root)
+    env = derived_environment(jw.runtime, project_uri)
+
+    return (
+        meta_dict=lint_result.meta_dict,
+        env=env,
+        workspace_packages=lint_result.workspace_packages,
+        root=root
+    )
+end
+
+"""
+    get_environment(jw::JuliaWorkspace, uri::URI)
+
+Get the resolved environment for the best root containing `uri`.
+
+# Returns
+- A `StaticLint.ExternalEnv` or `nothing`.
+"""
+function get_environment(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+
+    root = derived_best_root_for_uri(jw.runtime, uri)
+    root === nothing && return nothing
+
+    project_uri = derived_project_uri_for_root(jw.runtime, root)
+    return derived_environment(jw.runtime, project_uri)
 end
