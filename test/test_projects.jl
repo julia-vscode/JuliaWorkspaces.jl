@@ -3,7 +3,7 @@
     import UUIDs
     using UUIDs: UUID
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
 
     jw = workspace_from_folders([pkg_root])
 
@@ -29,7 +29,7 @@ end
     using UUIDs, Pkg
 
     mktempdir() do root_path
-        cp(joinpath(@__DIR__, "data", "project_detection"), joinpath(root_path, "project_detection"))
+        cp(joinpath(@__DIR__, "..", "testdata", "project_detection"), joinpath(root_path, "project_detection"))
 
         Pkg.activate(joinpath(root_path, "project_detection"))
         Pkg.develop(PackageSpec(path=joinpath(root_path, "project_detection", "TestPackage3")))

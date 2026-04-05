@@ -396,7 +396,7 @@ end
     using JuliaWorkspaces.URIs2: @uri_str, filepath2uri
 
     mktempdir() do root_path
-        cp(joinpath(@__DIR__, "data", "project_detection"), joinpath(root_path, "project_detection"))
+        cp(joinpath(@__DIR__, "..", "testdata", "project_detection"), joinpath(root_path, "project_detection"))
 
         Pkg.activate(joinpath(root_path, "project_detection", "TestPackage2"))
         Pkg.instantiate()

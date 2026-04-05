@@ -1,7 +1,7 @@
 @testitem "Julia workspace" begin
     using JuliaWorkspaces: filepath2uri, JuliaWorkspace
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
     project_file_path = joinpath(pkg_root, "Project.toml")
     project_path = dirname(project_file_path)
     project_file_uri = filepath2uri(project_file_path)
@@ -41,7 +41,7 @@ end
 @testitem "add_workspace_folder" begin
     using JuliaWorkspaces: filepath2uri
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
     project_file_path = joinpath(pkg_root, "Project.toml")
     project_path = dirname(project_file_path)
     project_file_uri = filepath2uri(project_file_path)
@@ -82,7 +82,7 @@ end
 @testitem "add_workspace_folder and remove_workspace_folder" begin
     using JuliaWorkspaces: filepath2uri
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
     pkg_root_uri = filepath2uri(pkg_root)
     project_file_path = joinpath(pkg_root, "Project.toml")
     project_path = dirname(project_file_path)
@@ -93,7 +93,7 @@ end
     jl_file_with_error_file_path = joinpath(pkg_root, "src", "file_with_error.jl")
     jl_file_with_error_file_uri = filepath2uri(jl_file_with_error_file_path)
 
-    second_folder = joinpath(@__DIR__, "data", "project_detection", "TestPackage2", "src")
+    second_folder = joinpath(@__DIR__, "..", "testdata", "project_detection", "TestPackage2", "src")
 
     jw = JuliaWorkspace()
     add_folder_from_disc!(jw, pkg_root)
@@ -128,7 +128,7 @@ end
 @testitem "add_file" begin
     using JuliaWorkspaces: filepath2uri
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
     pkg_root_uri = filepath2uri(pkg_root)
     project_file_path = joinpath(pkg_root, "Project.toml")
     project_path = dirname(project_file_path)
@@ -163,7 +163,7 @@ end
 @testitem "update_file" begin
     using JuliaWorkspaces: filepath2uri
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
     pkg_root_uri = filepath2uri(pkg_root)
     project_file_path = joinpath(pkg_root, "Project.toml")
     project_path = dirname(project_file_path)
@@ -199,7 +199,7 @@ end
 @testitem "delete_file" begin
     using JuliaWorkspaces: filepath2uri
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
     pkg_root_uri = filepath2uri(pkg_root)
     project_file_path = joinpath(pkg_root, "Project.toml")
     project_path = dirname(project_file_path)
