@@ -77,8 +77,6 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     for uri in julia_files
         cst = derived_julia_legacy_syntax_tree(rt, uri)
         StaticLint.ensuremeta(cst, meta_dict)
-
-        StaticLint.getmeta(cst, meta_dict).error = :doc # TODO WHAT IS OUR DOC??
     end
 
     cst = derived_julia_legacy_syntax_tree(rt, uri)
@@ -168,4 +166,23 @@ Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
     all_diags = derived_static_lint_all_diagnostics(rt)
 
     return all_diags[uri]
+end
+
+"""
+    derived_expr_uri_map(rt)
+
+Build a mapping from `objectid(root_cst)` → `URI` for every Julia file in the
+workspace. This allows resolving which file owns a given EXPR by walking
+`parent` pointers up to the file-root node and looking up its `objectid`.
+
+Salsa-memoized: invalidated when any file's CST changes (which also changes
+its `objectid`).
+"""
+Salsa.@derived function derived_expr_uri_map(rt)
+    result = Dict{UInt64,URI}()
+    for uri in derived_all_julia_files(rt)
+        cst = derived_julia_legacy_syntax_tree(rt, uri)
+        result[objectid(cst)] = uri
+    end
+    return result
 end

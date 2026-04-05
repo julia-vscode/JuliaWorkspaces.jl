@@ -29,6 +29,7 @@ export JuliaWorkspace,
     get_best_root_for_uri,
     get_static_lint_data,
     get_environment,
+    get_expr_location,
     TextFile,
     SourceText,
     Diagnostic
@@ -482,4 +483,56 @@ function get_environment(jw::JuliaWorkspace, uri::URI)
 
     project_uri = derived_project_uri_for_root(jw.runtime, root)
     return derived_environment(jw.runtime, project_uri)
+end
+
+"""
+    get_expr_location(jw::JuliaWorkspace, x::CSTParser.EXPR)
+
+Given an EXPR node from a CST obtained via `get_legacy_cst`, return the URI and
+byte offset of `x` within its owning file.
+
+Walks `x.parent` pointers up to the file-root EXPR, computes the byte offset
+by descending through the tree, then looks up the root's `objectid` in a
+Salsa-memoized expr→URI mapping.
+
+# Returns
+- `(uri::URI, offset::Int)` if the owning file is found
+- `nothing` if the EXPR cannot be mapped to a file
+"""
+function get_expr_location(jw::JuliaWorkspace, x::CSTParser.EXPR)
+    # Walk to root
+    root = x
+    while CSTParser.parentof(root) !== nothing
+        root = CSTParser.parentof(root)
+    end
+
+    # Must be a :file node to have a URI mapping
+    CSTParser.headof(root) === :file || return nothing
+
+    # Look up which file owns this root
+    expr_uri_map = derived_expr_uri_map(jw.runtime)
+    uri = get(expr_uri_map, objectid(root), nothing)
+    uri === nothing && return nothing
+
+    # Compute byte offset of x within the file
+    _, offset = _descend(root, x)
+
+    return (uri=uri, offset=offset)
+end
+
+"""
+    _descend(root::CSTParser.EXPR, target::CSTParser.EXPR, offset=0)
+
+Walk the CST from `root` to find `target`, accumulating the byte offset.
+Returns `(found::Bool, offset::Int)`.
+"""
+function _descend(x::CSTParser.EXPR, target::CSTParser.EXPR, offset=0)
+    x === target && return (true, offset)
+    for c in x
+        c === target && return (true, offset)
+        found, o = _descend(c, target, offset)
+        found && return (true, o)
+        offset += c.fullspan
+    end
+    return (false, offset)
 end
