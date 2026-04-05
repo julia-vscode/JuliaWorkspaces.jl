@@ -61,5 +61,8 @@ Salsa.@derived function derived_roots(rt)
  
     roots = setdiff(keys(uri2included), all_files_included_somewhere)
 
+    # DEBUG: log all discovered roots
+    @info "derived_roots" n_total_files=length(uri2included) n_roots=length(roots) roots=collect(roots)
+
     return roots
 end

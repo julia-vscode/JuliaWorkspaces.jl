@@ -177,7 +177,7 @@ function initial_pass_on_exports(x::EXPR, name, state)
         if headof(a) === :export
             for i = 1:length(a.args)
                 if isidentifier(a.args[i]) && valof(a.args[i]) == name && !hasref(a.args[i], meta_dict)
-                    Delayed(scopeof(x, meta_dict), state.env)(a.args[i])
+                    process_EXPR(a.args[i], Delayed(scopeof(x, meta_dict), state.env, state.workspace_packages, meta_dict))
                 end
             end
         end

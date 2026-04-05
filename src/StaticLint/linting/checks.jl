@@ -616,7 +616,7 @@ collect_hints(x::EXPR, env, missingrefs = :all, isquoted = false, errs = Tuple{I
 Collect hints and errors from an expression. `missingrefs` = (:none, :id, :all) determines whether unresolved
 identifiers are marked, the :all option will mark identifiers used in getfield calls."
 """
-function collect_hints(x::EXPR, env, meta_dict, missingrefs=:all, isquoted=false, errs=Tuple{Int,EXPR}[], pos=0)
+function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=:all, isquoted=false, errs=Tuple{Int,EXPR}[], pos=0)
     if quoted(x)
         isquoted = true
     elseif isquoted && unquoted(x)
@@ -634,12 +634,12 @@ function collect_hints(x::EXPR, env, meta_dict, missingrefs=:all, isquoted=false
             # collect lint hints
             push!(errs, (pos, x))
         end
-    elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, meta_dict)
+    elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
         push!(errs, (pos, x))
     end
 
     for i in 1:length(x)
-        collect_hints(x[i], env, meta_dict, missingrefs, isquoted, errs, pos)
+        collect_hints(x[i], env, workspace_packages, meta_dict, missingrefs, isquoted, errs, pos)
         pos += x[i].fullspan
     end
 
@@ -654,7 +654,7 @@ function refof_maybe_getfield(x::EXPR, meta_dict)
     end
 end
 
-function should_mark_missing_getfield_ref(x, env, meta_dict)
+function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
     if isidentifier(x) && !hasref(x, meta_dict) && # x has no ref
     parentof(x) isa EXPR && headof(parentof(x)) === :quotenode && parentof(parentof(x)) isa EXPR && is_getfield(parentof(parentof(x)))  # x is the rhs of a getproperty
         lhsref = refof_maybe_getfield(parentof(parentof(x)).args[1], meta_dict)
@@ -664,7 +664,7 @@ function should_mark_missing_getfield_ref(x, env, meta_dict)
             return true
         elseif lhsref isa Binding
             # by-use type inference runs after we've resolved references so we may not have known lhsref's type first time round, lets try and find `x` again
-            resolve_getfield(x, lhsref, ResolveOnly(retrieve_scope(x, meta_dict), env, meta_dict), meta_dict) # FIXME: Setting `server` to nothing might be sketchy?
+            resolve_getfield(x, lhsref, ResolveOnly(retrieve_scope(x, meta_dict), env, workspace_packages, meta_dict), meta_dict) # FIXME: Setting `server` to nothing might be sketchy?
             hasref(x, meta_dict) && return false # We've resolved
             if lhsref.val isa Binding
                 lhsref = lhsref.val

@@ -2,10 +2,13 @@ Salsa.@derived function derived_environment(rt, uri)
     project = derived_project(rt, uri)
     
     metadata_packages = SymbolServer.Package[]
+    missing_packages = String[]
     for (k,v) in project.regular_packages
         x = input_package_metadata(rt, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1)
         if x!==nothing
             push!(metadata_packages, x)
+        else
+            push!(missing_packages, v.name)
         end
     end
 
@@ -32,7 +35,7 @@ Salsa.@derived function derived_environment(rt, uri)
         end
     end
 
-    @info "The env for $uri is" keys(new_store)
+    @info "The env for $uri is" keys(new_store) missing_packages n_regular=length(project.regular_packages) n_stdlib=length(project.stdlib_packages) n_deved=length(project.deved_packages)
 
     return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), project_deps)
 end
@@ -78,6 +81,12 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
                 @info "For $uri we are returning $test_project_uri as the test project."
                 return test_project_uri
             end
+        end
+
+        # If the file belongs to a workspace package, use the package's own project
+        if package_folder_uri in derived_project_folders(rt)
+            @info "For $uri we are returning $package_folder_uri as the package project."
+            return package_folder_uri
         end
     end
 

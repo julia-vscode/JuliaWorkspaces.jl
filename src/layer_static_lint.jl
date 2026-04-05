@@ -91,17 +91,21 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     # This will trigger the launch of the dynamic process
     input_project_environment(rt, project_uri)
 
-    # Merge cached semantic info for in-workspace deved packages
+    # Build workspace_packages dict from cached deved package semantic info
+    workspace_packages = Dict{String,Any}()
     workspace_deved = derived_workspace_deved_packages(rt, project_uri)
     for (pkg_name, pkg_entry_uri) in workspace_deved
         result = derived_deved_package_meta(rt, pkg_entry_uri, project_uri)
         merge_meta_dict!(meta_dict, result.meta_dict)
         if result.module_binding !== nothing
-            env.workspace_packages[pkg_name] = result.module_binding
+            workspace_packages[pkg_name] = result.module_binding
         end
     end
 
-    StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt)
+    # DEBUG: trace workspace_packages and env contents for Tables resolution
+    @info "derived_static_lint_meta_for_root" uri workspace_packages_keys=collect(keys(workspace_packages)) project_deps=env.project_deps has_Tables_in_symbols=haskey(env.symbols, :Tables)
+
+    StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt; workspace_packages)
 
     for file in julia_files
         cst2 = derived_julia_legacy_syntax_tree(rt, file)
@@ -109,16 +113,18 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         StaticLint.check_all(cst2, StaticLint.LintOptions(), env, meta_dict)
     end
 
-    return meta_dict
+    return (meta_dict=meta_dict, workspace_packages=workspace_packages)
 end
 
-Salsa.@derived function derived_static_lint_all_diagnostics(rt)    
+Salsa.@derived function derived_static_lint_all_diagnostics(rt)
     # We use a Set to deduplicate diagnostics, as the same diagnostic
     # can be produced from multiple roots due to includes
     res = Dict{URI,Set{Diagnostic}}()
 
     for root in derived_roots(rt)
-        meta_dict = derived_static_lint_meta_for_root(rt, root)
+        lint_result = derived_static_lint_meta_for_root(rt, root)
+        meta_dict = lint_result.meta_dict
+        workspace_packages = lint_result.workspace_packages
         env = derived_environment(rt, derived_project_uri_for_root(rt, root))
 
         uris_to_check = Set{URI}([root])
@@ -135,7 +141,7 @@ Salsa.@derived function derived_static_lint_all_diagnostics(rt)
 
             cst = derived_julia_legacy_syntax_tree(rt, uri)
             # errs = StaticLint.collect_hints(cst, getenv(doc), doc.server.lint_missingrefs)
-            errs = StaticLint.collect_hints(cst, env, meta_dict, :id)
+            errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, :id)
 
             for err in errs
                 rng = err[1]+1:err[1]+err[2].fullspan+1

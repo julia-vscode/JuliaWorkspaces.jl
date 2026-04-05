@@ -142,8 +142,8 @@ function _get_field(par, arg, state)
     if par isa SymbolServer.EnvStore
         if (arg_scope = retrieve_scope(arg, meta_dict)) !== nothing && (tlm = get_named_toplevel_module(arg_scope, arg_str_rep)) !== nothing && hasbinding(tlm, meta_dict)
             return bindingof(tlm, meta_dict)
-        elseif haskey(state.env.workspace_packages, arg_str_rep)
-            return state.env.workspace_packages[arg_str_rep]
+        elseif haskey(state.workspace_packages, arg_str_rep)
+            return state.workspace_packages[arg_str_rep]
         elseif haskey(par, Symbol(arg_str_rep))
             if isempty(state.env.project_deps) || Symbol(arg_str_rep) in state.env.project_deps
                 return par[Symbol(arg_str_rep)]

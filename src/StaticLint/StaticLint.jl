@@ -59,9 +59,7 @@ mutable struct ExternalEnv
     symbols::SymbolServer.EnvStore
     extended_methods::Dict{SymbolServer.VarRef,Vector{SymbolServer.VarRef}}
     project_deps::Vector{Symbol}
-    workspace_packages::Dict{String,Any}
 end
-ExternalEnv(symbols, extended_methods, project_deps) = ExternalEnv(symbols, extended_methods, project_deps, Dict{String,Any}())
 
 getsymbols(env::ExternalEnv) = env.symbols
 getsymbolextendeds(env::ExternalEnv) = env.extended_methods
@@ -78,6 +76,7 @@ mutable struct Toplevel{RT} <: TraverseState
     delayed::Vector{EXPR}
     resolveonly::Vector{EXPR}
     env::ExternalEnv
+    workspace_packages::Dict{String,Any}
     flags::Int
     meta_dict::Dict{UInt64,Meta}
     include_dict::Dict{UInt64,URI}
@@ -86,8 +85,8 @@ end
 
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
-Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, meta_dict, include_dict, runtime) =
-    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, 0, meta_dict, include_dict, runtime)
+Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, include_dict, runtime) =
+    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, 0, meta_dict, include_dict, runtime)
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -123,11 +122,12 @@ end
 mutable struct Delayed <: TraverseState
     scope::Scope
     env::ExternalEnv
+    workspace_packages::Dict{String,Any}
     flags::Int
     meta_dict::Dict{UInt64,Meta}
 end
 
-Delayed(scope, env, meta_dict) = Delayed(scope, env, 0, meta_dict)
+Delayed(scope, env, workspace_packages, meta_dict) = Delayed(scope, env, workspace_packages, 0, meta_dict)
 
 function process_EXPR(x::EXPR, state::Delayed)
     meta_dict = state.meta_dict
@@ -156,6 +156,7 @@ end
 mutable struct ResolveOnly <: TraverseState
     scope::Scope
     env::ExternalEnv
+    workspace_packages::Dict{String,Any}
     meta_dict::Dict{UInt64,Meta}
 end
 
@@ -197,27 +198,27 @@ end
 
 Performs a semantic pass across a project from the entry point `file`. A first pass traverses the top-level scope after which secondary passes handle delayed scopes (e.g. functions). These secondary passes can be, optionally, very light and only seek to resovle references (e.g. link symbols to bindings). This can be done by supplying a list of expressions on which the full secondary pass should be made (`modified_expr`), all others will receive the light-touch version.
 """
-function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr = nothing)
+function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}())
     setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
-    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, meta_dict, include_dict, rt)
+    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, meta_dict, include_dict, rt)
     process_EXPR(cst, state)
     for x in state.delayed
         if hasscope(x, meta_dict)
-            traverse(x, Delayed(scopeof(x, meta_dict), env, meta_dict))
+            traverse(x, Delayed(scopeof(x, meta_dict), env, workspace_packages, meta_dict))
             for (k, b) in scopeof(x, meta_dict).names
                 infer_type_by_use(b, env, meta_dict)
                 check_unused_binding(b, scopeof(x, meta_dict), meta_dict)
             end
         else
-            traverse(x, Delayed(retrieve_delayed_scope(x, meta_dict), env, meta_dict))
+            traverse(x, Delayed(retrieve_delayed_scope(x, meta_dict), env, workspace_packages, meta_dict))
         end
     end
     if state.resolveonly !== nothing
         for x in state.resolveonly
             if hasscope(x, meta_dict)
-                traverse(x, ResolveOnly(scopeof(x, meta_dict), env, meta_dict))
+                traverse(x, ResolveOnly(scopeof(x, meta_dict), env, workspace_packages, meta_dict))
             else
-                traverse(x, ResolveOnly(retrieve_delayed_scope(x, meta_dict), env, meta_dict))
+                traverse(x, ResolveOnly(retrieve_delayed_scope(x, meta_dict), env, workspace_packages, meta_dict))
             end
         end
     end
