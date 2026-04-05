@@ -30,6 +30,10 @@ export JuliaWorkspace,
     get_static_lint_data,
     get_environment,
     get_expr_location,
+    get_hover_text,
+    get_expr1,
+    get_typed_definition,
+    completion_type,
     TextFile,
     SourceText,
     Diagnostic
@@ -535,4 +539,18 @@ function _descend(x::CSTParser.EXPR, target::CSTParser.EXPR, offset=0)
         offset += c.fullspan
     end
     return (false, offset)
+end
+
+# Hover
+
+"""
+    get_hover_text(jw::JuliaWorkspace, uri::URI, index::Integer)
+
+Return a Markdown documentation string for the expression at `index` (1-based
+Julia string index) in the file identified by `uri`, or `nothing` if there is
+no hover information for that position.
+"""
+function get_hover_text(jw::JuliaWorkspace, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    return _get_hover_text(jw.runtime, uri, index)
 end

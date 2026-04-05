@@ -37,6 +37,7 @@ include("layer_projects.jl")
 include("layer_environment.jl")
 include("layer_testitems.jl")
 include("layer_diagnostics.jl")
+include("layer_hover.jl")
 include("fileio.jl")
 include("public.jl")
 
