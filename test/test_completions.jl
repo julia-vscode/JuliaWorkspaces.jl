@@ -30,19 +30,19 @@
 
     uri = URI("file:///comptest/src/CompTest.jl")
 
-    # Helper: get 0-based byte offset for (1-based line, 1-based col)
-    function byte_offset(src, line, col)
+    # Helper: get 1-based string index for (1-based line, 1-based col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
     # \therefor at end of partial (line 2, col 10 = after "\\therefor")
-    offset = byte_offset(source, 2, 10)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 2, 10)
+    result = get_completions(jw, uri, index)
     @test !isempty(result.items)
     @test any(item -> item.label == "\\therefore", result.items)
     # Check that the replacement text is the unicode char
@@ -82,17 +82,17 @@ end
 
     uri = URI("file:///compkw/src/CompKW.jl")
 
-    function byte_offset(src, line, col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
-    offset = byte_offset(source, 2, 2)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 2, 2)
+    result = get_completions(jw, uri, index)
     @test any(item -> item.label == "for", result.items)
     @test any(item -> item.label == "function", result.items)
     # "for" snippet should have snippet format
@@ -132,18 +132,18 @@ end
 
     uri = URI("file:///compdot/src/CompDot.jl")
 
-    function byte_offset(src, line, col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
     # After "Base." (line 2, col 6)
-    offset = byte_offset(source, 2, 6)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 2, 6)
+    result = get_completions(jw, uri, index)
     @test length(result.items) > 10
 end
 
@@ -179,18 +179,18 @@ end
 
     uri = URI("file:///compdotp/src/CompDotP.jl")
 
-    function byte_offset(src, line, col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
     # After "Base.r" (line 2, col 7)
-    offset = byte_offset(source, 2, 7)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 2, 7)
+    result = get_completions(jw, uri, index)
     @test any(item -> item.label == "rand", result.items)
 end
 
@@ -226,18 +226,18 @@ end
 
     uri = URI("file:///comptok/src/CompTok.jl")
 
-    function byte_offset(src, line, col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
     # After "r" (line 2, col 2)
-    offset = byte_offset(source, 2, 2)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 2, 2)
+    result = get_completions(jw, uri, index)
     @test any(item -> item.label == "rand", result.items)
 end
 
@@ -274,18 +274,18 @@ end
 
     uri = URI("file:///compscope/src/CompScope.jl")
 
-    function byte_offset(src, line, col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
     # After "myv" (line 3, col 4)
-    offset = byte_offset(source, 3, 4)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 3, 4)
+    result = get_completions(jw, uri, index)
     @test any(item -> item.label == "myvar", result.items)
 end
 
@@ -321,18 +321,18 @@ end
 
     uri = URI("file:///compimp/src/CompImp.jl")
 
-    function byte_offset(src, line, col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
     # After "import Base: r" (line 2, col 15 = right after "r")
-    offset = byte_offset(source, 2, 15)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 2, 15)
+    result = get_completions(jw, uri, index)
     # In a minimal workspace without symbol server data, Base members won't resolve,
     # so we just verify the function returns a valid result without error.
     @test result isa CompletionResult
@@ -378,7 +378,7 @@ end
 
     uri = URI("file:///compempty/src/CompEmpty.jl")
 
-    result = get_completions(jw, uri, 0)
+    result = get_completions(jw, uri, 1)
     @test result isa CompletionResult
     @test result.is_incomplete == true
 end
@@ -418,18 +418,18 @@ end
 
     uri = URI("file:///compkinds/src/CompKinds.jl")
 
-    function byte_offset(src, line, col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
     # After "kind_variable_" (line 4, col 19)
-    offset = byte_offset(source, 4, 19)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 4, 19)
+    result = get_completions(jw, uri, index)
     @test any(i -> i.label == "kind_variable_local" && i.kind == CompletionKinds.Variable, result.items)
     @test any(i -> i.label == "kind_variable_arg" && i.kind == CompletionKinds.Variable, result.items)
 end
@@ -467,17 +467,17 @@ end
 
     uri = URI("file:///comprelimp/src/CompRelImp.jl")
 
-    function byte_offset(src, line, col)
+    function string_index(src, line, col)
         lines = split(src, '\n')
         off = 0
         for l in 1:(line - 1)
             off += ncodeunits(lines[l]) + 1
         end
-        return off + col - 1
+        return off + col
     end
 
     # After "import ." (line 3, col 9)
-    offset = byte_offset(source, 3, 9)
-    result = get_completions(jw, uri, offset)
+    index = string_index(source, 3, 9)
+    result = get_completions(jw, uri, index)
     @test any(item -> item.label == "M", result.items)
 end

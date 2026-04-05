@@ -39,11 +39,11 @@ module InsertFormats
 end
 
 """
-A text edit expressed in byte offsets (0-based).
+A text edit expressed in string indices (1-based).
 """
 struct CompletionEdit
-    start_offset::Int   # 0-based byte offset
-    end_offset::Int     # 0-based byte offset (exclusive)
+    start_index::Int   # 1-based Julia string index
+    end_index::Int     # 1-based Julia string index
     new_text::String
     uri::Union{Nothing,URI}  # nothing means same file
 end
@@ -200,12 +200,12 @@ function is_completion_match(s::AbstractString, prefix::AbstractString, cutoff=3
 end
 
 # ============================================================================
-# Completion edit helpers (byte-offset based, no LSP Range)
+# Completion edit helpers (1-based string indices)
 # ============================================================================
 
 function _texteditfor(state::_CompletionState, partial, new_text)
     start_off = max(state.start_offset - length(partial), 0)
-    CompletionEdit(start_off, state.end_offset, new_text, nothing)
+    CompletionEdit(start_off + 1, state.end_offset + 1, new_text, nothing)
 end
 
 # ============================================================================
@@ -403,7 +403,7 @@ function _path_completion(t, state::_CompletionState)
                         if isdir(joinpath(dir, f))
                             f = string(f, "/")
                         end
-                        edit = CompletionEdit(state.offset - sizeof(partial), state.offset, f, nothing)
+                        edit = CompletionEdit(state.offset - sizeof(partial) + 1, state.offset + 1, f, nothing)
                         _add_completion_item(state, CompletionResultItem(
                             f, CompletionKinds.File, f, nothing, edit))
                     catch err
@@ -580,7 +580,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                     n, CompletionKinds.Module,
                     _completion_details_description(m),
                     _sanitize_docstring(m.doc),
-                    CompletionEdit(state.start_offset, state.end_offset, n, nothing)))
+                    CompletionEdit(state.start_offset + 1, state.end_offset + 1, n, nothing)))
             end
         end
     elseif t.kind == Tokens.DOT && pt.kind == Tokens.IDENTIFIER
@@ -872,24 +872,24 @@ function _textedit_to_insert_using_stmt(m::SymbolServer.ModuleStore, n::String, 
     if haskey(state.using_stmts, String(m.name.name))
         (using_stmt, (uri, using_offset)) = state.using_stmts[String(m.name.name)]
         insert_offset = using_offset + using_stmt.span
-        return [CompletionEdit(insert_offset, insert_offset, ", $n", uri)]
+        return [CompletionEdit(insert_offset + 1, insert_offset + 1, ", $n", uri)]
     elseif tls !== nothing
         if tls.expr.head === :file
-            return [CompletionEdit(0, 0, "using $(m.name): $(n)\n", nothing)]
+            return [CompletionEdit(1, 1, "using $(m.name): $(n)\n", nothing)]
         elseif tls.expr.head === :module
             tls_loc = get_expr_location(state.workspace, tls.expr)
             if tls_loc !== nothing
                 offset2 = tls.expr.trivia[1].fullspan + tls.expr.args[2].fullspan
                 insert_offset = tls_loc.offset + offset2
-                return [CompletionEdit(insert_offset, insert_offset, "using $(m.name): $(n)\n", tls_loc.uri)]
+                return [CompletionEdit(insert_offset + 1, insert_offset + 1, "using $(m.name): $(n)\n", tls_loc.uri)]
             else
-                return [CompletionEdit(0, 0, "using $(m.name): $(n)\n", nothing)]
+                return [CompletionEdit(1, 1, "using $(m.name): $(n)\n", nothing)]
             end
         else
             error()
         end
     else
-        return [CompletionEdit(0, 0, "using $(m.name): $(n)\n", nothing)]
+        return [CompletionEdit(1, 1, "using $(m.name): $(n)\n", nothing)]
     end
 end
 

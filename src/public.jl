@@ -565,15 +565,16 @@ end
 # Completions
 
 """
-    get_completions(jw::JuliaWorkspace, uri::URI, offset::Integer, completion_mode::Symbol=:import)
+    get_completions(jw::JuliaWorkspace, uri::URI, index::Integer, completion_mode::Symbol=:import)
 
-Return a `CompletionResult` with completion items at the given byte `offset`
+Return a `CompletionResult` with completion items at the given `index`
 (1-based Julia string index) in the file identified by `uri`.
 
 `completion_mode` may be `:import` (default) or `:qualify` to control whether
 additional `using` statements are inserted for out-of-scope symbols.
 """
-function get_completions(jw::JuliaWorkspace, uri::URI, offset::Integer, completion_mode::Symbol=:import)
+function get_completions(jw::JuliaWorkspace, uri::URI, index::Integer, completion_mode::Symbol=:import)
     process_from_dynamic(jw)
+    offset = index - 1  # Convert 1-based string index to 0-based CSTParser offset
     return _get_completions(jw.runtime, uri, offset, completion_mode, jw)
 end
