@@ -41,6 +41,38 @@ export JuliaWorkspace,
     get_expr1,
     get_typed_definition,
     completion_type,
+    get_definitions,
+    get_references,
+    get_rename_edits,
+    get_highlights,
+    can_rename,
+    DefinitionResult,
+    ReferenceResult,
+    RenameEdit,
+    HighlightResult,
+    get_signature_help,
+    SignatureResult,
+    SignatureInfo,
+    ParameterInfo,
+    get_document_symbols,
+    get_workspace_symbols,
+    DocumentSymbolResult,
+    WorkspaceSymbolResult,
+    get_selection_ranges,
+    get_current_block_range,
+    get_module_at,
+    SelectionRangeResult,
+    BlockRangeResult,
+    get_document_links,
+    get_inlay_hints,
+    DocumentLinkResult,
+    InlayHintResult,
+    InlayHintConfig,
+    get_code_actions,
+    execute_code_action,
+    CodeActionInfo,
+    TextEditResult,
+    WorkspaceFileEdit,
     TextFile,
     SourceText,
     Diagnostic
@@ -577,4 +609,206 @@ function get_completions(jw::JuliaWorkspace, uri::URI, index::Integer, completio
     process_from_dynamic(jw)
     offset = index - 1  # Convert 1-based string index to 0-based CSTParser offset
     return _get_completions(jw.runtime, uri, offset, completion_mode, jw)
+end
+
+# References / Definition / Rename / Highlight
+
+"""
+    get_definitions(jw::JuliaWorkspace, uri::URI, index::Integer)
+
+Return a vector of `DefinitionResult` for the symbol at `index` (1-based
+Julia string index) in the file identified by `uri`.
+"""
+function get_definitions(jw::JuliaWorkspace, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _get_definitions(jw.runtime, uri, offset)
+end
+
+"""
+    get_references(jw::JuliaWorkspace, uri::URI, index::Integer)
+
+Return a vector of `ReferenceResult` for all references to the symbol at
+`index` (1-based Julia string index) in the file identified by `uri`.
+"""
+function get_references(jw::JuliaWorkspace, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _get_references(jw.runtime, uri, offset)
+end
+
+"""
+    get_rename_edits(jw::JuliaWorkspace, uri::URI, index::Integer, new_name::String)
+
+Return a vector of `RenameEdit` for renaming the symbol at `index` (1-based
+Julia string index) in `uri` to `new_name`.
+"""
+function get_rename_edits(jw::JuliaWorkspace, uri::URI, index::Integer, new_name::String)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _get_rename_edits(jw.runtime, uri, offset, new_name)
+end
+
+"""
+    get_highlights(jw::JuliaWorkspace, uri::URI, index::Integer)
+
+Return a vector of `HighlightResult` for highlighted occurrences of the
+symbol at `index` (1-based Julia string index) in the same file.
+"""
+function get_highlights(jw::JuliaWorkspace, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _get_highlights(jw.runtime, uri, offset)
+end
+
+"""
+    can_rename(jw::JuliaWorkspace, uri::URI, index::Integer)
+
+Check whether the symbol at `index` (1-based Julia string index) can be
+renamed. Returns a named tuple `(start_index, end_index)` with 1-based
+indices, or `nothing`.
+"""
+function can_rename(jw::JuliaWorkspace, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _can_rename(jw.runtime, uri, offset)
+end
+
+# Signatures
+
+"""
+    get_signature_help(jw::JuliaWorkspace, uri::URI, index::Integer)
+
+Return a `SignatureResult` with signature information for the function call
+at `index` (1-based Julia string index) in the file identified by `uri`.
+"""
+function get_signature_help(jw::JuliaWorkspace, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _get_signature_help(jw.runtime, uri, offset)
+end
+
+# Document Symbols / Workspace Symbols
+
+"""
+    get_document_symbols(jw::JuliaWorkspace, uri::URI)
+
+Return a vector of `DocumentSymbolResult` representing the document outline
+for the file identified by `uri`. Each result has `start_offset` and
+`end_offset` as 0-based byte offsets, plus `name`, `kind` (LSP SymbolKind
+integer), and `children`.
+"""
+function get_document_symbols(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+    return _get_document_symbols(jw.runtime, uri)
+end
+
+"""
+    get_workspace_symbols(jw::JuliaWorkspace, query::String)
+
+Search all files for top-level bindings whose name starts with `query`.
+Returns a vector of `WorkspaceSymbolResult`.
+"""
+function get_workspace_symbols(jw::JuliaWorkspace, query::String)
+    process_from_dynamic(jw)
+    return _get_workspace_symbols(jw.runtime, query)
+end
+
+# Navigation
+
+"""
+    get_selection_ranges(jw::JuliaWorkspace, uri::URI, indices::Vector{Int})
+
+For each 1-based string index in `indices`, compute a nested selection range.
+Returns a vector of `Union{Nothing, SelectionRangeResult}`.
+"""
+function get_selection_ranges(jw::JuliaWorkspace, uri::URI, indices::Vector{Int})
+    process_from_dynamic(jw)
+    offsets = [idx - 1 for idx in indices]
+    return _get_selection_ranges(jw.runtime, uri, offsets)
+end
+
+"""
+    get_current_block_range(jw::JuliaWorkspace, uri::URI, index::Integer)
+
+Find the current top-level block at `index` (1-based Julia string index).
+Returns a `BlockRangeResult` with 0-based byte offsets, or `nothing`.
+"""
+function get_current_block_range(jw::JuliaWorkspace, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _get_current_block_range(jw.runtime, uri, offset)
+end
+
+"""
+    get_module_at(jw::JuliaWorkspace, uri::URI, index::Integer)
+
+Return the fully qualified module name at `index` (1-based Julia string index),
+or "Main" if no module scope is found.
+"""
+function get_module_at(jw::JuliaWorkspace, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _get_module_at(jw.runtime, uri, offset)
+end
+
+# ============================================================================
+# Document links
+# ============================================================================
+
+"""
+    get_document_links(jw::JuliaWorkspace, uri::URI) → Vector{DocumentLinkResult}
+
+Return clickable document links (string literals that resolve to files).
+Offsets in results are 0-based byte offsets for direct use with CST spans.
+"""
+function get_document_links(jw::JuliaWorkspace, uri::URI)
+    process_from_dynamic(jw)
+    return _get_document_links(jw.runtime, uri)
+end
+
+# ============================================================================
+# Inlay hints
+# ============================================================================
+
+"""
+    get_inlay_hints(jw::JuliaWorkspace, uri::URI, start_index::Integer, end_index::Integer, config::InlayHintConfig) → Vector{InlayHintResult}
+
+Return inlay hints (parameter names, variable types) for the given range.
+`start_index` and `end_index` are 1-based Julia string indices.
+"""
+function get_inlay_hints(jw::JuliaWorkspace, uri::URI, start_index::Integer, end_index::Integer, config::InlayHintConfig)
+    process_from_dynamic(jw)
+    start_offset = start_index - 1
+    end_offset = end_index - 1
+    return _get_inlay_hints(jw.runtime, uri, start_offset, end_offset, config)
+end
+
+# ============================================================================
+# Code actions
+# ============================================================================
+
+"""
+    get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String}) → Vector{CodeActionInfo}
+
+Return the list of applicable code actions at `index` (1-based Julia string index).
+`diagnostic_messages` should contain the text of any diagnostics overlapping the cursor.
+"""
+function get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String})
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _get_code_actions(jw.runtime, uri, offset, diagnostic_messages)
+end
+
+"""
+    execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer) → Vector{WorkspaceFileEdit}
+
+Execute the code action identified by `action_id` at `index` (1-based Julia string index).
+Returns a vector of workspace file edits. Each edit contains a URI and a vector of
+`TextEditResult`s with 0-based byte offsets.
+"""
+function execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer)
+    process_from_dynamic(jw)
+    offset = index - 1
+    return _execute_code_action(jw.runtime, action_id, uri, offset)
 end
