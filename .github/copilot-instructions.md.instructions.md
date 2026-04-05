@@ -1,0 +1,1 @@
+- Always use the runTests tool to run Julia test item tests.
