@@ -26,6 +26,17 @@ function index_project(djp::DynamicJuliaProcess, store_path::String, depot_path)
     )
 end
 
+function create_standalone_project(djp::DynamicJuliaProcess, store_path::String)
+    JSONRPC.send(
+        djp.endpoint,
+        JuliaDynamicAnalysisProtocol.create_standalone_project_request_type,
+        JuliaDynamicAnalysisProtocol.CreateStandaloneProjectParams(
+            djp.project_path,
+            store_path
+        )
+    )
+end
+
 function start(djp::DynamicJuliaProcess)
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
@@ -271,6 +282,17 @@ function start(df::DynamicFeature)
                 test_project_uri = filepath2uri(test_project)
 
                 put!(df.out_channel, (;command=:test_environment_ready, project_uri=filepath2uri(msg.project_path), package=msg.package, test_project_uri=test_project_uri))
+            elseif msg.command == :create_standalone_package_project
+                djp = DynamicJuliaProcess(msg.package_path, nothing)
+                df.procs[msg.package_path, "__standalone__"] = djp
+
+                start(djp)
+
+                standalone_project = create_standalone_project(djp, df.store_path)
+
+                standalone_project_uri = filepath2uri(standalone_project)
+
+                put!(df.out_channel, (;command=:standalone_package_project_ready, package_folder_uri=filepath2uri(msg.package_path), project_uri=standalone_project_uri))
             else
                 error("Unknown message: $msg")
             end

@@ -1,5 +1,10 @@
 Salsa.@derived function derived_environment(rt, uri)
     project = derived_project(rt, uri)
+
+    if project === nothing
+        new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
+        return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
+    end
     
     metadata_packages = SymbolServer.Package[]
     for (k,v) in project.regular_packages
@@ -65,7 +70,13 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
             project_for_test_env = if package_folder_uri in derived_project_folders(rt)
                 package_folder_uri
             else
-                active_project
+                # Check if there's a standalone project for this package
+                standalone_uri = input_standalone_package_project(rt, package_folder_uri)
+                if standalone_uri !== nothing
+                    standalone_uri
+                else
+                    active_project
+                end
             end
 
             test_project_uri = input_project_test_environment(rt, project_for_test_env, package_name)
@@ -79,8 +90,30 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         if package_folder_uri in derived_project_folders(rt)
             return package_folder_uri
         end
+
+        # If the package is not a project (no manifest) and not dev'd into any workspace project,
+        # trigger creation of a standalone project for it
+        if !_is_package_deved_in_workspace(rt, package_folder_uri)
+            standalone_uri = input_standalone_package_project(rt, package_folder_uri)
+            if standalone_uri !== nothing
+                return standalone_uri
+            end
+        end
     end
 
     # TODO This needs to handle multi env
     return active_project
+end
+
+function _is_package_deved_in_workspace(rt, package_folder_uri)
+    for project_folder_uri in derived_project_folders(rt)
+        project = derived_project(rt, project_folder_uri)
+        project === nothing && continue
+        for (_, v) in project.deved_packages
+            if v.uri == package_folder_uri
+                return true
+            end
+        end
+    end
+    return false
 end

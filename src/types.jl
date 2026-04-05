@@ -374,6 +374,15 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 # so the next get_diagnostics won't trigger another round of background processes.
                 _load_package_caches_for_project!(jw, msg.test_project_uri)
                 set_input_project_environment!(jw.runtime, msg.test_project_uri, nothing)
+            elseif msg.command == :standalone_package_project_ready
+                @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
+
+                add_folder_from_disc!(jw, uri2filepath(msg.project_uri))
+
+                set_input_standalone_package_project!(jw.runtime, msg.package_folder_uri, msg.project_uri)
+
+                _load_package_caches_for_project!(jw, msg.project_uri)
+                set_input_project_environment!(jw.runtime, msg.project_uri, nothing)
             else
                 error("Unknown message: $msg")
             end

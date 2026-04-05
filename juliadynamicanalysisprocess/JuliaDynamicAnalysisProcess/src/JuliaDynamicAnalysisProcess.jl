@@ -21,8 +21,25 @@ function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProject
     return dirname(Base.active_project())
 end
 
+function create_standalone_project_request(params::JuliaDynamicAnalysisProtocol.CreateStandaloneProjectParams, state::JuliaDynamicAnalysisProcessState, token)
+    tmp = mktempdir()
+    Pkg.activate(tmp)
+
+    try
+        Pkg.develop(path=params.packagePath)
+        Pkg.resolve()
+    catch err
+        @warn "Failed to resolve standalone package project" params.packagePath exception=(err, catch_backtrace())
+    end
+
+    SymbolServer.get_store(params.storePath, nothing)
+
+    return dirname(Base.active_project())
+end
+
 JSONRPC.@message_dispatcher dispatch_msg begin
     JuliaDynamicAnalysisProtocol.index_project_request_type => index_project_request
+    JuliaDynamicAnalysisProtocol.create_standalone_project_request_type => create_standalone_project_request
 end
 
 function serve(pipename, error_handler=nothing)

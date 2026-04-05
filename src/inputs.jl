@@ -43,6 +43,22 @@ Salsa.@declare_input input_project_test_environment(rt, uri, package)::Union{Not
     return nothing
 end
 
+Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri)::Union{Nothing,URI} function(ctx, package_folder_uri)
+    @info "Lazy create standalone project for package" package_folder_uri
+
+    if ctx.dynamic_feature !== nothing
+        put!(
+            ctx.dynamic_feature.in_channel,
+            (
+                command = :create_standalone_package_project,
+                package_path = uri2filepath(package_folder_uri)
+            )
+        )
+    end
+
+    return nothing
+end
+
 Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{Nothing,String})::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
     
 
