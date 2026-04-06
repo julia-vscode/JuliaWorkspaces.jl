@@ -323,3 +323,20 @@ end
     @test result !== nothing
     @test occursin("Argument 1", result) && occursin("M.f", result)
 end
+
+@testitem "get_doc_from_word: basic matching" begin
+    jw = JuliaWorkspace()
+
+    # Exact match for a well-known Base symbol
+    result = get_doc_from_word(jw, "println")
+    @test result != "No results found."
+    @test occursin("println", result)
+
+    # Fuzzy match — close misspelling
+    result = get_doc_from_word(jw, "printl")
+    @test result != "No results found."
+
+    # Completely nonsensical word should return no results
+    result = get_doc_from_word(jw, "zzznotarealsymbolxxx")
+    @test result == "No results found."
+end

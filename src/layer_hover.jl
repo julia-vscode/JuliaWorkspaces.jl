@@ -6,6 +6,7 @@
 # bindings/scopes, and SymbolServer stores — no LSP types.
 
 using .URIs2: filepath2uri
+import REPL
 
 # ============================================================================
 # Helper utilities (moved from LanguageServer utilities.jl / staticlint.jl)
@@ -508,4 +509,76 @@ function _get_hover_text(rt, uri, index)
     documentation = _sanitize_docstring(documentation)
 
     return isempty(documentation) ? nothing : documentation
+end
+
+# ============================================================================
+# Word-based documentation search
+# ============================================================================
+
+function _doc_search_score(needle::Symbol, haystack::Symbol)
+    needle === haystack && return 0.0
+    needle_s = lowercase(string(needle))
+    haystack_s = lowercase(string(haystack))
+    ldist = Float64(REPL.levenshtein(needle_s, haystack_s))
+    if startswith(haystack_s, needle_s)
+        ldist *= 0.5
+    end
+    return ldist
+end
+
+_traverse_store!(_, _) = return
+_traverse_store!(f, store::SymbolServer.EnvStore) = _traverse_store!.(f, values(store))
+function _traverse_store!(f, store::SymbolServer.ModuleStore)
+    for (sym, val) in store.vals
+        f(sym, val)
+        _traverse_store!(f, val)
+    end
+end
+
+function _get_doc_from_word(rt, word::AbstractString)
+    matches = Pair{Float64, String}[]
+    needle = Symbol(word)
+
+    # Collect all unique environments from workspace roots
+    seen_envs = Set{UInt64}()
+    envs = StaticLint.ExternalEnv[]
+    for root in derived_roots(rt)
+        project_uri = derived_project_uri_for_root(rt, root)
+        project_uri === nothing && continue
+        env = derived_environment(rt, project_uri)
+        env === nothing && continue
+        eid = objectid(env.symbols)
+        eid in seen_envs && continue
+        push!(seen_envs, eid)
+        push!(envs, env)
+    end
+
+    # Fallback to stdlibs if no environments available
+    if isempty(envs)
+        push!(envs, _empty_hover_env)
+    end
+
+    for env in envs
+        symbols = env.symbols
+        # Also include stdlibs if not already in the env
+        stores = isempty(symbols) ? [SymbolServer.stdlibs] : [symbols]
+
+        for store in stores
+            _traverse_store!(store) do sym, val
+                score = _doc_search_score(needle, sym)
+                if score < 2
+                    hover_text = _get_hover(val, "", nothing, env, _empty_hover_meta_dict)
+                    if !isempty(hover_text)
+                        push!(matches, score => hover_text)
+                    end
+                end
+            end
+        end
+    end
+
+    if isempty(matches)
+        return "No results found."
+    else
+        return join(map(x -> x.second, sort!(unique!(matches), by = x -> x.first)[1:min(end, 25)]), "\n---\n")
+    end
 end

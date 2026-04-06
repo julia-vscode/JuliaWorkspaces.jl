@@ -35,6 +35,8 @@ end
 struct _ActionContext
     offset::Int
     diagnostic_messages::Vector{String}
+    workspace_folders::Vector{String}
+    file_text::String
 end
 
 struct _ActionDef
@@ -43,7 +45,7 @@ struct _ActionDef
     kind::Symbol
     is_preferred::Bool
     when::Function       # (x::EXPR, meta_dict, ctx) → Bool
-    handler::Function    # (x::EXPR, runtime, uri, meta_dict) → Vector{WorkspaceFileEdit}
+    handler::Function    # (x::EXPR, runtime, uri, meta_dict, ctx) → Vector{WorkspaceFileEdit}
 end
 
 function _action_get_text(runtime, uri::URI)
@@ -102,7 +104,7 @@ function _find_using_statement(x::CSTParser.EXPR, meta_dict)
     return nothing
 end
 
-function _explicitly_import_used_variables(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _explicitly_import_used_variables(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     edits_by_uri = Dict{URI,Vector{TextEditResult}}()
     ref = StaticLint.refof(x, meta_dict)
     !(ref isa StaticLint.Binding && ref.val isa SymbolServer.ModuleStore) && return WorkspaceFileEdit[]
@@ -150,7 +152,7 @@ end
 
 _is_single_line_func(x) = CSTParser.defines_function(x) && CSTParser.headof(x) !== :function
 
-function _expand_inline_func(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _expand_inline_func(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     func = _action_get_parent_fexpr(x, _is_single_line_func)
     func === nothing && return WorkspaceFileEdit[]
     length(func) < 3 && return WorkspaceFileEdit[]
@@ -199,7 +201,7 @@ function _is_fixable_missing_ref(x::CSTParser.EXPR, meta_dict, diag_messages::Ve
     return false
 end
 
-function _apply_missing_ref_fix(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _apply_missing_ref_fix(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     xname = StaticLint.valofid(x)
     loc = _get_file_loc(x, runtime)
     loc === nothing && return WorkspaceFileEdit[]
@@ -220,7 +222,7 @@ end
 # Action: ReexportModule
 # ============================================================================
 
-function _reexport_package(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _reexport_package(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     ref = StaticLint.refof(x, meta_dict)
     mod = if ref isa SymbolServer.ModuleStore
         ref
@@ -244,7 +246,7 @@ end
 # Action: DeleteUnusedFunctionArgumentName
 # ============================================================================
 
-function _remove_farg_name(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _remove_farg_name(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     x1 = StaticLint.get_parent_fexpr(x, y -> StaticLint.haserror(y, meta_dict) && StaticLint.errorof(y, meta_dict) == StaticLint.UnusedFunctionArgument)
     x1 === nothing && return WorkspaceFileEdit[]
     loc = _get_file_loc(x1, runtime)
@@ -261,7 +263,7 @@ end
 # Action: ReplaceUnusedAssignmentName
 # ============================================================================
 
-function _remove_unused_assignment_name(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _remove_unused_assignment_name(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     x1 = StaticLint.get_parent_fexpr(x, y -> StaticLint.haserror(y, meta_dict) && StaticLint.errorof(y, meta_dict) == StaticLint.UnusedBinding && y isa CSTParser.EXPR && y.head === :IDENTIFIER)
     x1 === nothing && return WorkspaceFileEdit[]
     loc = _get_file_loc(x1, runtime)
@@ -274,7 +276,7 @@ end
 # Action: CompareNothingWithTripleEqual
 # ============================================================================
 
-function _double_to_triple_equal(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _double_to_triple_equal(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     x1 = StaticLint.get_parent_fexpr(x, y -> StaticLint.haserror(y, meta_dict) && StaticLint.errorof(y, meta_dict) in (StaticLint.NothingEquality, StaticLint.NothingNotEq))
     x1 === nothing && return WorkspaceFileEdit[]
     loc = _get_file_loc(x1, runtime)
@@ -288,7 +290,7 @@ end
 # Action: WrapInIfBlock
 # ============================================================================
 
-function _wrap_in_if_block(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _wrap_in_if_block(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     loc = _get_file_loc(x, runtime)
     loc === nothing && return WorkspaceFileEdit[]
     furi, offset = loc
@@ -302,7 +304,7 @@ end
 # Action: OrganizeImports
 # ============================================================================
 
-function _organize_import_block(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _organize_import_block(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     if !StaticLint.is_in_fexpr(x, y -> CSTParser.headof(y) === :using || CSTParser.headof(y) === :import)
         return WorkspaceFileEdit[]
     end
@@ -426,7 +428,7 @@ function _is_string_literal(x::CSTParser.EXPR; inraw::Bool=false)
     return false
 end
 
-function _convert_to_raw(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _convert_to_raw(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     _is_string_literal(x) || return WorkspaceFileEdit[]
     loc = _get_file_loc(x, runtime)
     loc === nothing && return WorkspaceFileEdit[]
@@ -436,7 +438,7 @@ function _convert_to_raw(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
     return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset + x.span, raw)])]
 end
 
-function _convert_from_raw(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _convert_from_raw(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     _is_string_literal(x; inraw=true) || return WorkspaceFileEdit[]
     xparent = CSTParser.parentof(x)
     loc = _get_file_loc(xparent, runtime)
@@ -479,7 +481,7 @@ function _is_in_docstring_for_function(x::CSTParser.EXPR)
        CSTParser.headof(CSTParser.parentof(x).args[1]) === :globalrefdoc && CSTParser.defines_function(CSTParser.parentof(x).args[4])
 end
 
-function _add_docstring_template(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _add_docstring_template(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     _is_in_function_signature(x) || return WorkspaceFileEdit[]
     func = _action_get_parent_fexpr(x, CSTParser.defines_function)
     func === nothing && return WorkspaceFileEdit[]
@@ -499,7 +501,7 @@ end
 # Action: UpdateDocstringSignature
 # ============================================================================
 
-function _update_docstring_sig(x::CSTParser.EXPR, runtime, uri::URI, meta_dict)
+function _update_docstring_sig(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
     if _is_in_function_signature(x; with_docstring=true)
         func = _action_get_parent_fexpr(x, CSTParser.defines_function)
     elseif _is_in_docstring_for_function(x)
@@ -650,6 +652,111 @@ _JW_ACTIONS["UpdateDocstringSignature"] = _ActionDef(
 )
 
 # ============================================================================
+# Action: AddLicenseIdentifier
+# ============================================================================
+
+function _safe_isfile(s::AbstractString)
+    try
+        !occursin("\0", s) && isfile(s)
+    catch err
+        isa(err, Base.IOError) || isa(err, Base.SystemError) || rethrow()
+        false
+    end
+end
+_safe_isfile(::Nothing) = false
+
+function _get_spdx_header(text::AbstractString)
+    m = match(r"(*ANYCRLF)^# SPDX-License-Identifier:\h+((?:[\w\.-]+)(?:\h+[\w\.-]+)*)\h*$"m, text)
+    return m === nothing ? m : String(m[1])
+end
+
+function _in_same_workspace_folder(file1_str, file2_str, workspace_folders::Vector{String})
+    (file1_str === nothing || file2_str === nothing) && return false
+    for ws in workspace_folders
+        if _path_startswith(file1_str, ws) && _path_startswith(file2_str, ws)
+            return true
+        end
+    end
+    return false
+end
+
+# Case-insensitive startswith on Windows for path comparison
+@static if Sys.iswindows()
+    _path_startswith(path, prefix) = startswith(lowercase(path), lowercase(prefix))
+else
+    _path_startswith(path, prefix) = startswith(path, prefix)
+end
+
+function _identify_short_identifier(runtime, file_uri::URI, workspace_folders::Vector{String})
+    file_uri_str = uri2filepath(file_uri)
+
+    # First look in tracked files (in the same workspace folder) for existing headers
+    candidate_identifiers = Set{String}()
+    for uri in derived_text_files(runtime)
+        uri_str = uri2filepath(uri)
+        _in_same_workspace_folder(file_uri_str, uri_str, workspace_folders) || continue
+        text = _action_get_text(runtime, uri)
+        id = _get_spdx_header(text)
+        id === nothing || push!(candidate_identifiers, id)
+    end
+    if length(candidate_identifiers) == 1
+        return first(candidate_identifiers)
+    end
+
+    # Fallback to looking for a license file in the same workspace folder
+    candidate_files = String[]
+    for dir in workspace_folders
+        for f in joinpath.(dir, ["LICENSE", "LICENSE.md"])
+            f_str = f
+            _in_same_workspace_folder(file_uri_str, f_str, workspace_folders) || continue
+            _safe_isfile(f) || continue
+            push!(candidate_files, f)
+        end
+    end
+
+    length(candidate_files) != 1 && return nothing
+
+    license_text = read(first(candidate_files), String)
+
+    if contains(license_text, r"^\s*MIT\s+(\"?Expat\"?\s+)?Licen[sc]e")
+        return "MIT"
+    elseif contains(license_text, r"^\s*EUROPEAN\s+UNION\s+PUBLIC\s+LICEN[CS]E\s+v\."i)
+        version = match(r"\d\.\d", license_text).match
+        return "EUPL-$version"
+    end
+
+    return nothing
+end
+
+function _is_on_first_line(ctx::_ActionContext)
+    first_newline = findfirst('\n', ctx.file_text)
+    # offset is 0-based; if no newline, entire file is one line
+    return first_newline === nothing || ctx.offset < first_newline
+end
+
+function _add_license_identifier(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, ctx::_ActionContext)
+    isempty(ctx.workspace_folders) && return WorkspaceFileEdit[]
+    text = _action_get_text(runtime, uri)
+
+    # Does the current file already have a header?
+    _get_spdx_header(text) === nothing || return WorkspaceFileEdit[]
+
+    short_identifier = _identify_short_identifier(runtime, uri, ctx.workspace_folders)
+    short_identifier === nothing && return WorkspaceFileEdit[]
+
+    return [WorkspaceFileEdit(uri, [TextEditResult(0, 0, "# SPDX-License-Identifier: $(short_identifier)\n\n")])]
+end
+
+_JW_ACTIONS["AddLicenseIdentifier"] = _ActionDef(
+    "AddLicenseIdentifier",
+    "Add SPDX license identifier.",
+    :empty,
+    false,
+    (x, meta_dict, ctx) -> !isempty(ctx.workspace_folders) && _is_on_first_line(ctx),
+    _add_license_identifier,
+)
+
+# ============================================================================
 # Top-level API
 # ============================================================================
 
@@ -658,7 +765,7 @@ _JW_ACTIONS["UpdateDocstringSignature"] = _ActionDef(
 
 Return the list of applicable code actions at the given offset.
 """
-function _get_code_actions(runtime, uri::URI, offset::Int, diagnostic_messages::Vector{String})
+function _get_code_actions(runtime, uri::URI, offset::Int, diagnostic_messages::Vector{String}, workspace_folders::Vector{String})
     actions = CodeActionInfo[]
 
     root = derived_best_root_for_uri(runtime, uri)
@@ -673,7 +780,7 @@ function _get_code_actions(runtime, uri::URI, offset::Int, diagnostic_messages::
     x = _get_expr(cst, offset)
     x isa CSTParser.EXPR || return actions
 
-    ctx = _ActionContext(offset, diagnostic_messages)
+    ctx = _ActionContext(offset, diagnostic_messages, workspace_folders, _action_get_text(runtime, uri))
 
     for (_, ad) in _JW_ACTIONS
         try
@@ -693,7 +800,7 @@ end
 
 Execute the code action identified by `action_id` and return the workspace edits.
 """
-function _execute_code_action(runtime, action_id::String, uri::URI, offset::Int)
+function _execute_code_action(runtime, action_id::String, uri::URI, offset::Int, workspace_folders::Vector{String})
     haskey(_JW_ACTIONS, action_id) || return WorkspaceFileEdit[]
 
     ad = _JW_ACTIONS[action_id]
@@ -710,5 +817,6 @@ function _execute_code_action(runtime, action_id::String, uri::URI, offset::Int)
     x = _get_expr(cst, offset)
     x isa CSTParser.EXPR || return WorkspaceFileEdit[]
 
-    return ad.handler(x, runtime, uri, meta_dict)
+    ctx = _ActionContext(offset, String[], workspace_folders, _action_get_text(runtime, uri))
+    return ad.handler(x, runtime, uri, meta_dict, ctx)
 end

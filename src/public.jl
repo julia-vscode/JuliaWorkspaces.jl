@@ -31,6 +31,7 @@ export JuliaWorkspace,
     get_environment,
     get_expr_location,
     get_hover_text,
+    get_doc_from_word,
     get_completions,
     CompletionResult,
     CompletionResultItem,
@@ -594,6 +595,18 @@ function get_hover_text(jw::JuliaWorkspace, uri::URI, index::Integer)
     return _get_hover_text(jw.runtime, uri, index)
 end
 
+"""
+    get_doc_from_word(jw::JuliaWorkspace, word::AbstractString)
+
+Search all loaded symbol stores for symbols matching `word` (fuzzy match)
+and return their documentation as a single markdown string.
+Returns `"No results found."` when no matches are found.
+"""
+function get_doc_from_word(jw::JuliaWorkspace, word::AbstractString)
+    process_from_dynamic(jw)
+    return _get_doc_from_word(jw.runtime, word)
+end
+
 # Completions
 
 """
@@ -789,26 +802,27 @@ end
 # ============================================================================
 
 """
-    get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String}) → Vector{CodeActionInfo}
+    get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String}, workspace_folders::Vector{String}=String[]) → Vector{CodeActionInfo}
 
 Return the list of applicable code actions at `index` (1-based Julia string index).
 `diagnostic_messages` should contain the text of any diagnostics overlapping the cursor.
+`workspace_folders` is an optional list of workspace folder paths (used by license actions).
 """
-function get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String})
+function get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String}, workspace_folders::Vector{String}=String[])
     process_from_dynamic(jw)
     offset = index - 1
-    return _get_code_actions(jw.runtime, uri, offset, diagnostic_messages)
+    return _get_code_actions(jw.runtime, uri, offset, diagnostic_messages, workspace_folders)
 end
 
 """
-    execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer) → Vector{WorkspaceFileEdit}
+    execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer, workspace_folders::Vector{String}=String[]) → Vector{WorkspaceFileEdit}
 
 Execute the code action identified by `action_id` at `index` (1-based Julia string index).
 Returns a vector of workspace file edits. Each edit contains a URI and a vector of
 `TextEditResult`s with 0-based byte offsets.
 """
-function execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer)
+function execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer, workspace_folders::Vector{String}=String[])
     process_from_dynamic(jw)
     offset = index - 1
-    return _execute_code_action(jw.runtime, action_id, uri, offset)
+    return _execute_code_action(jw.runtime, action_id, uri, offset, workspace_folders)
 end
