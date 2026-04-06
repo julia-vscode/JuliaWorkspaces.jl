@@ -11,8 +11,8 @@
 struct DocumentSymbolResult
     name::String
     kind::Int  # LSP SymbolKind integer
-    start_offset::Int  # 0-based byte offset (converted to 1-based in public API)
-    end_offset::Int    # 0-based byte offset
+    start::Position
+    stop::Position
     children::Vector{DocumentSymbolResult}
 end
 
@@ -20,8 +20,8 @@ struct WorkspaceSymbolResult
     name::String
     kind::Int
     uri::URI
-    start_offset::Int  # 0-based byte offset
-    end_offset::Int    # 0-based byte offset
+    start::Position
+    stop::Position
 end
 
 # ============================================================================
@@ -109,7 +109,7 @@ end
 # Document symbols collection
 # ============================================================================
 
-function _collect_document_symbols(x::CSTParser.EXPR, meta_dict::MetaDict, pos=0, ctx=_BindingContext(), symbols=DocumentSymbolResult[])
+function _collect_document_symbols(x::CSTParser.EXPR, meta_dict::MetaDict, st::SourceText, pos=0, ctx=_BindingContext(), symbols=DocumentSymbolResult[])
     is_datatype_def_body = ctx.is_datatype_def_body
     if ctx.is_datatype_def && !is_datatype_def_body
         is_datatype_def_body = x.head === :block && length(x.parent.args) >= 3 && x.parent.args[3] == x
@@ -126,8 +126,8 @@ function _collect_document_symbols(x::CSTParser.EXPR, meta_dict::MetaDict, pos=0
             ds = DocumentSymbolResult(
                 _get_name_of_binding(b.name),
                 _binding_kind(b, ctx),
-                pos,
-                pos + x.span,
+                position_at(st, pos + 1),
+                position_at(st, pos + x.span + 1),
                 DocumentSymbolResult[],
             )
             push!(symbols, ds)
@@ -144,8 +144,8 @@ function _collect_document_symbols(x::CSTParser.EXPR, meta_dict::MetaDict, pos=0
                     ds = DocumentSymbolResult(
                         "$(macroname) \"$(testname)\"",
                         3, # Namespace
-                        pos,
-                        pos + x.span,
+                        position_at(st, pos + 1),
+                        position_at(st, pos + x.span + 1),
                         DocumentSymbolResult[],
                     )
                     push!(symbols, ds)
@@ -156,7 +156,7 @@ function _collect_document_symbols(x::CSTParser.EXPR, meta_dict::MetaDict, pos=0
     end
     if length(x) > 0
         for a in x
-            _collect_document_symbols(a, meta_dict, pos, ctx, symbols)
+            _collect_document_symbols(a, meta_dict, st, pos, ctx, symbols)
             pos += a.fullspan
         end
     end
@@ -201,8 +201,9 @@ function _get_document_symbols(runtime, uri::URI)
     lint_result = derived_static_lint_meta_for_root(runtime, root)
     meta_dict = lint_result.meta_dict
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
+    st = input_text_file(runtime, uri).content
 
-    return _collect_document_symbols(cst, meta_dict)
+    return _collect_document_symbols(cst, meta_dict, st)
 end
 
 """
@@ -228,8 +229,8 @@ function _get_workspace_symbols(runtime, query::String)
                 CSTParser.valof(b.name),
                 1, # SymbolKind.File (LS uses 1 for all workspace symbols)
                 uri,
-                first(rng),
-                last(rng),
+                _offset_to_position(runtime, uri, first(rng)),
+                _offset_to_position(runtime, uri, last(rng)),
             ))
         end
     end

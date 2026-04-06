@@ -1,3 +1,7 @@
+@enum DynamicMode DynamicOff DynamicIndexingOnly DynamicPersistent
+
+const DJPKey = @NamedTuple{project_path::String, package::Union{Nothing,String}, content_hash::UInt}
+
 mutable struct DynamicJuliaProcess
     project_path::String
     package::Union{Nothing,String}
@@ -227,26 +231,35 @@ function start(djp::DynamicJuliaProcess)
 end
 
 function Base.kill(djp::DynamicJuliaProcess)
+    if djp.proc !== nothing
+        kill(djp.proc)
+        djp.proc = nothing
+    end
+    djp.endpoint = nothing
 end
 
 struct DynamicFeature
+    mode::DynamicMode
     store_path::String
     depot_path::String
     in_channel::Channel{Any}
     out_channel::Channel{Any}
-    procs::Dict{Tuple{String,Union{Nothing,String}},DynamicJuliaProcess}
+    procs::Dict{DJPKey,DynamicJuliaProcess}
+    failed_projects::Set{DJPKey}
     missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}
     pending_count::Threads.Atomic{Int}
     update_channel::Channel{Symbol}
 
-    function DynamicFeature(store_path::String, depot_path::String)
+    function DynamicFeature(mode::DynamicMode, store_path::String, depot_path::String)
         return new(
+            mode,
             store_path,
             depot_path,
             Channel{Any}(Inf),
             Channel{Any}(Inf),
-            Dict{String,DynamicJuliaProcess}(),
-            Set{URI}(),
+            Dict{DJPKey,DynamicJuliaProcess}(),
+            Set{DJPKey}(),
+            Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}(),
             Threads.Atomic{Int}(0),
             Channel{Symbol}(100)
         )
@@ -262,43 +275,105 @@ function start(df::DynamicFeature)
 
             Threads.atomic_add!(df.pending_count, 1)
 
-            if msg.command == :watch_environment
-                djp = DynamicJuliaProcess(msg.project_path, nothing)
-                df.procs[msg.project_path, nothing] = djp
+            djp = nothing
+            try
+                if msg.command == :watch_environment
+                    key = DJPKey((msg.project_path, nothing, msg.content_hash))
 
-                start(djp)
+                    if key in df.failed_projects
+                        @warn "Skipping previously failed project" key
+                        put!(df.out_channel, (;command=:failed, key=key))
+                    else
+                        djp = DynamicJuliaProcess(msg.project_path, nothing)
+                        df.procs[key] = djp
 
-                index_project(djp, df.store_path, df.depot_path)
+                        start(djp)
 
-                put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path))
-            elseif msg.command == :watch_test_environment
-                djp = DynamicJuliaProcess(msg.project_path, msg.package)
-                df.procs[msg.project_path, msg.package] = djp
+                        index_project(djp, df.store_path, df.depot_path)
 
-                start(djp)
+                        put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path, content_hash=msg.content_hash))
 
-                test_project = index_project(djp, df.store_path, df.depot_path)
+                        if df.mode == DynamicIndexingOnly
+                            kill(djp)
+                            delete!(df.procs, key)
+                        end
+                    end
+                elseif msg.command == :watch_test_environment
+                    key = DJPKey((msg.project_path, msg.package, msg.content_hash))
 
-                test_project_uri = filepath2uri(test_project)
+                    if key in df.failed_projects
+                        @warn "Skipping previously failed test environment" key
+                        put!(df.out_channel, (;command=:failed, key=key))
+                    else
+                        djp = DynamicJuliaProcess(msg.project_path, msg.package)
+                        df.procs[key] = djp
 
-                put!(df.out_channel, (;command=:test_environment_ready, project_uri=filepath2uri(msg.project_path), package=msg.package, test_project_uri=test_project_uri))
-            elseif msg.command == :create_standalone_package_project
-                djp = DynamicJuliaProcess(msg.package_path, nothing)
-                df.procs[msg.package_path, "__standalone__"] = djp
+                        start(djp)
 
-                start(djp)
+                        test_project = index_project(djp, df.store_path, df.depot_path)
 
-                standalone_project = create_standalone_project(djp, df.store_path)
+                        test_project_uri = filepath2uri(test_project)
 
-                standalone_project_uri = filepath2uri(standalone_project)
+                        put!(df.out_channel, (;command=:test_environment_ready, project_uri=filepath2uri(msg.project_path), package=msg.package, test_project_uri=test_project_uri, content_hash=msg.content_hash))
 
-                put!(df.out_channel, (;command=:standalone_package_project_ready, package_folder_uri=filepath2uri(msg.package_path), project_uri=standalone_project_uri))
-            else
-                error("Unknown message: $msg")
+                        if df.mode == DynamicIndexingOnly
+                            kill(djp)
+                            delete!(df.procs, key)
+                        end
+                    end
+                elseif msg.command == :create_standalone_package_project
+                    key = DJPKey((msg.package_path, "__standalone__", msg.content_hash))
+
+                    if key in df.failed_projects
+                        @warn "Skipping previously failed standalone project" key
+                        put!(df.out_channel, (;command=:failed, key=key))
+                    else
+                        djp = DynamicJuliaProcess(msg.package_path, nothing)
+                        df.procs[key] = djp
+
+                        start(djp)
+
+                        standalone_project = create_standalone_project(djp, df.store_path)
+
+                        standalone_project_uri = filepath2uri(standalone_project)
+
+                        put!(df.out_channel, (;command=:standalone_package_project_ready, package_folder_uri=filepath2uri(msg.package_path), project_uri=standalone_project_uri, content_hash=msg.content_hash))
+
+                        if df.mode == DynamicIndexingOnly
+                            kill(djp)
+                            delete!(df.procs, key)
+                        end
+                    end
+                else
+                    error("Unknown message: $msg")
+                end
+            catch err
+                bt = catch_backtrace()
+                @error "DynamicJuliaProcess failed" exception=(err, bt)
+                # Mark this project as failed so we don't retry with the same content hash
+                if hasproperty(msg, :content_hash)
+                    failed_key = if msg.command == :watch_environment
+                        DJPKey((msg.project_path, nothing, msg.content_hash))
+                    elseif msg.command == :watch_test_environment
+                        DJPKey((msg.project_path, msg.package, msg.content_hash))
+                    elseif msg.command == :create_standalone_package_project
+                        DJPKey((msg.package_path, "__standalone__", msg.content_hash))
+                    else
+                        nothing
+                    end
+                    if failed_key !== nothing
+                        push!(df.failed_projects, failed_key)
+                        put!(df.out_channel, (;command=:failed, key=failed_key))
+                    end
+                end
+                # Kill the DJP if it was started
+                if djp !== nothing
+                    try kill(djp) catch; end
+                end
+            finally
+                Threads.atomic_sub!(df.pending_count, 1)
+                try put!(df.update_channel, :data_available) catch; end
             end
-
-            Threads.atomic_sub!(df.pending_count, 1)
-            try put!(df.update_channel, :data_available) catch; end
         end
     catch err
         flush(stderr)
@@ -306,4 +381,26 @@ function start(df::DynamicFeature)
         Base.display_error(err, bt)
         flush(stderr)
     end
+end
+
+function cleanup_stale_processes!(df::DynamicFeature, rt, required::Set{DJPKey})
+    for (key, djp) in collect(df.procs)
+        if key ∉ required
+            @info "Killing stale DynamicJuliaProcess" key
+            kill(djp)
+            delete!(df.procs, key)
+
+            # Clean up the corresponding Salsa inputs
+            if key.package === nothing
+                delete_input_project_environment!(rt, filepath2uri(key.project_path), key.content_hash)
+            elseif key.package == "__standalone__"
+                delete_input_standalone_package_project!(rt, filepath2uri(key.project_path), key.content_hash)
+            else
+                delete_input_project_test_environment!(rt, filepath2uri(key.project_path), key.package, key.content_hash)
+            end
+        end
+    end
+
+    # Prune failed_projects for keys that are no longer required
+    filter!(k -> k in required, df.failed_projects)
 end

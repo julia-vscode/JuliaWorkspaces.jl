@@ -18,8 +18,8 @@ struct CodeActionInfo
 end
 
 struct TextEditResult
-    start_offset::Int
-    end_offset::Int
+    start::Position
+    stop::Position
     new_text::String
 end
 
@@ -124,7 +124,7 @@ function _explicitly_import_used_variables(x::CSTParser.EXPR, runtime, uri::URI,
             if !haskey(edits_by_uri, ruri)
                 edits_by_uri[ruri] = TextEditResult[]
             end
-            push!(edits_by_uri[ruri], TextEditResult(roffset, roffset + CSTParser.parentof(r).span, CSTParser.valof(childname)))
+            push!(edits_by_uri[ruri], TextEditResult(_offset_to_position(runtime, ruri, roffset), _offset_to_position(runtime, ruri, roffset + CSTParser.parentof(r).span), CSTParser.valof(childname)))
             push!(vars, CSTParser.valof(childname))
         end
     end
@@ -138,7 +138,7 @@ function _explicitly_import_used_variables(x::CSTParser.EXPR, runtime, uri::URI,
         if !haskey(edits_by_uri, insert_uri)
             edits_by_uri[insert_uri] = TextEditResult[]
         end
-        push!(edits_by_uri[insert_uri], TextEditResult(insertpos, insertpos, string("using ", CSTParser.valof(x), ": ", join(vars, ", "), "\n")))
+        push!(edits_by_uri[insert_uri], TextEditResult(_offset_to_position(runtime, insert_uri, insertpos), _offset_to_position(runtime, insert_uri, insertpos), string("using ", CSTParser.valof(x), ": ", join(vars, ", "), "\n")))
     else
         return WorkspaceFileEdit[]
     end
@@ -179,7 +179,7 @@ function _expand_inline_func(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _c
         newtext = string(newtext, "\nend")
     end
     newtext === nothing && return WorkspaceFileEdit[]
-    return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset + func.span, newtext)])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset + func.span), newtext)])]
 end
 
 # ============================================================================
@@ -211,7 +211,7 @@ function _apply_missing_ref_fix(x::CSTParser.EXPR, runtime, uri::URI, meta_dict,
     if tls.modules !== nothing
         for (n, m) in tls.modules
             if (m isa SymbolServer.ModuleStore && haskey(m, Symbol(xname))) || (m isa StaticLint.Scope && StaticLint.scopehasbinding(m, xname))
-                return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset, string(n, "."))])]
+                return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset), string(n, "."))])]
             end
         end
     end
@@ -239,7 +239,7 @@ function _reexport_package(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx
     insertpos == -1 && return WorkspaceFileEdit[]
 
     export_text = string("export ", join(sort([string(n) for (n, v) in mod.vals if StaticLint.isexportedby(n, mod)]), ", "), "\n")
-    return [WorkspaceFileEdit(furi, [TextEditResult(insertpos, insertpos, export_text)])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, insertpos), _offset_to_position(runtime, furi, insertpos), export_text)])]
 end
 
 # ============================================================================
@@ -253,9 +253,9 @@ function _remove_farg_name(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx
     loc === nothing && return WorkspaceFileEdit[]
     furi, offset = loc
     if CSTParser.isdeclaration(x1)
-        return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset + x1.args[1].fullspan, "")])]
+        return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset + x1.args[1].fullspan), "")])]
     else
-        return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset + x1.fullspan, "_")])]
+        return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset + x1.fullspan), "_")])]
     end
 end
 
@@ -269,7 +269,7 @@ function _remove_unused_assignment_name(x::CSTParser.EXPR, runtime, uri::URI, me
     loc = _get_file_loc(x1, runtime)
     loc === nothing && return WorkspaceFileEdit[]
     furi, offset = loc
-    return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset + x1.span, "_")])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset + x1.span), "_")])]
 end
 
 # ============================================================================
@@ -283,7 +283,7 @@ function _double_to_triple_equal(x::CSTParser.EXPR, runtime, uri::URI, meta_dict
     loc === nothing && return WorkspaceFileEdit[]
     furi, offset = loc
     new_op = StaticLint.errorof(x1, meta_dict) == StaticLint.NothingEquality ? "===" : "!=="
-    return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset + x1.span, new_op)])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset + x1.span), new_op)])]
 end
 
 # ============================================================================
@@ -295,8 +295,8 @@ function _wrap_in_if_block(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx
     loc === nothing && return WorkspaceFileEdit[]
     furi, offset = loc
     return [WorkspaceFileEdit(furi, [
-        TextEditResult(offset, offset, "if CONDITION\n"),
-        TextEditResult(offset + x.span, offset + x.span, "\nend")
+        TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset), "if CONDITION\n"),
+        TextEditResult(_offset_to_position(runtime, furi, offset + x.span), _offset_to_position(runtime, furi, offset + x.span), "\nend")
     ])]
 end
 
@@ -402,7 +402,7 @@ function _organize_import_block(x::CSTParser.EXPR, runtime, uri::URI, meta_dict,
     _, lastoffset = last_loc
     lastoffset += last(siblings).span
 
-    return [WorkspaceFileEdit(furi, [TextEditResult(firstoffset, lastoffset, sorted_text)])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, firstoffset), _offset_to_position(runtime, furi, lastoffset), sorted_text)])]
 end
 
 # ============================================================================
@@ -435,7 +435,7 @@ function _convert_to_raw(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=n
     furi, offset = loc
     quotes = CSTParser.headof(x) === :TRIPLESTRING ? "\"\"\"" : "\""
     raw = string("raw", quotes, sprint(Base.escape_raw_string, CSTParser.valof(x)), quotes)
-    return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset + x.span, raw)])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset + x.span), raw)])]
 end
 
 function _convert_from_raw(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx=nothing)
@@ -446,7 +446,7 @@ function _convert_from_raw(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, _ctx
     furi, offset = loc
     quotes = CSTParser.headof(x) === :TRIPLESTRING ? "\"\"" : ""
     regular = quotes * repr(CSTParser.valof(x)) * quotes
-    return [WorkspaceFileEdit(furi, [TextEditResult(offset, offset + xparent.span, regular)])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, offset), _offset_to_position(runtime, furi, offset + xparent.span), regular)])]
 end
 
 # ============================================================================
@@ -494,7 +494,7 @@ function _add_docstring_template(x::CSTParser.EXPR, runtime, uri::URI, meta_dict
     _, sig_offset = sig_loc
     text = _action_get_text(runtime, furi)
     docstr = "\"\"\"\n    " * text[sig_offset .+ (1:sig.span)] * "\n\nTBW\n\"\"\"\n"
-    return [WorkspaceFileEdit(furi, [TextEditResult(func_offset, func_offset, docstr)])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, func_offset), _offset_to_position(runtime, furi, func_offset), docstr)])]
 end
 
 # ============================================================================
@@ -529,7 +529,7 @@ function _update_docstring_sig(x::CSTParser.EXPR, runtime, uri::URI, meta_dict, 
     end
     newline = endswith(docstr, "\n") ? "" : "\n"
     docstr = string("\"\"\"\n", docstr, newline, "\"\"\"")
-    return [WorkspaceFileEdit(furi, [TextEditResult(docstr_offset, docstr_offset + docstr_expr.span, docstr)])]
+    return [WorkspaceFileEdit(furi, [TextEditResult(_offset_to_position(runtime, furi, docstr_offset), _offset_to_position(runtime, furi, docstr_offset + docstr_expr.span), docstr)])]
 end
 
 # ============================================================================
@@ -744,7 +744,7 @@ function _add_license_identifier(x::CSTParser.EXPR, runtime, uri::URI, meta_dict
     short_identifier = _identify_short_identifier(runtime, uri, ctx.workspace_folders)
     short_identifier === nothing && return WorkspaceFileEdit[]
 
-    return [WorkspaceFileEdit(uri, [TextEditResult(0, 0, "# SPDX-License-Identifier: $(short_identifier)\n\n")])]
+    return [WorkspaceFileEdit(uri, [TextEditResult(Position(1, 1), Position(1, 1), "# SPDX-License-Identifier: $(short_identifier)\n\n")])]
 end
 
 _JW_ACTIONS["AddLicenseIdentifier"] = _ActionDef(

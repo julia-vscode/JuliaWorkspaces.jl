@@ -10,15 +10,16 @@ Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
 
 Salsa.@declare_input input_env_ready(rt)::Bool
 
-Salsa.@declare_input input_project_environment(rt, uri)::Nothing function(ctx, uri)
-    @info "Lazy load environment for" uri
+Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Nothing function(ctx, uri, content_hash)
+    @info "Lazy load environment for" uri content_hash
 
     if ctx.dynamic_feature !== nothing
         put!(
             ctx.dynamic_feature.in_channel,
             (
                 command = :watch_environment,
-                project_path = uri2filepath(uri)
+                project_path = uri2filepath(uri),
+                content_hash = content_hash
             )
         )
     end
@@ -26,8 +27,8 @@ Salsa.@declare_input input_project_environment(rt, uri)::Nothing function(ctx, u
     return nothing
 end
 
-Salsa.@declare_input input_project_test_environment(rt, uri, package)::Union{Nothing,URI} function(ctx, uri, package)
-    @info "Lazy load environment for project and package" uri package
+Salsa.@declare_input input_project_test_environment(rt, uri, package, content_hash::UInt)::Union{Nothing,URI} function(ctx, uri, package, content_hash)
+    @info "Lazy load environment for project and package" uri package content_hash
 
     if ctx.dynamic_feature !== nothing
         put!(
@@ -35,7 +36,8 @@ Salsa.@declare_input input_project_test_environment(rt, uri, package)::Union{Not
             (
                 command = :watch_test_environment,
                 project_path = uri2filepath(uri),
-                package = package
+                package = package,
+                content_hash = content_hash
             )
         )
     end
@@ -43,15 +45,16 @@ Salsa.@declare_input input_project_test_environment(rt, uri, package)::Union{Not
     return nothing
 end
 
-Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri)::Union{Nothing,URI} function(ctx, package_folder_uri)
-    @info "Lazy create standalone project for package" package_folder_uri
+Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri, content_hash::UInt)::Union{Nothing,URI} function(ctx, package_folder_uri, content_hash)
+    @info "Lazy create standalone project for package" package_folder_uri content_hash
 
     if ctx.dynamic_feature !== nothing
         put!(
             ctx.dynamic_feature.in_channel,
             (
                 command = :create_standalone_package_project,
-                package_path = uri2filepath(package_folder_uri)
+                package_path = uri2filepath(package_folder_uri),
+                content_hash = content_hash
             )
         )
     end
@@ -60,7 +63,7 @@ Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri)::U
 end
 
 Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{Nothing,String})::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
-    
+
 
     if ctx.dynamic_feature !== nothing
         cache_path = joinpath(ctx.dynamic_feature.store_path, uppercase(string(name)[1:1]), string(name, "_", uuid), string("v", version, "_", git_tree_sha1, ".jstore"))
@@ -95,4 +98,3 @@ Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, versio
 
     return nothing
 end
-

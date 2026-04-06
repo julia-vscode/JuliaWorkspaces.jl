@@ -2,7 +2,7 @@
 #
 # Provides go-to-definition, find-references, rename, document highlight,
 # and prepare-rename. All position parameters use 0-based byte offsets
-# internally; the public API in public.jl converts 1-based string indices.
+# internally; result types expose Position values.
 
 # ============================================================================
 # Result types
@@ -10,26 +10,26 @@
 
 struct DefinitionResult
     uri::URI
-    start_index::Int  # 1-based string index
-    end_index::Int    # 1-based string index
+    start::Position
+    stop::Position
 end
 
 struct ReferenceResult
     uri::URI
-    start_index::Int  # 1-based string index
-    end_index::Int    # 1-based string index
+    start::Position
+    stop::Position
 end
 
 struct RenameEdit
     uri::URI
-    start_index::Int  # 1-based string index
-    end_index::Int    # 1-based string index
+    start::Position
+    stop::Position
     new_text::String
 end
 
 struct HighlightResult
-    start_index::Int  # 1-based string index
-    end_index::Int    # 1-based string index
+    start::Position
+    stop::Position
     kind::Symbol      # :read or :write
 end
 
@@ -187,10 +187,11 @@ end
 function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, tls, env, results, runtime)
     StaticLint.iterate_over_ss_methods(x, tls, env, function (m)
         if safe_isfile(m.file)
+            pos = Position(m.line, 1)
             push!(results, DefinitionResult(
                 URIs2.filepath2uri(string(m.file)),
-                m.line,     # 1-based line (used as start_index placeholder)
-                m.line      # same
+                pos,
+                pos
             ))
         end
         return false
@@ -217,7 +218,7 @@ function _get_definitions_from_val(x::CSTParser.EXPR, tls::StaticLint.Scope, env
     loc = _get_file_loc(x, runtime)
     if loc !== nothing
         uri, o = loc
-        push!(results, DefinitionResult(uri, o + 1, o + x.span + 1))
+        push!(results, DefinitionResult(uri, _offset_to_position(runtime, uri, o), _offset_to_position(runtime, uri, o + x.span)))
     end
 end
 
@@ -274,7 +275,7 @@ function _get_references(runtime, uri::URI, offset::Int)
     x === nothing && return results
 
     _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
-        push!(results, ReferenceResult(ref_uri, o + 1, o + ref.span + 1))
+        push!(results, ReferenceResult(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span)))
     end
 
     return results
@@ -302,7 +303,7 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
     x === nothing && return results
 
     _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
-        push!(results, RenameEdit(ref_uri, o + 1, o + ref.span + 1, new_name))
+        push!(results, RenameEdit(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), new_name))
     end
 
     return results
@@ -316,7 +317,7 @@ end
     _can_rename(runtime, uri, offset)
 
 Check if the symbol at `offset` (0-based) can be renamed. Returns a named
-tuple with 1-based `start_index` and `end_index`, or `nothing`.
+tuple with `start::Position` and `stop::Position`, or `nothing`.
 """
 function _can_rename(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
@@ -330,7 +331,7 @@ function _can_rename(runtime, uri::URI, offset::Int)
     loc === nothing && return nothing
     _, x_start = loc
 
-    return (start_index=x_start + 1, end_index=x_start + x.span + 1)
+    return (start=_offset_to_position(runtime, uri, x_start), stop=_offset_to_position(runtime, uri, x_start + x.span))
 end
 
 # ============================================================================
@@ -358,7 +359,7 @@ function _get_highlights(runtime, uri::URI, offset::Int)
     _for_each_ref(identifier, meta_dict, runtime) do ref, ref_uri, o
         if ref_uri == uri
             kind = StaticLint.hasbinding(ref, meta_dict) ? :write : :read
-            push!(results, HighlightResult(o + 1, o + ref.span + 1, kind))
+            push!(results, HighlightResult(_offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), kind))
         end
     end
 

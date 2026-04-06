@@ -1,23 +1,24 @@
 # Navigation layer
 #
 # Provides selection ranges, current block range, and module-at-position.
-# All position parameters use 0-based byte offsets internally.
+# All position parameters use 0-based byte offsets internally;
+# result types expose Position values.
 
 # ============================================================================
 # Result types
 # ============================================================================
 
 struct SelectionRangeResult
-    start_offset::Int   # 0-based byte offset
-    end_offset::Int     # 0-based byte offset
+    start::Position
+    stop::Position
     parent::Union{Nothing,SelectionRangeResult}
 end
 
 struct BlockRangeResult
-    block_start_offset::Int       # 0-based, start of the block expression
-    highlight_start_offset::Int   # 0-based, start of the highlight portion
-    highlight_end_offset::Int     # 0-based, end of the highlight portion
-    block_end_offset::Int         # 0-based, end of the block (including trailing whitespace)
+    block_start::Position
+    highlight_start::Position
+    highlight_stop::Position
+    block_stop::Position
 end
 
 # ============================================================================
@@ -28,9 +29,9 @@ _get_selection_range_of_expr(x, runtime) = nothing
 function _get_selection_range_of_expr(x::CSTParser.EXPR, runtime)
     loc = _get_file_loc(x, runtime)
     loc === nothing && return nothing
-    _, offset = loc
+    uri, offset = loc
     parent_result = _get_selection_range_of_expr(x.parent, runtime)
-    return SelectionRangeResult(offset, offset + x.span, parent_result)
+    return SelectionRangeResult(_offset_to_position(runtime, uri, offset), _offset_to_position(runtime, uri, offset + x.span), parent_result)
 end
 
 """
@@ -64,6 +65,8 @@ function _get_current_block_range(runtime, uri::URI, offset::Int)
 
     CSTParser.headof(cst) === :file || return nothing
 
+    _pos(o) = _offset_to_position(runtime, uri, o)
+
     for (i, a) in enumerate(cst)
         if loc <= offset <= loc + a.fullspan
             # Try next expression if current is NOTHING or we're in trailing whitespace
@@ -86,28 +89,28 @@ function _get_current_block_range(runtime, uri::URI, offset::Int)
             if CSTParser.defines_module(a)
                 # Within module keyword — return entire expression
                 if loc <= offset <= loc + a.trivia[1].span
-                    return BlockRangeResult(loc, loc, loc + a.span, loc + a.fullspan)
+                    return BlockRangeResult(_pos(loc), _pos(loc), _pos(loc + a.span), _pos(loc + a.fullspan))
                 end
                 # Within module name — return entire expression
                 if loc + a.trivia[1].fullspan <= offset <= loc + a.trivia[1].fullspan + a.args[2].span
-                    return BlockRangeResult(loc, loc, loc + a.span, loc + a.fullspan)
+                    return BlockRangeResult(_pos(loc), _pos(loc), _pos(loc + a.span), _pos(loc + a.fullspan))
                 end
                 # Within module body
                 if loc + a.trivia[1].fullspan + a.args[2].fullspan <= offset <= loc + a.trivia[1].fullspan + a.args[2].fullspan + a.args[3].span
                     body_offset = loc + a.trivia[1].fullspan + a.args[2].fullspan
                     for b in a.args[3].args
                         if body_offset <= offset <= body_offset + b.span
-                            return BlockRangeResult(body_offset, body_offset, body_offset + b.span, body_offset + b.fullspan)
+                            return BlockRangeResult(_pos(body_offset), _pos(body_offset), _pos(body_offset + b.span), _pos(body_offset + b.fullspan))
                         end
                         body_offset += b.fullspan
                     end
                 end
                 # Within `end` keyword — return entire expression
                 if loc + a.trivia[1].fullspan + a.args[2].fullspan + a.args[3].fullspan < offset <= loc + a.trivia[1].fullspan + a.args[2].fullspan + a.args[3].fullspan + a.trivia[2].span
-                    return BlockRangeResult(loc, loc, loc + a.span, loc + a.fullspan)
+                    return BlockRangeResult(_pos(loc), _pos(loc), _pos(loc + a.span), _pos(loc + a.fullspan))
                 end
             else
-                return BlockRangeResult(loc, loc, loc + a.span, loc + a.fullspan)
+                return BlockRangeResult(_pos(loc), _pos(loc), _pos(loc + a.span), _pos(loc + a.fullspan))
             end
         end
         loc += a.fullspan

@@ -207,17 +207,41 @@ A source text, consisting of its content, line indices, and language ID.
     end
 end
 
+"""
+    struct Position
+
+A position in a source file expressed as a 1-based line number and a 1-based
+UTF-8 byte column within that line.
+
+- `line::Int`: 1-based line number.
+- `column::Int`: 1-based UTF-8 byte offset from the start of the line.
+"""
+struct Position
+    line::Int    # 1-based
+    column::Int  # 1-based, UTF-8 byte offset within the line
+end
+
 function position_at(source_text::SourceText, x)
     line_indices = source_text.line_indices
 
     # TODO Implement a more efficient algorithm
     for line in length(line_indices):-1:1
         if x >= line_indices[line]
-            return line, x - line_indices[line] + 1
+            return Position(line, x - line_indices[line] + 1)
         end
     end
 
     error("This should never happen")
+end
+
+"""
+    _offset_to_position(runtime, uri, offset)
+
+Convert a 0-based byte offset in the file identified by `uri` to a `Position`.
+"""
+function _offset_to_position(runtime, uri::URI, offset::Int)
+    st = input_text_file(runtime, uri).content
+    return position_at(st, offset + 1)
 end
 
 """
@@ -282,8 +306,8 @@ struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace(;dynamic=false)
-        dynamic_feature = dynamic ? DynamicFeature(joinpath(homedir(), "djpstore"), joinpath(homedir(), ".julia")) : nothing
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff)
+        dynamic_feature = dynamic != DynamicOff ? DynamicFeature(dynamic, joinpath(homedir(), "djpstore"), joinpath(homedir(), ".julia")) : nothing
         dynamic_feature === nothing || start(dynamic_feature)
 
         rt = Salsa.Runtime{SContext}(SContext(dynamic_feature))
@@ -352,7 +376,11 @@ function process_from_dynamic(jw::JuliaWorkspace)
         while isready(jw.dynamic_feature.out_channel)
             msg = take!(jw.dynamic_feature.out_channel)
 
-            if msg.command == :environment_ready
+            if msg.command == :failed
+                @warn "DJP reported failure" msg.key
+                # Nothing to update — the failed_projects set was already populated in start()
+
+            elseif msg.command == :environment_ready
                 @info "Processeing new env"
                 for i in jw.dynamic_feature.missing_pkg_metadata
                     package_data = _try_load_package_cache(jw.dynamic_feature.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
@@ -368,24 +396,34 @@ function process_from_dynamic(jw::JuliaWorkspace)
 
                 add_folder_from_disc!(jw, uri2filepath(msg.test_project_uri))
 
-                set_input_project_test_environment!(jw.runtime, msg.project_uri, msg.package, msg.test_project_uri)
+                set_input_project_test_environment!(jw.runtime, msg.project_uri, msg.package, msg.content_hash, msg.test_project_uri)
 
                 # Preload package caches and mark environment as known for the test project,
                 # so the next get_diagnostics won't trigger another round of background processes.
                 _load_package_caches_for_project!(jw, msg.test_project_uri)
-                set_input_project_environment!(jw.runtime, msg.test_project_uri, nothing)
+                # Use the test project's own content_hash so Salsa keys match what callers compute
+                test_proj = derived_project(jw.runtime, msg.test_project_uri)
+                test_proj_hash = test_proj === nothing ? UInt(0) : test_proj.content_hash
+                set_input_project_environment!(jw.runtime, msg.test_project_uri, test_proj_hash, nothing)
             elseif msg.command == :standalone_package_project_ready
                 @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
 
                 add_folder_from_disc!(jw, uri2filepath(msg.project_uri))
 
-                set_input_standalone_package_project!(jw.runtime, msg.package_folder_uri, msg.project_uri)
+                set_input_standalone_package_project!(jw.runtime, msg.package_folder_uri, msg.content_hash, msg.project_uri)
 
                 _load_package_caches_for_project!(jw, msg.project_uri)
-                set_input_project_environment!(jw.runtime, msg.project_uri, nothing)
+                # Use the standalone project's own content_hash so Salsa keys match what callers compute
+                standalone_proj = derived_project(jw.runtime, msg.project_uri)
+                standalone_proj_hash = standalone_proj === nothing ? UInt(0) : standalone_proj.content_hash
+                set_input_project_environment!(jw.runtime, msg.project_uri, standalone_proj_hash, nothing)
             else
                 error("Unknown message: $msg")
             end
         end
+
+        # Clean up stale processes after draining all messages
+        required = derived_required_dynamic_projects(jw.runtime)
+        cleanup_stale_processes!(jw.dynamic_feature, jw.runtime, required)
     end
 end

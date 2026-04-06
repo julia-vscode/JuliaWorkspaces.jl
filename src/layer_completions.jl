@@ -39,11 +39,11 @@ module InsertFormats
 end
 
 """
-A text edit expressed in string indices (1-based).
+A text edit expressed as Positions.
 """
 struct CompletionEdit
-    start_index::Int   # 1-based Julia string index
-    end_index::Int     # 1-based Julia string index
+    start::Position
+    stop::Position
     new_text::String
     uri::Union{Nothing,URI}  # nothing means same file
 end
@@ -205,7 +205,7 @@ end
 
 function _texteditfor(state::_CompletionState, partial, new_text)
     start_off = max(state.start_offset - length(partial), 0)
-    CompletionEdit(start_off + 1, state.end_offset + 1, new_text, nothing)
+    CompletionEdit(position_at(state.st, start_off + 1), position_at(state.st, state.end_offset + 1), new_text, nothing)
 end
 
 # ============================================================================
@@ -403,7 +403,7 @@ function _path_completion(t, state::_CompletionState)
                         if isdir(joinpath(dir, f))
                             f = string(f, "/")
                         end
-                        edit = CompletionEdit(state.offset - sizeof(partial) + 1, state.offset + 1, f, nothing)
+                        edit = CompletionEdit(position_at(state.st, state.offset - sizeof(partial) + 1), position_at(state.st, state.offset + 1), f, nothing)
                         _add_completion_item(state, CompletionResultItem(
                             f, CompletionKinds.File, f, nothing, edit))
                     catch err
@@ -580,7 +580,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                     n, CompletionKinds.Module,
                     _completion_details_description(m),
                     _sanitize_docstring(m.doc),
-                    CompletionEdit(state.start_offset + 1, state.end_offset + 1, n, nothing)))
+                    CompletionEdit(position_at(state.st, state.start_offset + 1), position_at(state.st, state.end_offset + 1), n, nothing)))
             end
         end
     elseif t.kind == Tokens.DOT && pt.kind == Tokens.IDENTIFIER
@@ -868,28 +868,39 @@ function _add_using_stmt(x::CSTParser.EXPR, using_stmts, workspace)
 end
 
 function _textedit_to_insert_using_stmt(m::SymbolServer.ModuleStore, n::String, state::_CompletionState)
+    _pos_for(uri, offset) = if uri === nothing
+        position_at(state.st, offset + 1)
+    else
+        _offset_to_position(state.workspace.runtime, uri, offset)
+    end
+
     tls = _retrieve_toplevel_scope(state.x, state.meta_dict)
     if haskey(state.using_stmts, String(m.name.name))
         (using_stmt, (uri, using_offset)) = state.using_stmts[String(m.name.name)]
         insert_offset = using_offset + using_stmt.span
-        return [CompletionEdit(insert_offset + 1, insert_offset + 1, ", $n", uri)]
+        p = _pos_for(uri, insert_offset)
+        return [CompletionEdit(p, p, ", $n", uri)]
     elseif tls !== nothing
         if tls.expr.head === :file
-            return [CompletionEdit(1, 1, "using $(m.name): $(n)\n", nothing)]
+            p = Position(1, 1)
+            return [CompletionEdit(p, p, "using $(m.name): $(n)\n", nothing)]
         elseif tls.expr.head === :module
             tls_loc = get_expr_location(state.workspace, tls.expr)
             if tls_loc !== nothing
                 offset2 = tls.expr.trivia[1].fullspan + tls.expr.args[2].fullspan
                 insert_offset = tls_loc.offset + offset2
-                return [CompletionEdit(insert_offset + 1, insert_offset + 1, "using $(m.name): $(n)\n", tls_loc.uri)]
+                p = _pos_for(tls_loc.uri, insert_offset)
+                return [CompletionEdit(p, p, "using $(m.name): $(n)\n", tls_loc.uri)]
             else
-                return [CompletionEdit(1, 1, "using $(m.name): $(n)\n", nothing)]
+                p = Position(1, 1)
+                return [CompletionEdit(p, p, "using $(m.name): $(n)\n", nothing)]
             end
         else
             error()
         end
     else
-        return [CompletionEdit(1, 1, "using $(m.name): $(n)\n", nothing)]
+        p = Position(1, 1)
+        return [CompletionEdit(p, p, "using $(m.name): $(n)\n", nothing)]
     end
 end
 

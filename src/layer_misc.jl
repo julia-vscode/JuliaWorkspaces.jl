@@ -11,13 +11,13 @@
 # ============================================================================
 
 struct DocumentLinkResult
-    start_offset::Int
-    end_offset::Int
+    start::Position
+    stop::Position
     target_uri::URI
 end
 
 struct InlayHintResult
-    offset::Int
+    position::Position
     label::String
     kind::Symbol       # :parameter or :type
     padding_left::Bool
@@ -34,16 +34,16 @@ end
 # Document links
 # ============================================================================
 
-function _find_document_links(x::CSTParser.EXPR, fpath::String, offset::Int, links::Vector{DocumentLinkResult})
+function _find_document_links(x::CSTParser.EXPR, fpath::String, offset::Int, links::Vector{DocumentLinkResult}, st::SourceText)
     if CSTParser.isstringliteral(x)
         val = CSTParser.valof(x)
         if val isa String && isvalid(val) && sizeof(val) < 256
             try
                 if isabspath(val) && safe_isfile(val)
-                    push!(links, DocumentLinkResult(offset, offset + x.span, URIs2.filepath2uri(val)))
+                    push!(links, DocumentLinkResult(position_at(st, offset + 1), position_at(st, offset + x.span + 1), URIs2.filepath2uri(val)))
                 elseif !isempty(fpath) && safe_isfile(joinpath(_dirname(fpath), val))
                     path = joinpath(_dirname(fpath), val)
-                    push!(links, DocumentLinkResult(offset, offset + x.span, URIs2.filepath2uri(path)))
+                    push!(links, DocumentLinkResult(position_at(st, offset + 1), position_at(st, offset + x.span + 1), URIs2.filepath2uri(path)))
                 end
             catch err
                 isa(err, Base.IOError) || isa(err, Base.SystemError) || rethrow()
@@ -52,7 +52,7 @@ function _find_document_links(x::CSTParser.EXPR, fpath::String, offset::Int, lin
     end
     if x.args !== nothing
         for arg in x
-            _find_document_links(arg, fpath, offset, links)
+            _find_document_links(arg, fpath, offset, links, st)
             offset += arg.fullspan
         end
     end
@@ -64,7 +64,8 @@ function _get_document_links(runtime, uri::URI)
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     cst === nothing && return links
     fpath = something(URIs2.uri2filepath(uri), "")
-    _find_document_links(cst, fpath, 0, links)
+    st = input_text_file(runtime, uri).content
+    _find_document_links(cst, fpath, 0, links, st)
     return links
 end
 
@@ -78,7 +79,7 @@ end
 Check whether EXPR `x` (which is an argument inside a call) should get a
 parameter-name inlay hint.  Returns an `InlayHintResult` or `nothing`.
 """
-function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, pos::Int)
+function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, pos::Int, st::SourceText)
     if config.parameter_names === :all || (config.parameter_names === :literals && CSTParser.isliteral(x))
         sigs = _collect_signatures(x, meta_dict, env, runtime)
         nargs = length(CSTParser.parentof(x).args) - 1
@@ -105,7 +106,7 @@ function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env,
                     CSTParser.valof(x.args[end].args[end]) == label && return nothing
                 end
             end
-            return InlayHintResult(pos, string(label, "="), :parameter, false, false)
+            return InlayHintResult(position_at(st, pos + 1), string(label, "="), :parameter, false, false)
         end
     end
     return nothing
@@ -117,13 +118,13 @@ end
 Recursively walk the CST within range [start, stop] collecting inlay hints
 for parameter names and variable types.
 """
-function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, start::Int, stop::Int, pos::Int=0, hints::Vector{InlayHintResult}=InlayHintResult[])
+function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, start::Int, stop::Int, st::SourceText, pos::Int=0, hints::Vector{InlayHintResult}=InlayHintResult[])
     # Parameter name hints: x is a call argument (not the callee)
     if CSTParser.parentof(x) isa CSTParser.EXPR &&
             CSTParser.iscall(CSTParser.parentof(x)) &&
             !(CSTParser.parentof(CSTParser.parentof(x)) isa CSTParser.EXPR && CSTParser.defines_function(CSTParser.parentof(CSTParser.parentof(x)))) &&
             CSTParser.parentof(x).args[1] != x
-        maybe_hint = _get_inlay_parameter_hints(x, meta_dict, env, runtime, config, pos)
+        maybe_hint = _get_inlay_parameter_hints(x, meta_dict, env, runtime, config, pos, st)
         if maybe_hint !== nothing
             push!(hints, maybe_hint)
         end
@@ -135,14 +136,14 @@ function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runti
         if config.variable_types
             typ = completion_type(StaticLint.bindingof(x, meta_dict))
             if typ !== missing
-                push!(hints, InlayHintResult(pos + x.span, string("::", typ), :type, false, false))
+                push!(hints, InlayHintResult(position_at(st, pos + x.span + 1), string("::", typ), :type, false, false))
             end
         end
     end
     if length(x) > 0
         for a in x
             if pos < stop && pos + a.fullspan > start
-                _collect_inlay_hints(a, meta_dict, env, runtime, config, start, stop, pos, hints)
+                _collect_inlay_hints(a, meta_dict, env, runtime, config, start, stop, st, pos, hints)
             end
             pos += a.fullspan
             pos > stop && break
@@ -167,5 +168,7 @@ function _get_inlay_hints(runtime, uri::URI, start_offset::Int, end_offset::Int,
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     cst === nothing && return hints
 
-    return _collect_inlay_hints(cst, meta_dict, env, runtime, config, start_offset, end_offset, 0, hints)
+    st = input_text_file(runtime, uri).content
+
+    return _collect_inlay_hints(cst, meta_dict, env, runtime, config, start_offset, end_offset, st, 0, hints)
 end

@@ -5,7 +5,7 @@ Salsa.@derived function derived_environment(rt, uri)
         new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
         return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
     end
-    
+
     metadata_packages = SymbolServer.Package[]
     for (k,v) in project.regular_packages
         x = input_package_metadata(rt, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1)
@@ -54,7 +54,7 @@ Salsa.@derived function derived_workspace_deved_packages(rt, project_uri)
     return result
 end
 
-Salsa.@derived function derived_project_uri_for_root(rt, uri)    
+Salsa.@derived function derived_project_uri_for_root(rt, uri)
     active_project = input_active_project(rt)
 
     package_folder_uri = derived_package_for_file(rt, uri)
@@ -63,15 +63,18 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         package_folder = uri2filepath(package_folder_uri)
         runtests_path = joinpath(package_folder, "test", "runtests.jl")
 
+        pkg = derived_package(rt, package_folder_uri)
+        pkg_content_hash = pkg === nothing ? UInt(0) : pkg.content_hash
+
         # TODO Is this lowercase the right move? On Windows for sure, not clear about other platforms
         if lowercase(uri2filepath(uri)) == lowercase(runtests_path)
-            package_name = derived_package(rt, package_folder_uri).name
+            package_name = pkg.name
 
             project_for_test_env = if package_folder_uri in derived_project_folders(rt)
                 package_folder_uri
             else
                 # Check if there's a standalone project for this package
-                standalone_uri = input_standalone_package_project(rt, package_folder_uri)
+                standalone_uri = input_standalone_package_project(rt, package_folder_uri, pkg_content_hash)
                 if standalone_uri !== nothing
                     standalone_uri
                 else
@@ -79,7 +82,9 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
                 end
             end
 
-            test_project_uri = input_project_test_environment(rt, project_for_test_env, package_name)
+            test_env_project = derived_project(rt, project_for_test_env)
+            test_env_hash = test_env_project === nothing ? UInt(0) : test_env_project.content_hash
+            test_project_uri = input_project_test_environment(rt, project_for_test_env, package_name, test_env_hash)
 
             if test_project_uri !== nothing
                 return test_project_uri
@@ -94,7 +99,7 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         # If the package is not a project (no manifest) and not dev'd into any workspace project,
         # trigger creation of a standalone project for it
         if !_is_package_deved_in_workspace(rt, package_folder_uri)
-            standalone_uri = input_standalone_package_project(rt, package_folder_uri)
+            standalone_uri = input_standalone_package_project(rt, package_folder_uri, pkg_content_hash)
             if standalone_uri !== nothing
                 return standalone_uri
             end
@@ -116,4 +121,65 @@ function _is_package_deved_in_workspace(rt, package_folder_uri)
         end
     end
     return false
+end
+
+Salsa.@derived function derived_required_dynamic_projects(rt)
+    required = Set{DJPKey}()
+
+    # Every project folder needs a :watch_environment DJP
+    for project_uri in derived_project_folders(rt)
+        project = derived_project(rt, project_uri)
+        project === nothing && continue
+        push!(required, DJPKey((
+            project_path = uri2filepath(project_uri),
+            package = nothing,
+            content_hash = project.content_hash
+        )))
+    end
+
+    # Package folders that aren't project folders and aren't deved need a standalone project DJP
+    for package_uri in derived_package_folders(rt)
+        package_uri in derived_project_folders(rt) && continue
+        _is_package_deved_in_workspace(rt, package_uri) && continue
+
+        pkg = derived_package(rt, package_uri)
+        pkg === nothing && continue
+        push!(required, DJPKey((
+            project_path = uri2filepath(package_uri),
+            package = nothing,
+            content_hash = pkg.content_hash
+        )))
+    end
+
+    # Test environments: for each package folder with a test/runtests.jl, the test env DJP
+    for package_uri in derived_package_folders(rt)
+        package_folder = uri2filepath(package_uri)
+        runtests_path = joinpath(package_folder, "test", "runtests.jl")
+        isfile(runtests_path) || continue
+
+        pkg = derived_package(rt, package_uri)
+        pkg === nothing && continue
+
+        # Determine which project provides the test environment
+        project_for_test = if package_uri in derived_project_folders(rt)
+            package_uri
+        elseif !_is_package_deved_in_workspace(rt, package_uri)
+            # Would use standalone project
+            package_uri
+        else
+            input_active_project(rt)
+        end
+        project_for_test === nothing && continue
+
+        proj = derived_project(rt, project_for_test)
+        proj_hash = proj === nothing ? UInt(0) : proj.content_hash
+
+        push!(required, DJPKey((
+            project_path = uri2filepath(project_for_test),
+            package = pkg.name,
+            content_hash = proj_hash
+        )))
+    end
+
+    return required
 end

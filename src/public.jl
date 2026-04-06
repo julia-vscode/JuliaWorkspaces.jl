@@ -1,4 +1,5 @@
 export JuliaWorkspace,
+    DynamicMode, DynamicOff, DynamicIndexingOnly, DynamicPersistent,
     add_file!,
     remove_file!,
     remove_all_children!,
@@ -268,8 +269,8 @@ Get the syntax tree of a Julia file from the workspace.
 
 # Returns
 
-- The tuple `(tree, diagnostics)`, where `tree` is the syntax tree 
-  and `diagnostics` is a vector of `Diagnostic` structs.   
+- The tuple `(tree, diagnostics)`, where `tree` is the syntax tree
+  and `diagnostics` is a vector of `Diagnostic` structs.
 """
 function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
@@ -315,7 +316,7 @@ Get all diagnostics from the workspace.
 """
 function get_diagnostics(jw::JuliaWorkspace)
     process_from_dynamic(jw)
-    
+
     return derived_all_diagnostics(jw.runtime)
 end
 
