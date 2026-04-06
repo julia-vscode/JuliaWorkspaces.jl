@@ -69,22 +69,27 @@ Salsa.@derived function derived_project(rt, uri)
     regular_packages = Dict{String,JuliaProjectEntryRegularPackage}()
     stdlib_packages = Dict{String,JuliaProjectEntryStdlibPackage}()
 
-    manifest_version = get(manifest_content, "manifest_format", "1.0")
+    manifest_version_str = get(manifest_content, "manifest_format", "1.0")
+    manifest_version = tryparse(VersionNumber, manifest_version_str)
 
-    manifest_deps = if manifest_version=="1.0"
-        manifest_content
-    elseif manifest_version=="2.0" && haskey(manifest_content, "deps") && manifest_content["deps"] isa Dict
-        manifest_content["deps"]
-    else
-        error("")
+    if manifest_version === nothing
+        return nothing
     end
 
-    julia_version = if manifest_version == "1.0"
+    manifest_deps = if manifest_version.major == 1
+        manifest_content
+    elseif manifest_version.major == 2 && haskey(manifest_content, "deps") && manifest_content["deps"] isa Dict
+        manifest_content["deps"]
+    else
+        return nothing
+    end
+
+    julia_version = if manifest_version.major == 1
         nothing
-    elseif manifest_version=="2.0" && haskey(manifest_content, "julia_version")
+    elseif manifest_version.major == 2 && haskey(manifest_content, "julia_version")
         tryparse(VersionNumber, manifest_content["julia_version"])
     else
-        error("")
+        nothing
     end
 
     for (k_entry, v_entry) in pairs(manifest_deps)
@@ -116,17 +121,17 @@ Salsa.@derived function derived_project(rt, uri)
             git_tree_sha1_of_regular_package = v_entry[1]["git-tree-sha1"]
 
             version_of_regular_package = v_entry[1]["version"]
-            
+
             regular_packages[k_entry] = JuliaProjectEntryRegularPackage(k_entry, uuid_of_regular_package, version_of_regular_package, git_tree_sha1_of_regular_package)
         elseif haskey(v_entry[1], "uuid")
             uuid_of_stdlib_package = tryparse(UUID, v_entry[1]["uuid"])
             uuid_of_stdlib_package !== nothing || continue
 
             version_of_stdlib_package = get(v_entry[1], "version", nothing)
-            
+
             stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_stdlib_package, version_of_stdlib_package)
         else
-            error("Unknown manifest entry type $(keys(e_entry[1]))")
+            error("Unknown manifest entry type $(keys(v_entry[1]))")
         end
     end
 
@@ -147,7 +152,7 @@ end
 
 Salsa.@derived function derived_package_for_file(rt, file::URI)
     packages = derived_package_folders(rt)
-    
+
     file_path = uri2filepath(file)
     package = packages |>
         x -> map(x) do i
