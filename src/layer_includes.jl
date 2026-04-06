@@ -1,5 +1,5 @@
 Salsa.@derived function derived_all_includes(rt)
-    files_to_check = derived_julia_files(rt)
+    files_to_check = copy(derived_julia_files(rt))
     uri2included = Dict{URI,Set{URI}}()
 
     include_dict = Dict{UInt64, URI}()
@@ -10,7 +10,7 @@ Salsa.@derived function derived_all_includes(rt)
         uri2included[uri] = Set{URI}()
 
         cst = derived_julia_legacy_syntax_tree(rt, uri)
-        state = StaticLint.IncludeOnly(uri, include_dict, rt)        
+        state = StaticLint.IncludeOnly(uri, include_dict, rt)
         StaticLint.process_EXPR(cst, state)
 
         for included_file in state.included_files
@@ -58,7 +58,7 @@ Salsa.@derived function derived_roots(rt)
             push!(all_files_included_somewhere, included_uri)
         end
     end
- 
+
     roots = setdiff(keys(uri2included), all_files_included_somewhere)
 
     return roots
