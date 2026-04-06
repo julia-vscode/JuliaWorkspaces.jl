@@ -18,7 +18,7 @@ mutable struct DynamicJuliaProcess
     end
 end
 
-function index_project(djp::DynamicJuliaProcess, store_path::String, depot_path)
+function index_project(djp::DynamicJuliaProcess, store_path::String)
     JSONRPC.send(
         djp.endpoint,
         JuliaDynamicAnalysisProtocol.index_project_request_type,
@@ -241,7 +241,6 @@ end
 struct DynamicFeature
     mode::DynamicMode
     store_path::String
-    depot_path::String
     in_channel::Channel{Any}
     out_channel::Channel{Any}
     procs::Dict{DJPKey,DynamicJuliaProcess}
@@ -250,11 +249,10 @@ struct DynamicFeature
     pending_count::Threads.Atomic{Int}
     update_channel::Channel{Symbol}
 
-    function DynamicFeature(mode::DynamicMode, store_path::String, depot_path::String)
+    function DynamicFeature(mode::DynamicMode, store_path::String)
         return new(
             mode,
             store_path,
-            depot_path,
             Channel{Any}(Inf),
             Channel{Any}(Inf),
             Dict{DJPKey,DynamicJuliaProcess}(),
@@ -289,7 +287,7 @@ function start(df::DynamicFeature)
 
                         start(djp)
 
-                        index_project(djp, df.store_path, df.depot_path)
+                        index_project(djp, df.store_path)
 
                         put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path, content_hash=msg.content_hash))
 
@@ -310,7 +308,7 @@ function start(df::DynamicFeature)
 
                         start(djp)
 
-                        test_project = index_project(djp, df.store_path, df.depot_path)
+                        test_project = index_project(djp, df.store_path)
 
                         test_project_uri = filepath2uri(test_project)
 
