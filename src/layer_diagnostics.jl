@@ -43,6 +43,8 @@ Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
 end
 
 Salsa.@derived function derived_lint_configuration(rt, uri)
+    Base.@logmsg Trace "derived_lint_configuration" uri=uri
+
     config_files = derived_lintconfig_files(rt)
 
     config_files = sort(config_files, by=i->length(string(i)))
@@ -64,6 +66,8 @@ Salsa.@derived function derived_lint_configuration(rt, uri)
 end
 
 Salsa.@derived function derived_diagnostics(rt, uri)
+    Base.@logmsg Trace "derived_diagnostics" uri=uri
+
     lint_config = derived_lint_configuration(rt, uri)
 
     results = Diagnostic[]

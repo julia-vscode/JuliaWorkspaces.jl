@@ -1,4 +1,6 @@
 Salsa.@derived function derived_project_files(rt)
+    Base.@logmsg Trace "derived_project_files"
+
     files = input_files(rt)
 
     return [file for file in files if file.scheme=="file" && (is_path_project_file(uri2filepath(file)) || is_path_manifest_file(uri2filepath(file)))]
@@ -32,6 +34,8 @@ Salsa.@derived function derived_potential_project_folders(rt)
 end
 
 Salsa.@derived function derived_package(rt, uri)
+    Base.@logmsg Trace "derived_package" uri=uri
+
     project_folders = derived_potential_project_folders(rt)
 
     project_file = project_folders[uri].project_file
@@ -52,6 +56,8 @@ Salsa.@derived function derived_package(rt, uri)
 end
 
 Salsa.@derived function derived_project(rt, uri)
+    Base.@logmsg Trace "derived_project" uri=uri
+
     project_folders = derived_potential_project_folders(rt)
 
     project_file = project_folders[uri].project_file

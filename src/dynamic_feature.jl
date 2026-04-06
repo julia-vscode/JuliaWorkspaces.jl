@@ -42,6 +42,8 @@ function create_standalone_project(djp::DynamicJuliaProcess, store_path::String)
 end
 
 function start(djp::DynamicJuliaProcess)
+    @info "Starting DynamicJuliaProcess" project_path=djp.project_path package=djp.package
+
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
 
@@ -231,6 +233,8 @@ function start(djp::DynamicJuliaProcess)
 end
 
 function Base.kill(djp::DynamicJuliaProcess)
+    @info "Killing DynamicJuliaProcess" project_path=djp.project_path package=djp.package
+
     if djp.proc !== nothing
         kill(djp.proc)
         djp.proc = nothing
@@ -269,7 +273,7 @@ function start(df::DynamicFeature)
         while true
             msg = take!(df.in_channel)
 
-            @info "Processing message" msg
+            Base.@logmsg Trace "Processing dynamic feature message" command=msg.command
 
             Threads.atomic_add!(df.pending_count, 1)
 
@@ -384,7 +388,7 @@ end
 function cleanup_stale_processes!(df::DynamicFeature, rt, required::Set{DJPKey})
     for (key, djp) in collect(df.procs)
         if key ∉ required
-            @info "Killing stale DynamicJuliaProcess" key
+            @info "Killing stale DynamicJuliaProcess" key=key
             kill(djp)
             delete!(df.procs, key)
 

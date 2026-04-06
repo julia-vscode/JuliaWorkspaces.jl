@@ -41,6 +41,8 @@ function find_module_binding(cst, name::String, meta_dict::Dict{UInt64,StaticLin
 end
 
 Salsa.@derived function derived_deved_package_meta(rt, pkg_entry_uri, project_uri)
+    Base.@logmsg Trace "derived_deved_package_meta" pkg_entry_uri=pkg_entry_uri project_uri=project_uri
+
     env = derived_environment(rt, project_uri)
     include_dict = derived_include_dict(rt)
 
@@ -70,6 +72,8 @@ Salsa.@derived function derived_deved_package_meta(rt, pkg_entry_uri, project_ur
 end
 
 Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
+    Base.@logmsg Trace "derived_static_lint_meta_for_root" uri=uri
+
     meta_dict = Dict{UInt64,StaticLint.Meta}()
     include_dict = derived_include_dict(rt)
 
@@ -84,6 +88,10 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
 
     # TODO Replace this with proper logic, but for now this should be not too bad.
     project_uri = derived_project_uri_for_root(rt, uri)
+
+    if project_uri === nothing
+        return (meta_dict=meta_dict, workspace_packages=Dict{String,Any}())
+    end
 
     env = derived_environment(rt, project_uri)
 
@@ -114,15 +122,20 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
 end
 
 Salsa.@derived function derived_static_lint_all_diagnostics(rt)
+    Base.@logmsg Trace "derived_static_lint_all_diagnostics"
+
     # We use a Set to deduplicate diagnostics, as the same diagnostic
     # can be produced from multiple roots due to includes
     res = Dict{URI,Set{Diagnostic}}()
 
     for root in derived_roots(rt)
+        project_uri = derived_project_uri_for_root(rt, root)
+        project_uri === nothing && continue
+
         lint_result = derived_static_lint_meta_for_root(rt, root)
         meta_dict = lint_result.meta_dict
         workspace_packages = lint_result.workspace_packages
-        env = derived_environment(rt, derived_project_uri_for_root(rt, root))
+        env = derived_environment(rt, project_uri)
 
         uris_to_check = Set{URI}([root])
         while !isempty(uris_to_check)

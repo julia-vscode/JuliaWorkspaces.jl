@@ -11,7 +11,7 @@ Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
 Salsa.@declare_input input_env_ready(rt)::Bool
 
 Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Nothing function(ctx, uri, content_hash)
-    @info "Lazy load environment for" uri content_hash
+    Base.@logmsg Trace "Lazy load environment for" uri=uri content_hash=content_hash
 
     if ctx.dynamic_feature !== nothing
         put!(
@@ -28,7 +28,7 @@ Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Not
 end
 
 Salsa.@declare_input input_project_test_environment(rt, uri, package, content_hash::UInt)::Union{Nothing,URI} function(ctx, uri, package, content_hash)
-    @info "Lazy load environment for project and package" uri package content_hash
+    Base.@logmsg Trace "Lazy load test environment for project and package" uri=uri package=package content_hash=content_hash
 
     if ctx.dynamic_feature !== nothing
         put!(
@@ -46,7 +46,7 @@ Salsa.@declare_input input_project_test_environment(rt, uri, package, content_ha
 end
 
 Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri, content_hash::UInt)::Union{Nothing,URI} function(ctx, package_folder_uri, content_hash)
-    @info "Lazy create standalone project for package" package_folder_uri content_hash
+    Base.@logmsg Trace "Lazy create standalone project for package" package_folder_uri=package_folder_uri content_hash=content_hash
 
     if ctx.dynamic_feature !== nothing
         put!(
@@ -94,7 +94,7 @@ Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, versio
         end
     end
 
-    @info "No package metadata loading because dynamic feature is off" name uuid version git_tree_sha1
+    Base.@logmsg Trace "No package metadata loading because dynamic feature is off" name=name uuid=uuid version=version git_tree_sha1=git_tree_sha1
 
     return nothing
 end

@@ -1,4 +1,6 @@
 Salsa.@derived function derived_all_includes(rt)
+    Base.@logmsg Trace "derived_all_includes"
+
     files_to_check = copy(derived_julia_files(rt))
     uri2included = Dict{URI,Set{URI}}()
 
@@ -14,6 +16,9 @@ Salsa.@derived function derived_all_includes(rt)
         StaticLint.process_EXPR(cst, state)
 
         for included_file in state.included_files
+            if !derived_has_file(rt, included_file)
+                continue
+            end
             if !haskey(uri2included, included_file) && !(included_file in files_to_check)
                 push!(files_to_check, included_file)
             end
@@ -49,6 +54,8 @@ Salsa.@derived function derived_include_dict(rt)
 end
 
 Salsa.@derived function derived_roots(rt)
+    Base.@logmsg Trace "derived_roots"
+
     uri2included, include_dict = derived_all_includes(rt)
 
     all_files_included_somewhere = Set{URI}()
@@ -71,6 +78,8 @@ Return the set of roots whose include tree contains `uri`.
 If `uri` is itself a root, it will be included in the result.
 """
 Salsa.@derived function derived_roots_for_uri(rt, uri)
+    Base.@logmsg Trace "derived_roots_for_uri" uri=uri
+
     uri2included, _ = derived_all_includes(rt)
     roots = derived_roots(rt)
 

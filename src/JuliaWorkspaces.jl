@@ -1,5 +1,6 @@
 module JuliaWorkspaces
 
+import Logging
 import UUIDs, JuliaSyntax, TestItemDetection, CSTParser, JSONRPC, Sockets, CancellationTokens
 using UUIDs: UUID, uuid4
 using JuliaSyntax: SyntaxNode
