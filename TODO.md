@@ -11,3 +11,4 @@ This is a list of open issues that we still need to address before we can switch
 - Consider whether we should switch to pull based diagnostics right away because that might be a better fit
 - Figure formatting out
 - Add lint config for static lint to lint config file
+- Follow includes outside of the workspace

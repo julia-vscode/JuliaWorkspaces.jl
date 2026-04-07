@@ -358,7 +358,7 @@ function _load_package_caches_for_project!(jw, project_uri)
     for (_, v) in project.regular_packages
         package_data = _try_load_package_cache(store_path, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1)
         if package_data !== nothing
-            @info "Now package data is ready" v.name v.uuid v.version v.git_tree_sha1
+            # @info "Now package data is ready" v.name v.uuid v.version v.git_tree_sha1
             set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1, package_data)
         end
     end
@@ -368,7 +368,7 @@ function _load_package_caches_for_project!(jw, project_uri)
         ver = parse(VersionNumber, v.version)
         package_data = _try_load_package_cache(store_path, Symbol(v.name), v.uuid, ver, nothing)
         if package_data !== nothing
-            @info "Now package data is ready (stdlib)" v.name v.uuid v.version
+            # @info "Now package data is ready (stdlib)" v.name v.uuid v.version
             set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, ver, nothing, package_data)
         end
     end
@@ -388,7 +388,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 for i in jw.dynamic_feature.missing_pkg_metadata
                     package_data = _try_load_package_cache(jw.dynamic_feature.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
                     if package_data !== nothing
-                        @info "Now package data is ready" i.name i.uuid i.version i.git_tree_sha1
+                        # @info "Now package data is ready" i.name i.uuid i.version i.git_tree_sha1
                         set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
                     end
                 end
