@@ -408,6 +408,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 test_proj = derived_project(jw.runtime, msg.test_project_uri)
                 test_proj_hash = test_proj === nothing ? UInt(0) : test_proj.content_hash
                 set_input_project_environment!(jw.runtime, msg.test_project_uri, test_proj_hash, nothing)
+                set_input_env_ready!(jw.runtime, true)
             elseif msg.command == :standalone_package_project_ready
                 @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
 
@@ -420,6 +421,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 standalone_proj = derived_project(jw.runtime, msg.project_uri)
                 standalone_proj_hash = standalone_proj === nothing ? UInt(0) : standalone_proj.content_hash
                 set_input_project_environment!(jw.runtime, msg.project_uri, standalone_proj_hash, nothing)
+                set_input_env_ready!(jw.runtime, true)
             else
                 error("Unknown message: $msg")
             end

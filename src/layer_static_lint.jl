@@ -180,7 +180,7 @@ end
 Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
     all_diags = derived_static_lint_all_diagnostics(rt)
 
-    return all_diags[uri]
+    return get(all_diags, uri, Set{Diagnostic}())
 end
 
 """

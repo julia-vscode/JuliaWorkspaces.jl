@@ -88,12 +88,14 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
                 end
             end
 
-            test_env_project = derived_project(rt, project_for_test_env)
-            test_env_hash = test_env_project === nothing ? UInt(0) : test_env_project.content_hash
-            test_project_uri = input_project_test_environment(rt, project_for_test_env, package_name, test_env_hash)
+            if project_for_test_env !== nothing
+                test_env_project = derived_project(rt, project_for_test_env)
+                test_env_hash = test_env_project === nothing ? UInt(0) : test_env_project.content_hash
+                test_project_uri = input_project_test_environment(rt, project_for_test_env, package_name, test_env_hash)
 
-            if test_project_uri !== nothing
-                return test_project_uri
+                if test_project_uri !== nothing
+                    return test_project_uri
+                end
             end
         end
 

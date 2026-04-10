@@ -90,7 +90,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             append!(results, Diagnostic(i.range, :error, i.message, nothing, Symbol[], "Testitem") for i in tis.testerrors)
         end
 
-        if is_path_julia_file(uri2filepath(uri)) && input_active_project(rt) !== nothing
+        if is_path_julia_file(uri2filepath(uri))
             sl = derived_static_lint_diagnostics(rt, uri)
             env_ready = input_env_ready(rt)
             if env_ready
