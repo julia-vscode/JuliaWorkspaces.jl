@@ -49,4 +49,6 @@ include("layer_actions.jl")
 include("fileio.jl")
 include("public.jl")
 
+include("CloudIndexApp.jl")
+
 end
