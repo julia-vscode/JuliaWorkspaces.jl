@@ -60,6 +60,49 @@ Salsa.@derived function derived_testitems(rt, uri)
 
     TestItemDetection.find_test_detail!(syntax_tree, testitems, testsetups, testerrors)
 
+    packages = derived_package_folders(rt)
+    package_uri = find_package_for_file(packages, uri)
+
+    if isnothing(package_uri) && (!isempty(testitems) || !isempty(testsetups))
+        all_testerrors = [
+            TestErrorDetail(
+                uri,
+                "$uri:error$i",
+                string(te.name),
+                te.message,
+                te.range
+            ) for (i,te) in enumerate(testerrors)
+        ]
+
+        error_offset = length(testerrors)
+
+        for (i, ti) in enumerate(testitems)
+            push!(all_testerrors, TestErrorDetail(
+                uri,
+                "$uri:error$(error_offset + i)",
+                ti.name,
+                "Test items must be defined inside a Julia package.",
+                ti.range
+            ))
+        end
+
+        for (i, ts) in enumerate(testsetups)
+            push!(all_testerrors, TestErrorDetail(
+                uri,
+                "$uri:error$(error_offset + length(testitems) + i)",
+                string(ts.name),
+                "Test setups must be defined inside a Julia package.",
+                ts.range
+            ))
+        end
+
+        return TestDetails(
+            TestItemDetail[],
+            TestSetupDetail[],
+            all_testerrors
+        )
+    end
+
     return TestDetails(
         [TestItemDetail(
             uri,
@@ -143,7 +186,7 @@ Salsa.@derived function derived_testenv(rt, uri)
             safe_getproperty(derived_project(rt, project_uri), :content_hash)
         end
 
-    env_content_hash = 
+    env_content_hash =
         if isnothing(package_uri)
             hash(project_env_content_hash)
         else
