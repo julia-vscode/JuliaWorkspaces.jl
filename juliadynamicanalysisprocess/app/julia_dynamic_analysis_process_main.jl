@@ -1,19 +1,10 @@
 @info "Julia dynamic analysis process launching"
 
-import Pkg
-version_specific_env_path = joinpath(@__DIR__, "../environments", "v$(VERSION.major).$(VERSION.minor)")
-if isdir(version_specific_env_path)
-    @static if VERSION >= v"1.6"
-        Pkg.activate(version_specific_env_path, io=devnull)
-    else
-        Pkg.activate(version_specific_env_path)
-    end
+version_specific_env_path = normpath(joinpath(@__DIR__, "../environments", "v$(VERSION.major).$(VERSION.minor)", "Project.toml"))
+if isfile(version_specific_env_path)
+    Base.ACTIVE_PROJECT[] = version_specific_env_path
 else
-    @static if VERSION >= v"1.6"
-        Pkg.activate(joinpath(@__DIR__, "../environments", "fallback"), io=devnull)
-    else
-        Pkg.activate(joinpath(@__DIR__, "../environments", "fallback"))
-    end
+    Base.ACTIVE_PROJECT[] = normpath(joinpath(@__DIR__, "../environments", "fallback"))
 end
 
 let
