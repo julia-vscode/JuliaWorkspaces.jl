@@ -110,7 +110,7 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
 end
 
 function add_file_from_disc!(jw::JuliaWorkspace, path)
-    Base.@logmsg Trace "add_file_from_disc!" path=path
+    @debug "add_file_from_disc!" path=path
 
     process_from_dynamic(jw)
 
@@ -121,7 +121,7 @@ function add_file_from_disc!(jw::JuliaWorkspace, path)
 end
 
 function update_file_from_disc!(jw::JuliaWorkspace, path)
-    Base.@logmsg Trace "update_file_from_disc!" path=path
+    @debug "update_file_from_disc!" path=path
 
     process_from_dynamic(jw)
 
@@ -132,7 +132,7 @@ function update_file_from_disc!(jw::JuliaWorkspace, path)
 end
 
 function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
-    Base.@logmsg Trace "add_folder_from_disc!" path=path
+    @debug "add_folder_from_disc!" path=path
 
     process_from_dynamic(jw)
 
@@ -146,7 +146,7 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
 end
 
 function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff)
-    Base.@logmsg Trace "workspace_from_folders" folders=workspace_folders dynamic=dynamic
+    @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic
 
     jw = JuliaWorkspace(;dynamic=dynamic)
 

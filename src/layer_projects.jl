@@ -1,5 +1,5 @@
 Salsa.@derived function derived_project_files(rt)
-    Base.@logmsg Trace "derived_project_files"
+    @debug "derived_project_files"
 
     files = input_files(rt)
 
@@ -34,7 +34,7 @@ Salsa.@derived function derived_potential_project_folders(rt)
 end
 
 Salsa.@derived function derived_package(rt, uri)
-    Base.@logmsg Trace "derived_package" uri=uri
+    @debug "derived_package" uri=uri
 
     project_folders = derived_potential_project_folders(rt)
 
@@ -56,7 +56,7 @@ Salsa.@derived function derived_package(rt, uri)
 end
 
 Salsa.@derived function derived_project(rt, uri)
-    Base.@logmsg Trace "derived_project" uri=uri
+    @debug "derived_project" uri=uri
 
     project_folders = derived_potential_project_folders(rt)
 

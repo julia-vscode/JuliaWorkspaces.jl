@@ -90,7 +90,7 @@ export JuliaWorkspace,
 Add a file to the workspace. If the file already exists, it will throw an error.
 """
 function add_file!(jw::JuliaWorkspace, file::TextFile)
-    Base.@logmsg Trace "add_file!" uri=file.uri
+    @debug "add_file!" uri=file.uri
 
     process_from_dynamic(jw)
 
@@ -111,7 +111,7 @@ end
 Update a file in the workspace. If the file does not exist, it will throw an error.
 """
 function update_file!(jw::JuliaWorkspace, file::TextFile)
-    Base.@logmsg Trace "update_file!" uri=file.uri
+    @debug "update_file!" uri=file.uri
 
     process_from_dynamic(jw)
 
@@ -130,7 +130,7 @@ Get all text files from the workspace.
 - A set of URIs.
 """
 function get_text_files(jw::JuliaWorkspace)
-    Base.@logmsg Trace "get_text_files"
+    @debug "get_text_files"
 
     process_from_dynamic(jw)
 
@@ -147,7 +147,7 @@ Get all Julia files from the workspace.
 - A set of URIs.
 """
 function get_julia_files(jw::JuliaWorkspace)
-    Base.@logmsg Trace "get_julia_files"
+    @debug "get_julia_files"
 
     process_from_dynamic(jw)
 
@@ -163,7 +163,7 @@ Get all files from the workspace.
 - A set of URIs.
 """
 function get_files(jw::JuliaWorkspace)
-    Base.@logmsg Trace "get_files"
+    @debug "get_files"
 
     process_from_dynamic(jw)
 
@@ -176,7 +176,7 @@ end
 Check if a file exists in the workspace.
 """
 function has_file(jw, uri)
-    Base.@logmsg Trace "has_file" uri=uri
+    @debug "has_file" uri=uri
 
     process_from_dynamic(jw)
 
@@ -193,7 +193,7 @@ Get a text file from the workspace. If the file does not exist, it will throw an
 - A [`TextFile`](@ref) struct.
 """
 function get_text_file(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_text_file" uri=uri
+    @debug "get_text_file" uri=uri
 
     process_from_dynamic(jw)
 
@@ -210,7 +210,7 @@ end
 Remove a file from the workspace. If the file does not exist, it will throw an error.
 """
 function remove_file!(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "remove_file!" uri=uri
+    @debug "remove_file!" uri=uri
 
     process_from_dynamic(jw)
 
@@ -231,7 +231,7 @@ end
 Remove all children of a folder from the workspace.
 """
 function remove_all_children!(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "remove_all_children!" uri=uri
+    @debug "remove_all_children!" uri=uri
 
     process_from_dynamic(jw)
 
@@ -260,7 +260,7 @@ Get all packages from the workspace.
 - A set of URIs.
 """
 function get_packages(jw::JuliaWorkspace)
-    Base.@logmsg Trace "get_packages"
+    @debug "get_packages"
 
     process_from_dynamic(jw)
 
@@ -277,7 +277,7 @@ Get all projects from the workspace.
 - A set of URIs.
 """
 function get_projects(jw::JuliaWorkspace)
-    Base.@logmsg Trace "get_projects"
+    @debug "get_projects"
 
     process_from_dynamic(jw)
 
@@ -297,7 +297,7 @@ Get the syntax tree of a Julia file from the workspace.
   and `diagnostics` is a vector of `Diagnostic` structs.
 """
 function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_julia_syntax_tree" uri=uri
+    @debug "get_julia_syntax_tree" uri=uri
 
     process_from_dynamic(jw)
 
@@ -310,7 +310,7 @@ end
 Get the syntax tree of a TOML file from the workspace.
 """
 function get_toml_syntax_tree(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_toml_syntax_tree" uri=uri
+    @debug "get_toml_syntax_tree" uri=uri
 
     process_from_dynamic(jw)
 
@@ -329,7 +329,7 @@ Get the diagnostics of a file from the workspace.
 - A vector of `Diagnostic` structs.
 """
 function get_diagnostic(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_diagnostic" uri=uri
+    @debug "get_diagnostic" uri=uri
 
     process_from_dynamic(jw)
 
@@ -345,7 +345,7 @@ Get all diagnostics from the workspace.
 - A vector of `Diagnostic` structs.
 """
 function get_diagnostics(jw::JuliaWorkspace)
-    Base.@logmsg Trace "get_diagnostics"
+    @debug "get_diagnostics"
 
     process_from_dynamic(jw)
 
@@ -361,7 +361,7 @@ If `cancel_token` is provided, throws `CancellationTokens.OperationCanceledExcep
 when the token is cancelled.
 """
 function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
-    Base.@logmsg Trace "get_diagnostics_blocking"
+    @debug "get_diagnostics_blocking"
 
     # First call triggers lazy inputs that start background processes
     get_diagnostics(jw)
@@ -383,7 +383,7 @@ Returns
 - an instance of the struct [`TestDetails`](@ref)
 """
 function get_test_items(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_test_items" uri=uri
+    @debug "get_test_items" uri=uri
 
     process_from_dynamic(jw)
 
@@ -400,7 +400,7 @@ Returns
 - an instance of the struct [`TestDetails`](@ref)
 """
 function get_test_items(jw::JuliaWorkspace)
-    Base.@logmsg Trace "get_test_items (all)"
+    @debug "get_test_items (all)"
 
     process_from_dynamic(jw)
 
@@ -417,7 +417,7 @@ Returns
 - an instance of the struct [`JuliaTestEnv`](@ref)
 """
 function get_test_env(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_test_env" uri=uri
+    @debug "get_test_env" uri=uri
 
     process_from_dynamic(jw)
 
@@ -434,7 +434,7 @@ Returns `true` if no dynamic feature is configured, or if the environment
 has finished loading and no tasks are pending.
 """
 function is_ready(jw::JuliaWorkspace)
-    Base.@logmsg Trace "is_ready"
+    @debug "is_ready"
 
     jw.dynamic_feature === nothing && return true
     return input_env_ready(jw.runtime) && jw.dynamic_feature.pending_count[] == 0
@@ -448,7 +448,7 @@ If `cancel_token` is provided, throws `CancellationTokens.OperationCanceledExcep
 when the token is cancelled.
 """
 function wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
-    Base.@logmsg Trace "wait_until_ready"
+    @debug "wait_until_ready"
 
     while !is_ready(jw)
         if cancel_token !== nothing
@@ -487,7 +487,7 @@ Get the CSTParser legacy syntax tree for a Julia file.
 - An `EXPR` (CSTParser expression tree).
 """
 function get_legacy_cst(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_legacy_cst" uri=uri
+    @debug "get_legacy_cst" uri=uri
 
     process_from_dynamic(jw)
 
@@ -503,7 +503,7 @@ Get all root files whose include tree contains the given URI.
 - A `Set{URI}` of root file URIs.
 """
 function get_roots_for_uri(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_roots_for_uri" uri=uri
+    @debug "get_roots_for_uri" uri=uri
 
     process_from_dynamic(jw)
 
@@ -522,7 +522,7 @@ include tree.
 - A `URI` or `nothing`.
 """
 function get_best_root_for_uri(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_best_root_for_uri" uri=uri
+    @debug "get_best_root_for_uri" uri=uri
 
     process_from_dynamic(jw)
 
@@ -545,7 +545,7 @@ needed by LS request handlers.
   - `root::URI` — the root file that was used
 """
 function get_static_lint_data(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_static_lint_data" uri=uri
+    @debug "get_static_lint_data" uri=uri
 
     process_from_dynamic(jw)
 
@@ -573,7 +573,7 @@ Get the resolved environment for the best root containing `uri`.
 - A `StaticLint.ExternalEnv` or `nothing`.
 """
 function get_environment(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_environment" uri=uri
+    @debug "get_environment" uri=uri
 
     process_from_dynamic(jw)
 
@@ -599,7 +599,7 @@ Salsa-memoized expr→URI mapping.
 - `nothing` if the EXPR cannot be mapped to a file
 """
 function get_expr_location(jw::JuliaWorkspace, x::CSTParser.EXPR)
-    Base.@logmsg Trace "get_expr_location"
+    @debug "get_expr_location"
 
     # Walk to root
     root = x
@@ -648,7 +648,7 @@ Julia string index) in the file identified by `uri`, or `nothing` if there is
 no hover information for that position.
 """
 function get_hover_text(jw::JuliaWorkspace, uri::URI, index::Integer)
-    Base.@logmsg Trace "get_hover_text" uri=uri index=index
+    @debug "get_hover_text" uri=uri index=index
 
     process_from_dynamic(jw)
     return _get_hover_text(jw.runtime, uri, index)
@@ -662,7 +662,7 @@ and return their documentation as a single markdown string.
 Returns `"No results found."` when no matches are found.
 """
 function get_doc_from_word(jw::JuliaWorkspace, word::AbstractString)
-    Base.@logmsg Trace "get_doc_from_word" word=word
+    @debug "get_doc_from_word" word=word
 
     process_from_dynamic(jw)
     return _get_doc_from_word(jw.runtime, word)
@@ -680,7 +680,7 @@ Return a `CompletionResult` with completion items at the given `index`
 additional `using` statements are inserted for out-of-scope symbols.
 """
 function get_completions(jw::JuliaWorkspace, uri::URI, index::Integer, completion_mode::Symbol=:import)
-    Base.@logmsg Trace "get_completions" uri=uri index=index mode=completion_mode
+    @debug "get_completions" uri=uri index=index mode=completion_mode
 
     process_from_dynamic(jw)
     offset = index - 1  # Convert 1-based string index to 0-based CSTParser offset
@@ -696,7 +696,7 @@ Return a vector of `DefinitionResult` for the symbol at `index` (1-based
 Julia string index) in the file identified by `uri`.
 """
 function get_definitions(jw::JuliaWorkspace, uri::URI, index::Integer)
-    Base.@logmsg Trace "get_definitions" uri=uri index=index
+    @debug "get_definitions" uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -710,7 +710,7 @@ Return a vector of `ReferenceResult` for all references to the symbol at
 `index` (1-based Julia string index) in the file identified by `uri`.
 """
 function get_references(jw::JuliaWorkspace, uri::URI, index::Integer)
-    Base.@logmsg Trace "get_references" uri=uri index=index
+    @debug "get_references" uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -724,7 +724,7 @@ Return a vector of `RenameEdit` for renaming the symbol at `index` (1-based
 Julia string index) in `uri` to `new_name`.
 """
 function get_rename_edits(jw::JuliaWorkspace, uri::URI, index::Integer, new_name::String)
-    Base.@logmsg Trace "get_rename_edits" uri=uri index=index new_name=new_name
+    @debug "get_rename_edits" uri=uri index=index new_name=new_name
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -738,7 +738,7 @@ Return a vector of `HighlightResult` for highlighted occurrences of the
 symbol at `index` (1-based Julia string index) in the same file.
 """
 function get_highlights(jw::JuliaWorkspace, uri::URI, index::Integer)
-    Base.@logmsg Trace "get_highlights" uri=uri index=index
+    @debug "get_highlights" uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -753,7 +753,7 @@ renamed. Returns a named tuple `(start_index, end_index)` with 1-based
 indices, or `nothing`.
 """
 function can_rename(jw::JuliaWorkspace, uri::URI, index::Integer)
-    Base.@logmsg Trace "can_rename" uri=uri index=index
+    @debug "can_rename" uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -769,7 +769,7 @@ Return a `SignatureResult` with signature information for the function call
 at `index` (1-based Julia string index) in the file identified by `uri`.
 """
 function get_signature_help(jw::JuliaWorkspace, uri::URI, index::Integer)
-    Base.@logmsg Trace "get_signature_help" uri=uri index=index
+    @debug "get_signature_help" uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -787,7 +787,7 @@ for the file identified by `uri`. Each result has `start_offset` and
 integer), and `children`.
 """
 function get_document_symbols(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_document_symbols" uri=uri
+    @debug "get_document_symbols" uri=uri
 
     process_from_dynamic(jw)
     return _get_document_symbols(jw.runtime, uri)
@@ -800,7 +800,7 @@ Search all files for top-level bindings whose name starts with `query`.
 Returns a vector of `WorkspaceSymbolResult`.
 """
 function get_workspace_symbols(jw::JuliaWorkspace, query::String)
-    Base.@logmsg Trace "get_workspace_symbols" query=query
+    @debug "get_workspace_symbols" query=query
 
     process_from_dynamic(jw)
     return _get_workspace_symbols(jw.runtime, query)
@@ -815,7 +815,7 @@ For each 1-based string index in `indices`, compute a nested selection range.
 Returns a vector of `Union{Nothing, SelectionRangeResult}`.
 """
 function get_selection_ranges(jw::JuliaWorkspace, uri::URI, indices::Vector{Int})
-    Base.@logmsg Trace "get_selection_ranges" uri=uri count=length(indices)
+    @debug "get_selection_ranges" uri=uri count=length(indices)
 
     process_from_dynamic(jw)
     offsets = [idx - 1 for idx in indices]
@@ -829,7 +829,7 @@ Find the current top-level block at `index` (1-based Julia string index).
 Returns a `BlockRangeResult` with 0-based byte offsets, or `nothing`.
 """
 function get_current_block_range(jw::JuliaWorkspace, uri::URI, index::Integer)
-    Base.@logmsg Trace "get_current_block_range" uri=uri index=index
+    @debug "get_current_block_range" uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -843,7 +843,7 @@ Return the fully qualified module name at `index` (1-based Julia string index),
 or "Main" if no module scope is found.
 """
 function get_module_at(jw::JuliaWorkspace, uri::URI, index::Integer)
-    Base.@logmsg Trace "get_module_at" uri=uri index=index
+    @debug "get_module_at" uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -861,7 +861,7 @@ Return clickable document links (string literals that resolve to files).
 Offsets in results are 0-based byte offsets for direct use with CST spans.
 """
 function get_document_links(jw::JuliaWorkspace, uri::URI)
-    Base.@logmsg Trace "get_document_links" uri=uri
+    @debug "get_document_links" uri=uri
 
     process_from_dynamic(jw)
     return _get_document_links(jw.runtime, uri)
@@ -878,7 +878,7 @@ Return inlay hints (parameter names, variable types) for the given range.
 `start_index` and `end_index` are 1-based Julia string indices.
 """
 function get_inlay_hints(jw::JuliaWorkspace, uri::URI, start_index::Integer, end_index::Integer, config::InlayHintConfig)
-    Base.@logmsg Trace "get_inlay_hints" uri=uri start_index=start_index end_index=end_index
+    @debug "get_inlay_hints" uri=uri start_index=start_index end_index=end_index
 
     process_from_dynamic(jw)
     start_offset = start_index - 1
@@ -898,7 +898,7 @@ Return the list of applicable code actions at `index` (1-based Julia string inde
 `workspace_folders` is an optional list of workspace folder paths (used by license actions).
 """
 function get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String}, workspace_folders::Vector{String}=String[])
-    Base.@logmsg Trace "get_code_actions" uri=uri index=index
+    @debug "get_code_actions" uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1
@@ -913,7 +913,7 @@ Returns a vector of workspace file edits. Each edit contains a URI and a vector 
 `TextEditResult`s with 0-based byte offsets.
 """
 function execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer, workspace_folders::Vector{String}=String[])
-    Base.@logmsg Trace "execute_code_action" action_id=action_id uri=uri index=index
+    @debug "execute_code_action" action_id=action_id uri=uri index=index
 
     process_from_dynamic(jw)
     offset = index - 1

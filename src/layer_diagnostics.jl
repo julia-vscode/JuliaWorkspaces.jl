@@ -43,7 +43,7 @@ Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
 end
 
 Salsa.@derived function derived_lint_configuration(rt, uri)
-    Base.@logmsg Trace "derived_lint_configuration" uri=uri
+    @debug "derived_lint_configuration" uri=uri
 
     config_files = derived_lintconfig_files(rt)
 
@@ -66,7 +66,7 @@ Salsa.@derived function derived_lint_configuration(rt, uri)
 end
 
 Salsa.@derived function derived_diagnostics(rt, uri)
-    Base.@logmsg Trace "derived_diagnostics" uri=uri
+    @debug "derived_diagnostics" uri=uri
 
     lint_config = derived_lint_configuration(rt, uri)
 

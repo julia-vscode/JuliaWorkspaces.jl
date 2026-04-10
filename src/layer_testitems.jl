@@ -38,7 +38,7 @@ function find_project_for_file(projects::Vector{URI}, file::URI)
 end
 
 Salsa.@derived function derived_testitems(rt, uri)
-    Base.@logmsg Trace "derived_testitems" uri=uri
+    @debug "derived_testitems" uri=uri
 
     testitems = []
     testsetups = []
@@ -80,7 +80,7 @@ Salsa.@derived function derived_testitems(rt, uri)
 end
 
 Salsa.@derived function derived_all_testitems(rt)
-    Base.@logmsg Trace "derived_all_testitems"
+    @debug "derived_all_testitems"
 
     files = derived_julia_files(rt)
 

@@ -1,5 +1,5 @@
 Salsa.@derived function derived_julia_parse_result(rt, uri)
-    Base.@logmsg Trace "derived_julia_parse_result" uri=uri
+    @debug "derived_julia_parse_result" uri=uri
 
     tf = input_text_file(rt, uri)
 
@@ -42,7 +42,7 @@ Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
 end
 
 Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
-    Base.@logmsg Trace "derived_julia_legacy_syntax_tree" uri=uri
+    @debug "derived_julia_legacy_syntax_tree" uri=uri
 
     tf = input_text_file(rt, uri)
 
@@ -54,7 +54,7 @@ Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
 end
 
 Salsa.@derived function derived_toml_parse_result(rt, uri)
-    Base.@logmsg Trace "derived_toml_parse_result" uri=uri
+    @debug "derived_toml_parse_result" uri=uri
 
     tf = input_text_file(rt, uri)
 

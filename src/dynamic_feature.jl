@@ -273,7 +273,7 @@ function start(df::DynamicFeature)
         while true
             msg = take!(df.in_channel)
 
-            Base.@logmsg Trace "Processing dynamic feature message" command=msg.command
+            @debug "Processing dynamic feature message" command=msg.command
 
             Threads.atomic_add!(df.pending_count, 1)
 

@@ -1,5 +1,5 @@
 Salsa.@derived function derived_environment(rt, uri)
-    Base.@logmsg Trace "derived_environment" uri=uri
+    @debug "derived_environment" uri=uri
 
     project = derived_project(rt, uri)
 
@@ -43,7 +43,7 @@ Salsa.@derived function derived_environment(rt, uri)
 end
 
 Salsa.@derived function derived_workspace_deved_packages(rt, project_uri)
-    Base.@logmsg Trace "derived_workspace_deved_packages" project_uri=project_uri
+    @debug "derived_workspace_deved_packages" project_uri=project_uri
 
     project = derived_project(rt, project_uri)
     project === nothing && return Dict{String, URI}()
@@ -59,7 +59,7 @@ Salsa.@derived function derived_workspace_deved_packages(rt, project_uri)
 end
 
 Salsa.@derived function derived_project_uri_for_root(rt, uri)
-    Base.@logmsg Trace "derived_project_uri_for_root" uri=uri
+    @debug "derived_project_uri_for_root" uri=uri
 
     active_project = input_active_project(rt)
 
@@ -132,7 +132,7 @@ function _is_package_deved_in_workspace(rt, package_folder_uri)
 end
 
 Salsa.@derived function derived_required_dynamic_projects(rt)
-    Base.@logmsg Trace "derived_required_dynamic_projects"
+    @debug "derived_required_dynamic_projects"
 
     required = Set{DJPKey}()
 
