@@ -49,7 +49,7 @@ function start(djp::DynamicJuliaProcess)
 
     julia_dynamic_analysis_process_script = joinpath(@__DIR__, "../juliadynamicanalysisprocess/app/julia_dynamic_analysis_process_main.jl")
 
-    # pipe_out = Pipe()
+    pipe_out = Pipe()
 
     # jlArgs = copy(env.juliaArgs)
 
@@ -86,127 +86,40 @@ function start(djp::DynamicJuliaProcess)
     djp.proc = open(
         pipeline(
             Cmd(`julia --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
-            # stdout = pipe_out,
-            # stderr = pipe_out
+            stdout = pipe_out,
+            stderr = pipe_out
         )
     )
 
-    # @async try
-    #     begin_marker = "\x1f3805a0ad41b54562a46add40be31ca27"
-    #     end_marker = "\x1f4031af828c3d406ca42e25628bb0aa77"
-    #     buffer = ""
-    #     current_output_testitem_id = nothing
-    #     while !eof(pipe_out)
-    #         data = readavailable(pipe_out)
-    #         data_as_string = String(data)
+    @async try
+        buffer = ""
+        while !eof(pipe_out)
+            data = readavailable(pipe_out)
+            data_as_string = String(data)
 
-    #         buffer *= data_as_string
+            buffer *= data_as_string
 
-    #         output_for_test_proc = IOBuffer()
-    #         output_for_test_items = Pair{Union{Nothing,String},IOBuffer}[]
+            output_for_test_proc = IOBuffer()
 
-    #         i = 1
-    #         while i<=length(buffer)
-    #             might_be_begin_marker = false
-    #             might_be_end_marker = false
+            i = 1
+            current_line_start = 1
+            while i<=length(buffer)                
+                if buffer[i] == '\n'
+                    line = strip(buffer[current_line_start:prevind(buffer,i)])
+                    if length(line) > 0
+                        @debug "Output from DynamicJuliaProcess" project_path=djp.project_path package=djp.package line=line
+                    end
+                    current_line_start = nextind(buffer, i)
+                end
+                i = nextind(buffer, i)
+            end
 
-    #             if current_output_testitem_id === nothing
-    #                 j = 1
-    #                 might_be_begin_marker = true
-    #                 while i + j - 1<=length(buffer) && j <= length(begin_marker)
-    #                     if buffer[i + j - 1] != begin_marker[j] || nextind(buffer, i + j - 1) != i + j
-    #                         might_be_begin_marker = false
-    #                         break
-    #                     end
-    #                     j += 1
-    #                 end
-    #                 is_begin_marker = might_be_begin_marker && length(buffer) - i + 1 >= length(begin_marker)
-
-    #                 if is_begin_marker
-    #                     ti_id_end_index = findfirst("\"", SubString(buffer, i))
-    #                     if ti_id_end_index === nothing
-    #                         break
-    #                     else
-    #                         current_output_testitem_id = SubString(buffer, i + length(begin_marker), i + ti_id_end_index.start - 2)
-    #                         i = nextind(buffer, i + ti_id_end_index.start - 1)
-    #                     end
-    #                 elseif might_be_begin_marker
-    #                     break
-    #                 end
-    #             else
-    #                 j = 1
-    #                 might_be_end_marker = true
-    #                 while i + j - 1<=length(buffer) && j <= length(end_marker)
-    #                     if buffer[i + j - 1] != end_marker[j] || nextind(buffer, i + j - 1) != i + j
-    #                         might_be_end_marker = false
-    #                         break
-    #                     end
-    #                     j += 1
-    #                 end
-    #                 is_end_marker = might_be_end_marker && length(buffer) - i + 1 >= length(end_marker)
-
-    #                 if is_end_marker
-    #                     current_output_testitem_id = nothing
-    #                     i = i + length(end_marker)
-    #                 elseif might_be_end_marker
-    #                     break
-    #                 end
-    #             end
-
-    #             if !might_be_begin_marker && !might_be_end_marker
-    #                 print(output_for_test_proc, buffer[i])
-
-    #                 if length(output_for_test_items) == 0 || output_for_test_items[end].first != current_output_testitem_id
-    #                     push!(output_for_test_items, current_output_testitem_id => IOBuffer())
-    #                 end
-
-    #                 output_for_ti = output_for_test_items[end].second
-    #                 if !CancellationTokens.is_cancellation_requested(token)
-    #                     print(output_for_ti, buffer[i])
-    #                 end
-
-    #                 i = nextind(buffer, i)
-    #             end
-    #         end
-
-    #         buffer = buffer[i:end]
-
-    #         output_for_test_proc_as_string = String(take!(output_for_test_proc))
-
-    #         if length(output_for_test_proc_as_string) > 0
-    #             put!(
-    #                 controller_msg_channel,
-    #                 (
-    #                     event = :testprocess_output,
-    #                     id = testprocess_id,
-    #                     output = output_for_test_proc_as_string
-    #                 )
-    #             )
-    #         end
-
-    #         for (k,v) in output_for_test_items
-    #             output_for_ti_as_string = String(take!(v))
-
-    #             if length(output_for_ti_as_string) > 0
-    #                 put!(
-    #                     testprocess_msg_channel,
-    #                     (
-    #                         event = :append_output,
-    #                         testitem_id = something(k, missing),
-    #                         output = replace(output_for_ti_as_string, "\n"=>"\r\n")
-    #                     )
-    #                 )
-    #             end
-    #         end
-    #     end
-    # catch err
-    #     bt = catch_backtrace()
-    #     if controller.err_handler !== nothing
-    #         controller.err_handler(err, bt)
-    #     else
-    #         Base.display_error(err, bt)
-    #     end
-    # end
+            buffer = buffer[current_line_start:end]
+        end
+    catch err
+        bt = catch_backtrace()
+        Base.display_error(err, bt)
+    end
 
     @debug "Waiting for connection from test process"
     socket = Sockets.accept(server)

@@ -361,12 +361,15 @@ when the token is cancelled.
 function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
     @debug "get_diagnostics_blocking"
 
-    # First call triggers lazy inputs that start background processes
-    get_diagnostics(jw)
-    # Wait for all background processes to complete
-    wait_until_ready(jw; cancel_token=cancel_token)
-    # Second call picks up the results and returns final diagnostics
-    return get_diagnostics(jw)
+    # Each get_diagnostics call may trigger new lazy inputs (e.g., standalone project,
+    # then test environment). Loop until no new background tasks are spawned.
+    local result
+    while true
+        result = get_diagnostics(jw)
+        is_ready(jw) && break
+        wait_until_ready(jw; cancel_token=cancel_token)
+    end
+    return result
 end
 
 # Test items

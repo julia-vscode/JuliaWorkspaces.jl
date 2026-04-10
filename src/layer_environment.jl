@@ -111,6 +111,13 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
             if standalone_uri !== nothing
                 return standalone_uri
             end
+        else
+            # Package IS deved in a workspace project (possibly the standalone project
+            # that was created for it) — find and return that project
+            deving_project = _find_deving_project(rt, package_folder_uri)
+            if deving_project !== nothing
+                return deving_project
+            end
         end
     end
 
@@ -129,6 +136,19 @@ function _is_package_deved_in_workspace(rt, package_folder_uri)
         end
     end
     return false
+end
+
+function _find_deving_project(rt, package_folder_uri)
+    for project_folder_uri in derived_project_folders(rt)
+        project = derived_project(rt, project_folder_uri)
+        project === nothing && continue
+        for (_, v) in project.deved_packages
+            if v.uri == package_folder_uri
+                return project_folder_uri
+            end
+        end
+    end
+    return nothing
 end
 
 Salsa.@derived function derived_required_dynamic_projects(rt)
