@@ -1,5 +1,3 @@
-const Trace = Logging.LogLevel(-1001)
-
 export JuliaWorkspace,
     DynamicMode, DynamicOff, DynamicIndexingOnly, DynamicPersistent,
     add_file!,
