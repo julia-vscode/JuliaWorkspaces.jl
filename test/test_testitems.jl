@@ -407,8 +407,8 @@ end
 
     @test tsd.name == :Foo
     @test tsd.kind == :module
-    @test tsd.range == 1:length(content)
-    @test tsd.code_range == (length("@testmodule Foo begin ") + 1):(length(content) - 4)
+    @test tsd.range == 1:39
+    @test tsd.code_range == (length("@testmodule Foo begin ") + 1):(39 - 4)
 end
 
 @testitem "@testsnippet all correct" begin
@@ -434,8 +434,8 @@ end
 
     @test tsd.name == :Foo
     @test tsd.kind == :snippet
-    @test tsd.range == 1:length(content)
-    @test tsd.code_range == (length("@testsnippet Foo begin ") + 1):(length(content) - 4)
+    @test tsd.range == 1:40
+    @test tsd.code_range == (length("@testsnippet Foo begin ") + 1):(40 - 4)
 end
 
 @testitem "@testitem project detection" begin
