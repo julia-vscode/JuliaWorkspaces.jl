@@ -14,6 +14,7 @@ Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Not
     @debug "Lazy load environment for" uri=uri content_hash=content_hash
 
     if ctx.dynamic_feature !== nothing
+        Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
         put!(
             ctx.dynamic_feature.in_channel,
             (
@@ -31,6 +32,7 @@ Salsa.@declare_input input_project_test_environment(rt, uri, package, content_ha
     @debug "Lazy load test environment for project and package" uri=uri package=package content_hash=content_hash
 
     if ctx.dynamic_feature !== nothing
+        Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
         put!(
             ctx.dynamic_feature.in_channel,
             (
@@ -49,6 +51,7 @@ Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri, co
     @debug "Lazy create standalone project for package" package_folder_uri=package_folder_uri content_hash=content_hash
 
     if ctx.dynamic_feature !== nothing
+        Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
         put!(
             ctx.dynamic_feature.in_channel,
             (

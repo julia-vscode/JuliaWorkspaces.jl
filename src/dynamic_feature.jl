@@ -188,8 +188,6 @@ function start(df::DynamicFeature)
 
             @debug "Processing dynamic feature message" command=msg.command
 
-            Threads.atomic_add!(df.pending_count, 1)
-
             djp = nothing
             try
                 if msg.command == :watch_environment
