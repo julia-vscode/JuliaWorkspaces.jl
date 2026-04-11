@@ -103,6 +103,12 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     workspace_packages = Dict{String,Any}()
     workspace_deved = derived_workspace_deved_packages(rt, project_uri)
     for (pkg_name, pkg_entry_uri) in workspace_deved
+        # Skip when the root IS the deved package — semantic_pass will process
+        # these CST nodes directly, and merging stale meta would cause
+        # resolve_ref to short-circuit (hasref→true) before new bindings are
+        # added, resulting in false "unused binding" warnings.
+        pkg_entry_uri == uri && continue
+
         result = derived_deved_package_meta(rt, pkg_entry_uri, project_uri)
         merge_meta_dict!(meta_dict, result.meta_dict)
         if result.module_binding !== nothing
