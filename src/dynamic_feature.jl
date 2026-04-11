@@ -5,13 +5,15 @@ const DJPKey = @NamedTuple{project_path::String, package::Union{Nothing,String},
 mutable struct DynamicJuliaProcess
     project_path::String
     package::Union{Nothing,String}
+    kind::Symbol
     proc::Union{Nothing, Base.Process}
     endpoint::Union{Nothing, JSONRPC.JSONRPCEndpoint}
 
-    function DynamicJuliaProcess(project_path::String, package::Union{Nothing,String})
+    function DynamicJuliaProcess(project_path::String, package::Union{Nothing,String}, kind::Symbol)
         return new(
             project_path,
             package,
+            kind,
             nothing,
             nothing
         )
@@ -42,7 +44,7 @@ function create_standalone_project(djp::DynamicJuliaProcess, store_path::String)
 end
 
 function start(djp::DynamicJuliaProcess)
-    @info "Starting DynamicJuliaProcess" project_path=djp.project_path package=djp.package
+    @info "Starting DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
 
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
@@ -146,7 +148,7 @@ function start(djp::DynamicJuliaProcess)
 end
 
 function Base.kill(djp::DynamicJuliaProcess)
-    @info "Killing DynamicJuliaProcess" project_path=djp.project_path package=djp.package
+    @info "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
 
     if djp.proc !== nothing
         kill(djp.proc)
@@ -197,7 +199,7 @@ function start(df::DynamicFeature)
                         @warn "Skipping previously failed project" key
                         put!(df.out_channel, (;command=:failed, key=key))
                     else
-                        djp = DynamicJuliaProcess(msg.project_path, nothing)
+                        djp = DynamicJuliaProcess(msg.project_path, nothing, :watch_environment)
                         df.procs[key] = djp
 
                         start(djp)
@@ -218,7 +220,7 @@ function start(df::DynamicFeature)
                         @warn "Skipping previously failed test environment" key
                         put!(df.out_channel, (;command=:failed, key=key))
                     else
-                        djp = DynamicJuliaProcess(msg.project_path, msg.package)
+                        djp = DynamicJuliaProcess(msg.project_path, msg.package, :watch_test_environment)
                         df.procs[key] = djp
 
                         start(djp)
@@ -241,7 +243,7 @@ function start(df::DynamicFeature)
                         @warn "Skipping previously failed standalone project" key
                         put!(df.out_channel, (;command=:failed, key=key))
                     else
-                        djp = DynamicJuliaProcess(msg.package_path, nothing)
+                        djp = DynamicJuliaProcess(msg.package_path, nothing, :create_standalone_project)
                         df.procs[key] = djp
 
                         start(djp)
