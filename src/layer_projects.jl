@@ -174,3 +174,22 @@ Salsa.@derived function derived_package_for_file(rt, file::URI)
 
     return package
 end
+
+Salsa.@derived function derived_project_for_file(rt, file::URI)
+    projects = derived_project_folders(rt)
+
+    file_path = uri2filepath(file)
+    project = projects |>
+        x -> map(x) do i
+            project_folder_path = uri2filepath(i)
+            parts = splitpath(project_folder_path)
+            return (uri = i, parts = parts)
+        end |>
+        x -> filter(x) do i
+            return vec_startswith(splitpath(file_path), i.parts)
+        end |>
+        x -> sort(x, by=i->length(i.parts), rev=true) |>
+        x -> length(x) == 0 ? nothing : first(x).uri
+
+    return project
+end

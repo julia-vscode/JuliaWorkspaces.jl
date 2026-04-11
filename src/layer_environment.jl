@@ -63,7 +63,20 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
 
     active_project = input_active_project(rt)
 
+    # Check if the file is inside a project folder (has both Project.toml and Manifest.toml).
+    # If this project folder is more specific (deeper) than the enclosing package folder,
+    # use it directly. This handles cases like benchmark/ sub-projects that aren't packages
+    # but define their own environment.
+    project_folder_uri = derived_project_for_file(rt, uri)
     package_folder_uri = derived_package_for_file(rt, uri)
+
+    if project_folder_uri !== nothing
+        project_is_more_specific = package_folder_uri === nothing ||
+            length(uri2filepath(project_folder_uri)) > length(uri2filepath(package_folder_uri))
+        if project_is_more_specific
+            return project_folder_uri
+        end
+    end
 
     if package_folder_uri!==nothing
         package_folder = uri2filepath(package_folder_uri)
