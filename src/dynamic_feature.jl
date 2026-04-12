@@ -157,9 +157,13 @@ function Base.kill(djp::DynamicJuliaProcess)
     djp.endpoint = nothing
 end
 
+const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://www.julia-vscode.org/symbolcache"
+
 struct DynamicFeature
-    mode::DynamicMode
+    djp_mode::DynamicMode
     store_path::String
+    download_enabled::Bool
+    upstream_url::String
     in_channel::Channel{Any}
     out_channel::Channel{Any}
     procs::Dict{DJPKey,DynamicJuliaProcess}
@@ -168,10 +172,12 @@ struct DynamicFeature
     pending_count::Threads.Atomic{Int}
     update_channel::Channel{Symbol}
 
-    function DynamicFeature(mode::DynamicMode, store_path::String)
+    function DynamicFeature(djp_mode::DynamicMode, store_path::String; download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM)
         return new(
-            mode,
+            djp_mode,
             store_path,
+            download_enabled,
+            upstream_url,
             Channel{Any}(Inf),
             Channel{Any}(Inf),
             Dict{DJPKey,DynamicJuliaProcess}(),
@@ -181,6 +187,241 @@ struct DynamicFeature
             Channel{Symbol}(100)
         )
     end
+end
+
+const MissingPackage = @NamedTuple{name::String, uuid::UUID, version::String, git_tree_sha1::Union{String,Nothing}}
+
+"""
+    _get_missing_packages(project_path, store_path) -> Vector{MissingPackage}
+
+Parse the Manifest.toml at `project_path` and return a list of regular and stdlib
+packages whose .jstore cache files do not yet exist on disk. Deved packages are
+skipped entirely (they have no git_tree_sha1 and are handled by StaticLint).
+"""
+function _get_missing_packages(project_path::String, store_path::String)
+    manifest_path = joinpath(project_path, "Manifest.toml")
+    isfile(manifest_path) || return MissingPackage[]
+
+    manifest_content = try
+        Pkg.TOML.parsefile(manifest_path)
+    catch
+        return MissingPackage[]
+    end
+
+    manifest_version_str = get(manifest_content, "manifest_format", "1.0")
+    manifest_version = tryparse(VersionNumber, manifest_version_str)
+    manifest_version === nothing && return MissingPackage[]
+
+    manifest_deps = if manifest_version.major == 1
+        manifest_content
+    elseif manifest_version.major == 2 && haskey(manifest_content, "deps") && manifest_content["deps"] isa Dict
+        manifest_content["deps"]
+    else
+        return MissingPackage[]
+    end
+
+    missing = MissingPackage[]
+
+    for (k_entry, v_entry) in pairs(manifest_deps)
+        v_entry isa Vector || continue
+        length(v_entry) == 1 || continue
+        v_entry[1] isa Dict || continue
+        entry = v_entry[1]
+
+        # Skip deved packages (have "path" key)
+        haskey(entry, "path") && continue
+
+        uuid_str = get(entry, "uuid", nothing)
+        uuid_str === nothing && continue
+        uuid = tryparse(UUID, uuid_str)
+        uuid === nothing && continue
+
+        if haskey(entry, "git-tree-sha1") && haskey(entry, "version")
+            # Regular package
+            ver = entry["version"]
+            tree_sha = entry["git-tree-sha1"]
+            cache_path = joinpath(store_path, uppercase(k_entry[1:1]), string(k_entry, "_", uuid), string("v", ver, "_", tree_sha, ".jstore"))
+            if !isfile(cache_path)
+                push!(missing, MissingPackage((k_entry, uuid, ver, tree_sha)))
+            end
+        elseif !haskey(entry, "git-tree-sha1")
+            # Stdlib package
+            ver_str = get(entry, "version", nothing)
+            ver_str === nothing && continue
+            cache_path = joinpath(store_path, uppercase(k_entry[1:1]), string(k_entry, "_", uuid), string("v", ver_str, "_nothing.jstore"))
+            if !isfile(cache_path)
+                push!(missing, MissingPackage((k_entry, uuid, ver_str, nothing)))
+            end
+        end
+    end
+
+    return missing
+end
+
+const GENERAL_REGISTRY_UUID = UUID("23338594-aafe-5451-b93e-139f81909106")
+
+"""
+    _get_general_registry_packages() -> Dict{UUID, NamedTuple}
+
+Return a dict mapping UUID => (;name) for all packages in the General registry.
+Used to filter out private packages from cloud download requests.
+"""
+function _get_general_registry_packages()
+    dp_before = copy(Base.DEPOT_PATH)
+    try
+        push!(empty!(Base.DEPOT_PATH), joinpath(homedir(), ".julia"))
+        regs = Pkg.Types.Context().registries
+        i = findfirst(r -> r.name == "General" && r.uuid == GENERAL_REGISTRY_UUID, regs)
+        i === nothing && return Dict{UUID,@NamedTuple{name::String}}()
+        return Dict{UUID,@NamedTuple{name::String}}(
+            uuid => (;name=info.name) for (uuid, info) in regs[i].pkgs
+        )
+    catch err
+        @warn "Failed to read General registry" exception=(err, catch_backtrace())
+        return Dict{UUID,@NamedTuple{name::String}}()
+    finally
+        append!(empty!(Base.DEPOT_PATH), dp_before)
+    end
+end
+
+"""
+    _download_single_cache(pkg, store_path, upstream_url, download_dir) -> Bool
+
+Download a single .jstore.tar.gz from the cloud, unpack it, and move it to the
+store path. Returns true on success, false on failure.
+"""
+function _download_single_cache(pkg::MissingPackage, store_path::String, upstream_url::String, download_dir::String)
+    name, uuid, version, git_tree_sha1 = pkg
+    tree_hash_str = git_tree_sha1 === nothing ? "nothing" : git_tree_sha1
+
+    letter = uppercase(name[1:1])
+    name_uuid = string(name, "_", uuid)
+    filename = string("v", version, "_", tree_hash_str, ".jstore")
+
+    dest_dir = joinpath(store_path, letter, name_uuid)
+    dest_filepath = joinpath(dest_dir, filename)
+    dest_filepath_unavailable = string(first(splitext(dest_filepath)), ".unavailable")
+
+    # Skip if we already know it's unavailable
+    if isfile(dest_filepath_unavailable)
+        @debug "Cloud cache unavailable marker exists, skipping" name=name
+        return false
+    end
+
+    link = string(upstream_url, "/store/v1/packages/", letter, "/", name_uuid, "/", first(splitext(filename)), ".tar.gz")
+
+    pkg_download_dir = joinpath(download_dir, string(name, "_", uuid, "_", version))
+
+    try
+        mkpath(pkg_download_dir)
+        tarball_path = joinpath(pkg_download_dir, "cache.tar.gz")
+
+        @info "Downloading package cache" name=name version=version
+        Downloads.download(link, tarball_path)
+
+        # Extract the tarball
+        open(tarball_path) do tar_io
+            gz_io = GzipDecompressorStream(tar_io)
+            try
+                Tar.extract(gz_io, pkg_download_dir)
+            finally
+                close(gz_io)
+            end
+        end
+
+        download_filepath = joinpath(pkg_download_dir, filename)
+        download_filepath_unavailable = string(first(splitext(download_filepath)), ".unavailable")
+
+        if !isfile(download_filepath) && isfile(download_filepath_unavailable)
+            mkpath(dest_dir)
+            mv(download_filepath_unavailable, dest_filepath_unavailable, force=true)
+            @debug "Cloud cache unavailable for package" name=name
+            return false
+        end
+
+        if !isfile(download_filepath)
+            @debug "Expected file not found in tarball" name=name expected=download_filepath
+            return false
+        end
+
+        # Patch PLACEHOLDER paths
+        cache = try
+            open(download_filepath, "r") do io
+                SymbolServer.CacheStore.read(io)
+            end
+        catch
+            @warn "Couldn't read downloaded cache file" name=name
+            return false
+        end
+
+        pkg_entry = Base.locate_package(Base.PkgId(uuid, name))
+        if pkg_entry !== nothing && isfile(pkg_entry)
+            pkg_src = dirname(pkg_entry)
+            SymbolServer.modify_dirs(cache.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", pkg_src))
+        end
+
+        mkpath(dest_dir)
+        open(dest_filepath, "w") do io
+            SymbolServer.CacheStore.write(io, cache)
+        end
+
+        @info "Successfully downloaded cache" name=name version=version
+        return true
+    catch err
+        @warn "Failed to download cache" name=name version=version exception=(err, catch_backtrace())
+        return false
+    finally
+        try rm(pkg_download_dir, recursive=true, force=true) catch; end
+    end
+end
+
+"""
+    _download_missing_caches(missing_pkgs, store_path, upstream_url) -> Vector{MissingPackage}
+
+Download missing package caches from the cloud. Filters to General registry
+packages only (to avoid leaking private package names via URL requests).
+Returns the list of packages still missing after download.
+"""
+function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_path::String, upstream_url::String)
+    general_pkgs = _get_general_registry_packages()
+    if isempty(general_pkgs)
+        @warn "Could not read General registry, skipping cloud downloads"
+        return missing_pkgs
+    end
+
+    # Filter to General registry packages with tree_hash (no stdlibs, no _jll)
+    downloadable = filter(missing_pkgs) do pkg
+        pkg.git_tree_sha1 === nothing && return false  # stdlibs
+        endswith(pkg.name, "_jll") && return false     # JLL packages
+        info = get(general_pkgs, pkg.uuid, nothing)
+        info === nothing && return false                # not in General
+        info.name != pkg.name && return false           # UUID/name mismatch
+        return true
+    end
+
+    isempty(downloadable) && return missing_pkgs
+
+    download_dir_parent = joinpath(store_path, "_downloads")
+    mkpath(download_dir_parent)
+
+    downloaded_set = Set{MissingPackage}()
+
+    mktempdir(download_dir_parent) do download_dir
+        for batch in Iterators.partition(downloadable, 100)
+            @sync for pkg in batch
+                @async begin
+                    yield()
+                    if _download_single_cache(pkg, store_path, upstream_url, download_dir)
+                        push!(downloaded_set, pkg)
+                    end
+                    yield()
+                end
+            end
+        end
+    end
+
+    # Return packages still missing
+    return filter(pkg -> pkg ∉ downloaded_set, missing_pkgs)
 end
 
 function start(df::DynamicFeature)
@@ -199,18 +440,34 @@ function start(df::DynamicFeature)
                         @warn "Skipping previously failed project" key
                         put!(df.out_channel, (;command=:failed, key=key))
                     else
-                        djp = DynamicJuliaProcess(msg.project_path, nothing, :watch_environment)
-                        df.procs[key] = djp
+                        missing_pkgs = _get_missing_packages(msg.project_path, df.store_path)
 
-                        start(djp)
+                        if !isempty(missing_pkgs) && df.download_enabled
+                            @info "Downloading missing package caches" count=length(missing_pkgs)
+                            missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url)
+                        end
 
-                        index_project(djp, df.store_path)
+                        if isempty(missing_pkgs)
+                            @info "All package caches available, skipping DJP" project_path=msg.project_path
+                            put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path, content_hash=msg.content_hash))
+                        elseif df.djp_mode != DynamicOff
+                            @info "Launching DJP for remaining missing packages" count=length(missing_pkgs)
+                            djp = DynamicJuliaProcess(msg.project_path, nothing, :watch_environment)
+                            df.procs[key] = djp
 
-                        put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path, content_hash=msg.content_hash))
+                            start(djp)
 
-                        if df.mode == DynamicIndexingOnly
-                            kill(djp)
-                            delete!(df.procs, key)
+                            index_project(djp, df.store_path)
+
+                            put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path, content_hash=msg.content_hash))
+
+                            if df.djp_mode == DynamicIndexingOnly
+                                kill(djp)
+                                delete!(df.procs, key)
+                            end
+                        else
+                            @info "Some packages missing but DJP disabled, proceeding with best-effort" missing_count=length(missing_pkgs)
+                            put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path, content_hash=msg.content_hash))
                         end
                     end
                 elseif msg.command == :watch_test_environment
@@ -231,7 +488,7 @@ function start(df::DynamicFeature)
 
                         put!(df.out_channel, (;command=:test_environment_ready, project_uri=filepath2uri(msg.project_path), package=msg.package, test_project_uri=test_project_uri, content_hash=msg.content_hash))
 
-                        if df.mode == DynamicIndexingOnly
+                        if df.djp_mode == DynamicIndexingOnly
                             kill(djp)
                             delete!(df.procs, key)
                         end
@@ -254,7 +511,7 @@ function start(df::DynamicFeature)
 
                         put!(df.out_channel, (;command=:standalone_package_project_ready, package_folder_uri=filepath2uri(msg.package_path), project_uri=standalone_project_uri, content_hash=msg.content_hash))
 
-                        if df.mode == DynamicIndexingOnly
+                        if df.djp_mode == DynamicIndexingOnly
                             kill(djp)
                             delete!(df.procs, key)
                         end

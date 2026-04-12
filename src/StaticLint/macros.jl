@@ -94,6 +94,16 @@ function handle_macro(x::EXPR, state)
                 end
                 mark_binding!(x.args[i], meta_dict, x)
             end
+        elseif _is_testitem_macro(x.args[1]) && state isa Toplevel
+            _handle_testitem(x, state)
+        elseif _is_testmodule_macro(x.args[1]) && state isa Toplevel
+            _handle_testmodule(x, state)
+        elseif _is_testsnippet_macro(x.args[1]) && state isa Toplevel
+            # @testsnippet body will be inlined into each @testitem that references it.
+            # Create an isolating scope so the declaration-site traversal doesn't leak
+            # bindings into the parent scope. The body_exprs are separately stored in
+            # test_setups and process_EXPR'd in each @testitem's scope.
+            _handle_testsnippet(x, state)
         # elseif _points_to_arbitrary_macro(x.args[1], :Turing, :model, state) && length(x) == 3 &&
         #     isassignment(x.args[3]) &&
         #     headof(x.args[3].args[2]) === CSTParser.Begin && length(x.args[3].args[2]) == 3 && headof(x.args[3].args[2].args[2]) === :block
@@ -279,4 +289,234 @@ function collect_expr_with_bindings(x, meta_dict, bound_exprs=EXPR[])
         end
     end
     return bound_exprs
+end
+
+# ───────────────────────────────────────────────────────────────────
+# TestItems.jl macro handling (@testitem, @testmodule, @testsnippet)
+# ───────────────────────────────────────────────────────────────────
+
+_is_testitem_macro(x) = isidentifier(x) && valofid(x) == "@testitem"
+_is_testmodule_macro(x) = isidentifier(x) && valofid(x) == "@testmodule"
+_is_testsnippet_macro(x) = isidentifier(x) && valofid(x) == "@testsnippet"
+
+"""
+    _parse_testitem_kwargs(x::EXPR)
+
+Parse keyword arguments from a `@testitem` macrocall. Returns:
+- `default_imports::Bool` (default `true`)
+- `setup_names::Vector{Symbol}` (default empty)
+- `body::Union{Nothing,EXPR}` — the `begin...end` block, if found.
+"""
+function _parse_testitem_kwargs(x::EXPR)
+    default_imports = true
+    setup_names = Symbol[]
+    body = nothing
+
+    # args layout: args[1]=@testitem, args[2]=name_string, args[3..end]=kwargs and body
+    x.args === nothing && return (default_imports, setup_names, body)
+    for i in 3:length(x.args)
+        arg = x.args[i]
+        arg === nothing && continue
+        if iskwarg(arg) && arg.args !== nothing && length(arg.args) >= 2
+            kwname = arg.args[1]
+            kwval = arg.args[2]
+            if isidentifier(kwname) && valof(kwname) == "default_imports"
+                if isidentifier(kwval) && valof(kwval) == "false"
+                    default_imports = false
+                end
+            elseif isidentifier(kwname) && valof(kwname) == "setup"
+                # setup=[Foo, Bar] — kwval is a :vect EXPR
+                if kwval isa EXPR && headof(kwval) === :vect && kwval.args !== nothing
+                    for s in kwval.args
+                        if isidentifier(s)
+                            push!(setup_names, Symbol(valof(s)))
+                        end
+                    end
+                end
+            end
+        elseif headof(arg) === :block
+            body = arg
+        end
+    end
+    return (default_imports, setup_names, body)
+end
+
+"""
+    _handle_testitem(x::EXPR, state::Toplevel)
+
+Handle a `@testitem "name" [kwargs...] begin ... end` macrocall.
+
+Creates a module-like scope for the body block. If `default_imports=true`,
+`Test` and the parent package module are injected into the scope. Setup modules
+referenced via `setup=[...]` are also injected.
+"""
+function _handle_testitem(x::EXPR, state::Toplevel)
+    meta_dict = state.meta_dict
+    default_imports, setup_names, body = _parse_testitem_kwargs(x)
+
+    body === nothing && return
+
+    # Create a module-like scope for the @testitem body
+    setscope!(x, Scope(x), meta_dict)
+    setparent!(scopeof(x, meta_dict), state.scope)
+    item_scope = scopeof(x, meta_dict)
+
+    # Pre-populate with Base and Core (like a real module)
+    item_scope.modules = Dict{Symbol,Any}()
+    item_scope.modules[:Base] = getsymbols(state)[:Base]
+    item_scope.modules[:Core] = getsymbols(state)[:Core]
+
+    # If default_imports=true, add Test module
+    if default_imports
+        symbols = getsymbols(state)
+        if haskey(symbols, :Test)
+            item_scope.modules[:Test] = symbols[:Test]
+            # Also add all Test exports into scope (simulating `using Test`)
+            _add_module_public_names!(item_scope, symbols[:Test], state)
+        end
+
+        # Inject the parent package module (simulating `using PackageName`)
+        if state.self_package_name !== nothing
+            pkg_sym = Symbol(state.self_package_name)
+            # Try SymbolServer env first (provides exported names for bare access)
+            if haskey(symbols, pkg_sym)
+                item_scope.modules[pkg_sym] = symbols[pkg_sym]
+                _add_module_public_names!(item_scope, symbols[pkg_sym], state)
+            end
+            # Also check workspace_packages (provides CST-level Binding for qualified access)
+            if haskey(state.workspace_packages, state.self_package_name)
+                pkg_binding = state.workspace_packages[state.self_package_name]
+                item_scope.names[state.self_package_name] = pkg_binding
+                # If not already in modules from env, extract the module scope from the Binding
+                if !haskey(item_scope.modules, pkg_sym) && pkg_binding isa Binding
+                    if pkg_binding.val isa EXPR && CSTParser.defines_module(pkg_binding.val) && hasscope(pkg_binding.val, state.meta_dict)
+                        item_scope.modules[pkg_sym] = scopeof(pkg_binding.val, state.meta_dict)
+                    end
+                end
+            end
+        end
+    end
+
+    # Resolve setup=[...] references from pre-computed test_setups registry.
+    # Snippet body_exprs are from other files' CSTs (not children of this macrocall),
+    # so they must be process_EXPR'd here — traverse won't reach them.
+    s0 = state.scope
+    state.scope = item_scope
+    for setup_name in setup_names
+        if haskey(state.test_setups, setup_name)
+            setup_info = state.test_setups[setup_name]
+            if setup_info.kind === :module && setup_info.binding !== nothing
+                # Module: inject into scope.modules so `using .ModuleName` works
+                item_scope.modules[setup_name] = setup_info.scope !== nothing ? setup_info.scope : setup_info.binding
+                # Also add as a named binding so bare `ModuleName.x` resolves
+                item_scope.names[string(setup_name)] = setup_info.binding
+            elseif setup_info.kind === :snippet && setup_info.body_exprs !== nothing
+                # Snippet: inline the body expressions into this scope
+                for expr in setup_info.body_exprs
+                    process_EXPR(expr, state)
+                end
+            end
+        end
+    end
+    state.scope = s0
+
+    # NOTE: We intentionally do NOT call process_EXPR(body, state) here.
+    # The body will be processed by the standard traverse() in process_EXPR,
+    # which will use the scope we just created (pushed by scopes()).
+    return
+end
+
+"""
+    _handle_testmodule(x::EXPR, state::Toplevel)
+
+Handle a `@testmodule Name begin ... end` macrocall.
+
+Creates a module scope for the body block. The module binding is registered
+in the parent scope so other code can reference it.
+"""
+function _handle_testmodule(x::EXPR, state::Toplevel)
+    meta_dict = state.meta_dict
+
+    # args layout: args[1]=@testmodule, args[2]=Name, args[3]=begin...end
+    x.args === nothing && return
+    length(x.args) < 3 && return
+
+    name_expr = x.args[2]
+    body = nothing
+    for i in 3:length(x.args)
+        if x.args[i] isa EXPR && headof(x.args[i]) === :block
+            body = x.args[i]
+            break
+        end
+    end
+    body === nothing && return
+    !isidentifier(name_expr) && return
+
+    mod_name = valof(name_expr)
+
+    # Create a module-like scope
+    setscope!(x, Scope(x), meta_dict)
+    setparent!(scopeof(x, meta_dict), state.scope)
+    mod_scope = scopeof(x, meta_dict)
+
+    mod_scope.modules = Dict{Symbol,Any}()
+    mod_scope.modules[:Base] = getsymbols(state)[:Base]
+    mod_scope.modules[:Core] = getsymbols(state)[:Core]
+
+    # Create a binding for the module name
+    binding = Binding(name_expr, x, nothing, EXPR[], true)
+    mark_binding!(name_expr, meta_dict, x)
+    state.scope.names[mod_name] = binding
+
+    # NOTE: We intentionally do NOT call process_EXPR(body, state) here.
+    # The body will be processed by the standard traverse() in process_EXPR,
+    # which will use the scope we just created (pushed by scopes()).
+    return
+end
+
+"""
+    _handle_testsnippet(x::EXPR, state::Toplevel)
+
+Handle a `@testsnippet Name begin ... end` macrocall.
+
+Creates an isolating scope so the declaration-site traversal (by the standard
+`traverse` in `process_EXPR`) doesn't leak bindings into the parent scope. The
+snippet body_exprs are separately stored in `test_setups` and inlined into each
+`@testitem`'s scope.
+"""
+function _handle_testsnippet(x::EXPR, state::Toplevel)
+    meta_dict = state.meta_dict
+
+    # Create an isolating scope — bindings created during traversal stay here
+    setscope!(x, Scope(x), meta_dict)
+    setparent!(scopeof(x, meta_dict), state.scope)
+    snip_scope = scopeof(x, meta_dict)
+
+    snip_scope.modules = Dict{Symbol,Any}()
+    snip_scope.modules[:Base] = getsymbols(state)[:Base]
+    snip_scope.modules[:Core] = getsymbols(state)[:Core]
+
+    # Body will be traversed by the standard traverse() in process_EXPR,
+    # using this isolating scope (pushed by scopes()).
+    return
+end
+
+"""
+    _add_module_public_names!(scope, mod_store, state)
+
+Simulate `using ModuleName` by adding the module's exported names
+into the given scope. Works with `SymbolServer.ModuleStore`.
+"""
+function _add_module_public_names!(scope::Scope, mod_store::SymbolServer.ModuleStore, state)
+    for name_sym in mod_store.exportednames
+        if haskey(mod_store, name_sym)
+            val = maybe_lookup(mod_store[name_sym], state)
+            if val !== nothing
+                scope.names[string(name_sym)] = Binding(noname, val, nothing, EXPR[])
+            end
+        end
+    end
+end
+function _add_module_public_names!(scope::Scope, mod_store, state)
+    # Fallback for non-ModuleStore (e.g. Binding, Scope) — no-op
 end

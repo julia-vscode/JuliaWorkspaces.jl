@@ -104,6 +104,18 @@ function setscope!(x::EXPR, s, meta_dict)
 end
 
 """
+    _has_prebuilt_scope(x, meta_dict)
+
+Returns `true` if `x` is a macrocall whose scope was pre-built by `handle_macro`
+(e.g. for `@testitem`, `@testmodule`, `@testsnippet`). These scopes must not be
+cleared or re-created by `scopes()` — they contain explicitly configured modules,
+bindings, and parent pointers.
+"""
+function _has_prebuilt_scope(x::EXPR, meta_dict)
+    CSTParser.ismacrocall(x) && scopeof(x, meta_dict) isa Scope
+end
+
+"""
     scopes(x::EXPR, state)
 
 Called when traversing the syntax tree and handles the association of
@@ -113,9 +125,11 @@ necessary, on following passes it empties it.
 function scopes(x::EXPR, state)
     meta_dict = state.meta_dict
 
-    clear_scope(x, meta_dict)
-    if scopeof(x, meta_dict) === nothing && introduces_scope(x, state)
-        setscope!(x, Scope(x), meta_dict)
+    if !_has_prebuilt_scope(x, meta_dict)
+        clear_scope(x, meta_dict)
+        if scopeof(x, meta_dict) === nothing && introduces_scope(x, state)
+            setscope!(x, Scope(x), meta_dict)
+        end
     end
     s0 = state.scope
     if headof(x) === :file

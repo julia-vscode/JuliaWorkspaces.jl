@@ -311,7 +311,16 @@ function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::Exter
     end
 
     has_at_least_one_method = func_ref.val isa EXPR && defines_function(func_ref.val)
-    # handle case where func_ref is typed as Function and yet has no methods
+
+    # Check binding.val directly as a method definition.
+    # When a file is include()d multiple times (e.g. shared.jl included by
+    # each @testitem), the function-name EXPR node carries a ref to only ONE
+    # Binding (the last include's).  Later bindings' refs lists may lack the
+    # function-name node, so get_method() below won't find it.  Checking val
+    # directly ensures the first method definition is always considered.
+    if has_at_least_one_method
+        sig_match_any(func_ref.val, x, call_counts, tls, env) && return true
+    end
 
     for r in func_ref.refs
         method = get_method(r)
@@ -585,9 +594,20 @@ function check_farg_unused_(arg, arg_names, meta_dict)
        isempty(b.refs) ||
         # only self ref:
        (length(b.refs) == 1 && first(b.refs) == b.name) ||
-        # first usage has binding:
-        (length(b.refs) > 1 && b.refs[2] isa EXPR && hasbinding(b.refs[2], meta_dict))
-        seterror!(arg, UnusedFunctionArgument, meta_dict)
+        # all usages after self-ref are assignments (no reads):
+        (length(b.refs) > 1 && all(r -> !(r isa EXPR) || hasbinding(r, meta_dict), @view b.refs[2:end]))
+        # Check whether the parameter was reassigned in the function scope.
+        # If so, the parameter is being used (its slot/name is meaningful).
+        name = valof(b.name)
+        reassigned = false
+        if name isa String
+            func_expr = maybe_get_parent_fexpr(arg, CSTParser.defines_function)
+            if func_expr !== nothing && hasscope(func_expr, meta_dict)
+                scope = scopeof(func_expr, meta_dict)
+                reassigned = scopehasbinding(scope, name) && scope.names[name] !== b
+            end
+        end
+        reassigned || seterror!(arg, UnusedFunctionArgument, meta_dict)
     end
 
     if valof(b.name) === nothing

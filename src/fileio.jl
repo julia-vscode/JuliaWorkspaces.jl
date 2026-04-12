@@ -145,10 +145,10 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
     end
 end
 
-function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff)
-    @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic
+function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM)
+    @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic symbolcache_download=symbolcache_download
 
-    jw = JuliaWorkspace(;dynamic=dynamic)
+    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream)
 
     for folder in workspace_folders
         add_folder_from_disc!(jw, folder)

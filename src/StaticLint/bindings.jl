@@ -373,7 +373,9 @@ function add_binding(x, state, scope=state.scope)
             end
         elseif scopehasbinding(scope, name)
             # TODO: some checks about rebinding of consts
-            check_const_decl(name, b, scope, meta_dict)
+            if !is_in_fexpr(b.name, x -> headof(x) === :import || headof(x) === :using)
+                check_const_decl(name, b, scope, meta_dict)
+            end
 
             scope.names[name] = b
         elseif is_soft_scope(scope) && parentof(scope) isa Scope && isidentifier(b.name) && scopehasbinding(parentof(scope), valofid(b.name)) && !enforce_hard_scope(x, scope)

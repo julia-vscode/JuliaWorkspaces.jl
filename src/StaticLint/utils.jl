@@ -200,7 +200,10 @@ retrieve_toplevel_scope(s::Scope, meta_dict) = (is_toplevel_scope(s) || !(parent
 retrieve_toplevel_or_func_scope(s::Scope) = (is_toplevel_scope(s) || defines_function(s.expr) || !(parentof(s) isa Scope)) ? s : retrieve_toplevel_or_func_scope(parentof(s))
 
 is_toplevel_scope(s::Scope) = is_toplevel_scope(s.expr)
-is_toplevel_scope(x::EXPR) = CSTParser.defines_module(x) || headof(x) === :file
+# Macrocall scopes (e.g. @testitem, @testmodule, @testsnippet) with prebuilt
+# scopes act as top-level scopes so that function overload detection, binding
+# placement and call-signature checking operate within the testitem boundary.
+is_toplevel_scope(x::EXPR) = CSTParser.defines_module(x) || headof(x) === :file || CSTParser.ismacrocall(x)
 
 # b::SymbolServer.FunctionStore or DataTypeStore
 # tls is a top-level Scope (expected to contain loaded modules)

@@ -1,7 +1,7 @@
 # TODO
 
 This is a list of open issues that we still need to address before we can switch things over
-- Add cache cloud download back in
+- [X] Add cache cloud download back in
 - [X] Make sure cache location is properly configured
 - Handle different Julia versions based on manifest
 - Bring progress notifications back

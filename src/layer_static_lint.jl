@@ -116,7 +116,32 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         end
     end
 
-    StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt; workspace_packages)
+    # Pre-compute test setup bindings (@testmodule/@testsnippet) for the enclosing package
+    test_setups = Dict{Symbol, StaticLint.TestSetupInfo}()
+    self_package_name = nothing
+    package_folder_uri = derived_package_for_file(rt, uri)
+    if package_folder_uri !== nothing
+        test_setups = derived_test_setup_bindings(rt, package_folder_uri)
+
+        # Determine the self-package name and ensure it's in workspace_packages
+        # so @testitem blocks can resolve `using PackageName` and bare references.
+        pkg = derived_package(rt, package_folder_uri)
+        if pkg !== nothing
+            self_package_name = pkg.name
+            if !haskey(workspace_packages, self_package_name)
+                entry_uri = filepath2uri(joinpath(uri2filepath(package_folder_uri), "src", "$(self_package_name).jl"))
+                if derived_has_file(rt, entry_uri) && entry_uri != uri
+                    result = derived_deved_package_meta(rt, entry_uri, project_uri)
+                    merge_meta_dict!(meta_dict, result.meta_dict)
+                    if result.module_binding !== nothing
+                        workspace_packages[self_package_name] = result.module_binding
+                    end
+                end
+            end
+        end
+    end
+
+    StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt; workspace_packages, test_setups, self_package_name)
 
     for file in julia_files
         cst2 = derived_julia_legacy_syntax_tree(rt, file)
@@ -134,7 +159,13 @@ Salsa.@derived function derived_static_lint_all_diagnostics(rt)
     # can be produced from multiple roots due to includes
     res = Dict{URI,Set{Diagnostic}}()
 
-    for root in derived_roots(rt)
+    roots = derived_roots(rt)
+    for root in roots
+        project_uri = derived_project_uri_for_root(rt, root)
+        @info "Workspace root" root=root project=project_uri
+    end
+
+    for root in roots
         project_uri = derived_project_uri_for_root(rt, root)
         project_uri === nothing && continue
 
@@ -187,6 +218,151 @@ Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
     all_diags = derived_static_lint_all_diagnostics(rt)
 
     return get(all_diags, uri, Set{Diagnostic}())
+end
+
+# ───────────────────────────────────────────────────────────────────
+# Test setup pre-computation (@testmodule / @testsnippet)
+# ───────────────────────────────────────────────────────────────────
+
+"""
+    _find_test_macros_in_cst(cst)
+
+Walk a file-level CST and collect `@testmodule` and `@testsnippet` macrocall
+EXPR nodes.  Returns `(modules, snippets)` where each is a vector of EXPR.
+"""
+function _find_test_macros_in_cst(cst)
+    modules = CSTParser.EXPR[]
+    snippets = CSTParser.EXPR[]
+    cst.args === nothing && return (modules, snippets)
+    for arg in cst.args
+        if CSTParser.ismacrocall(arg) && arg.args !== nothing && length(arg.args) >= 1
+            macro_name_expr = arg.args[1]
+            if CSTParser.isidentifier(macro_name_expr)
+                name = CSTParser.valof(macro_name_expr)
+                if name == "@testmodule"
+                    push!(modules, arg)
+                elseif name == "@testsnippet"
+                    push!(snippets, arg)
+                end
+            end
+        end
+    end
+    return (modules, snippets)
+end
+
+"""
+    _get_body_block(x::CSTParser.EXPR)
+
+Find the `begin...end` block in a macrocall EXPR. Returns `nothing` if not found.
+"""
+function _get_body_block(x::CSTParser.EXPR)
+    x.args === nothing && return nothing
+    for i in 2:length(x.args)
+        arg = x.args[i]
+        if arg isa CSTParser.EXPR && CSTParser.headof(arg) === :block
+            return arg
+        end
+    end
+    return nothing
+end
+
+"""
+    _collect_body_exprs(body::CSTParser.EXPR)
+
+Collect the child EXPR nodes of a `:block` expression (the body of a macro).
+Returns a `Vector{CSTParser.EXPR}` of the individual statements.
+"""
+function _collect_body_exprs(body::CSTParser.EXPR)
+    exprs = CSTParser.EXPR[]
+    body.args === nothing && return exprs
+    for arg in body.args
+        push!(exprs, arg)
+    end
+    return exprs
+end
+
+"""
+    derived_test_setup_bindings(rt, package_folder_uri)
+
+Pre-compute `TestSetupInfo` for all `@testmodule` and `@testsnippet`
+declarations across all files in a package. Returns
+`Dict{Symbol, StaticLint.TestSetupInfo}`.
+
+For `@testmodule`: runs a lightweight semantic analysis on the module body
+to produce a `Scope` and `Binding`.
+
+For `@testsnippet`: stores the body EXPR nodes for later inline processing.
+No semantic analysis is run — the snippet will be analyzed in-context when
+inlined into each `@testitem`.
+"""
+Salsa.@derived function derived_test_setup_bindings(rt, package_folder_uri)
+    @debug "derived_test_setup_bindings" package_folder_uri=package_folder_uri
+
+    result = Dict{Symbol, StaticLint.TestSetupInfo}()
+
+    # Collect all files in this package
+    all_files = derived_all_julia_files(rt)
+
+    package_folder_path = lowercase(uri2filepath(package_folder_uri))
+
+    for uri in all_files
+        file_path = lowercase(uri2filepath(uri))
+        # Only scan files that belong to this package
+        startswith(file_path, package_folder_path) || continue
+
+        cst = derived_julia_legacy_syntax_tree(rt, uri)
+        modules, snippets = _find_test_macros_in_cst(cst)
+
+        # Process @testmodule declarations
+        for mod_expr in modules
+            mod_expr.args === nothing && continue
+            length(mod_expr.args) < 3 && continue
+            name_expr = mod_expr.args[2]
+            CSTParser.isidentifier(name_expr) || continue
+            mod_name = Symbol(CSTParser.valof(name_expr))
+
+            body = _get_body_block(mod_expr)
+            body === nothing && continue
+
+            # Create a scope for the module and run a lightweight semantic pass
+            meta_dict = Dict{UInt64, StaticLint.Meta}()
+            StaticLint.ensuremeta(cst, meta_dict)
+            StaticLint.ensuremeta(mod_expr, meta_dict)
+
+            mod_scope = StaticLint.Scope(nothing, mod_expr, Dict{String,StaticLint.Binding}(), Dict{Symbol,Any}(), nothing)
+
+            # Get the environment for this file to populate Base/Core in the module scope
+            project_uri = derived_project_uri_for_root(rt, uri)
+            if project_uri !== nothing
+                env = derived_environment(rt, project_uri)
+                mod_scope.modules = Dict{Symbol,Any}()
+                mod_scope.modules[:Base] = env.symbols[:Base]
+                mod_scope.modules[:Core] = env.symbols[:Core]
+            end
+
+            binding = StaticLint.Binding(name_expr, mod_expr, nothing, CSTParser.EXPR[], true)
+            StaticLint.setscope!(mod_expr, mod_scope, meta_dict)
+
+            result[mod_name] = StaticLint.TestSetupInfo(:module, binding, nothing, mod_scope)
+        end
+
+        # Process @testsnippet declarations
+        for snip_expr in snippets
+            snip_expr.args === nothing && continue
+            length(snip_expr.args) < 3 && continue
+            name_expr = snip_expr.args[2]
+            CSTParser.isidentifier(name_expr) || continue
+            snip_name = Symbol(CSTParser.valof(name_expr))
+
+            body = _get_body_block(snip_expr)
+            body === nothing && continue
+
+            body_exprs = _collect_body_exprs(body)
+            result[snip_name] = StaticLint.TestSetupInfo(:snippet, nothing, body_exprs, nothing)
+        end
+    end
+
+    return result
 end
 
 """

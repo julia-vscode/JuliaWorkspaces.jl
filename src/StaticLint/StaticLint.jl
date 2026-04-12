@@ -61,6 +61,28 @@ mutable struct ExternalEnv
     project_deps::Vector{Symbol}
 end
 
+"""
+    TestSetupInfo
+
+Holds pre-computed semantic information for a `@testmodule` or `@testsnippet`
+declaration. Used by `handle_macro` to resolve `setup=[...]` references in
+`@testitem` macros.
+
+- `kind`: `:module` for `@testmodule`, `:snippet` for `@testsnippet`
+- `binding`: For modules, the `Binding` of the module definition (injected into scope.modules).
+             For snippets, `nothing` (snippet body is inlined directly).
+- `body_exprs`: The CSTParser EXPR nodes of the setup's body block. For snippets,
+                these are `process_EXPR`'d directly in the `@testitem`'s scope. For modules,
+                this is `nothing` (the module binding handles it).
+- `scope`: For modules, the `Scope` of the module. For snippets, `nothing`.
+"""
+struct TestSetupInfo
+    kind::Symbol  # :module or :snippet
+    binding::Union{Nothing,Binding}
+    body_exprs::Union{Nothing,Vector{EXPR}}
+    scope::Union{Nothing,Scope}
+end
+
 getsymbols(env::ExternalEnv) = env.symbols
 getsymbolextendeds(env::ExternalEnv) = env.extended_methods
 
@@ -77,6 +99,8 @@ mutable struct Toplevel{RT} <: TraverseState
     resolveonly::Vector{EXPR}
     env::ExternalEnv
     workspace_packages::Dict{String,Any}
+    test_setups::Dict{Symbol,TestSetupInfo}
+    self_package_name::Union{Nothing,String}
     flags::Int
     meta_dict::Dict{UInt64,Meta}
     include_dict::Dict{UInt64,URI}
@@ -86,7 +110,7 @@ end
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
 Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, include_dict, runtime) =
-    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, 0, meta_dict, include_dict, runtime)
+    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, 0, meta_dict, include_dict, runtime)
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -198,10 +222,11 @@ end
 
 Performs a semantic pass across a project from the entry point `file`. A first pass traverses the top-level scope after which secondary passes handle delayed scopes (e.g. functions). These secondary passes can be, optionally, very light and only seek to resovle references (e.g. link symbols to bindings). This can be done by supplying a list of expressions on which the full secondary pass should be made (`modified_expr`), all others will receive the light-touch version.
 """
-function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}())
+function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing)
     setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
-    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, meta_dict, include_dict, rt)
+    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, 0, meta_dict, include_dict, rt)
     process_EXPR(cst, state)
+    unique!(state.delayed)
     for x in state.delayed
         if hasscope(x, meta_dict)
             traverse(x, Delayed(scopeof(x, meta_dict), env, workspace_packages, meta_dict))
@@ -214,6 +239,7 @@ function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr
         end
     end
     if state.resolveonly !== nothing
+        unique!(state.resolveonly)
         for x in state.resolveonly
             if hasscope(x, meta_dict)
                 traverse(x, ResolveOnly(scopeof(x, meta_dict), env, workspace_packages, meta_dict))

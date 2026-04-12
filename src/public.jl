@@ -1,5 +1,6 @@
 export JuliaWorkspace,
     DynamicMode, DynamicOff, DynamicIndexingOnly, DynamicPersistent,
+    DEFAULT_SYMBOLCACHE_UPSTREAM,
     add_file!,
     remove_file!,
     remove_all_children!,

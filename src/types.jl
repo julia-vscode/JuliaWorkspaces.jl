@@ -306,11 +306,12 @@ struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing)
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM)
         if store_path === nothing
             store_path = Scratch.@get_scratch!("store_path_v1")
         end
-        dynamic_feature = dynamic != DynamicOff ? DynamicFeature(dynamic, store_path) : nothing
+        need_dynamic_feature = dynamic != DynamicOff || symbolcache_download
+        dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream) : nothing
         dynamic_feature === nothing || start(dynamic_feature)
 
         rt = Salsa.Runtime{SContext}(SContext(dynamic_feature))

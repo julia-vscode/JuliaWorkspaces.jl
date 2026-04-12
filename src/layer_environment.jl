@@ -86,7 +86,10 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         pkg_content_hash = pkg === nothing ? UInt(0) : pkg.content_hash
 
         # TODO Is this lowercase the right move? On Windows for sure, not clear about other platforms
-        if lowercase(uri2filepath(uri)) == lowercase(runtests_path)
+        file_needs_test_env = lowercase(uri2filepath(uri)) == lowercase(runtests_path) ||
+            _file_has_testitems(rt, uri)
+
+        if file_needs_test_env
             package_name = pkg.name
 
             project_for_test_env = if package_folder_uri in derived_project_folders(rt)
@@ -162,6 +165,21 @@ function _find_deving_project(rt, package_folder_uri)
         end
     end
     return nothing
+end
+
+"""
+    _file_has_testitems(rt, uri)
+
+Check whether a file contains `@testitem` macros by looking at the
+already-computed test item detection results (which use JuliaSyntax, not CSTParser).
+"""
+function _file_has_testitems(rt, uri)
+    try
+        details = derived_testitems(rt, uri)
+        return !isempty(details.testitems)
+    catch
+        return false
+    end
 end
 
 Salsa.@derived function derived_required_dynamic_projects(rt)
