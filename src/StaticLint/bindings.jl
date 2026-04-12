@@ -181,6 +181,22 @@ function markiterbinding!(iter::EXPR, meta_dict)
     return iter
 end
 
+function _mark_nospecialize_arg!(a::EXPR, meta_dict)
+    inner = a.args[3]
+    if CSTParser.isassignment(inner)
+        # Inside macrocalls, `x=default` is parsed as an assignment (not :kw),
+        # so mark_binding! won't unwrap it. Handle it explicitly.
+        mark_binding!(inner.args[1], meta_dict, inner)
+    else
+        mark_binding!(inner, meta_dict)
+    end
+end
+
+function _is_nospecialize_macrocall(a::EXPR)
+    CSTParser.ismacrocall(a) && length(a.args) == 3 &&
+    CSTParser.isidentifier(a.args[1]) && valofid(a.args[1]) == "@nospecialize"
+end
+
 function mark_sig_args!(x::EXPR, meta_dict)
     if CSTParser.iscall(x) || CSTParser.istuple(x)
         if x.args !== nothing && length(x.args) > 0
@@ -192,10 +208,14 @@ function mark_sig_args!(x::EXPR, meta_dict)
                 if CSTParser.isparameters(a)
                     for j = 1:length(a.args)
                         aa = a.args[j]
-                        mark_binding!(aa, meta_dict)
+                        if _is_nospecialize_macrocall(aa)
+                            _mark_nospecialize_arg!(aa, meta_dict)
+                        else
+                            mark_binding!(aa, meta_dict)
+                        end
                     end
-                elseif CSTParser.ismacrocall(a) && CSTParser.isidentifier(a.args[1]) && valofid(a.args[1]) == "@nospecialize" && length(a.args) == 3
-                    mark_binding!(a.args[3], meta_dict)
+                elseif _is_nospecialize_macrocall(a)
+                    _mark_nospecialize_arg!(a, meta_dict)
                 else
                     mark_binding!(a, meta_dict)
                 end
