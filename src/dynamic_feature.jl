@@ -105,7 +105,7 @@ function start(djp::DynamicJuliaProcess)
 
             i = 1
             current_line_start = 1
-            while i<=length(buffer)                
+            while i<=length(buffer)
                 if buffer[i] == '\n'
                     line = strip(buffer[current_line_start:prevind(buffer,i)])
                     if length(line) > 0
@@ -313,21 +313,8 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
     pkg_download_dir = joinpath(download_dir, string(name, "_", uuid, "_", version))
 
     try
-        mkpath(pkg_download_dir)
-        tarball_path = joinpath(pkg_download_dir, "cache.tar.gz")
-
         @info "Downloading package cache" name=name version=version
-        Downloads.download(link, tarball_path)
-
-        # Extract the tarball
-        open(tarball_path) do tar_io
-            gz_io = GzipDecompressorStream(tar_io)
-            try
-                Tar.extract(gz_io, pkg_download_dir)
-            finally
-                close(gz_io)
-            end
-        end
+        Pkg.PlatformEngines.download_verify_unpack(link, nothing, pkg_download_dir)
 
         download_filepath = joinpath(pkg_download_dir, filename)
         download_filepath_unavailable = string(first(splitext(download_filepath)), ".unavailable")

@@ -2,11 +2,9 @@ module JuliaWorkspaces
 
 import Logging
 import UUIDs, JuliaSyntax, TestItemDetection, CSTParser, JSONRPC, Sockets, CancellationTokens
-import Downloads, Tar
 using UUIDs: UUID, uuid4
 using JuliaSyntax: SyntaxNode
 using Salsa
-using CodecZlib: GzipDecompressorStream
 
 using AutoHashEquals
 
