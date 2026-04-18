@@ -1,11 +1,15 @@
+function _stdlib_only_env()
+    new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
+    return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
+end
+
 Salsa.@derived function derived_environment(rt, uri)
     @debug "derived_environment" uri=uri
 
     project = derived_project(rt, uri)
 
     if project === nothing
-        new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
-        return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
+        return _stdlib_only_env()
     end
 
     metadata_packages = SymbolServer.Package[]
@@ -191,11 +195,10 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
     for project_uri in derived_project_folders(rt)
         project = derived_project(rt, project_uri)
         project === nothing && continue
-        push!(required, DJPKey((
-            project_path = uri2filepath(project_uri),
-            package = nothing,
-            content_hash = project.content_hash
-        )))
+        push!(required, WatchEnvironmentKey(
+            uri2filepath(project_uri),
+            project.content_hash,
+        ))
     end
 
     # Package folders that aren't project folders and aren't deved need a standalone project DJP
@@ -205,11 +208,10 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
 
         pkg = derived_package(rt, package_uri)
         pkg === nothing && continue
-        push!(required, DJPKey((
-            project_path = uri2filepath(package_uri),
-            package = nothing,
-            content_hash = pkg.content_hash
-        )))
+        push!(required, CreateStandaloneProjectKey(
+            uri2filepath(package_uri),
+            pkg.content_hash,
+        ))
     end
 
     # Test environments: for each package folder with a test/runtests.jl, the test env DJP
@@ -235,11 +237,11 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
         proj = derived_project(rt, project_for_test)
         proj_hash = proj === nothing ? UInt(0) : proj.content_hash
 
-        push!(required, DJPKey((
-            project_path = uri2filepath(project_for_test),
-            package = pkg.name,
-            content_hash = proj_hash
-        )))
+        push!(required, WatchTestEnvironmentKey(
+            uri2filepath(project_for_test),
+            pkg.name,
+            proj_hash,
+        ))
     end
 
     return required

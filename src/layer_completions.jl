@@ -918,14 +918,9 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
     root = derived_best_root_for_uri(rt, uri)
     if root !== nothing
         project_uri = derived_project_uri_for_root(rt, root)
-        if project_uri !== nothing
-            lint_result = derived_static_lint_meta_for_root(rt, root)
-            meta_dict = lint_result.meta_dict
-            env = derived_environment(rt, project_uri)
-        else
-            meta_dict = _empty_hover_meta_dict
-            env = _empty_hover_env
-        end
+        lint_result = derived_static_lint_meta_for_root(rt, root)
+        meta_dict = lint_result.meta_dict
+        env = project_uri !== nothing ? derived_environment(rt, project_uri) : _stdlib_only_env()
     else
         meta_dict = _empty_hover_meta_dict
         env = _empty_hover_env

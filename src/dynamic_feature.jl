@@ -1,6 +1,30 @@
 @enum DynamicMode DynamicOff DynamicIndexingOnly DynamicPersistent
 
-const DJPKey = @NamedTuple{project_path::String, package::Union{Nothing,String}, content_hash::UInt}
+# DJPKey is a tagged sum type identifying a DynamicJuliaProcess.
+#
+# Each variant carries exactly the fields that are meaningful for that kind of
+# process. Producers (`start(df::DynamicFeature)`), the required-set computation
+# (`derived_required_dynamic_projects`), and the cleanup path
+# (`cleanup_stale_processes!`) all construct/dispatch on these variants
+# directly, which makes mismatches between them a type error rather than a
+# silent string-sentinel collision.
+struct WatchEnvironmentKey
+    project_path::String
+    content_hash::UInt
+end
+
+struct WatchTestEnvironmentKey
+    project_path::String
+    package_name::String
+    content_hash::UInt
+end
+
+struct CreateStandaloneProjectKey
+    package_path::String
+    content_hash::UInt
+end
+
+const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey}
 
 mutable struct DynamicJuliaProcess
     project_path::String
@@ -421,7 +445,7 @@ function start(df::DynamicFeature)
             djp = nothing
             try
                 if msg.command == :watch_environment
-                    key = DJPKey((msg.project_path, nothing, msg.content_hash))
+                    key = WatchEnvironmentKey(msg.project_path, msg.content_hash)
 
                     if key in df.failed_projects
                         @warn "Skipping previously failed project" key
@@ -458,7 +482,7 @@ function start(df::DynamicFeature)
                         end
                     end
                 elseif msg.command == :watch_test_environment
-                    key = DJPKey((msg.project_path, msg.package, msg.content_hash))
+                    key = WatchTestEnvironmentKey(msg.project_path, msg.package, msg.content_hash)
 
                     if key in df.failed_projects
                         @warn "Skipping previously failed test environment" key
@@ -481,7 +505,7 @@ function start(df::DynamicFeature)
                         end
                     end
                 elseif msg.command == :create_standalone_package_project
-                    key = DJPKey((msg.package_path, "__standalone__", msg.content_hash))
+                    key = CreateStandaloneProjectKey(msg.package_path, msg.content_hash)
 
                     if key in df.failed_projects
                         @warn "Skipping previously failed standalone project" key
@@ -512,11 +536,11 @@ function start(df::DynamicFeature)
                 # Mark this project as failed so we don't retry with the same content hash
                 if hasproperty(msg, :content_hash)
                     failed_key = if msg.command == :watch_environment
-                        DJPKey((msg.project_path, nothing, msg.content_hash))
+                        WatchEnvironmentKey(msg.project_path, msg.content_hash)
                     elseif msg.command == :watch_test_environment
-                        DJPKey((msg.project_path, msg.package, msg.content_hash))
+                        WatchTestEnvironmentKey(msg.project_path, msg.package, msg.content_hash)
                     elseif msg.command == :create_standalone_package_project
-                        DJPKey((msg.package_path, "__standalone__", msg.content_hash))
+                        CreateStandaloneProjectKey(msg.package_path, msg.content_hash)
                     else
                         nothing
                     end
@@ -550,12 +574,12 @@ function cleanup_stale_processes!(df::DynamicFeature, rt, required::Set{DJPKey})
             delete!(df.procs, key)
 
             # Clean up the corresponding Salsa inputs
-            if key.package === nothing
+            if key isa WatchEnvironmentKey
                 delete_input_project_environment!(rt, filepath2uri(key.project_path), key.content_hash)
-            elseif key.package == "__standalone__"
-                delete_input_standalone_package_project!(rt, filepath2uri(key.project_path), key.content_hash)
-            else
-                delete_input_project_test_environment!(rt, filepath2uri(key.project_path), key.package, key.content_hash)
+            elseif key isa CreateStandaloneProjectKey
+                delete_input_standalone_package_project!(rt, filepath2uri(key.package_path), key.content_hash)
+            elseif key isa WatchTestEnvironmentKey
+                delete_input_project_test_environment!(rt, filepath2uri(key.project_path), key.package_name, key.content_hash)
             end
         end
     end

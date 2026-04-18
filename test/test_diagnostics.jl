@@ -28,7 +28,7 @@ end
     diags = get_diagnostic(jw, uri)
 
     @test length(diags) == 0
-end    
+end
 
 @testitem "@nospecialize params no false MissingRef" begin
     using JuliaWorkspaces.URIs2: URI
@@ -70,4 +70,34 @@ end
 
     missing_ref_diags = filter(d -> startswith(d.message, "Missing reference"), diags)
     @test isempty(missing_ref_diags)
+end
+
+@testitem "Diagnostics: standalone file no crash" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # A standalone file with no Project.toml — should not crash and should
+    # not emit env-dependent lint errors (only syntax errors if any).
+    source = """
+    module StandaloneDiag
+
+    function foo(x)
+        return x + 1
+    end
+
+    foo(42)
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///standalonediag/src/StandaloneDiag.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///standalonediag/src/StandaloneDiag.jl")
+
+    # Should not throw (previously crashed with KeyError in derived_environment)
+    diags = get_diagnostic(jw, uri)
+
+    # No syntax errors in this well-formed file
+    syntax_diags = filter(d -> d.source == "JuliaSyntax.jl", diags)
+    @test isempty(syntax_diags)
 end

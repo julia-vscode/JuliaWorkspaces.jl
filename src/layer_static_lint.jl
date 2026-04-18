@@ -89,7 +89,15 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     # TODO Replace this with proper logic, but for now this should be not too bad.
     project_uri = derived_project_uri_for_root(rt, uri)
 
+    # Even when no project URI is available yet (e.g. while a standalone
+    # package's DJP is still computing its project), we still want hover and
+    # completions to work for locally-defined symbols and stdlib names. We
+    # therefore always run `semantic_pass` with a stdlib-only env, and skip
+    # workspace-package / test-setup discovery and the post-pass `check_all`
+    # loop (those all require a real project).
     if project_uri === nothing
+        env = _stdlib_only_env()
+        StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt)
         return (meta_dict=meta_dict, workspace_packages=Dict{String,Any}())
     end
 

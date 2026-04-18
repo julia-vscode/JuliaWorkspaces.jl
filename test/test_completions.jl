@@ -481,3 +481,98 @@ end
     result = get_completions(jw, uri, index)
     @test any(item -> item.label == "M", result.items)
 end
+
+@testitem "Completions: standalone file (no project)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # No Project.toml or Manifest.toml — exercises _stdlib_only_env() path.
+    source = """
+    module StandaloneComp
+
+    function myfunc(x)
+        return x + 1
+    end
+
+    printl
+    myfun
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///standalonecomp/src/StandaloneComp.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///standalonecomp/src/StandaloneComp.jl")
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # Completions for partial stdlib name "printl" (line 7, col 7)
+    index = string_index(source, 7, 7)
+    result = get_completions(jw, uri, index)
+    @test !isempty(result.items)
+    @test any(item -> item.label == "println", result.items)
+
+    # Completions for partial local name "myfun" (line 8, col 6)
+    index = string_index(source, 8, 6)
+    result = get_completions(jw, uri, index)
+    @test !isempty(result.items)
+    @test any(item -> item.label == "myfunc", result.items)
+end
+
+@testitem "Completions: package without manifest (pre-DJP)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Project.toml present but no Manifest.toml — pre-DJP state.
+    project_toml = """
+    name = "PreDJPComp"
+    uuid = "bbccddee-1122-3344-5566-778899aabbcc"
+    version = "0.1.0"
+    """
+
+    source = """
+    module PreDJPComp
+
+    function greet(name)
+        println("Hello")
+    end
+
+    printl
+    gree
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///predjpcomp/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///predjpcomp/src/PreDJPComp.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///predjpcomp/src/PreDJPComp.jl")
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # Completions for partial stdlib name "printl" (line 7, col 7)
+    index = string_index(source, 7, 7)
+    result = get_completions(jw, uri, index)
+    @test !isempty(result.items)
+    @test any(item -> item.label == "println", result.items)
+
+    # Completions for partial local name "gree" (line 8, col 5)
+    index = string_index(source, 8, 5)
+    result = get_completions(jw, uri, index)
+    @test !isempty(result.items)
+    @test any(item -> item.label == "greet", result.items)
+end

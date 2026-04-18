@@ -73,3 +73,44 @@ end
         Base.set_active_project(old)
     end
 end
+
+@testitem "_stdlib_only_env contains Base symbols" begin
+    import JuliaWorkspaces.StaticLint as StaticLint
+
+    env = JuliaWorkspaces._stdlib_only_env()
+
+    # Should be a StaticLint.ExternalEnv
+    @test env isa StaticLint.ExternalEnv
+
+    # project_deps should be non-empty and contain core stdlib modules
+    @test !isempty(env.project_deps)
+    @test :Base in env.project_deps
+    @test :Core in env.project_deps
+
+    # The store should contain entries for Base
+    @test haskey(env.symbols, :Base)
+end
+
+@testitem "derived_static_lint_meta_for_root without project" begin
+    using JuliaWorkspaces: filepath2uri, JuliaWorkspace
+
+    # Use the StandaloneFile testdata — a bare .jl file with no Project.toml.
+    standalone_root = abspath(joinpath(@__DIR__, "..", "testdata", "StandaloneFile"))
+
+    jw = workspace_from_folders([standalone_root])
+
+    standalone_uri = filepath2uri(joinpath(standalone_root, "standalone.jl"))
+
+    # The file should be found as a root
+    root = JuliaWorkspaces.derived_best_root_for_uri(jw.runtime, standalone_uri)
+    @test root !== nothing
+
+    # No project URI should be detected (no Project.toml)
+    project_uri = JuliaWorkspaces.derived_project_uri_for_root(jw.runtime, root)
+    @test project_uri === nothing
+
+    # derived_static_lint_meta_for_root should still succeed (via _stdlib_only_env)
+    lint_result = JuliaWorkspaces.derived_static_lint_meta_for_root(jw.runtime, root)
+    @test !isempty(lint_result.meta_dict)
+    @test isempty(lint_result.workspace_packages)
+end

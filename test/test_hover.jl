@@ -340,3 +340,108 @@ end
     result = get_doc_from_word(jw, "zzznotarealsymbolxxx")
     @test result == "No results found."
 end
+
+@testitem "Hover: standalone file (no project)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # No Project.toml or Manifest.toml — just a bare Julia source file.
+    # This exercises the _stdlib_only_env() fallback path.
+    source = """
+    module Standalone
+
+    function myfunc(x)
+        return x + 1
+    end
+
+    myvar = 42
+
+    struct MyStruct
+        field1::Int
+    end
+
+    println("hello")
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///standalone/src/Standalone.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///standalone/src/Standalone.jl")
+
+    function index_of(src, line, col)
+        lines = split(src, '\n')
+        idx = 0
+        for l in 1:(line - 1)
+            idx += ncodeunits(lines[l]) + 1
+        end
+        return idx + col
+    end
+
+    # Hover on locally-defined function name "myfunc" (line 3, col 10)
+    result = get_hover_text(jw, uri, index_of(source, 3, 10))
+    @test result !== nothing
+
+    # Hover on locally-defined variable "myvar" (line 7, col 1)
+    result = get_hover_text(jw, uri, index_of(source, 7, 1))
+    @test result !== nothing
+
+    # Hover on stdlib function "println" (line 13, col 1)
+    result = get_hover_text(jw, uri, index_of(source, 13, 1))
+    @test result !== nothing
+
+    # Hover on integer literal should return nothing (line 7, col 9 = "42")
+    result = get_hover_text(jw, uri, index_of(source, 7, 9))
+    @test result === nothing
+end
+
+@testitem "Hover: package without manifest (pre-DJP)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Project.toml present but NO Manifest.toml — simulates the window
+    # between opening a project and DJP completing.
+    project_toml = """
+    name = "PreDJP"
+    uuid = "aabbccdd-1122-3344-5566-778899aabbcc"
+    version = "0.1.0"
+    """
+
+    source = """
+    module PreDJP
+
+    function greet(name)
+        println("Hello, \$name!")
+    end
+
+    counter = 0
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///predjp/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///predjp/src/PreDJP.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///predjp/src/PreDJP.jl")
+
+    function index_of(src, line, col)
+        lines = split(src, '\n')
+        idx = 0
+        for l in 1:(line - 1)
+            idx += ncodeunits(lines[l]) + 1
+        end
+        return idx + col
+    end
+
+    # Hover on locally-defined function "greet" (line 3, col 10)
+    result = get_hover_text(jw, uri, index_of(source, 3, 10))
+    @test result !== nothing
+
+    # Hover on stdlib function "println" (line 4, col 5)
+    result = get_hover_text(jw, uri, index_of(source, 4, 5))
+    @test result !== nothing
+
+    # Hover on local variable "counter" (line 7, col 1)
+    result = get_hover_text(jw, uri, index_of(source, 7, 1))
+    @test result !== nothing
+end
