@@ -1,7 +1,7 @@
 Salsa.@derived function derived_julia_parse_result(rt, uri)
     @debug "derived_julia_parse_result" uri=uri
 
-    tf = input_text_file(rt, uri)
+    tf = derived_text_file_content(rt, uri)
 
     content = tf.content.content
 
@@ -44,7 +44,7 @@ end
 Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
     @debug "derived_julia_legacy_syntax_tree" uri=uri
 
-    tf = input_text_file(rt, uri)
+    tf = derived_text_file_content(rt, uri)
 
     content = tf.content.content
 

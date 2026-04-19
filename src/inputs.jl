@@ -10,6 +10,36 @@ Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
 
 Salsa.@declare_input input_env_ready(rt)::Bool
 
+# Lazy input for files that are pulled in via `include(...)` from a regular
+# JW file but are not themselves regular files. Initial content is read
+# synchronously from disc; the watcher callback (if any) is invoked once per
+# URI so the LS can register an LSP file watcher to feed future updates back
+# in via `set_input_indirect_text_file!`.
+Salsa.@declare_input input_indirect_text_file(rt, uri)::Union{TextFile,Nothing} function(ctx, uri)
+    @debug "Lazy load indirect file" uri=uri
+
+    if ctx.indirect_file_watch_callback !== nothing
+        try
+            ctx.indirect_file_watch_callback(uri)
+        catch err
+            @error "indirect_file_watch_callback threw" exception=(err, catch_backtrace())
+        end
+    end
+
+    content = if uri.scheme != "file"
+        nothing
+    else
+        try
+            read_text_file_from_uri(uri, return_nothing_on_io_error=true)
+        catch err
+            @debug "Failed to read indirect file from disc" uri=uri exception=(err, catch_backtrace())
+            nothing
+        end
+    end
+
+    return content
+end
+
 Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Nothing function(ctx, uri, content_hash)
     @debug "Lazy load environment for" uri=uri content_hash=content_hash
 

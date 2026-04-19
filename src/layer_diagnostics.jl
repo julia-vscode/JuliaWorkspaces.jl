@@ -68,6 +68,13 @@ end
 Salsa.@derived function derived_diagnostics(rt, uri)
     @debug "derived_diagnostics" uri=uri
 
+    # Indirect files participate in the include graph (so cross-file
+    # resolution works) but never report diagnostics — they are not files
+    # the user explicitly asked the LS to track.
+    if derived_is_indirect_file(rt, uri)
+        return Diagnostic[]
+    end
+
     lint_config = derived_lint_configuration(rt, uri)
 
     results = Diagnostic[]

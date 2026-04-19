@@ -16,7 +16,8 @@ Salsa.@derived function derived_all_includes(rt)
         StaticLint.process_EXPR(cst, state)
 
         for included_file in state.included_files
-            if !derived_has_file(rt, included_file)
+            tf = derived_text_file_content(rt, included_file)
+            if tf === nothing
                 continue
             end
             if !haskey(uri2included, included_file) && !(included_file in files_to_check)
@@ -51,6 +52,23 @@ Salsa.@derived function derived_include_dict(rt)
     _, include_dict = derived_all_includes(rt)
 
     return include_dict
+end
+
+"""
+    derived_indirect_files(rt)
+
+Return the set of URIs in the include graph that are *not* regular workspace
+files — i.e. files reached only via `include(...)` traversal whose content was
+loaded through the lazy `input_indirect_text_file` input.
+"""
+Salsa.@derived function derived_indirect_files(rt)
+    uri2included, _ = derived_all_includes(rt)
+
+    return Set{URI}(uri for uri in keys(uri2included) if !derived_has_file(rt, uri))
+end
+
+Salsa.@derived function derived_is_indirect_file(rt, uri)
+    return uri in derived_indirect_files(rt)
 end
 
 Salsa.@derived function derived_roots(rt)

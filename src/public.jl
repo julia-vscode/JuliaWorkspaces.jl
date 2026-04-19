@@ -4,6 +4,10 @@ export JuliaWorkspace,
     add_file!,
     remove_file!,
     remove_all_children!,
+    set_indirect_file_content!,
+    clear_indirect_file!,
+    get_indirect_files,
+    is_indirect_file,
     TextFile, SourceText,
     workspace_from_folders,
     add_folder_from_disc!,
@@ -86,7 +90,10 @@ export JuliaWorkspace,
 """
     add_file!(jw::JuliaWorkspace, file::TextFile)
 
-Add a file to the workspace. If the file already exists, it will throw an error.
+Add a file to the workspace. If the file already exists as a *regular* file,
+it will throw an error. If the URI is currently tracked as an *indirect* file
+(reached via `include` from another file), it is promoted to a regular file
+and any existing lazy indirect content is cleared.
 """
 function add_file!(jw::JuliaWorkspace, file::TextFile)
     @debug "add_file!" uri=file.uri
@@ -102,6 +109,11 @@ function add_file!(jw::JuliaWorkspace, file::TextFile)
     set_input_files!(jw.runtime, new_files)
 
     set_input_text_file!(jw.runtime, file.uri, file)
+
+    # Promotion: if this URI was previously requested as an indirect file,
+    # drop the lazy indirect tracking so the regular `input_text_file` is the
+    # sole source of truth.
+    _clear_indirect_tracking!(jw, file.uri)
 end
 
 """
@@ -150,7 +162,7 @@ function get_julia_files(jw::JuliaWorkspace)
 
     process_from_dynamic(jw)
 
-    return derived_julia_files(jw.runtime)
+    return derived_all_julia_files(jw.runtime)
 end
 
 """
@@ -245,6 +257,76 @@ function remove_all_children!(jw::JuliaWorkspace, uri::URI)
             remove_file!(jw, file)
         end
     end
+end
+
+# Indirect files
+
+function _clear_indirect_tracking!(jw::JuliaWorkspace, uri::URI)
+    try
+        delete_input_indirect_text_file!(jw.runtime, uri)
+    catch err
+        # The lazy input may not have been materialized yet; ignore.
+        @debug "delete_input_indirect_text_file! failed" uri=uri exception=err
+    end
+end
+
+"""
+    set_indirect_file_content!(jw::JuliaWorkspace, uri::URI, file::Union{TextFile,Nothing})
+
+Update the content of an *indirect* file (a file referenced via `include` from
+a regular file but not itself added as a regular file). Pass `nothing` if the
+file no longer exists on disc. This is intended to be called by the LS in
+response to file-watcher notifications.
+"""
+function set_indirect_file_content!(jw::JuliaWorkspace, uri::URI, file::Union{TextFile,Nothing})
+    @debug "set_indirect_file_content!" uri=uri
+
+    process_from_dynamic(jw)
+
+    set_input_indirect_text_file!(jw.runtime, uri, file)
+end
+
+"""
+    clear_indirect_file!(jw::JuliaWorkspace, uri::URI)
+
+Drop tracking for an indirect file. Any cached lazy content is removed; if the
+include graph still references the URI, the next query will re-trigger the
+lazy disc read and the watcher callback.
+"""
+function clear_indirect_file!(jw::JuliaWorkspace, uri::URI)
+    @debug "clear_indirect_file!" uri=uri
+
+    process_from_dynamic(jw)
+
+    _clear_indirect_tracking!(jw, uri)
+end
+
+"""
+    get_indirect_files(jw::JuliaWorkspace)
+
+Return the set of URIs currently tracked as indirect files — i.e. files
+reached only via `include(...)` traversal that are not regular workspace files.
+"""
+function get_indirect_files(jw::JuliaWorkspace)
+    @debug "get_indirect_files"
+
+    process_from_dynamic(jw)
+
+    return derived_indirect_files(jw.runtime)
+end
+
+"""
+    is_indirect_file(jw::JuliaWorkspace, uri::URI)
+
+Return `true` if `uri` is currently part of the include graph as an indirect
+file (i.e. reached only via `include` and not added as a regular file).
+"""
+function is_indirect_file(jw::JuliaWorkspace, uri::URI)
+    @debug "is_indirect_file" uri=uri
+
+    process_from_dynamic(jw)
+
+    return derived_is_indirect_file(jw.runtime, uri)
 end
 
 # Projects
