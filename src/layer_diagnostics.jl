@@ -27,15 +27,30 @@ Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
 
     res = Diagnostic[]
 
-    valid_lint_configs = ["syntax-errors", "syntax-warnings", "testitem-errors", "toml-syntax-errors", "lint-config-errors"]
+    valid_lint_configs = [
+        "syntax-errors", "syntax-warnings", "testitem-errors", "toml-syntax-errors", "lint-config-errors",
+        "static-lint",
+        "call", "iter", "nothingcomp", "constif", "lazy", "datadecl", "typeparam", "modname", "pirates", "useoffuncargs",
+        "kwdefault", "literal", "break-continue", "constdecl",
+        "missing-refs",
+    ]
+
+    string_valued_configs = Dict{String,Vector{String}}(
+        "missing-refs" => ["none", "symbols", "all"],
+    )
 
     for (k,v) in pairs(toml_content)
         if !(k in valid_lint_configs)
             push!(res, Diagnostic(1:1, :error, "Invalid lint configuration $k.", nothing, Symbol[], "JuliaWorkspaces.jl"))
         end
 
-        if !(v isa Bool)
-            push!(res, Diagnostic(1:1, :error, "Invalid lint configuration value for $k, ony `true` or `false` are valid.", nothing, Symbol[], "JuliaWorkspaces.jl"))
+        if haskey(string_valued_configs, k)
+            if !(v isa String) || !(v in string_valued_configs[k])
+                valid_values = join(string_valued_configs[k], ", ")
+                push!(res, Diagnostic(1:1, :error, "Invalid lint configuration value for $k, only $valid_values are valid.", nothing, Symbol[], "JuliaWorkspaces.jl"))
+            end
+        elseif !(v isa Bool)
+            push!(res, Diagnostic(1:1, :error, "Invalid lint configuration value for $k, only `true` or `false` are valid.", nothing, Symbol[], "JuliaWorkspaces.jl"))
         end
     end
 
@@ -63,6 +78,33 @@ Salsa.@derived function derived_lint_configuration(rt, uri)
     end
 
     return configs
+end
+
+function _lint_options_from_config(lint_config::Dict)
+    StaticLint.LintOptions(
+        get(lint_config, "call", true)::Bool,
+        get(lint_config, "iter", true)::Bool,
+        get(lint_config, "nothingcomp", true)::Bool,
+        get(lint_config, "constif", true)::Bool,
+        get(lint_config, "lazy", true)::Bool,
+        get(lint_config, "datadecl", true)::Bool,
+        get(lint_config, "typeparam", true)::Bool,
+        get(lint_config, "modname", true)::Bool,
+        get(lint_config, "pirates", true)::Bool,
+        get(lint_config, "useoffuncargs", true)::Bool,
+        get(lint_config, "kwdefault", true)::Bool,
+        get(lint_config, "literal", true)::Bool,
+        get(lint_config, "break-continue", true)::Bool,
+        get(lint_config, "constdecl", true)::Bool,
+    )
+end
+
+function _missingrefs_from_config(lint_config::Dict)
+    val = get(lint_config, "missing-refs", "symbols")
+    val == "none" && return :none
+    val == "symbols" && return :id
+    val == "all" && return :all
+    return :id  # fallback
 end
 
 Salsa.@derived function derived_diagnostics(rt, uri)
@@ -97,7 +139,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             append!(results, Diagnostic(i.range, :error, i.message, nothing, Symbol[], "Testitem") for i in tis.testerrors)
         end
 
-        if is_path_julia_file(uri2filepath(uri))
+        if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "static-lint", true) == true
             sl = derived_static_lint_diagnostics(rt, uri)
             env_ready = input_env_ready(rt)
             if env_ready

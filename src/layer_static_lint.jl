@@ -154,7 +154,9 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     for file in julia_files
         cst2 = derived_julia_legacy_syntax_tree(rt, file)
 
-        StaticLint.check_all(cst2, StaticLint.LintOptions(), env, meta_dict)
+        lint_config = derived_lint_configuration(rt, file)
+        opts = _lint_options_from_config(lint_config)
+        StaticLint.check_all(cst2, opts, env, meta_dict)
     end
 
     return (meta_dict=meta_dict, workspace_packages=workspace_packages)
@@ -195,8 +197,9 @@ Salsa.@derived function derived_static_lint_all_diagnostics(rt)
             current_res = get!(res, uri, Set{Diagnostic}())
 
             cst = derived_julia_legacy_syntax_tree(rt, uri)
-            # errs = StaticLint.collect_hints(cst, getenv(doc), doc.server.lint_missingrefs)
-            errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, :id)
+            lint_config = derived_lint_configuration(rt, uri)
+            missingrefs = _missingrefs_from_config(lint_config)
+            errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
 
             for err in errs
                 rng = err[1]+1:err[1]+err[2].fullspan+1

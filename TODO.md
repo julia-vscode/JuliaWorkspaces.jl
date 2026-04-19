@@ -12,3 +12,4 @@ This is a list of open issues that we still need to address before we can switch
 - Figure formatting out
 - Add lint config for static lint to lint config file
 - [X] Follow includes outside of the workspace
+- Make active env a regular config field

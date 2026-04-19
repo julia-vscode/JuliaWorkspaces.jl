@@ -79,7 +79,7 @@ function seterror!(x::EXPR, e, meta_dict)
     getmeta(x, meta_dict).error = e
 end
 
-const default_options = (true, true, true, true, true, true, true, true, true, true)
+const default_options = (true, true, true, true, true, true, true, true, true, true, true, true, true, true)
 
 struct LintOptions
     call::Bool
@@ -92,6 +92,10 @@ struct LintOptions
     modname::Bool
     pirates::Bool
     useoffuncargs::Bool
+    kwdefault::Bool
+    literal::Bool
+    breakcontinue::Bool
+    constdecl::Bool
 end
 LintOptions() = LintOptions(default_options...)
 LintOptions(::Colon) = LintOptions(fill(true, length(default_options))...)
@@ -111,10 +115,10 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict)
     opts.modname && check_modulename(x, meta_dict)
     opts.pirates && check_for_pirates(x, meta_dict)
     opts.useoffuncargs && check_farg_unused(x, meta_dict)
-    check_kw_default(x, env, meta_dict)
-    check_use_of_literal(x, meta_dict)
-    check_break_continue(x, meta_dict)
-    check_const(x, meta_dict)
+    opts.kwdefault && check_kw_default(x, env, meta_dict)
+    opts.literal && check_use_of_literal(x, meta_dict)
+    opts.breakcontinue && check_break_continue(x, meta_dict)
+    opts.constdecl && check_const(x, meta_dict)
 
     if x.args !== nothing
         for i in 1:length(x.args)
