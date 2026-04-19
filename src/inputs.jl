@@ -45,6 +45,8 @@ Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Not
 
     if ctx.dynamic_feature !== nothing
         Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
+        ctx.dynamic_feature.progress_state.total_items += 1
+        _report_progress(ctx.dynamic_feature, "Preparing to index...")
         put!(
             ctx.dynamic_feature.in_channel,
             (
@@ -63,6 +65,8 @@ Salsa.@declare_input input_project_test_environment(rt, uri, package, content_ha
 
     if ctx.dynamic_feature !== nothing
         Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
+        ctx.dynamic_feature.progress_state.total_items += 1
+        _report_progress(ctx.dynamic_feature, "Preparing to index...")
         put!(
             ctx.dynamic_feature.in_channel,
             (
@@ -82,6 +86,8 @@ Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri, co
 
     if ctx.dynamic_feature !== nothing
         Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
+        ctx.dynamic_feature.progress_state.total_items += 1
+        _report_progress(ctx.dynamic_feature, "Preparing to index...")
         put!(
             ctx.dynamic_feature.in_channel,
             (

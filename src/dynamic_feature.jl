@@ -183,6 +183,15 @@ end
 
 const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://www.julia-vscode.org/symbolcache"
 
+mutable struct ProgressState
+    total_items::Int
+    completed_items::Int
+    current_sub_progress::Float64
+    current_message::String
+end
+
+ProgressState() = ProgressState(0, 0, 0.0, "")
+
 struct DynamicFeature
     djp_mode::DynamicMode
     store_path::String
@@ -195,8 +204,10 @@ struct DynamicFeature
     missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}
     pending_count::Threads.Atomic{Int}
     update_channel::Channel{Symbol}
+    progress_callback::Union{Nothing,Function}
+    progress_state::ProgressState
 
-    function DynamicFeature(djp_mode::DynamicMode, store_path::String; download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM)
+    function DynamicFeature(djp_mode::DynamicMode, store_path::String; download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM, progress_callback::Union{Nothing,Function}=nothing)
         return new(
             djp_mode,
             store_path,
@@ -208,9 +219,35 @@ struct DynamicFeature
             Set{DJPKey}(),
             Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}(),
             Threads.Atomic{Int}(0),
-            Channel{Symbol}(100)
+            Channel{Symbol}(100),
+            progress_callback,
+            ProgressState()
         )
     end
+end
+
+"""
+    _report_progress(df::DynamicFeature, message::String)
+
+Compute the aggregated progress percentage from `df.progress_state` and invoke
+`df.progress_callback` if one is registered.
+"""
+function _report_progress(df::DynamicFeature, message::String)
+    df.progress_callback === nothing && return
+    ps = df.progress_state
+    ps.current_message = message
+    if ps.total_items == 0
+        pct = 0
+    else
+        pct = floor(Int, (ps.completed_items + ps.current_sub_progress) / ps.total_items * 100)
+        pct = clamp(pct, 0, 100)
+    end
+    try
+        df.progress_callback(message, pct)
+    catch err
+        @warn "progress_callback threw" exception=(err, catch_backtrace())
+    end
+    return
 end
 
 const MissingPackage = @NamedTuple{name::String, uuid::UUID, version::String, git_tree_sha1::Union{String,Nothing}}
@@ -387,13 +424,14 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
 end
 
 """
-    _download_missing_caches(missing_pkgs, store_path, upstream_url) -> Vector{MissingPackage}
+    _download_missing_caches(missing_pkgs, store_path, upstream_url; df=nothing) -> Vector{MissingPackage}
 
 Download missing package caches from the cloud. Filters to General registry
 packages only (to avoid leaking private package names via URL requests).
 Returns the list of packages still missing after download.
+If `df` is provided, progress is reported through its callback.
 """
-function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_path::String, upstream_url::String)
+function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_path::String, upstream_url::String; df::Union{Nothing,DynamicFeature}=nothing)
     general_pkgs = _get_general_registry_packages()
     if isempty(general_pkgs)
         @warn "Could not read General registry, skipping cloud downloads"
@@ -416,6 +454,8 @@ function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_pa
     mkpath(download_dir_parent)
 
     downloaded_set = Set{MissingPackage}()
+    total_downloadable = length(downloadable)
+    downloaded_count = Threads.Atomic{Int}(0)
 
     mktempdir(download_dir_parent) do download_dir
         for batch in Iterators.partition(downloadable, 100)
@@ -424,6 +464,11 @@ function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_pa
                     yield()
                     if _download_single_cache(pkg, store_path, upstream_url, download_dir)
                         push!(downloaded_set, pkg)
+                    end
+                    Threads.atomic_add!(downloaded_count, 1)
+                    if df !== nothing
+                        df.progress_state.current_sub_progress = downloaded_count[] / total_downloadable * 0.5
+                        _report_progress(df, "Downloading caches ($(downloaded_count[])/$total_downloadable)...")
                     end
                     yield()
                 end
@@ -455,14 +500,18 @@ function start(df::DynamicFeature)
 
                         if !isempty(missing_pkgs) && df.download_enabled
                             @info "Downloading missing package caches" count=length(missing_pkgs)
-                            missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url)
+                            _report_progress(df, "Downloading caches for $(basename(msg.project_path))...")
+                            missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url; df=df)
                         end
 
+                        df.progress_state.current_sub_progress = 0.5
                         if isempty(missing_pkgs)
                             @info "All package caches available, skipping DJP" project_path=msg.project_path
+                            _report_progress(df, "All caches available for $(basename(msg.project_path))")
                             put!(df.out_channel, (;command=:environment_ready, project_path=msg.project_path, content_hash=msg.content_hash))
                         elseif df.djp_mode != DynamicOff
                             @info "Launching DJP for remaining missing packages" count=length(missing_pkgs)
+                            _report_progress(df, "Indexing $(basename(msg.project_path))...")
                             djp = DynamicJuliaProcess(msg.project_path, nothing, :watch_environment)
                             df.procs[key] = djp
 
@@ -491,6 +540,7 @@ function start(df::DynamicFeature)
                         djp = DynamicJuliaProcess(msg.project_path, msg.package, :watch_test_environment)
                         df.procs[key] = djp
 
+                        _report_progress(df, "Indexing test environment for $(msg.package)...")
                         start(djp)
 
                         test_project = index_project(djp, df.store_path)
@@ -514,6 +564,7 @@ function start(df::DynamicFeature)
                         djp = DynamicJuliaProcess(msg.package_path, nothing, :create_standalone_project)
                         df.procs[key] = djp
 
+                        _report_progress(df, "Creating standalone project for $(basename(msg.package_path))...")
                         start(djp)
 
                         standalone_project = create_standalone_project(djp, df.store_path)
@@ -555,6 +606,14 @@ function start(df::DynamicFeature)
                 end
             finally
                 Threads.atomic_sub!(df.pending_count, 1)
+                df.progress_state.completed_items += 1
+                df.progress_state.current_sub_progress = 0.0
+                if df.pending_count[] == 0
+                    _report_progress(df, "Indexing complete")
+                    # Reset for the next round of indexing
+                    df.progress_state.total_items = 0
+                    df.progress_state.completed_items = 0
+                end
                 try put!(df.update_channel, :data_available) catch; end
             end
         end
