@@ -56,7 +56,9 @@ end
 Salsa.@derived function derived_toml_parse_result(rt, uri)
     @debug "derived_toml_parse_result" uri=uri
 
-    tf = input_text_file(rt, uri)
+    tf = derived_text_file_content(rt, uri)
+
+    tf === nothing && return Dict{String,Any}(), Diagnostic[Diagnostic(1:1, :error, "File not found", nothing, Symbol[], "JuliaWorkspaces")]
 
     content = tf.content.content
 

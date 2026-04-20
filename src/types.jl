@@ -325,7 +325,6 @@ struct JuliaWorkspace
 
         set_input_files!(rt, Set{URI}())
         set_input_active_project!(rt, nothing)
-        set_input_fallback_test_project!(rt, nothing)
         set_input_env_ready!(rt, false)
 
         new(rt, dynamic_feature)
@@ -405,8 +404,6 @@ function process_from_dynamic(jw::JuliaWorkspace)
             elseif msg.command == :test_environment_ready
                 @info "Processeing new test env" msg.project_uri msg.package msg.test_project_uri
 
-                add_folder_from_disc!(jw, uri2filepath(msg.test_project_uri))
-
                 set_input_project_test_environment!(jw.runtime, msg.project_uri, msg.package, msg.content_hash, msg.test_project_uri)
 
                 # Preload package caches and mark environment as known for the test project,
@@ -419,8 +416,6 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 set_input_env_ready!(jw.runtime, true)
             elseif msg.command == :standalone_package_project_ready
                 @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
-
-                add_folder_from_disc!(jw, uri2filepath(msg.project_uri))
 
                 set_input_standalone_package_project!(jw.runtime, msg.package_folder_uri, msg.content_hash, msg.project_uri)
 

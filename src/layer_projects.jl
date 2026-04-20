@@ -6,6 +6,42 @@ Salsa.@derived function derived_project_files(rt)
     return [file for file in files if file.scheme=="file" && (is_path_project_file(uri2filepath(file)) || is_path_manifest_file(uri2filepath(file)))]
 end
 
+"""
+    derived_project_toml_files(rt, folder_uri)
+
+Probe for Project.toml and Manifest.toml files in `folder_uri` by
+constructing candidate URIs and checking via `derived_text_file_content`.
+This triggers lazy loading (and the indirect file watch callback) for
+files outside the regular workspace.
+
+Returns `(project_file=uri_or_nothing, manifest_file=uri_or_nothing)`.
+"""
+Salsa.@derived function derived_project_toml_files(rt, folder_uri)
+    folder_path = uri2filepath(folder_uri)
+
+    project_file = nothing
+    for name in ("JuliaProject.toml", "Project.toml")
+        candidate = filepath2uri(joinpath(folder_path, name))
+        tf = derived_text_file_content(rt, candidate)
+        if tf !== nothing
+            project_file = candidate
+            break
+        end
+    end
+
+    manifest_file = nothing
+    for name in ("JuliaManifest.toml", "Manifest.toml")
+        candidate = filepath2uri(joinpath(folder_path, name))
+        tf = derived_text_file_content(rt, candidate)
+        if tf !== nothing
+            manifest_file = candidate
+            break
+        end
+    end
+
+    return (project_file=project_file, manifest_file=manifest_file)
+end
+
 Salsa.@derived function derived_potential_project_folders(rt)
     project_files = derived_project_files(rt)
 
@@ -30,22 +66,43 @@ Salsa.@derived function derived_potential_project_folders(rt)
         end
     end
 
-    return Dict(k => (project_file=v, manifest_file=get(mf,k,nothing)) for (k,v) in pf)
+    result = Dict(k => (project_file=v, manifest_file=get(mf,k,nothing)) for (k,v) in pf)
+
+    # Include the active project folder even if its files are not in the
+    # regular file set (e.g. external environment). The files will be loaded
+    # lazily via the indirect file mechanism.
+    active_project = input_active_project(rt)
+    if active_project !== nothing && !haskey(result, active_project)
+        toml_files = derived_project_toml_files(rt, active_project)
+        if toml_files.project_file !== nothing
+            result[active_project] = toml_files
+        end
+    end
+
+    return result
 end
 
 Salsa.@derived function derived_package(rt, uri)
     @debug "derived_package" uri=uri
 
+    # Try the known project folders first (workspace files + active project),
+    # then fall back to lazy probing for DJP-created projects.
     project_folders = derived_potential_project_folders(rt)
+    toml_files = get(project_folders, uri, nothing)
+    if toml_files === nothing
+        toml_files = derived_project_toml_files(rt, uri)
+    end
 
-    project_file = project_folders[uri].project_file
+    project_file = toml_files.project_file
+    project_file === nothing && return nothing
 
     syntax_tree = derived_toml_syntax_tree(rt, project_file)
 
     if haskey(syntax_tree, "name") && haskey(syntax_tree, "uuid") && haskey(syntax_tree, "version")
         parsed_uuid = tryparse(UUID, syntax_tree["uuid"])
         if parsed_uuid!==nothing
-            project_text_content = input_text_file(rt, project_file)
+            project_text_content = derived_text_file_content(rt, project_file)
+            project_text_content === nothing && return nothing
             project_content_hash = hash(project_text_content.content.content)
 
             return JuliaPackage(project_file, syntax_tree["name"], parsed_uuid, project_content_hash)
@@ -58,10 +115,16 @@ end
 Salsa.@derived function derived_project(rt, uri)
     @debug "derived_project" uri=uri
 
+    # Try the known project folders first (workspace files + active project),
+    # then fall back to lazy probing for DJP-created projects.
     project_folders = derived_potential_project_folders(rt)
+    toml_files = get(project_folders, uri, nothing)
+    if toml_files === nothing
+        toml_files = derived_project_toml_files(rt, uri)
+    end
 
-    project_file = project_folders[uri].project_file
-    manifest_file = project_folders[uri].manifest_file
+    project_file = toml_files.project_file
+    manifest_file = toml_files.manifest_file
 
     if manifest_file===nothing
         return nothing
@@ -141,8 +204,9 @@ Salsa.@derived function derived_project(rt, uri)
         end
     end
 
-    manifest_text_content = input_text_file(rt, manifest_file)
-    project_text_content = input_text_file(rt, project_file)
+    manifest_text_content = derived_text_file_content(rt, manifest_file)
+    project_text_content = derived_text_file_content(rt, project_file)
+    (manifest_text_content === nothing || project_text_content === nothing) && return nothing
     project_content_hash = hash(project_text_content.content.content, hash(manifest_text_content.content.content))
 
     JuliaProject(project_file, manifest_file, julia_version, project_content_hash, deved_packages, regular_packages, stdlib_packages)

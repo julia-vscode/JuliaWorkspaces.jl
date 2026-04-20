@@ -99,9 +99,9 @@ Salsa.@derived function derived_testenv(rt, uri)
     package_uri = derived_package_for_file(rt, uri)
 
     if project_uri === nothing
-        project_uri = input_fallback_test_project(rt)
+        project_uri = input_active_project(rt)
 
-        # Sometimes the fallback project is actually not a fallback project
+        # Sometimes the active project is actually not a valid project
         # because there is no manifest, here we check for that
         if project_uri === nothing || derived_project(rt, project_uri) === nothing
             project_uri = nothing

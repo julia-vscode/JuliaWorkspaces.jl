@@ -6,8 +6,6 @@ Salsa.@declare_input input_active_project(rt)::Union{URI,Nothing}
 
 Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
 
-Salsa.@declare_input input_fallback_test_project(rt)::Union{URI,Nothing}
-
 Salsa.@declare_input input_env_ready(rt)::Bool
 
 # Lazy input for files that are pulled in via `include(...)` from a regular

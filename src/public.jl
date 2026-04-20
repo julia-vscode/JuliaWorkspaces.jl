@@ -4,6 +4,7 @@ export JuliaWorkspace,
     add_file!,
     remove_file!,
     remove_all_children!,
+    set_active_project!,
     set_indirect_file_content!,
     clear_indirect_file!,
     get_indirect_files,
@@ -327,6 +328,30 @@ function is_indirect_file(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     return derived_is_indirect_file(jw.runtime, uri)
+end
+
+# Active project
+
+"""
+    set_active_project!(jw::JuliaWorkspace, uri_or_nothing::Union{URI,Nothing})
+
+Set the active project for the workspace. The active project serves as the
+fallback environment for files that are not inside any project folder and also
+as the fallback test project when determining test environments.
+
+Pass `nothing` to clear the active project.
+
+When the active project is outside the workspace folders, its Project.toml and
+Manifest.toml will be loaded lazily via the indirect file mechanism, which
+triggers the `indirect_file_watch_callback` so the host (e.g. the LS) can
+register file watchers for them.
+"""
+function set_active_project!(jw::JuliaWorkspace, uri_or_nothing::Union{URI,Nothing})
+    @debug "set_active_project!" uri=uri_or_nothing
+
+    process_from_dynamic(jw)
+
+    set_input_active_project!(jw.runtime, uri_or_nothing)
 end
 
 # Projects
