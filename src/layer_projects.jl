@@ -51,22 +51,24 @@ Salsa.@derived function derived_potential_project_folders(rt)
     for file_uri in project_files
         file_path = uri2filepath(file_uri)
         folder_path = dirname(file_path)
-        fodler_uri = filepath2uri(folder_path)
+        folder_uri = filepath2uri(folder_path)
 
         if is_path_project_file(file_path)
-            if !haskey(pf, folder_path) || endswith(lowercase(file_path), "juliaproject.toml")
-                pf[fodler_uri] =file_uri
+            if !haskey(pf, folder_uri) || endswith(lowercase(file_path), "juliaproject.toml")
+                pf[folder_uri] = file_uri
             end
         elseif is_path_manifest_file(file_path)
-            if !haskey(mf, folder_path) || endswith(lowercase(file_path), "juliamanifest.toml")
-                mf[fodler_uri] =file_uri
+            if !haskey(mf, folder_uri) || endswith(lowercase(file_path), "juliamanifest.toml")
+                mf[folder_uri] = file_uri
             end
         else
             error("Unknown file type")
         end
     end
 
-    result = Dict(k => (project_file=v, manifest_file=get(mf,k,nothing)) for (k,v) in pf)
+    result = Dict{URI,@NamedTuple{project_file::Union{URI,Nothing}, manifest_file::Union{URI,Nothing}}}(
+        k => (project_file=v, manifest_file=get(mf, k, nothing)) for (k, v) in pf
+    )
 
     # Include the active project folder even if its files are not in the
     # regular file set (e.g. external environment). The files will be loaded
