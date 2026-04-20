@@ -7,9 +7,9 @@ This is a list of open issues that we still need to address before we can switch
 - [X] Bring progress notifications back
 - [X] Have three options: no dynamic feature, only symbol indexing, permanent dynamic processes
 - [X] Make client process management more robust
-- Handle watching of lazy inputs
+- [X] Handle watching of lazy inputs
 - Consider whether we should switch to pull based diagnostics right away because that might be a better fit
 - Figure formatting out
-- Add lint config for static lint to lint config file
+- [X] Add lint config for static lint to lint config file
 - [X] Follow includes outside of the workspace
-- Make active env a regular config field
+- [X] Make active env a regular config field
