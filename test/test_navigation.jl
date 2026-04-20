@@ -100,7 +100,12 @@ end
     idx = string_index(source, 2, 1)
     result = get_current_block_range(jw, uri, idx)
     @test result !== nothing
-    @test result.block_start_offset >= 0
+    @test result.block_start isa JuliaWorkspaces.Position
+    @test result.block_stop isa JuliaWorkspaces.Position
+    @test result.highlight_start isa JuliaWorkspaces.Position
+    @test result.highlight_stop isa JuliaWorkspaces.Position
+    @test (result.block_stop.line, result.block_stop.column) >= (result.block_start.line, result.block_start.column)
+    @test (result.highlight_stop.line, result.highlight_stop.column) >= (result.highlight_start.line, result.highlight_start.column)
 end
 
 @testitem "Navigation: get_selection_ranges" begin

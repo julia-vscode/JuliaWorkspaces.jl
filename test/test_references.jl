@@ -243,8 +243,9 @@ end
     idx = string_index(source, 3, 1)
     result = can_rename(jw, uri, idx)
     @test result !== nothing
-    @test result.start_index > 0
-    @test result.end_index > result.start_index
+    @test result.start isa JuliaWorkspaces.Position
+    @test result.stop isa JuliaWorkspaces.Position
+    @test (result.stop.line, result.stop.column) > (result.start.line, result.start.column)
 end
 
 @testitem "References: empty results on whitespace" begin

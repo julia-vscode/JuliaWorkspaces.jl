@@ -858,8 +858,9 @@ end
     can_rename(jw::JuliaWorkspace, uri::URI, index::Integer)
 
 Check whether the symbol at `index` (1-based Julia string index) can be
-renamed. Returns a named tuple `(start_index, end_index)` with 1-based
-indices, or `nothing`.
+renamed. Returns a named tuple `(; start::Position, stop::Position)`
+describing the range of the renamable symbol (both positions use 1-based
+`line` and `column`), or `nothing` if the symbol cannot be renamed.
 """
 function can_rename(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "can_rename" uri=uri index=index
