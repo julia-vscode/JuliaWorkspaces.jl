@@ -172,6 +172,47 @@ function _find_deving_project(rt, package_folder_uri)
 end
 
 """
+    derived_file_env_ready(rt, uri)
+
+Return true if this file's effective environment is ready for static-lint
+analysis that depends on environment data (e.g. missing-reference checks).
+
+This is stricter than the global `input_env_ready` flag: files that need a
+test environment (`test/runtests.jl` or files with `@testitem`) require the
+test-env DJP to have produced a merged test project URI before we consider
+their env "ready". Otherwise missing-ref diagnostics for test-only deps
+(TestItemRunner, Test, @testitem, @test, …) would flash as false positives
+until indexing finishes.
+"""
+Salsa.@derived function derived_file_env_ready(rt, uri)
+    input_env_ready(rt) || return false
+
+    package_folder_uri = derived_package_for_file(rt, uri)
+    package_folder_uri === nothing && return true
+
+    pkg = derived_package(rt, package_folder_uri)
+    pkg === nothing && return true
+    pkg_content_hash = pkg.content_hash
+
+    runtests_path = joinpath(uri2filepath(package_folder_uri), "test", "runtests.jl")
+    file_needs_test_env = lowercase(uri2filepath(uri)) == lowercase(runtests_path) ||
+        _file_has_testitems(rt, uri)
+    file_needs_test_env || return true
+
+    project_for_test_env = if package_folder_uri in derived_project_folders(rt)
+        package_folder_uri
+    else
+        standalone = input_standalone_package_project(rt, package_folder_uri, pkg_content_hash)
+        standalone !== nothing ? standalone : input_active_project(rt)
+    end
+    project_for_test_env === nothing && return true
+
+    test_env_project = derived_project(rt, project_for_test_env)
+    test_env_hash = test_env_project === nothing ? UInt(0) : test_env_project.content_hash
+    return input_project_test_environment(rt, project_for_test_env, pkg.name, test_env_hash) !== nothing
+end
+
+"""
     _file_has_testitems(rt, uri)
 
 Check whether a file contains `@testitem` macros by looking at the

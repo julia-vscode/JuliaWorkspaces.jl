@@ -202,7 +202,7 @@ Salsa.@derived function derived_static_lint_all_diagnostics(rt)
             errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
 
             for err in errs
-                rng = err[1]+1:err[1]+err[2].fullspan+1
+                rng = err[1]+1:err[1]+err[2].span+1
                 if StaticLint.headof(err[2]) === :errortoken
                     # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
                 elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
