@@ -400,6 +400,11 @@ function process_from_dynamic(jw::JuliaWorkspace)
                     end
                 end
 
+                # Mark THIS specific project's environment as ready. Per-project
+                # gating (in derived_file_env_ready) prevents env-dependent
+                # diagnostics for other projects from being flushed prematurely
+                # while their own DJPs are still pending.
+                set_input_project_environment!(jw.runtime, filepath2uri(msg.project_path), msg.content_hash, true)
                 set_input_env_ready!(jw.runtime, true)
             elseif msg.command == :test_environment_ready
                 @info "Processeing new test env" msg.project_uri msg.package msg.test_project_uri
@@ -412,7 +417,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 # Use the test project's own content_hash so Salsa keys match what callers compute
                 test_proj = derived_project(jw.runtime, msg.test_project_uri)
                 test_proj_hash = test_proj === nothing ? UInt(0) : test_proj.content_hash
-                set_input_project_environment!(jw.runtime, msg.test_project_uri, test_proj_hash, nothing)
+                set_input_project_environment!(jw.runtime, msg.test_project_uri, test_proj_hash, true)
                 set_input_env_ready!(jw.runtime, true)
             elseif msg.command == :standalone_package_project_ready
                 @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
@@ -423,7 +428,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 # Use the standalone project's own content_hash so Salsa keys match what callers compute
                 standalone_proj = derived_project(jw.runtime, msg.project_uri)
                 standalone_proj_hash = standalone_proj === nothing ? UInt(0) : standalone_proj.content_hash
-                set_input_project_environment!(jw.runtime, msg.project_uri, standalone_proj_hash, nothing)
+                set_input_project_environment!(jw.runtime, msg.project_uri, standalone_proj_hash, true)
                 set_input_env_ready!(jw.runtime, true)
             else
                 error("Unknown message: $msg")

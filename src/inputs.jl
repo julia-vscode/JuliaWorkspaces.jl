@@ -38,24 +38,61 @@ Salsa.@declare_input input_indirect_text_file(rt, uri)::Union{TextFile,Nothing} 
     return content
 end
 
-Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Nothing function(ctx, uri, content_hash)
+# Returns `true` once the environment for this project has been fully
+# processed by the dynamic feature (i.e. the per-project `:environment_ready`
+# message has been consumed). The lazy default is `false`, which both queues
+# the indexing work and signals to gates like `derived_file_env_ready` that
+# environment-dependent diagnostics for files belonging to this project are
+# not yet trustworthy.
+Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Bool function(ctx, uri, content_hash)
     @debug "Lazy load environment for" uri=uri content_hash=content_hash
 
     if ctx.dynamic_feature !== nothing
-        Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
-        ctx.dynamic_feature.progress_state.total_items += 1
-        _report_progress(ctx.dynamic_feature, "Preparing to index...")
-        put!(
-            ctx.dynamic_feature.in_channel,
-            (
-                command = :watch_environment,
-                project_path = uri2filepath(uri),
-                content_hash = content_hash
+        df = ctx.dynamic_feature
+        project_path = uri2filepath(uri)
+
+        # Fast-lane: when no package caches are missing for this project, skip
+        # the (single, serial) DJP work queue and signal readiness directly via
+        # the out_channel. This prevents quick projects (e.g. a `docs/` env or
+        # the active project) from being blocked behind a slow standalone-
+        # project DJP for an unrelated package.
+        missing_pkgs = try
+            _get_missing_packages(project_path, df.store_path)
+        catch err
+            @debug "Fast-lane env check failed; falling back to queue" project_path=project_path exception=(err, catch_backtrace())
+            nothing
+        end
+
+        Threads.atomic_add!(df.pending_count, 1)
+        df.progress_state.total_items += 1
+
+        if missing_pkgs !== nothing && isempty(missing_pkgs)
+            df.progress_state.completed_items += 1
+            put!(
+                df.out_channel,
+                (command=:environment_ready, project_path=project_path, content_hash=content_hash),
             )
-        )
+            Threads.atomic_sub!(df.pending_count, 1)
+            if df.pending_count[] == 0
+                _report_progress(df, "Indexing complete")
+                df.progress_state.total_items = 0
+                df.progress_state.completed_items = 0
+            end
+            try put!(df.update_channel, :data_available) catch; end
+        else
+            _report_progress(df, "Preparing to index...")
+            put!(
+                df.in_channel,
+                (
+                    command = :watch_environment,
+                    project_path = project_path,
+                    content_hash = content_hash,
+                ),
+            )
+        end
     end
 
-    return nothing
+    return false
 end
 
 Salsa.@declare_input input_project_test_environment(rt, uri, package, content_hash::UInt)::Union{Nothing,URI} function(ctx, uri, package, content_hash)

@@ -177,15 +177,30 @@ end
 Return true if this file's effective environment is ready for static-lint
 analysis that depends on environment data (e.g. missing-reference checks).
 
-This is stricter than the global `input_env_ready` flag: files that need a
-test environment (`test/runtests.jl` or files with `@testitem`) require the
-test-env DJP to have produced a merged test project URI before we consider
-their env "ready". Otherwise missing-ref diagnostics for test-only deps
-(TestItemRunner, Test, @testitem, @test, …) would flash as false positives
-until indexing finishes.
+Per-project gating: each file's *own* project must have completed dynamic
+indexing (the corresponding `:environment_ready` /
+`:standalone_package_project_ready` / `:test_environment_ready` message has
+been consumed). The legacy global `input_env_ready` flag is honored as a
+manual override for tests.
+
+Files that need a test environment (`test/runtests.jl` or files with
+`@testitem`) additionally require the test-env DJP to have produced a merged
+test project URI before we consider their env "ready". Otherwise missing-ref
+diagnostics for test-only deps (TestItemRunner, Test, @testitem, @test, …)
+would flash as false positives until indexing finishes.
 """
 Salsa.@derived function derived_file_env_ready(rt, uri)
-    input_env_ready(rt) || return false
+    # Determine the file's effective project URI and require its env to have
+    # been processed. The legacy global flag (settable in tests) acts as an
+    # override that pretends every project's env is ready.
+    project_uri = derived_project_uri_for_root(rt, uri)
+    if project_uri !== nothing
+        project = derived_project(rt, project_uri)
+        project_hash = project === nothing ? UInt(0) : project.content_hash
+        if !input_project_environment(rt, project_uri, project_hash) && !input_env_ready(rt)
+            return false
+        end
+    end
 
     package_folder_uri = derived_package_for_file(rt, uri)
     package_folder_uri === nothing && return true
