@@ -92,6 +92,7 @@ getsymbolextendeds(state::TraverseState) = getsymbolextendeds(state.env)
 mutable struct Toplevel{RT} <: TraverseState
     uri::URI
     included_files::Vector{URI}
+    all_included_files::Set{URI}
     scope::Scope
     in_modified_expr::Bool
     modified_exprs::Union{Nothing,Vector{EXPR}}
@@ -109,8 +110,8 @@ end
 
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
-Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, include_dict, runtime) =
-    Toplevel(uri, included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, 0, meta_dict, include_dict, runtime)
+Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, include_dict, runtime) =
+    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, 0, meta_dict, include_dict, runtime)
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -350,7 +351,12 @@ function followinclude(x, state::Toplevel)
     # TODO DA FIX
     if derived_has_file(rt, target_uri)
         if target_uri in state.included_files
-            seterror!(x, IncludeLoop)
+            seterror!(x, IncludeLoop, meta_dict)
+            return
+        end
+
+        if target_uri in state.all_included_files
+            seterror!(x, DuplicateInclude, meta_dict)
             return
         end
 
@@ -363,6 +369,7 @@ function followinclude(x, state::Toplevel)
         old_uri = state.uri
         state.uri = target_uri
         push!(state.included_files, state.uri)
+        push!(state.all_included_files, state.uri)
     #     root_dict[state.file] = root_dict[oldfile]
         cst_new_file = derived_julia_legacy_syntax_tree(rt, target_uri)
         setscope!(cst_new_file, nothing, meta_dict)
@@ -372,7 +379,7 @@ function followinclude(x, state::Toplevel)
     # TODO Understand this original code better
     # elseif !is_in_fexpr(x, CSTParser.defines_function) && !isempty(init_path)    
     elseif !is_in_fexpr(x, CSTParser.defines_function)
-        seterror!(x, MissingFile)
+        seterror!(x, MissingFile, meta_dict)
     end
 end
 
