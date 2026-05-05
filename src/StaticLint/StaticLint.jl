@@ -225,7 +225,7 @@ Performs a semantic pass across a project from the entry point `file`. A first p
 """
 function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing)
     setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
-    state = Toplevel(uri, [uri], scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, 0, meta_dict, include_dict, rt)
+    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, 0, meta_dict, include_dict, rt)
     process_EXPR(cst, state)
     unique!(state.delayed)
     for x in state.delayed
