@@ -21,7 +21,12 @@ function infer_type(binding::Binding, scope, state)
                 if CSTParser.is_func_call(binding.val.args[1])
                     settype!(binding, CoreTypes.Function)
                 else
-                    infer_type_assignment_rhs(binding, state, scope)
+                    lhs = binding.val.args[1]
+                    if lhs.head isa EXPR && valof(lhs.head) == "::"
+                        infer_type_decl(binding, lhs.args[2], state, scope)
+                    else
+                        infer_type_assignment_rhs(binding, state, scope)
+                    end
                 end
             elseif binding.val.head isa EXPR && valof(binding.val.head) == "::"
                 infer_type_decl(binding, state, scope)
@@ -151,6 +156,33 @@ function infer_type_decl(binding, state, scope)
         end
     else
         edt = get_eventual_datatype(refof(t, meta_dict), state.env)
+        if edt !== nothing
+            settype!(binding, edt)
+        end
+    end
+end
+
+function infer_type_decl(binding, t, state, scope)
+    if isidentifier(t)
+        resolve_ref(t, scope, state)
+    end
+    if iscurly(t)
+        t = t.args[1]
+        resolve_ref(t, scope, state)
+    end
+    if CSTParser.is_getfield_w_quotenode(t)
+        resolve_getfield(t, scope, state)
+        t = t.args[2].args[1]
+    end
+    if refof(t, state.meta_dict) isa Binding
+        rb = get_root_method(refof(t, state.meta_dict))
+        if rb isa Binding && CoreTypes.isdatatype(rb.type)
+            settype!(binding, rb)
+        else
+            settype!(binding, refof(t, state.meta_dict))
+        end
+    else
+        edt = get_eventual_datatype(refof(t, state.meta_dict), state.env)
         if edt !== nothing
             settype!(binding, edt)
         end

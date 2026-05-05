@@ -36,7 +36,7 @@ _super(a::SymbolServer.FakeTypeName, store) = _super(SymbolServer._lookup(a.name
 end
 
 function _super(b::Binding, store)
-    StaticLint.CoreTypes.isdatatype(b.type) || error()
+    StaticLint.CoreTypes.isdatatype(b.type) || return store[:Core][:Any]
     b.val isa Binding && return _super(b.val, store)
     sup = _super(b.val, store)
     if sup isa EXPR && StaticLint.hasref(sup, meta_dict)
