@@ -89,38 +89,38 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     # TODO Replace this with proper logic, but for now this should be not too bad.
     project_uri = derived_project_uri_for_root(rt, uri)
 
-    # Even when no project URI is available yet (e.g. while a standalone
-    # package's DJP is still computing its project), we still want hover and
-    # completions to work for locally-defined symbols and stdlib names. We
-    # therefore always run `semantic_pass` with a stdlib-only env, and skip
-    # workspace-package / test-setup discovery and the post-pass `check_all`
-    # loop (those all require a real project).
+    # When no project URI is available yet (e.g. while a standalone package's
+    # DJP is still computing its project), fall back to a stdlib-only env so
+    # that hover, completions, and env-independent `check_all` passes still
+    # work for locally-defined symbols and stdlib names. Workspace-package
+    # discovery is skipped (it requires a real project), but test-setup
+    # discovery and the `check_all` loop still run.
     if project_uri === nothing
         env = _stdlib_only_env()
-        StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt)
-        return (meta_dict=meta_dict, workspace_packages=Dict{String,Any}())
+    else
+        env = derived_environment(rt, project_uri)
+
+        # This will trigger the launch of the dynamic process
+        project_for_hash = derived_project(rt, project_uri)
+        input_project_environment(rt, project_uri, project_for_hash === nothing ? UInt(0) : project_for_hash.content_hash)
     end
-
-    env = derived_environment(rt, project_uri)
-
-    # This will trigger the launch of the dynamic process
-    project_for_hash = derived_project(rt, project_uri)
-    input_project_environment(rt, project_uri, project_for_hash === nothing ? UInt(0) : project_for_hash.content_hash)
 
     # Build workspace_packages dict from cached deved package semantic info
     workspace_packages = Dict{String,Any}()
-    workspace_deved = derived_workspace_deved_packages(rt, project_uri)
-    for (pkg_name, pkg_entry_uri) in workspace_deved
-        # Skip when the root IS the deved package — semantic_pass will process
-        # these CST nodes directly, and merging stale meta would cause
-        # resolve_ref to short-circuit (hasref→true) before new bindings are
-        # added, resulting in false "unused binding" warnings.
-        pkg_entry_uri == uri && continue
+    if project_uri !== nothing
+        workspace_deved = derived_workspace_deved_packages(rt, project_uri)
+        for (pkg_name, pkg_entry_uri) in workspace_deved
+            # Skip when the root IS the deved package — semantic_pass will process
+            # these CST nodes directly, and merging stale meta would cause
+            # resolve_ref to short-circuit (hasref→true) before new bindings are
+            # added, resulting in false "unused binding" warnings.
+            pkg_entry_uri == uri && continue
 
-        result = derived_deved_package_meta(rt, pkg_entry_uri, project_uri)
-        merge_meta_dict!(meta_dict, result.meta_dict)
-        if result.module_binding !== nothing
-            workspace_packages[pkg_name] = result.module_binding
+            result = derived_deved_package_meta(rt, pkg_entry_uri, project_uri)
+            merge_meta_dict!(meta_dict, result.meta_dict)
+            if result.module_binding !== nothing
+                workspace_packages[pkg_name] = result.module_binding
+            end
         end
     end
 
@@ -136,7 +136,7 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         pkg = derived_package(rt, package_folder_uri)
         if pkg !== nothing
             self_package_name = pkg.name
-            if !haskey(workspace_packages, self_package_name)
+            if project_uri !== nothing && !haskey(workspace_packages, self_package_name)
                 entry_uri = filepath2uri(joinpath(uri2filepath(package_folder_uri), "src", "$(self_package_name).jl"))
                 if derived_has_file(rt, entry_uri) && entry_uri != uri
                     result = derived_deved_package_meta(rt, entry_uri, project_uri)
