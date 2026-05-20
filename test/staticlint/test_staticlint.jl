@@ -298,17 +298,20 @@ end
     end
 end
 
-@testitem "type params check" setup=[shared_static_lint] begin
-    let (cst, meta_dict) = parse_and_pass("""
+@testitem "unused type params check" setup=[shared_static_lint] begin
+    cst, meta_dict = parse_and_pass("""
     f() where T
     f() where {T,S}
     f() where {T<:Any}
     """)
-        @test JuliaWorkspaces.StaticLint.errorof(cst.args[1].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
-        @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
-        @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[3], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
-        @test JuliaWorkspaces.StaticLint.errorof(cst.args[3].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
-    end
+    
+    @test JuliaWorkspaces.StaticLint.errorof(cst.args[1].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
+    @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
+    @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[3], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
+    @test JuliaWorkspaces.StaticLint.errorof(cst.args[3].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
+end
+
+@testitem "type params check" setup=[shared_static_lint] begin
     let (cst, meta_dict) = parse_and_pass("""
     f(x::T) where T
     f(x::T,y::S) where {T,S}
