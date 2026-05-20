@@ -65,7 +65,7 @@ function infer_type_assignment_rhs(binding, state, scope)
                     rb = get_root_method(refof(callname, meta_dict))
                     if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
                         if is_destructuring
-                            infer_destructuring_type(binding, rb)
+                            infer_destructuring_type(binding, rb, meta_dict)
                         else
                             settype!(binding, rb)
                         end
@@ -113,7 +113,7 @@ function infer_type_assignment_rhs(binding, state, scope)
     end
 end
 
-function infer_destructuring_type(binding, rb::SymbolServer.DataTypeStore)
+function infer_destructuring_type(binding, rb::SymbolServer.DataTypeStore, meta_dict)
     assigned_name = CSTParser.get_name(binding.val)
     for (fieldname, fieldtype) in zip(rb.fieldnames, rb.types)
         if fieldname == assigned_name
@@ -122,7 +122,7 @@ function infer_destructuring_type(binding, rb::SymbolServer.DataTypeStore)
         end
     end
 end
-function infer_destructuring_type(binding::Binding, rb::EXPR)
+function infer_destructuring_type(binding::Binding, rb::EXPR, meta_dict)
     assigned_name = string(to_codeobject(binding.name))
     scope = scopeof(rb, meta_dict)
     names = scope.names
@@ -131,7 +131,7 @@ function infer_destructuring_type(binding::Binding, rb::EXPR)
         settype!(binding, b.type)
     end
 end
-infer_destructuring_type(binding, rb::Binding) = infer_destructuring_type(binding, rb.val)
+infer_destructuring_type(binding, rb::Binding, meta_dict) = infer_destructuring_type(binding, rb.val, meta_dict)
 
 function infer_type_decl(binding, state, scope)
     meta_dict = state.meta_dict

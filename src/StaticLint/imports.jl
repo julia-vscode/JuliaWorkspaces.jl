@@ -6,7 +6,7 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
         ensuremeta(x.args[2], meta_dict)
         if hasbinding(last(x.args[1].args), meta_dict) && CSTParser.isidentifier(x.args[2])
             lhsbinding = bindingof(last(x.args[1].args), meta_dict)
-            getameta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
+            getmeta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
             setref!(x.args[2], bindingof(x.args[2], meta_dict), meta_dict)
             getmeta(last(x.args[1].args), meta_dict).binding = nothing
         end
