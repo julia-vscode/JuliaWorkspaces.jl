@@ -157,6 +157,11 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         lint_config = derived_lint_configuration(rt, file)
         opts = _lint_options_from_config(lint_config)
         StaticLint.check_all(cst2, opts, env, meta_dict)
+
+        # Late getfield reference resolution. This mutates meta_dict, so it must
+        # run here (while we still own meta_dict) rather than from the read-only
+        # diagnostics pass in `collect_hints`.
+        StaticLint.resolve_remaining_getfields!(cst2, env, workspace_packages, meta_dict)
     end
 
     return (meta_dict=meta_dict, workspace_packages=workspace_packages)

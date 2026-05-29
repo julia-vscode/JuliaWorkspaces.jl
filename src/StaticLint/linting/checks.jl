@@ -690,18 +690,70 @@ function refof_maybe_getfield(x::EXPR, meta_dict)
     end
 end
 
+"""
+    resolve_remaining_getfields!(x::EXPR, env, workspace_packages, meta_dict, isquoted=false)
+
+Perform late getfield reference resolution over `x`. By-use type inference runs
+after the initial reference-resolution pass, so the type of the left-hand side of
+a `getproperty` (e.g. `a` in `a.b`) may only become known afterwards. This pass
+revisits the field-name identifiers of `getproperty` calls and attempts to
+resolve them now that types are available.
+
+This mutates `meta_dict` (via `setref!`/`resolve_getfield`) and must therefore be
+run while the meta is still being built (e.g. alongside `check_all`), not from the
+read-only diagnostics gathering in `collect_hints`.
+"""
+function resolve_remaining_getfields!(x::EXPR, env, workspace_packages, meta_dict, isquoted=false)
+    if quoted(x)
+        isquoted = true
+    elseif isquoted && unquoted(x)
+        isquoted = false
+    end
+    if isquoted
+        try_resolve_getfield_ref!(x, env, workspace_packages, meta_dict)
+    end
+    for i in 1:length(x)
+        resolve_remaining_getfields!(x[i], env, workspace_packages, meta_dict, isquoted)
+    end
+    return x
+end
+
+# Attempt to resolve a getfield-rhs identifier `x` (the field name in `a.b`).
+# Mutates `meta_dict`/bindings via `resolve_getfield` and `setref!`.
+function try_resolve_getfield_ref!(x, env, workspace_packages, meta_dict)
+    if isidentifier(x) && !hasref(x, meta_dict) && # x has no ref
+    parentof(x) isa EXPR && headof(parentof(x)) === :quotenode && parentof(parentof(x)) isa EXPR && is_getfield(parentof(parentof(x)))  # x is the rhs of a getproperty
+        lhsref = refof_maybe_getfield(parentof(parentof(x)).args[1], meta_dict)
+        if lhsref isa Binding
+            # by-use type inference runs after we've resolved references so we may not have known lhsref's type first time round, lets try and find `x` again
+            resolve_getfield(x, lhsref, ResolveOnly(retrieve_scope(x, meta_dict), env, workspace_packages, meta_dict), meta_dict) # FIXME: Setting `server` to nothing might be sketchy?
+            hasref(x, meta_dict) && return # We've resolved
+            if lhsref.val isa Binding
+                lhsref = lhsref.val
+            end
+            lhsref = get_root_method(lhsref)
+            if lhsref isa Binding && lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
+                # We may have infered the lhs type after the semantic pass that was resolving references. Copied from `resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Bool`.
+                if scopehasbinding(scopeof(lhsref.type.val, meta_dict), valof(x))
+                    setref!(x, scopeof(lhsref.type.val, meta_dict).names[valof(x)], meta_dict)
+                end
+            end
+        end
+    end
+    return
+end
+
+# Pure (read-only) decision: should `x` (the field name in `a.b`) be reported as a
+# missing reference? Any late resolution that could change the answer must already
+# have been performed by `resolve_remaining_getfields!` before this runs.
 function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
     if isidentifier(x) && !hasref(x, meta_dict) && # x has no ref
     parentof(x) isa EXPR && headof(parentof(x)) === :quotenode && parentof(parentof(x)) isa EXPR && is_getfield(parentof(parentof(x)))  # x is the rhs of a getproperty
         lhsref = refof_maybe_getfield(parentof(parentof(x)).args[1], meta_dict)
-        hasref(x, meta_dict) && return false # We've resolved
         if lhsref isa SymbolServer.ModuleStore || (lhsref isa Binding && lhsref.val isa SymbolServer.ModuleStore)
             # a module, we should know this.
             return true
         elseif lhsref isa Binding
-            # by-use type inference runs after we've resolved references so we may not have known lhsref's type first time round, lets try and find `x` again
-            resolve_getfield(x, lhsref, ResolveOnly(retrieve_scope(x, meta_dict), env, workspace_packages, meta_dict), meta_dict) # FIXME: Setting `server` to nothing might be sketchy?
-            hasref(x, meta_dict) && return false # We've resolved
             if lhsref.val isa Binding
                 lhsref = lhsref.val
             end
@@ -712,12 +764,8 @@ function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
             elseif lhsref.type isa SymbolServer.DataTypeStore && !(isempty(lhsref.type.fieldnames) || isunionfaketype(lhsref.type.name) || has_getproperty_method(lhsref.type, env))
                 return true
             elseif lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
-                # We may have infered the lhs type after the semantic pass that was resolving references. Copied from `resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Bool`.
-                if scopehasbinding(scopeof(lhsref.type.val, meta_dict), valof(x))
-                    setref!(x, scopeof(lhsref.type.val, meta_dict).names[valof(x)], meta_dict)
-                    return false
-                end
-                return true
+                # We may have infered the lhs type after the semantic pass that was resolving references.
+                return !scopehasbinding(scopeof(lhsref.type.val, meta_dict), valof(x))
             end
         end
     end
