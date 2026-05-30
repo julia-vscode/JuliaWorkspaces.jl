@@ -117,6 +117,10 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         return Diagnostic[]
     end
 
+    if !(uri in derived_text_files(rt))
+        error("Invalid uri $uri")
+    end
+
     lint_config = derived_lint_configuration(rt, uri)
 
     results = Diagnostic[]
