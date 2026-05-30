@@ -726,7 +726,7 @@ function try_resolve_getfield_ref!(x, env, workspace_packages, meta_dict)
         lhsref = refof_maybe_getfield(parentof(parentof(x)).args[1], meta_dict)
         if lhsref isa Binding
             # by-use type inference runs after we've resolved references so we may not have known lhsref's type first time round, lets try and find `x` again
-            resolve_getfield(x, lhsref, ResolveOnly(retrieve_scope(x, meta_dict), env, workspace_packages, meta_dict), meta_dict) # FIXME: Setting `server` to nothing might be sketchy?
+            resolve_getfield(x, lhsref, ResolveOnly(retrieve_scope(x, meta_dict), env, workspace_packages, meta_dict)) # FIXME: Setting `server` to nothing might be sketchy?
             hasref(x, meta_dict) && return # We've resolved
             if lhsref.val isa Binding
                 lhsref = lhsref.val

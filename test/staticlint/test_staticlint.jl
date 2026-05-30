@@ -7,7 +7,11 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
 @testmodule shared_static_lint begin
     using JuliaWorkspaces
 
-    export parse_and_pass, check_resolved
+    export parse_and_pass, check_resolved, get_hints
+
+    # New-structure equivalent of the old `StaticLint.collect_hints(cst, server)`:
+    # returns the diagnostics produced for the single test file.
+    get_hints(jw) = get_diagnostic(jw, JuliaWorkspaces.URIs2.uri"file://test.jl")
 
     function parse_and_pass(s; dynamic::DynamicMode=DynamicOff)
         our_uri = JuliaWorkspaces.URIs2.uri"file://test.jl"
@@ -640,7 +644,7 @@ end
 end
 
 @testitem "JuMP @variable parenthesized" setup=[shared_static_lint] begin
-        (cst, meta_dict) = parse_and_pass("""
+        (cst, meta_dict, jw) = parse_and_pass("""
 using JuMP
 model = Model()
 some_bound = 1
@@ -653,11 +657,11 @@ some_bound = 1
 @variable(model, x6 >= some_bound)
 # @variable(model, some_bound >= x7)
 """)
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        @test isempty(get_hints(jw))
 end
 
 @testitem "JuMP @variable space-separated" setup=[shared_static_lint] begin
-        (cst, meta_dict) = parse_and_pass("""
+        (cst, meta_dict, jw) = parse_and_pass("""
 using JuMP
 model = Model()
 some_bound = 1
@@ -670,7 +674,7 @@ some_bound = 1
 @variable model x6 >= some_bound
 # @variable(model, some_bound >= x7)
 """)
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        @test isempty(get_hints(jw))
 end
 
 @testitem "JuMP @variable unresolved bound" setup=[shared_static_lint] begin
@@ -687,31 +691,30 @@ end
 end
 
 @testitem "JuMP @expression" setup=[shared_static_lint] begin
-        (cst, meta_dict) = parse_and_pass("""
+        (cst, meta_dict, jw) = parse_and_pass("""
 using JuMP
 model = Model()
 some_bound = 1
 @expression(model, ex, some_bound >= 1)
 """)
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        @test isempty(get_hints(jw))
 end
 
 @testitem "JuMP @constraint" setup=[shared_static_lint] begin
-        (cst, meta_dict) = parse_and_pass("""
+        (cst, meta_dict, jw) = parse_and_pass("""
 using JuMP
 model = Model()
 @expression(model, expr, 1 == 1)
 @constraint(model, con1, expr)
 @constraint model con2 expr
 """)
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        @test isempty(get_hints(jw))
 end
 
 @testitem "stdcall in ccall" setup=[shared_static_lint] begin
-    (cst, meta_dict) = parse_and_pass("""
+    (cst, meta_dict, jw) = parse_and_pass("""
     ccall(:GetCurrentProcess, stdcall, Ptr{Cvoid}, ())""")
-    StaticLint.collect_hints(cst, getenv(server.files[""], server))
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "stdcall as identifier" setup=[shared_static_lint] begin
@@ -895,7 +898,7 @@ end
 end
 
 @testitem "hoisting of inner constructors" setup=[shared_static_lint] begin
-    let (cst, meta_dict) = parse_and_pass("""
+    let (cst, meta_dict, jw) = parse_and_pass("""
     struct ASDF
         x::Int
         y::Int
@@ -904,7 +907,7 @@ end
     ASDF(1)
     """)
         # Check inner constructor is hoisted
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        @test isempty(get_hints(jw))
     end
 end
 
@@ -955,7 +958,7 @@ end
 end
 
 @testitem "custom getproperty suppresses unknown field" setup=[shared_static_lint] begin
-    (cst, meta_dict) = parse_and_pass("""
+    (cst, meta_dict, jw) = parse_and_pass("""
     struct T
         f1
         f2
@@ -963,12 +966,12 @@ end
     Base.getproperty(x::T, s) = (x,s)
     f(x::T) = x.f3
     """)
-    @test !StaticLint.hasref(cst.args[3].args[2].args[1].args[2].args[1])
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test !JuliaWorkspaces.StaticLint.hasref(cst.args[3].args[2].args[1].args[2].args[1], meta_dict)
+    @test isempty(get_hints(jw))
 end
 
 @testitem "custom getproperty on parametric type" setup=[shared_static_lint] begin
-    (cst, meta_dict) = parse_and_pass("""
+    (cst, meta_dict, jw) = parse_and_pass("""
     struct T{S}
         f1
         f2
@@ -976,9 +979,9 @@ end
     Base.getproperty(x::T{Int}, s) = (x,s)
     f(x::T) = x.f3
     """)
-    @test !StaticLint.hasref(cst.args[3].args[2].args[1].args[2].args[1])
-    @test StaticLint.is_type_of_call_to_getproperty(cst.args[2].args[1].args[2].args[2].args[1])
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test !JuliaWorkspaces.StaticLint.hasref(cst.args[3].args[2].args[1].args[2].args[1], meta_dict)
+    @test JuliaWorkspaces.StaticLint.is_type_of_call_to_getproperty(cst.args[2].args[1].args[2].args[2].args[1])
+    @test isempty(get_hints(jw))
 end
 
 @testitem "custom getproperty Module builtin" setup=[shared_static_lint] begin
@@ -989,8 +992,8 @@ end
 end
 
 @testitem "custom getproperty DataType reports unknown field" setup=[shared_static_lint] begin
-    (cst, meta_dict) = parse_and_pass("f(x::DataType) = x.sdf")
-    @test !isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    (cst, meta_dict, jw) = parse_and_pass("f(x::DataType) = x.sdf")
+    @test !isempty(get_hints(jw))
 end
 
 @testitem "using of self" setup=[shared_static_lint] begin # e.g. `using StaticLint: StaticLint`
@@ -1094,7 +1097,7 @@ end
     """)
             @test scopehasbinding(scopeof(cst, meta_dict), "adf")
             @test !scopehasbinding(scopeof(cst.args[1], meta_dict), "adf")
-            @test errorof(cst.args[2]) === IncorrectCallArgs
+            @test errorof(cst.args[2], meta_dict) === IncorrectCallArgs
         end
         let (cst, meta_dict) = parse_and_pass("""
     for name in (:sdf, :asdf)
@@ -1104,7 +1107,7 @@ end
     """)
             @test scopehasbinding(scopeof(cst, meta_dict), "sdf")
             @test !scopehasbinding(scopeof(cst.args[1], meta_dict), "asdf")
-            @test errorof(cst[2]) === IncorrectCallArgs
+            @test errorof(cst[2], meta_dict) === IncorrectCallArgs
         end
 end
 
@@ -1127,19 +1130,19 @@ end
 end
 
 @testitem "misc Bool import and overload" setup=[shared_static_lint] begin # e.g. `using StaticLint: StaticLint`
-    (cst, meta_dict) = parse_and_pass("""
+    (cst, meta_dict, jw) = parse_and_pass("""
     import Base: Bool
     function Bool(x) x end
     ^(z::Complex, n::Bool) = n ? z : one(z)
     """)
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "misc parametric return type signature" setup=[shared_static_lint] begin
-    (cst, meta_dict) = parse_and_pass("""
+    (cst, meta_dict, jw) = parse_and_pass("""
     (rand(d::Vector{T})::T) where {T}  =  1
     """)
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "Test self" setup=[shared_static_lint] begin
@@ -1149,13 +1152,13 @@ end
 end
 
 @testitem "Test @irrational" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     using Base:@irrational
     @irrational ase 0.45343 π
     ase
     """)
 
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "quoted getfield" setup=[shared_static_lint] begin
@@ -1372,7 +1375,7 @@ end
     @test errorof(cst.args[3].args[1], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
     @test errorof(cst.args[4].args[2], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
     @test errorof(cst.args[5].args[2], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
-    @test errorof(cst.args[6].args[1]) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
+    @test errorof(cst.args[6].args[1], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
     @test errorof(cst.args[7].args[2].args[1], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
     @test errorof(cst.args[8].args[2], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
     @test errorof(cst.args[9].args[3], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
@@ -1504,18 +1507,18 @@ end
 
 @testitem "issue #210" setup=[shared_static_lint] begin
     if VERSION > v"1.5-"
-        cst, meta_dict = parse_and_pass("""h()::@NamedTuple{a::Int,b::String} = (a=1, b = "s")""")
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        cst, meta_dict, jw = parse_and_pass("""h()::@NamedTuple{a::Int,b::String} = (a=1, b = "s")""")
+        @test isempty(get_hints(jw))
     end
 end
 
 @testitem "Base.@kwdef" setup=[shared_static_lint] begin
     if isdefined(Base, Symbol("@kwdef"))
-        cst, meta_dict = parse_and_pass("""
+        cst, meta_dict, jw = parse_and_pass("""
         Base.@kwdef struct T
             arg = 1
         end""")
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        @test isempty(get_hints(jw))
     end
 end
 
@@ -1691,48 +1694,50 @@ end
         arg * kw
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "handle shadow bindings on method" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     f(x) = 1
     g = f
     g(1)
     """)
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "documented symbol resolving" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     \"\"\"
     doc
     \"\"\"
     func
     func(x) = 1
     """)
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test isempty(get_hints(jw))
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     \"\"\"
     doc
     \"\"\"
     func(a,b)::Int
     func(x, b) = 1
     """)
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "unused bindings" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    using JuliaWorkspaces.StaticLint: errorof
+
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arg, arg2)
         arg*arg2
         arg3 = 1
     end
     """)
-    @test errorof(cst[1][3][2][1]) !== nothing
+    @test errorof(cst[1][3][2][1], meta_dict) !== nothing
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f()
         arg = false
         while arg
@@ -1742,9 +1747,9 @@ end
         end
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arg)
         arg
         while true
@@ -1752,9 +1757,9 @@ end
         end
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arg)
         arg
         while true
@@ -1764,16 +1769,16 @@ end
         end
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f()
         (a = 1, b = 2)
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f()
         arg = 0
         if 1
@@ -1783,7 +1788,7 @@ end
         end
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "unwrap sig" setup=[shared_static_lint] begin
@@ -1820,42 +1825,46 @@ end
 end
 
 @testitem "clear .type refs" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     struct T{S,R} where S <: Number where R <: Number
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     struct T{S,R} <: Number where S <: Number
         x::S
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "where type param infer" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    using JuliaWorkspaces.StaticLint: getmeta
+
+    cst, meta_dict, jw = parse_and_pass("""
     foo(u::Union) = 1
     function foo(x::T) where {T}
         x + foo(T)
     end
     """)
 
-    @test cst[2].meta.scope.names["T"].type isa SymbolServer.DataTypeStore
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test getmeta(cst[2], meta_dict).scope.names["T"].type isa JuliaWorkspaces.SymbolServer.DataTypeStore
+    @test isempty(get_hints(jw))
 end
 
 @testitem "where type param infer" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    using JuliaWorkspaces.StaticLint: getmeta
+
+    cst, meta_dict, jw = parse_and_pass("""
     bar(u::Union) = 1
     foo(x::T, y::S, q::V) where {T, S <: V} where {V <: Integer} = x + y + q + bar(S) + bar(T) + bar(V)
     """)
 
-    @test cst[2].meta.scope.names["T"].type isa SymbolServer.DataTypeStore
-    @test cst[2].meta.scope.names["S"].type isa SymbolServer.DataTypeStore
-    @test cst[2].meta.scope.names["V"].type isa SymbolServer.DataTypeStore
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test getmeta(cst[2], meta_dict).scope.names["T"].type isa JuliaWorkspaces.SymbolServer.DataTypeStore
+    @test getmeta(cst[2], meta_dict).scope.names["S"].type isa JuliaWorkspaces.SymbolServer.DataTypeStore
+    @test getmeta(cst[2], meta_dict).scope.names["V"].type isa JuliaWorkspaces.SymbolServer.DataTypeStore
+    @test isempty(get_hints(jw))
 end
 
 @testitem "softscope" setup=[shared_static_lint] begin
@@ -1940,21 +1949,23 @@ end
 # end
 
 @testitem "#1218" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""function foo(a; p) a+p end
-    foo(1, p = true)""")
-    @test isempty(StaticLint.collect_hints(cst, server))
+    using JuliaWorkspaces.StaticLint: haserror
 
-    cst, meta_dict = parse_and_pass("""function foo(a; p) a end
+    cst, meta_dict, jw = parse_and_pass("""function foo(a; p) a+p end
     foo(1, p = true)""")
-    @test cst[1][2][4][1].meta.error != false
+    @test isempty(get_hints(jw))
 
-    cst, meta_dict = parse_and_pass("""function foo(a; p::Bool) a+p end
+    cst, meta_dict, jw = parse_and_pass("""function foo(a; p) a end
     foo(1, p = true)""")
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test haserror(cst[1][2][4][1], meta_dict)
 
-    cst, meta_dict = parse_and_pass("""function foo(a; p::Bool) a end
+    cst, meta_dict, jw = parse_and_pass("""function foo(a; p::Bool) a+p end
     foo(1, p = true)""")
-    @test cst[1][2][4][1].meta.error != false
+    @test isempty(get_hints(jw))
+
+    cst, meta_dict, jw = parse_and_pass("""function foo(a; p::Bool) a end
+    foo(1, p = true)""")
+    @test haserror(cst[1][2][4][1], meta_dict)
 end
 
 @testitem "import as ..." setup=[shared_static_lint] begin
@@ -1970,7 +1981,7 @@ end
 
 
 @testitem "#1218" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     module Sup
     function myfunc end
     module SubA
@@ -1980,42 +1991,44 @@ end
 
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 
 end
 
 
 @testitem "macrocall bindings: #2187" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(url = 1, file = 1)
         @info "Downloading" source = url dest = file
         return nothing
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "aliased import: #974" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     const CC = Core.Compiler
     import .CC: div
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     const C = Core
     import .C: div
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "kwarg refs" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: getmeta
+
     cst, meta_dict = parse_and_pass("""
     function foo(aaa, bbb; ccc)
         return aaa + bbb + ccc
     end
     """)
-    for (_, b) in cst.args[1].meta.scope.names
+    for (_, b) in getmeta(cst.args[1], meta_dict).scope.names
         @test length(b.refs) == 2
     end
 
@@ -2024,7 +2037,7 @@ end
         return aaa + bbb + ccc
     end
     """)
-    for (_, b) in cst.args[1].meta.scope.names
+    for (_, b) in getmeta(cst.args[1], meta_dict).scope.names
         @test length(b.refs) == 2
     end
 
@@ -2033,7 +2046,7 @@ end
         return aaa + bbb + ccc
     end
     """)
-    for (_, b) in cst.args[1].meta.scope.names
+    for (_, b) in getmeta(cst.args[1], meta_dict).scope.names
         @test length(b.refs) == 2
     end
     cst, meta_dict = parse_and_pass("""
@@ -2041,7 +2054,7 @@ end
         return aaa + bbb + ccc
     end
     """)
-    for (_, b) in cst.args[1].meta.scope.names
+    for (_, b) in getmeta(cst.args[1], meta_dict).scope.names
         @test length(b.refs) == 2
     end
 end
@@ -2152,7 +2165,7 @@ end
 end
 
 @testitem "assigned but not used with loops" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function a!(v)
         next = 0
         for i in eachindex(v)
@@ -2166,8 +2179,8 @@ end
         end
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
-    cst, meta_dict = parse_and_pass("""
+    @test isempty(get_hints(jw))
+    cst, meta_dict, jw = parse_and_pass("""
     function f(v)
         next = 0
         for _ in v
@@ -2179,7 +2192,7 @@ end
         end
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
+    @test isempty(get_hints(jw))
 end
 
 @testitem "macro definition" setup=[shared_static_lint] begin
