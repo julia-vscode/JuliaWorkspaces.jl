@@ -96,7 +96,12 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     # discovery is skipped (it requires a real project), but test-setup
     # discovery and the `check_all` loop still run.
     if project_uri === nothing
-        env = _stdlib_only_env()
+        # Use the Salsa-memoized stdlib-only env so that every consumer observes
+        # the *same* env object. This matters because `SymbolServer` stores
+        # (FunctionStore/DataTypeStore) compare by identity, so refs resolved
+        # during the pass must point at the same env instance that later
+        # read-only queries retrieve.
+        env = derived_stdlib_only_env(rt)
     else
         env = derived_environment(rt, project_uri)
 

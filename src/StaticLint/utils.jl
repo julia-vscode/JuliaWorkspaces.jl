@@ -203,7 +203,19 @@ is_toplevel_scope(s::Scope) = is_toplevel_scope(s.expr)
 # Macrocall scopes (e.g. @testitem, @testmodule, @testsnippet) with prebuilt
 # scopes act as top-level scopes so that function overload detection, binding
 # placement and call-signature checking operate within the testitem boundary.
-is_toplevel_scope(x::EXPR) = CSTParser.defines_module(x) || headof(x) === :file || CSTParser.ismacrocall(x)
+is_toplevel_scope(x::EXPR) = CSTParser.defines_module(x) || headof(x) === :file || _is_testitem_scope_macrocall(x)
+
+# Only testitem-family macrocalls (@testitem/@testmodule/@testsnippet) act as
+# top-level scopes. Other macrocalls that build scopes (e.g. `@eval`, `@deprecate`)
+# must NOT be treated as top-level, otherwise bindings hoisted by `interpret_eval`
+# would land in the macro's own scope instead of the enclosing top-level scope.
+function _is_testitem_scope_macrocall(x::EXPR)
+    CSTParser.ismacrocall(x) || return false
+    x.args === nothing && return false
+    mname = x.args[1]
+    mname isa EXPR || return false
+    return _is_testitem_macro(mname) || _is_testmodule_macro(mname) || _is_testsnippet_macro(mname)
+end
 
 # b::SymbolServer.FunctionStore or DataTypeStore
 # tls is a top-level Scope (expected to contain loaded modules)

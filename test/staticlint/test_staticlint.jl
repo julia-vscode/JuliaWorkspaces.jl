@@ -6,15 +6,38 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
 
 @testmodule shared_static_lint begin
     using JuliaWorkspaces
+    const CSTParser = JuliaWorkspaces.CSTParser
+    const StaticLint = JuliaWorkspaces.StaticLint
 
-    export parse_and_pass, check_resolved, get_hints
+    export parse_and_pass, check_resolved, get_hints, get_env, collect_hints
+    export module_name, find_module_by_name, find_first
+
+    const TEST_URI = JuliaWorkspaces.URIs2.uri"file://test.jl"
 
     # New-structure equivalent of the old `StaticLint.collect_hints(cst, server)`:
     # returns the diagnostics produced for the single test file.
-    get_hints(jw) = get_diagnostic(jw, JuliaWorkspaces.URIs2.uri"file://test.jl")
+    get_hints(jw) = get_diagnostic(jw, TEST_URI)
+
+    # New-structure equivalent of the old `getenv(server.files[""], server)` /
+    # `server.external_env`: the resolved `StaticLint.ExternalEnv` for the test file.
+    function get_env(jw)
+        rt = jw.runtime
+        project_uri = JuliaWorkspaces.derived_project_uri_for_root(rt, TEST_URI)
+        return project_uri === nothing ?
+            JuliaWorkspaces.derived_stdlib_only_env(rt) :
+            JuliaWorkspaces.derived_environment(rt, project_uri)
+    end
+
+    # Faithful equivalent of the old `StaticLint.collect_hints(x, server)`:
+    # collects hints/errors from a (sub)tree of the test file.
+    function collect_hints(x, meta_dict, jw; missingrefs=:all)
+        rt = jw.runtime
+        res = JuliaWorkspaces.derived_static_lint_meta_for_root(rt, TEST_URI)
+        return StaticLint.collect_hints(x, get_env(jw), res.workspace_packages, meta_dict, missingrefs)
+    end
 
     function parse_and_pass(s; dynamic::DynamicMode=DynamicOff)
-        our_uri = JuliaWorkspaces.URIs2.uri"file://test.jl"
+        our_uri = TEST_URI
         jw = JuliaWorkspaces.JuliaWorkspace(;dynamic=dynamic)
         add_file!(jw, TextFile(our_uri, SourceText(s, "julia")))
 
@@ -44,58 +67,58 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
         IDs = get_ids(cst)
         [(JuliaWorkspaces.StaticLint.refof(i, meta_dict) !== nothing) for i in IDs]
     end
-end
 
-
-
-
-# Simple iterative DFS utilities (no recursive predicate calls)
-function module_name(ex::CSTParser.EXPR)::Union{String,Nothing}
-    if CSTParser.defines_module(ex)
-        n = CSTParser.get_name(ex)
-        if CSTParser.isidentifier(n)
-            return CSTParser.valof(n)
-        elseif StaticLint.headof(n) === :NONSTDIDENTIFIER && length(n.args) == 2
-            return CSTParser.valof(n.args[2])
-        end
-    end
-    return nothing
-end
-
-function find_module_by_name(root::CSTParser.EXPR, name::String)
-    stack = CSTParser.EXPR[root]
-    while !isempty(stack)
-        x = pop!(stack)
-        if module_name(x) == name
-            return x
-        end
-        if x.args !== nothing
-            # push children
-            for a in x.args
-                a isa CSTParser.EXPR && push!(stack, a)
+    # Simple iterative DFS utilities (no recursive predicate calls)
+    function module_name(ex::CSTParser.EXPR)::Union{String,Nothing}
+        if CSTParser.defines_module(ex)
+            n = CSTParser.get_name(ex)
+            if CSTParser.isidentifier(n)
+                return CSTParser.valof(n)
+            elseif StaticLint.headof(n) === :NONSTDIDENTIFIER && length(n.args) == 2
+                return CSTParser.valof(n.args[2])
             end
         end
+        return nothing
     end
-    return nothing
-end
 
-function find_first(root::CSTParser.EXPR, f::Function)
-    stack = CSTParser.EXPR[root]
-    while !isempty(stack)
-        x = pop!(stack)
-        if f(x)
-            return x
-        end
-        if x.args !== nothing
-            for a in x.args
-                a isa CSTParser.EXPR && push!(stack, a)
+    function find_module_by_name(root::CSTParser.EXPR, name::String)
+        stack = CSTParser.EXPR[root]
+        while !isempty(stack)
+            x = pop!(stack)
+            if module_name(x) == name
+                return x
+            end
+            if x.args !== nothing
+                for a in x.args
+                    a isa CSTParser.EXPR && push!(stack, a)
+                end
             end
         end
+        return nothing
     end
-    return nothing
+
+    function find_first(root::CSTParser.EXPR, f::Function)
+        stack = CSTParser.EXPR[root]
+        while !isempty(stack)
+            x = pop!(stack)
+            if f(x)
+                return x
+            end
+            if x.args !== nothing
+                for a in x.args
+                    a isa CSTParser.EXPR && push!(stack, a)
+                end
+            end
+        end
+        return nothing
+    end
+
+    # Adapter to support do-block call style: find_first(root) do x ... end
+    find_first(f::Function, root::CSTParser.EXPR) = find_first(root, f)
 end
-# Adapter to support weird block call
-find_first(f::Function, root::CSTParser.EXPR) = find_first(root, f)
+
+
+
 
 @testitem "Basic bindings" setup=[shared_static_lint] begin
 
@@ -678,6 +701,7 @@ some_bound = 1
 end
 
 @testitem "JuMP @variable unresolved bound" setup=[shared_static_lint] begin
+    import CSTParser
     using JuliaWorkspaces.StaticLint: hasref
 
     cst, meta_dict = parse_and_pass("""
@@ -686,8 +710,12 @@ end
         some_bound = 1
         @variable(model, some_bound >= x7)
         """)
-    
-    @test !hasref(cst[4][5][3], meta_dict)
+
+    x7 = find_first(cst) do x
+        CSTParser.isidentifier(x) && CSTParser.valof(x) == "x7"
+    end
+    @test x7 !== nothing
+    @test !hasref(x7, meta_dict)
 end
 
 @testitem "JuMP @expression" setup=[shared_static_lint] begin
@@ -985,15 +1013,16 @@ end
 end
 
 @testitem "custom getproperty Module builtin" setup=[shared_static_lint] begin
-    (cst, meta_dict) = parse_and_pass("f(x::Module) = x.parent1")
-    @test StaticLint.has_getproperty_method(server.external_env.symbols[:Core][:Module], getenv(server.files[""], server))
-    @test !StaticLint.has_getproperty_method(server.external_env.symbols[:Core][:DataType], getenv(server.files[""], server))
-    @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+    (cst, meta_dict, jw) = parse_and_pass("f(x::Module) = x.parent1")
+    env = get_env(jw)
+    @test JuliaWorkspaces.StaticLint.has_getproperty_method(env.symbols[:Core][:Module], env)
+    @test !JuliaWorkspaces.StaticLint.has_getproperty_method(env.symbols[:Core][:DataType], env)
+    @test isempty(collect_hints(cst, meta_dict, jw))
 end
 
 @testitem "custom getproperty DataType reports unknown field" setup=[shared_static_lint] begin
     (cst, meta_dict, jw) = parse_and_pass("f(x::DataType) = x.sdf")
-    @test !isempty(get_hints(jw))
+    @test !isempty(collect_hints(cst, meta_dict, jw))
 end
 
 @testitem "using of self" setup=[shared_static_lint] begin # e.g. `using StaticLint: StaticLint`
@@ -1162,82 +1191,85 @@ end
 end
 
 @testitem "quoted getfield" setup=[shared_static_lint] begin
-    let (cst, meta_dict) = parse_and_pass("Base.:sin")
-        @test isempty(StaticLint.collect_hints(cst[1], getenv(server.files[""], server)))
+    import CSTParser
+    using JuliaWorkspaces.StaticLint: errorof, getmeta, bindingof, get_method
+
+    let (cst, meta_dict, jw) = parse_and_pass("Base.:sin")
+        @test isempty(collect_hints(cst[1], meta_dict, jw))
     end
     @testset "quoted getfield" begin
-        let (cst, meta_dict) = parse_and_pass("Base.:sin")
-            @test isempty(StaticLint.collect_hints(cst.args[1], getenv(server.files[""], server)))
+        let (cst, meta_dict, jw) = parse_and_pass("Base.:sin")
+            @test isempty(collect_hints(cst.args[1], meta_dict, jw))
         end
 
-        let (cst, meta_dict) = parse_and_pass("""
+        let (cst, meta_dict, jw) = parse_and_pass("""
     sin(1,1)
     Base.sin(1,1)
     Base.:sin(1,1)
     """)
-            @test errorof(cst.args[1]) === errorof(cst.args[2]) === errorof(cst.args[3])
+            @test errorof(cst.args[1], meta_dict) === errorof(cst.args[2], meta_dict) === errorof(cst.args[3], meta_dict)
         end
     end
     @testset "overloading" begin
 # overloading of a function that happens to be exported into the current scope.
-        let (cst, meta_dict) = parse_and_pass("""
+        let (cst, meta_dict, jw) = parse_and_pass("""
     Base.sin() = nothing
     sin()
     """)
-            @test haskey(cst.meta.scope.names, "sin") #
-            @test first(cst.meta.scope.names["sin"].refs) == server.external_env.symbols[:Base][:sin]
-            @test isempty(StaticLint.collect_hints(cst[2], getenv(server.files[""], server)))
+            @test haskey(getmeta(cst, meta_dict).scope.names, "sin") #
+            @test first(getmeta(cst, meta_dict).scope.names["sin"].refs) == get_env(jw).symbols[:Base][:sin]
+            @test isempty(collect_hints(cst[2], meta_dict, jw))
         end
 # As above but for user defined function
-        let (cst, meta_dict) = parse_and_pass("""
+        let (cst, meta_dict, jw) = parse_and_pass("""
     module M
     f(x) = nothing
     end
     M.f(a,b) = nothing
     M.f(1,2)
     """)
-            @test !haskey(cst.meta.scope.names, "f")
-            @test errorof(cst.args[3]) === nothing
+            @test !haskey(getmeta(cst, meta_dict).scope.names, "f")
+            @test errorof(cst.args[3], meta_dict) === nothing
         end
 
-        let (cst, meta_dict) = parse_and_pass("""
+        let (cst, meta_dict, jw) = parse_and_pass("""
 sin(1,1)
 Base.sin(1,1)
 Base.:sin(1,1)
 """)
-            @test errorof(cst[1]) === errorof(cst[2]) === errorof(cst[3])
+            @test errorof(cst[1], meta_dict) === errorof(cst[2], meta_dict) === errorof(cst[3], meta_dict)
         end
     end
 # Non exported function is overloaded
-    let (cst, meta_dict) = parse_and_pass("""
+    let (cst, meta_dict, jw) = parse_and_pass("""
     Base.argtail() = nothing
     Base.argtail()
     """)
-        @test !haskey(cst.meta.scope.names, "argtail") #
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        @test !haskey(getmeta(cst, meta_dict).scope.names, "argtail") #
+        @test isempty(collect_hints(cst, meta_dict, jw))
     end
 # As above but for user defined function
-    let (cst, meta_dict) = parse_and_pass("""
+    let (cst, meta_dict, jw) = parse_and_pass("""
     module M
     ff(x) = nothing
     end
     M.ff() = nothing
     M.ff()
     """)
-        @test !haskey(cst.meta.scope.names, "ff")
-        @test isempty(StaticLint.collect_hints(cst[3], getenv(server.files[""], server)))
+        @test !haskey(getmeta(cst, meta_dict).scope.names, "ff")
+        @test isempty(collect_hints(cst[3], meta_dict, jw))
     end
 
-    let (cst, meta_dict) = parse_and_pass("""
+    let (cst, meta_dict, jw) = parse_and_pass("""
     import Base: argtail
     Base.argtail() = nothing
     Base.argtail()
     argtail()
     """)
-        @test cst.meta.scope.names["argtail"] === bindingof(cst[1][2][3][1])
-        @test StaticLint.get_method(cst.meta.scope.names["argtail"].refs[2]) isa CSTParser.EXPR
-        @test cst[3][1][3][1].meta.ref == cst.meta.scope.names["argtail"]
-        @test isempty(StaticLint.collect_hints(cst, getenv(server.files[""], server)))
+        @test getmeta(cst, meta_dict).scope.names["argtail"] === bindingof(cst[1][2][3][1], meta_dict)
+        @test get_method(getmeta(cst, meta_dict).scope.names["argtail"].refs[2]) isa CSTParser.EXPR
+        @test getmeta(cst[3][1][3][1], meta_dict).ref == getmeta(cst, meta_dict).scope.names["argtail"]
+        @test isempty(collect_hints(cst, meta_dict, jw))
     end
 end
 
@@ -1591,6 +1623,7 @@ end
 # end
 
 @testitem "forward relative using/import" setup=[shared_static_lint] begin
+    import CSTParser
     using JuliaWorkspaces.StaticLint: hasref
 
     cst, meta_dict = parse_and_pass("""
@@ -1624,18 +1657,20 @@ end
     lhs = gget.args[1]                    # Sibling
     rhsid = gget.args[2].args[1]          # g (inside QuoteNode)
 
-    @test StaticLint.hasref(lhs)
-    @test StaticLint.hasref(rhsid)
+    @test JuliaWorkspaces.StaticLint.hasref(lhs, meta_dict)
+    @test JuliaWorkspaces.StaticLint.hasref(rhsid, meta_dict)
 end
 
 @testitem "too many dots" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("""
+    using JuliaWorkspaces.StaticLint: errorof, RelativeImportTooManyDots
+
+    cst, meta_dict, jw = parse_and_pass("""
         module A
             import ....X
         end
         """)
-    errs = StaticLint.collect_hints(cst, getenv(server.files[""], server))
-    @test any(err -> StaticLint.errorof(err[2]) === StaticLint.RelativeImportTooManyDots, errs)
+    errs = collect_hints(cst, meta_dict, jw)
+    @test any(err -> errorof(err[2], meta_dict) === RelativeImportTooManyDots, errs)
 end
 
 
@@ -2060,108 +2095,108 @@ end
 end
 
 @testitem "iteration over 1:length(...)" setup=[shared_static_lint] begin
-    cst, meta_dict = parse_and_pass("arr = []; [1 for _ in 1:length(arr)]")
-    @test isempty(StaticLint.collect_hints(cst, server))
-    cst, meta_dict = parse_and_pass("arr = []; [arr[i] for i in 1:length(arr)]")
-    @test length(StaticLint.collect_hints(cst, server)) == 2
-    cst, meta_dict = parse_and_pass("arr = []; [i for i in 1:length(arr)]")
-    @test length(StaticLint.collect_hints(cst, server)) == 0
+    cst, meta_dict, jw = parse_and_pass("arr = []; [1 for _ in 1:length(arr)]")
+    @test isempty(collect_hints(cst, meta_dict, jw))
+    cst, meta_dict, jw = parse_and_pass("arr = []; [arr[i] for i in 1:length(arr)]")
+    @test length(collect_hints(cst, meta_dict, jw)) == 2
+    cst, meta_dict, jw = parse_and_pass("arr = []; [i for i in 1:length(arr)]")
+    @test length(collect_hints(cst, meta_dict, jw)) == 0
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for _ in 1:length(arr)
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
-    cst, meta_dict = parse_and_pass("""
+    @test isempty(collect_hints(cst, meta_dict, jw))
+    cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for i in 1:length(arr)
         arr[i]
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 2
-    cst, meta_dict = parse_and_pass("""
+    @test length(collect_hints(cst, meta_dict, jw)) == 2
+    cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for i in 1:length(arr)
         println(i)
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 0
+    @test length(collect_hints(cst, meta_dict, jw)) == 0
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for _ in 1:length(arr), _ in 1:length(arr)
     end
     """)
-    @test isempty(StaticLint.collect_hints(cst, server))
-    cst, meta_dict = parse_and_pass("""
+    @test isempty(collect_hints(cst, meta_dict, jw))
+    cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for i in 1:length(arr), j in 1:length(arr)
         arr[i] + arr[j]
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 4
-    cst, meta_dict = parse_and_pass("""
+    @test length(collect_hints(cst, meta_dict, jw)) == 4
+    cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for i in 1:length(arr), j in 1:length(arr)
         println(i + j)
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 0
+    @test length(collect_hints(cst, meta_dict, jw)) == 0
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arr::Vector)
         for i in 1:length(arr), j in 1:length(arr)
             arr[i] + arr[j]
         end
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 0
+    @test length(collect_hints(cst, meta_dict, jw)) == 0
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arr::Array)
         for i in 1:length(arr), j in 1:length(arr)
             arr[i] + arr[j]
         end
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 0
+    @test length(collect_hints(cst, meta_dict, jw)) == 0
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arr::Matrix)
         for i in 1:length(arr), j in 1:length(arr)
             arr[i] + arr[j]
         end
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 0
+    @test length(collect_hints(cst, meta_dict, jw)) == 0
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arr::Array{T,N}) where T where N
         for i in 1:length(arr), j in 1:length(arr)
             arr[i] + arr[j]
         end
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 0
+    @test length(collect_hints(cst, meta_dict, jw)) == 0
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arr::AbstractArray)
         for i in 1:length(arr), j in 1:length(arr)
             arr[i] + arr[j]
         end
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 4
+    @test length(collect_hints(cst, meta_dict, jw)) == 4
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
     function f(arr)
         for i in 1:length(arr), j in 1:length(arr)
             arr[i] + arr[j]
         end
     end
     """)
-    @test length(StaticLint.collect_hints(cst, server)) == 4
+    @test length(collect_hints(cst, meta_dict, jw)) == 4
 end
 
 @testitem "assigned but not used with loops" setup=[shared_static_lint] begin
@@ -2196,6 +2231,8 @@ end
 end
 
 @testitem "macro definition" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: getmeta, get_method
+
     cst, meta_dict = parse_and_pass("""
     module JumpToMacroDoesNotWork
         export @mymacro
@@ -2208,10 +2245,10 @@ end
     """)
     m = cst.args[end].args[1].args[2].args[1]
     methods = Set()
-    for r in m.meta.ref.refs
-        m = StaticLint.get_method(r)
-        if m !== nothing
-            push!(methods, m)
+    for r in getmeta(m, meta_dict).ref.refs
+        method = get_method(r)
+        if method !== nothing
+            push!(methods, method)
         end
     end
 

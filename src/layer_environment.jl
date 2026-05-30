@@ -3,6 +3,15 @@ function _stdlib_only_env()
     return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
 end
 
+# Salsa-memoized stdlib-only env. Sharing a single env instance is required
+# because `SymbolServer` stores compare by identity: refs resolved against this
+# env during the semantic pass must point at the same instance that later
+# read-only queries (hover, completions, tests) retrieve.
+Salsa.@derived function derived_stdlib_only_env(rt)
+    @debug "derived_stdlib_only_env"
+    return _stdlib_only_env()
+end
+
 Salsa.@derived function derived_environment(rt, uri)
     @debug "derived_environment" uri=uri
 
