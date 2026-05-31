@@ -1175,9 +1175,18 @@ end
 end
 
 @testitem "Test self" setup=[shared_static_lint] begin
-    empty!(server.files)
-    f = StaticLint.loadfile(server, joinpath(@__DIR__, "..", "src", "StaticLint.jl"))
-    StaticLint.semantic_pass(f)
+    # Smoke test: load every file in the JuliaWorkspaces `src` folder into a
+    # workspace and request diagnostics for all of them. We don't assert on the
+    # contents here, the point is simply to make sure the full pipeline runs to
+    # completion without crashing on a realistic, sizeable codebase.
+    src_folder = normpath(joinpath(@__DIR__, "..", "..", "src"))
+
+    jw = JuliaWorkspace()
+    JuliaWorkspaces.add_folder_from_disc!(jw, src_folder)
+
+    for uri in get_text_files(jw)
+        @test get_diagnostic(jw, uri) !== nothing
+    end
 end
 
 @testitem "Test @irrational" setup=[shared_static_lint] begin
