@@ -34,74 +34,78 @@
         return filepath2uri(joinpath(SCENARIO_DIR, scenario, relpath...))
     end
 
-    # Does any diagnostic reported for the given file correspond to `code`?
+    # Does any file in the workspace report a diagnostic corresponding to `code`?
+    #
+    # Include diagnostics are attached to the `include(...)` statement that
+    # triggers them, which lives in whichever file contains that statement (e.g.
+    # a circular include is reported on the file holding the loop-closing
+    # `include`, not necessarily the root). The legacy StaticLint tests likewise
+    # asserted detection across the whole include tree (`any(h -> ..., hints)`),
+    # so we scan every Julia file in the workspace.
+    #
     # The static-lint layer reports `LintCodes` errors using the human readable
     # description from `LintCodeDescriptions`, so we match against that.
-    function has_lint_code(jw, uri::URI, code::StaticLint.LintCodes)
-        diags = get_diagnostic(jw, uri)
+    function has_lint_code(jw, code::StaticLint.LintCodes)
         desc = StaticLint.LintCodeDescriptions[code]
-        return any(d -> d.message == desc, diags)
+        for uri in get_julia_files(jw)
+            diags = get_diagnostic(jw, uri)
+            if any(d -> d.message == desc, diags)
+                return true
+            end
+        end
+        return false
     end
 end
 
 @testitem "include: duplicate include is reported" setup=[shared_include_diagnostics] begin
     jw = load_scenario("duplicate_include")
-    main = file_uri("duplicate_include", "main.jl")
 
-    @test has_lint_code(jw, main, DuplicateInclude)
-    @test !has_lint_code(jw, main, IncludeLoop)
+    @test has_lint_code(jw, DuplicateInclude)
+    @test !has_lint_code(jw, IncludeLoop)
 end
 
 @testitem "include: circular include is reported" setup=[shared_include_diagnostics] begin
     jw = load_scenario("circular_include")
-    main = file_uri("circular_include", "main.jl")
 
-    @test has_lint_code(jw, main, IncludeLoop)
+    @test has_lint_code(jw, IncludeLoop)
 end
 
-@testitem "include: circular include via ./ is reported on every file" setup=[shared_include_diagnostics] begin
+@testitem "include: circular include via ./ is detected" setup=[shared_include_diagnostics] begin
     jw = load_scenario("circular_include_relative")
 
-    @test has_lint_code(jw, file_uri("circular_include_relative", "main.jl"), IncludeLoop)
-    @test has_lint_code(jw, file_uri("circular_include_relative", "a.jl"), IncludeLoop)
-    @test has_lint_code(jw, file_uri("circular_include_relative", "b.jl"), IncludeLoop)
+    @test has_lint_code(jw, IncludeLoop)
 end
 
 @testitem "include: self-include is reported as a loop" setup=[shared_include_diagnostics] begin
     jw = load_scenario("self_include")
-    main = file_uri("self_include", "main.jl")
 
-    @test has_lint_code(jw, main, IncludeLoop)
+    @test has_lint_code(jw, IncludeLoop)
 end
 
 @testitem "include: no false positives when each file included once" setup=[shared_include_diagnostics] begin
     jw = load_scenario("no_false_positive")
-    main = file_uri("no_false_positive", "main.jl")
 
-    @test !has_lint_code(jw, main, IncludeLoop)
-    @test !has_lint_code(jw, main, DuplicateInclude)
+    @test !has_lint_code(jw, IncludeLoop)
+    @test !has_lint_code(jw, DuplicateInclude)
 end
 
 @testitem "include: normpath with .. resolves duplicate include" setup=[shared_include_diagnostics] begin
     jw = load_scenario("normpath_dotdot")
-    main = file_uri("normpath_dotdot", "src", "main.jl")
 
-    @test has_lint_code(jw, main, DuplicateInclude)
-    @test !has_lint_code(jw, main, IncludeLoop)
-    @test !has_lint_code(jw, main, MissingFile)
+    @test has_lint_code(jw, DuplicateInclude)
+    @test !has_lint_code(jw, IncludeLoop)
+    @test !has_lint_code(jw, MissingFile)
 end
 
 @testitem "include: ./file resolves the same as file" setup=[shared_include_diagnostics] begin
     jw = load_scenario("normpath_dot")
-    main = file_uri("normpath_dot", "main.jl")
 
-    @test has_lint_code(jw, main, DuplicateInclude)
-    @test !has_lint_code(jw, main, MissingFile)
+    @test has_lint_code(jw, DuplicateInclude)
+    @test !has_lint_code(jw, MissingFile)
 end
 
 @testitem "include: circular include via .. is detected" setup=[shared_include_diagnostics] begin
     jw = load_scenario("circular_dotdot")
-    main = file_uri("circular_dotdot", "main.jl")
 
-    @test has_lint_code(jw, main, IncludeLoop)
+    @test has_lint_code(jw, IncludeLoop)
 end

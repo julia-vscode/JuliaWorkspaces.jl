@@ -151,6 +151,12 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             else
                 append!(results, d for d in sl if !_is_env_dependent_diagnostic(d))
             end
+
+            # Include-graph diagnostics (DuplicateInclude / IncludeLoop /
+            # MissingFile) are a purely structural analysis that does not depend
+            # on a project/environment, so they are reported independently of the
+            # semantic static-lint pass above.
+            append!(results, derived_include_diagnostics(rt, uri))
         end
 
         if (is_path_lintconfig_file(uri2filepath(uri)) || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri)) ) && get(lint_config, "toml-syntax-errors", true) == true

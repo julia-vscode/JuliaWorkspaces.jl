@@ -91,3 +91,46 @@ function process_EXPR(x::EXPR, state::IncludeOnly)
     return state
 end
 
+"""
+    collect_include_calls(cst::EXPR, file_path::String)
+
+Walk `cst` and return a vector of `(offset, span, target_uri)` tuples, one for
+each `include(...)`/`includet(...)` call. `offset` is the 0-based byte offset of
+the call EXPR within the file and `span` its span. `target_uri` is the resolved
+target `URI` (normalised, relative paths joined to the file's directory) or
+`nothing` when the path could not be determined statically.
+
+Unlike `process_EXPR(::IncludeOnly)`, this records the position of every include
+call (including those that point at non-existent files) so that include-graph
+diagnostics can be attached to the offending statement.
+"""
+function collect_include_calls(cst::EXPR, file_path::String)
+    results = Tuple{Int,Int,Union{URI,Nothing}}[]
+    _collect_include_calls(cst, file_path, dirname(file_path), results, 0)
+    return results
+end
+
+function _collect_include_calls(x::EXPR, file_path, file_dir, results, pos)
+    if (CSTParser.fcall_name(x) == "include" || CSTParser.fcall_name(x) == "includet") && length(x.args) == 2
+        path = get_path(x, file_dir, nothing)
+
+        target = nothing
+        if path !== nothing
+            if !isabspath(path)
+                path = joinpath(file_dir, path)
+            end
+            target = filepath2uri(path)
+        end
+
+        push!(results, (pos, x.span, target))
+    elseif !(CSTParser.defines_function(x) || CSTParser.defines_macro(x) || headof(x) === :export || headof(x) === :public)
+        p = pos
+        for i in 1:length(x)
+            _collect_include_calls(x[i], file_path, file_dir, results, p)
+            p += x[i].fullspan
+        end
+    end
+
+    return results
+end
+

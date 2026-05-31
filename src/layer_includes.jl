@@ -158,3 +158,98 @@ Salsa.@derived function derived_best_root_for_uri(rt, uri)
 
     return first(roots)
 end
+
+"""
+    derived_file_include_records(rt, uri)
+
+Return the ordered list of `include(...)` call records for the file `uri` as
+`(offset, span, target_uri)` tuples. `target_uri` is the resolved include target
+(or `nothing` when the path could not be determined statically). The records are
+in source order, which the include-graph diagnostics rely on to flag the
+*repeated* `include` rather than the first one.
+"""
+Salsa.@derived function derived_file_include_records(rt, uri)
+    @debug "derived_file_include_records" uri=uri
+
+    tf = derived_text_file_content(rt, uri)
+    tf === nothing && return Tuple{Int,Int,Union{URI,Nothing}}[]
+
+    file_path = uri2filepath(uri)
+    file_path === nothing && return Tuple{Int,Int,Union{URI,Nothing}}[]
+
+    cst = derived_julia_legacy_syntax_tree(rt, uri)
+
+    return StaticLint.collect_include_calls(cst, file_path)
+end
+
+function _include_diagnostic(offset, span, code)
+    rng = (offset + 1):(offset + span + 1)
+    description = StaticLint.LintCodeDescriptions[code]
+    return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl")
+end
+
+function _collect_include_diagnostics!(rt, uri, stack, visited, result)
+    push!(stack, uri)
+
+    for (offset, span, target) in derived_file_include_records(rt, uri)
+        target === nothing && continue
+
+        if derived_text_file_content(rt, target) === nothing
+            push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.MissingFile))
+            continue
+        end
+
+        if target in stack
+            push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.IncludeLoop))
+            continue
+        end
+
+        if target in visited
+            push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.DuplicateInclude))
+            continue
+        end
+
+        push!(visited, target)
+        _collect_include_diagnostics!(rt, target, stack, visited, result)
+    end
+
+    pop!(stack)
+
+    return result
+end
+
+"""
+    derived_all_include_diagnostics(rt)
+
+Compute include-graph diagnostics (`DuplicateInclude`, `IncludeLoop`,
+`MissingFile`) for the whole workspace, keyed by the URI of the file that
+contains the offending `include(...)` statement.
+
+This is a purely structural analysis over the include graph and does not depend
+on a project/environment, so it is reported even for files that are not part of
+a package.
+"""
+Salsa.@derived function derived_all_include_diagnostics(rt)
+    @debug "derived_all_include_diagnostics"
+
+    result = Dict{URI,Vector{Diagnostic}}()
+
+    for root in derived_roots(rt)
+        stack = URI[]
+        visited = Set{URI}([root])
+        _collect_include_diagnostics!(rt, root, stack, visited, result)
+    end
+
+    # The same statement can be reached from multiple roots; deduplicate.
+    for ds in values(result)
+        unique!(ds)
+    end
+
+    return result
+end
+
+Salsa.@derived function derived_include_diagnostics(rt, uri)
+    all_diags = derived_all_include_diagnostics(rt)
+
+    return get(all_diags, uri, Diagnostic[])
+end

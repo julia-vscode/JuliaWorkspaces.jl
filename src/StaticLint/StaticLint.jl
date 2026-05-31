@@ -350,13 +350,16 @@ function followinclude(x, state::Toplevel)
   
     # TODO DA FIX
     if derived_has_file(rt, target_uri)
+        # Circular- and duplicate-include detection (and the corresponding
+        # diagnostics) is handled structurally in `derived_all_include_diagnostics`,
+        # independently of the semantic pass. Here we only use the same checks as
+        # recursion guards so the traversal terminates and does not re-process a
+        # file that was already included.
         if target_uri in state.included_files
-            seterror!(x, IncludeLoop, meta_dict)
             return
         end
 
         if target_uri in state.all_included_files
-            seterror!(x, DuplicateInclude, meta_dict)
             return
         end
 
@@ -379,7 +382,7 @@ function followinclude(x, state::Toplevel)
     # TODO Understand this original code better
     # elseif !is_in_fexpr(x, CSTParser.defines_function) && !isempty(init_path)    
     elseif !is_in_fexpr(x, CSTParser.defines_function)
-        seterror!(x, MissingFile, meta_dict)
+        # MissingFile is likewise reported structurally; nothing to do here.
     end
 end
 
