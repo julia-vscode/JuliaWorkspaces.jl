@@ -7,6 +7,16 @@ else
     _channel_wait_cond(c::Channel) = c.cond_take
 end
 
+# Helper: get the condition variable that a `Sockets.TCPServer` /
+# `Sockets.PipeServer` notifies on incoming connections.
+# Julia 1.2+ exposes a thread-safe `cond::Base.ThreadSynchronizer`;
+# Julia 1.0/1.1 expose a plain `connectnotify::Condition`.
+@static if :cond in fieldnames(Sockets.TCPServer)
+    _server_cond(server) = server.cond
+else
+    _server_cond(server) = server.connectnotify
+end
+
 # ---------------------------------------------------------------------------
 # Base.sleep with cancellation
 # ---------------------------------------------------------------------------
@@ -190,6 +200,247 @@ function Base.read(s::Union{Sockets.PipeEndpoint,Sockets.TCPSocket}, nb::Integer
     finally
         close(reg)
     end
+end
+
+# ---------------------------------------------------------------------------
+# Base.readavailable with cancellation  (sockets only)
+# ---------------------------------------------------------------------------
+
+"""
+    readavailable(socket::Union{Sockets.PipeEndpoint, Sockets.TCPSocket},
+                  token::CancellationToken)
+
+Read all available bytes from `socket`, blocking until at least one byte is
+available, but throw [`OperationCanceledException`](@ref) if `token` is
+cancelled before any data arrives.
+
+!!! warning "Cancellation closes the socket"
+    When `token` is cancelled, the underlying socket is **closed** to unblock
+    the read.  This means the socket is no longer usable after cancellation.
+
+    This is the only safe way to interrupt a socket read without corrupting
+    other tasks that may be waiting on the same socket condition variable.
+    Closing the socket ensures all readers receive a clean I/O error rather
+    than having a foreign `OperationCanceledException` injected into
+    unrelated tasks.
+
+    For most timeout use cases this is the desired behaviour — if a read
+    timed out, the protocol-level state is typically indeterminate anyway
+    and the connection should be re-established.
+
+# Examples
+
+```julia
+src = CancellationTokenSource(5.0)  # 5 s timeout
+try
+    data = readavailable(socket, get_token(src))
+catch ex
+    if ex isa OperationCanceledException
+        # socket has been closed; reconnect if needed
+    end
+end
+```
+"""
+function Base.readavailable(s::Union{Sockets.PipeEndpoint,Sockets.TCPSocket}, token::CancellationToken)
+    is_cancellation_requested(token) && throw(OperationCanceledException(token))
+
+    reg = register(token) do
+        @async close(s)
+    end
+
+    try
+        result = readavailable(s)
+        # readavailable returns an empty Vector on a closed socket without
+        # throwing.  Only treat an empty result as cancellation when the
+        # cancellation callback closed the socket.  If real data arrived,
+        # return it even if the token was cancelled in the meantime
+        # (.NET semantics: completed operations are not retroactively
+        # cancelled).
+        if isempty(result) && is_cancellation_requested(token)
+            throw(OperationCanceledException(token))
+        end
+        return result
+    catch ex
+        if ex isa OperationCanceledException
+            rethrow()
+        end
+        if is_cancellation_requested(token)
+            throw(OperationCanceledException(token))
+        end
+        rethrow()
+    finally
+        close(reg)
+    end
+end
+
+"""
+    readavailable(pipe::Base.Pipe, token::CancellationToken)
+
+Read all available bytes from `pipe`, blocking until at least one byte is
+available, but throw [`OperationCanceledException`](@ref) if `token` is
+cancelled before any data arrives.
+
+!!! warning "Cancellation closes the pipe"
+    When `token` is cancelled, the underlying pipe is **closed** to unblock
+    the read.  Because `close(::Base.Pipe)` closes both ends of the pipe,
+    the pipe is no longer usable after cancellation.
+
+    This is the only safe way to interrupt a pipe read without corrupting
+    other tasks that may be waiting on the same pipe.  Closing the pipe
+    ensures all readers receive a clean I/O error rather than having a
+    foreign `OperationCanceledException` injected into unrelated tasks.
+
+# Examples
+
+```julia
+src = CancellationTokenSource(5.0)  # 5 s timeout
+try
+    data = readavailable(pipe, get_token(src))
+catch ex
+    if ex isa OperationCanceledException
+        # pipe has been closed; recreate if needed
+    end
+end
+```
+"""
+function Base.readavailable(p::Base.Pipe, token::CancellationToken)
+    is_cancellation_requested(token) && throw(OperationCanceledException(token))
+
+    reg = register(token) do
+        @async close(p)
+    end
+
+    try
+        result = readavailable(p)
+        # readavailable returns an empty Vector on a closed pipe without
+        # throwing.  Only treat an empty result as cancellation when the
+        # cancellation callback closed the pipe.  If real data arrived,
+        # return it even if the token was cancelled in the meantime
+        # (.NET semantics: completed operations are not retroactively
+        # cancelled).
+        if isempty(result) && is_cancellation_requested(token)
+            throw(OperationCanceledException(token))
+        end
+        return result
+    catch ex
+        if ex isa OperationCanceledException
+            rethrow()
+        end
+        if is_cancellation_requested(token)
+            throw(OperationCanceledException(token))
+        end
+        rethrow()
+    finally
+        close(reg)
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Sockets.accept with cancellation
+# ---------------------------------------------------------------------------
+
+
+function _accept_cancellable(f, server, token::CancellationToken)
+    is_cancellation_requested(token) && throw(OperationCanceledException(token))
+
+    callback_started = Threads.Atomic{Bool}(false)
+    completed = Threads.Atomic{Bool}(false)
+
+    cond = _server_cond(server)
+
+    reg = register(token) do
+        if completed[]
+            return
+        end
+
+        if !Threads.atomic_xchg!(callback_started, true)
+            @async try
+                @static if VERSION >= v"1.2"
+                    # Julia 1.2+: `cond` is a `Base.ThreadSynchronizer` and
+                    # must be locked before notifying. Use explicit
+                    # lock/unlock rather than the `lock(f, c)` do-form,
+                    # because on Julia 1.2 `Base.GenericCondition` is not a
+                    # subtype of `AbstractLock` and the do-form has no
+                    # matching method.
+                    lock(cond)
+                    try
+                        if !completed[]
+                            notify(cond, OperationCanceledException(token); error=true)
+                        end
+                    finally
+                        unlock(cond)
+                    end
+                else
+                    # Julia 1.0/1.1: `cond` is a plain `Condition` with no
+                    # locking. Cooperative scheduling plus the
+                    # `callback_started` / `completed` atomics provide the
+                    # required mutual exclusion.
+                    if !completed[]
+                        notify(cond, OperationCanceledException(token); error=true)
+                    end
+                end
+            catch err
+                Base.display_error(err, catch_backtrace())
+            end
+        end
+    end
+
+    try
+        return f()
+    finally
+        close(reg)
+        Threads.atomic_xchg!(completed, true)
+    end
+end
+
+"""
+    Sockets.accept(server::Sockets.TCPServer,token::CancellationToken)
+
+Accept a connection from `server`, but abort with an error if `token` is
+cancelled before a client arrives.
+
+The listening server remains usable after cancellation.
+"""
+function Sockets.accept(server::Sockets.TCPServer, token::CancellationToken)
+    return _accept_cancellable(() -> Sockets.accept(server), server, token)
+end
+
+"""
+    Sockets.accept(server::Sockets.PipeServer, token::CancellationToken)
+
+Accept a connection from `server`, but abort with an error if `token` is
+cancelled before a client arrives.
+
+The listening server remains usable after cancellation.
+"""
+function Sockets.accept(server::Sockets.PipeServer, token::CancellationToken)
+    return _accept_cancellable(() -> Sockets.accept(server), server, token)
+end
+
+"""
+    Sockets.accept(server::Sockets.TCPServer, client::Sockets.TCPSocket,
+                   token::CancellationToken)
+
+Accept a connection from `server`, but abort with an error if `token` is
+cancelled before a client arrives.
+
+The listening server remains usable after cancellation.
+"""
+function Sockets.accept(server::Sockets.TCPServer, client::Sockets.TCPSocket, token::CancellationToken)
+    return _accept_cancellable(() -> Sockets.accept(server, client), server, token)
+end
+
+"""
+    Sockets.accept(server::Sockets.PipeServer, client::Sockets.PipeEndpoint,
+                   token::CancellationToken)
+
+Accept a connection from `server`, but abort with an error if `token` is
+cancelled before a client arrives.
+
+The listening server remains usable after cancellation.
+"""
+function Sockets.accept(server::Sockets.PipeServer, client::Sockets.PipeEndpoint, token::CancellationToken)
+    return _accept_cancellable(() -> Sockets.accept(server, client), server, token)
 end
 
 # ---------------------------------------------------------------------------
