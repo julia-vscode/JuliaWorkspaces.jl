@@ -316,6 +316,55 @@ end
     @test_throws InvalidStateException take!(ch, get_token(src))
 end
 
+# ---------------------------------------------------------------------------
+# Base.readavailable(::Base.Pipe, ::CancellationToken)
+# ---------------------------------------------------------------------------
+
+@testitem "readavailable(Pipe) - cancel" setup=[SpawnHelper] begin
+    p = Base.Pipe()
+    Base.link_pipe!(p; reader_supports_async=true, writer_supports_async=true)
+
+    src = CancellationTokenSource()
+    token = get_token(src)
+
+    @spawn begin
+        sleep(0.2)
+        cancel(src)
+    end
+
+    @test_throws OperationCanceledException readavailable(p, token)
+    @test !isopen(p)
+end
+
+@testitem "readavailable(Pipe) - data arrives before cancel" begin
+    p = Base.Pipe()
+    Base.link_pipe!(p; reader_supports_async=true, writer_supports_async=true)
+
+    src = CancellationTokenSource()
+
+    write(p.in, UInt8[1, 2, 3, 4, 5])
+    flush(p.in)
+
+    data = readavailable(p, get_token(src))
+    @test !isempty(data)
+    @test data == UInt8[1, 2, 3, 4, 5]
+    @test !is_cancellation_requested(get_token(src))
+
+    close(p)
+end
+
+@testitem "readavailable(Pipe) - already cancelled throws immediately" begin
+    p = Base.Pipe()
+    Base.link_pipe!(p; reader_supports_async=true, writer_supports_async=true)
+
+    src = CancellationTokenSource()
+    cancel(src)
+
+    @test_throws OperationCanceledException readavailable(p, get_token(src))
+
+    close(p)
+end
+
 @testitem "take!(Channel) on unbuffered channel throws not-implemented" begin
     src = CancellationTokenSource()
     ch = Channel{Int}(0)

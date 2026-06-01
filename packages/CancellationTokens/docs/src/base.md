@@ -44,6 +44,20 @@ readline(socket, token; keep=false)
 Base.readline(::Union{Sockets.PipeEndpoint, Sockets.TCPSocket}, ::CancellationTokens.CancellationToken)
 ```
 
+## accept (sockets)
+
+```julia
+Sockets.accept(server, token)
+Sockets.accept(server, client, token)
+```
+
+```@docs
+Sockets.accept(::Sockets.TCPServer, ::CancellationTokens.CancellationToken)
+Sockets.accept(::Sockets.PipeServer, ::CancellationTokens.CancellationToken)
+Sockets.accept(::Sockets.TCPServer, ::Sockets.TCPSocket, ::CancellationTokens.CancellationToken)
+Sockets.accept(::Sockets.PipeServer, ::Sockets.PipeEndpoint, ::CancellationTokens.CancellationToken)
+```
+
 ## read (sockets)
 
 ```julia
@@ -52,4 +66,16 @@ read(socket, nb, token)
 
 ```@docs
 Base.read(::Union{Sockets.PipeEndpoint, Sockets.TCPSocket}, ::Integer, ::CancellationTokens.CancellationToken)
+```
+
+## readavailable
+
+```julia
+readavailable(socket, token)
+readavailable(pipe, token)
+```
+
+```@docs
+Base.readavailable(::Union{Sockets.PipeEndpoint, Sockets.TCPSocket}, ::CancellationTokens.CancellationToken)
+Base.readavailable(::Base.Pipe, ::CancellationTokens.CancellationToken)
 ```
