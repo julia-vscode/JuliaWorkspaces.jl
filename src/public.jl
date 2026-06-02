@@ -81,6 +81,7 @@ export JuliaWorkspace,
     CodeActionInfo,
     TextEditResult,
     WorkspaceFileEdit,
+    get_format_edits,
     TextFile,
     SourceText,
     Diagnostic
@@ -1028,4 +1029,45 @@ function execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, in
     process_from_dynamic(jw)
     offset = index - 1
     return _execute_code_action(jw.runtime, action_id, uri, offset, workspace_folders)
+end
+
+"""
+    get_format_edits(jw::JuliaWorkspace, uri::URI) → WorkspaceFileEdit
+
+Format the entire document `uri` and return a `WorkspaceFileEdit` describing the
+edits required to apply the formatting. The formatting style and options are
+taken from the nearest `juliaformat.toml` configuration file (see
+`derived_format_configuration`); when no configuration is found the `minimal`
+JuliaFormatter style is used. A `style` of `"runic"` routes formatting through
+Runic.jl.
+
+If the document is already correctly formatted the returned edit list is empty.
+Throws an error if formatting fails (for example because of a syntax error).
+"""
+function get_format_edits(jw::JuliaWorkspace, uri::URI)
+    @debug "get_format_edits" uri=uri
+
+    process_from_dynamic(jw)
+    result, err = derived_format_edits(jw.runtime, uri)
+    err === nothing || error(err)
+    return result
+end
+
+"""
+    get_format_edits(jw::JuliaWorkspace, uri::URI, start_line::Integer, stop_line::Integer) → WorkspaceFileEdit
+
+Format the whole-line range `[start_line, stop_line]` (1-based, inclusive) of the
+document `uri` and return a `WorkspaceFileEdit`. Configuration is resolved the
+same way as for full-document formatting.
+
+If the targeted range is already correctly formatted the returned edit list is
+empty. Throws an error if formatting fails.
+"""
+function get_format_edits(jw::JuliaWorkspace, uri::URI, start_line::Integer, stop_line::Integer)
+    @debug "get_format_edits" uri=uri start_line=start_line stop_line=stop_line
+
+    process_from_dynamic(jw)
+    result, err = derived_format_range_edits(jw.runtime, uri, start_line, stop_line)
+    err === nothing || error(err)
+    return result
 end

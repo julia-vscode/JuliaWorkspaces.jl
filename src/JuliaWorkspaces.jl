@@ -2,6 +2,7 @@ module JuliaWorkspaces
 
 import Logging
 import UUIDs, JuliaSyntax, TestItemDetection, CSTParser, JSONRPC, Sockets, CancellationTokens
+import JuliaFormatter, Runic
 using UUIDs: UUID, uuid4
 using JuliaSyntax: SyntaxNode
 using Salsa
@@ -46,6 +47,7 @@ include("layer_symbols.jl")
 include("layer_navigation.jl")
 include("layer_misc.jl")
 include("layer_actions.jl")
+include("layer_formatting.jl")
 include("fileio.jl")
 include("public.jl")
 

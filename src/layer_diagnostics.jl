@@ -33,6 +33,7 @@ Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
         "call", "iter", "nothingcomp", "constif", "lazy", "datadecl", "typeparam", "modname", "pirates", "useoffuncargs",
         "kwdefault", "literal", "break-continue", "constdecl",
         "missing-refs",
+        "format-config-errors",
     ]
 
     string_valued_configs = Dict{String,Vector{String}}(
@@ -159,7 +160,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             append!(results, derived_include_diagnostics(rt, uri))
         end
 
-        if (is_path_lintconfig_file(uri2filepath(uri)) || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri)) ) && get(lint_config, "toml-syntax-errors", true) == true
+        if (is_path_lintconfig_file(uri2filepath(uri)) || is_path_formatconfig_file(uri2filepath(uri)) || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri)) ) && get(lint_config, "toml-syntax-errors", true) == true
             toml_syntax_errors = derived_toml_syntax_diagnostics(rt, uri)
             append!(results, toml_syntax_errors)
         end
@@ -167,6 +168,11 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         if is_path_lintconfig_file(uri2filepath(uri)) && get(lint_config, "lint-config-errors", true) == true
             lint_config_errors = derived_lintconfig_diagnostics(rt, uri)
             append!(results, lint_config_errors)
+        end
+
+        if is_path_formatconfig_file(uri2filepath(uri)) && get(lint_config, "format-config-errors", true) == true
+            format_config_errors = derived_formatconfig_diagnostics(rt, uri)
+            append!(results, format_config_errors)
         end
     end
 
