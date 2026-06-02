@@ -17,7 +17,7 @@ end
 function is_path_lintconfig_file(path)
     basename_lower_case = basename(lowercase(path))
 
-    return basename_lower_case == ".julialint.toml"
+    return basename_lower_case == "julialint.toml"
 end
 
 function is_path_formatconfig_file(path)

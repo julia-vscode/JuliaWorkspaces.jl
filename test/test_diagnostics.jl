@@ -23,7 +23,7 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:/test/.JuliaLint.toml"), SourceText("syntax-errors = false", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:/test/JuliaLint.toml"), SourceText("syntax-errors = false", "toml")))
 
     diags = get_diagnostic(jw, uri)
 
@@ -109,7 +109,7 @@ end
 @testitem "Config validation: invalid key" begin
     using JuliaWorkspaces.URIs2: URI
 
-    config_uri = URI("file:/proj/.JuliaLint.toml")
+    config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(config_uri, SourceText("nonexistent-key = true", "toml")))
 
@@ -120,7 +120,7 @@ end
 @testitem "Config validation: bool key with wrong type" begin
     using JuliaWorkspaces.URIs2: URI
 
-    config_uri = URI("file:/proj/.JuliaLint.toml")
+    config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(config_uri, SourceText("call = \"yes\"", "toml")))
 
@@ -131,7 +131,7 @@ end
 @testitem "Config validation: missing-refs wrong type" begin
     using JuliaWorkspaces.URIs2: URI
 
-    config_uri = URI("file:/proj/.JuliaLint.toml")
+    config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(config_uri, SourceText("missing-refs = true", "toml")))
 
@@ -142,7 +142,7 @@ end
 @testitem "Config validation: missing-refs invalid value" begin
     using JuliaWorkspaces.URIs2: URI
 
-    config_uri = URI("file:/proj/.JuliaLint.toml")
+    config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(config_uri, SourceText("missing-refs = \"invalid\"", "toml")))
 
@@ -173,7 +173,7 @@ end
     syntax-errors = true
     """
 
-    config_uri = URI("file:/proj/.JuliaLint.toml")
+    config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(config_uri, SourceText(config_content, "toml")))
 
@@ -229,7 +229,7 @@ end
     add_file!(jw2, TextFile(URI("file:///sltoggle2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///sltoggle2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///sltoggle2/src/SLToggle.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///sltoggle2/.JuliaLint.toml"), SourceText("static-lint = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///sltoggle2/JuliaLint.toml"), SourceText("static-lint = false", "toml")))
 
     uri2 = URI("file:///sltoggle2/src/SLToggle.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -277,7 +277,7 @@ end
     add_file!(jw, TextFile(URI("file:///subdirtest/src/SubDirTest.jl"), SourceText(source_with_lint, "julia")))
     add_file!(jw, TextFile(URI("file:///subdirtest/test/runtests.jl"), SourceText(test_source, "julia")))
     # Disable static-lint only in test/
-    add_file!(jw, TextFile(URI("file:///subdirtest/test/.JuliaLint.toml"), SourceText("static-lint = false", "toml")))
+    add_file!(jw, TextFile(URI("file:///subdirtest/test/JuliaLint.toml"), SourceText("static-lint = false", "toml")))
 
     # src/ file should have StaticLint diagnostics
     src_uri = URI("file:///subdirtest/src/SubDirTest.jl")
@@ -339,7 +339,7 @@ end
     add_file!(jw2, TextFile(URI("file:///cit4/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///cit4/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///cit4/src/ConstIfToggle.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///cit4/.JuliaLint.toml"), SourceText("constif = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///cit4/JuliaLint.toml"), SourceText("constif = false", "toml")))
 
     uri2 = URI("file:///cit4/src/ConstIfToggle.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -388,7 +388,7 @@ end
     add_file!(jw2, TextFile(URI("file:///cit2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///cit2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///cit2/src/ConstIfTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///cit2/.JuliaLint.toml"), SourceText("constif = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///cit2/JuliaLint.toml"), SourceText("constif = false", "toml")))
 
     uri2 = URI("file:///cit2/src/ConstIfTest.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -435,7 +435,7 @@ end
     add_file!(jw2, TextFile(URI("file:///lt2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///lt2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///lt2/src/LazyTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///lt2/.JuliaLint.toml"), SourceText("lazy = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///lt2/JuliaLint.toml"), SourceText("lazy = false", "toml")))
 
     uri2 = URI("file:///lt2/src/LazyTest.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -480,7 +480,7 @@ end
     add_file!(jw2, TextFile(URI("file:///mnt2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mnt2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mnt2/src/ModNameTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///mnt2/.JuliaLint.toml"), SourceText("modname = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///mnt2/JuliaLint.toml"), SourceText("modname = false", "toml")))
 
     uri2 = URI("file:///mnt2/src/ModNameTest.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -525,7 +525,7 @@ end
     add_file!(jw2, TextFile(URI("file:///mntog2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mntog2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mntog2/src/ModNameToggle.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///mntog2/.JuliaLint.toml"), SourceText("modname = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///mntog2/JuliaLint.toml"), SourceText("modname = false", "toml")))
 
     uri2 = URI("file:///mntog2/src/ModNameToggle.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -571,7 +571,7 @@ end
     add_file!(jw2, TextFile(URI("file:///bct2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///bct2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///bct2/src/BreakContTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///bct2/.JuliaLint.toml"), SourceText("break-continue = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///bct2/JuliaLint.toml"), SourceText("break-continue = false", "toml")))
 
     uri2 = URI("file:///bct2/src/BreakContTest.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -624,7 +624,7 @@ end
     add_file!(jw2, TextFile(URI("file:///mrt2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mrt2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mrt2/src/MissRefTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///mrt2/.JuliaLint.toml"), SourceText("missing-refs = \"none\"", "toml")))
+    add_file!(jw2, TextFile(URI("file:///mrt2/JuliaLint.toml"), SourceText("missing-refs = \"none\"", "toml")))
     JuliaWorkspaces.set_input_env_ready!(jw2.runtime, true)
 
     uri2 = URI("file:///mrt2/src/MissRefTest.jl")
@@ -674,8 +674,8 @@ end
     add_file!(jw, TextFile(URI("file:///hier/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///hier/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///hier/src/HierTest.jl"), SourceText(source, "julia")))
-    add_file!(jw, TextFile(URI("file:///hier/.JuliaLint.toml"), SourceText(root_config, "toml")))
-    add_file!(jw, TextFile(URI("file:///hier/src/.JuliaLint.toml"), SourceText(sub_config, "toml")))
+    add_file!(jw, TextFile(URI("file:///hier/JuliaLint.toml"), SourceText(root_config, "toml")))
+    add_file!(jw, TextFile(URI("file:///hier/src/JuliaLint.toml"), SourceText(sub_config, "toml")))
 
     # Child overrides parent — constif should be enabled for src/
     uri = URI("file:///hier/src/HierTest.jl")
