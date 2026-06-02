@@ -70,7 +70,7 @@ Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Boo
             df.progress_state.completed_items += 1
             put!(
                 df.out_channel,
-                (command=:environment_ready, project_path=project_path, content_hash=content_hash),
+                EnvironmentReadyResult(project_path, content_hash),
             )
             Threads.atomic_sub!(df.pending_count, 1)
             if df.pending_count[] == 0
@@ -83,11 +83,7 @@ Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Boo
             _report_progress(df, "Preparing to index...")
             put!(
                 df.in_channel,
-                (
-                    command = :watch_environment,
-                    project_path = project_path,
-                    content_hash = content_hash,
-                ),
+                WatchEnvironmentMsg(project_path, content_hash),
             )
         end
     end
@@ -104,12 +100,7 @@ Salsa.@declare_input input_project_test_environment(rt, uri, package, content_ha
         _report_progress(ctx.dynamic_feature, "Preparing to index...")
         put!(
             ctx.dynamic_feature.in_channel,
-            (
-                command = :watch_test_environment,
-                project_path = uri2filepath(uri),
-                package = package,
-                content_hash = content_hash
-            )
+            WatchTestEnvironmentMsg(uri2filepath(uri), package, content_hash)
         )
     end
 
@@ -125,11 +116,7 @@ Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri, co
         _report_progress(ctx.dynamic_feature, "Preparing to index...")
         put!(
             ctx.dynamic_feature.in_channel,
-            (
-                command = :create_standalone_package_project,
-                package_path = uri2filepath(package_folder_uri),
-                content_hash = content_hash
-            )
+            CreateStandaloneProjectMsg(uri2filepath(package_folder_uri), content_hash)
         )
     end
 

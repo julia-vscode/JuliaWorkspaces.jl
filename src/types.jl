@@ -386,11 +386,11 @@ function process_from_dynamic(jw::JuliaWorkspace)
         while isready(jw.dynamic_feature.out_channel)
             msg = take!(jw.dynamic_feature.out_channel)
 
-            if msg.command == :failed
+            if msg isa FailedResult
                 @warn "DJP reported failure" msg.key
-                # Nothing to update — the failed_projects set was already populated in start()
+                # Nothing to update — the failed_projects set was already populated in the reactor
 
-            elseif msg.command == :environment_ready
+            elseif msg isa EnvironmentReadyResult
                 @info "Processeing new env"
                 for i in jw.dynamic_feature.missing_pkg_metadata
                     package_data = _try_load_package_cache(jw.dynamic_feature.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
@@ -406,7 +406,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 # while their own DJPs are still pending.
                 set_input_project_environment!(jw.runtime, filepath2uri(msg.project_path), msg.content_hash, true)
                 set_input_env_ready!(jw.runtime, true)
-            elseif msg.command == :test_environment_ready
+            elseif msg isa TestEnvironmentReadyResult
                 @info "Processeing new test env" msg.project_uri msg.package msg.test_project_uri
 
                 set_input_project_test_environment!(jw.runtime, msg.project_uri, msg.package, msg.content_hash, msg.test_project_uri)
@@ -419,7 +419,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
                 test_proj_hash = test_proj === nothing ? UInt(0) : test_proj.content_hash
                 set_input_project_environment!(jw.runtime, msg.test_project_uri, test_proj_hash, true)
                 set_input_env_ready!(jw.runtime, true)
-            elseif msg.command == :standalone_package_project_ready
+            elseif msg isa StandaloneProjectReadyResult
                 @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
 
                 set_input_standalone_package_project!(jw.runtime, msg.package_folder_uri, msg.content_hash, msg.project_uri)
