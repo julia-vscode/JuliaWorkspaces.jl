@@ -38,90 +38,27 @@ Salsa.@declare_input input_indirect_text_file(rt, uri)::Union{TextFile,Nothing} 
     return content
 end
 
-# Returns `true` once the environment for this project has been fully
-# processed by the dynamic feature (i.e. the per-project `:environment_ready`
-# message has been consumed). The lazy default is `false`, which both queues
-# the indexing work and signals to gates like `derived_file_env_ready` that
-# environment-dependent diagnostics for files belonging to this project are
-# not yet trustworthy.
-Salsa.@declare_input input_project_environment(rt, uri, content_hash::UInt)::Bool function(ctx, uri, content_hash)
-    @debug "Lazy load environment for" uri=uri content_hash=content_hash
+# Readiness state for dynamically-indexed environments. These replace the
+# former lazy `input_project_environment` / `input_project_test_environment` /
+# `input_standalone_package_project` inputs: instead of each per-key input
+# lazily triggering a child process as a side effect, the dynamic-feature
+# reactor is driven by an explicit reconcile (see `derived_required_dynamic_projects`
+# and `ReconcileMsg`), and the *results* are written back here as plain
+# collections. Per-key readiness is exposed via the memoized derived wrappers
+# `derived_project_environment_ready` / `derived_ready_test_environment` /
+# `derived_ready_standalone_project` (layer_environment.jl), which preserve
+# fine-grained Salsa invalidation despite the collection being a single input.
 
-    if ctx.dynamic_feature !== nothing
-        df = ctx.dynamic_feature
-        project_path = uri2filepath(uri)
+# Set of project environments that have been fully indexed and are ready.
+Salsa.@declare_input input_ready_project_environments(rt)::Set{WatchEnvironmentKey}
 
-        # Fast-lane: when no package caches are missing for this project, skip
-        # the (single, serial) DJP work queue and signal readiness directly via
-        # the out_channel. This prevents quick projects (e.g. a `docs/` env or
-        # the active project) from being blocked behind a slow standalone-
-        # project DJP for an unrelated package.
-        missing_pkgs = try
-            _get_missing_packages(project_path, df.store_path)
-        catch err
-            @debug "Fast-lane env check failed; falling back to queue" project_path=project_path exception=(err, catch_backtrace())
-            nothing
-        end
+# Ready test environments, mapping each test-env key to the resulting test
+# project URI.
+Salsa.@declare_input input_ready_test_environments(rt)::Dict{WatchTestEnvironmentKey,URI}
 
-        Threads.atomic_add!(df.pending_count, 1)
-        df.progress_state.total_items += 1
-
-        if missing_pkgs !== nothing && isempty(missing_pkgs)
-            df.progress_state.completed_items += 1
-            put!(
-                df.out_channel,
-                EnvironmentReadyResult(project_path, content_hash),
-            )
-            Threads.atomic_sub!(df.pending_count, 1)
-            if df.pending_count[] == 0
-                _report_progress(df, "Indexing complete")
-                df.progress_state.total_items = 0
-                df.progress_state.completed_items = 0
-            end
-            try put!(df.update_channel, :data_available) catch; end
-        else
-            _report_progress(df, "Preparing to index...")
-            put!(
-                df.in_channel,
-                WatchEnvironmentMsg(project_path, content_hash),
-            )
-        end
-    end
-
-    return false
-end
-
-Salsa.@declare_input input_project_test_environment(rt, uri, package, content_hash::UInt)::Union{Nothing,URI} function(ctx, uri, package, content_hash)
-    @debug "Lazy load test environment for project and package" uri=uri package=package content_hash=content_hash
-
-    if ctx.dynamic_feature !== nothing
-        Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
-        ctx.dynamic_feature.progress_state.total_items += 1
-        _report_progress(ctx.dynamic_feature, "Preparing to index...")
-        put!(
-            ctx.dynamic_feature.in_channel,
-            WatchTestEnvironmentMsg(uri2filepath(uri), package, content_hash)
-        )
-    end
-
-    return nothing
-end
-
-Salsa.@declare_input input_standalone_package_project(rt, package_folder_uri, content_hash::UInt)::Union{Nothing,URI} function(ctx, package_folder_uri, content_hash)
-    @debug "Lazy create standalone project for package" package_folder_uri=package_folder_uri content_hash=content_hash
-
-    if ctx.dynamic_feature !== nothing
-        Threads.atomic_add!(ctx.dynamic_feature.pending_count, 1)
-        ctx.dynamic_feature.progress_state.total_items += 1
-        _report_progress(ctx.dynamic_feature, "Preparing to index...")
-        put!(
-            ctx.dynamic_feature.in_channel,
-            CreateStandaloneProjectMsg(uri2filepath(package_folder_uri), content_hash)
-        )
-    end
-
-    return nothing
-end
+# Created standalone package projects, mapping each standalone key to the
+# resulting project URI.
+Salsa.@declare_input input_standalone_projects(rt)::Dict{CreateStandaloneProjectKey,URI}
 
 Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{Nothing,String})::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
 

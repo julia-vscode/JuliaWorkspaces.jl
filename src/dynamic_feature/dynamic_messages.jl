@@ -6,22 +6,26 @@
 #
 # Each variant carries exactly the fields that are meaningful for that kind of
 # process. Producers (`handle!` for the work messages), the required-set
-# computation (`derived_required_dynamic_projects`), and the cleanup path
-# (`cleanup_stale_processes!`) all construct/dispatch on these variants
+# computation (`derived_required_dynamic_projects`), and the reconcile path
+# (`handle!(::ReconcileMsg)`) all construct/dispatch on these variants
 # directly, which makes mismatches between them a type error rather than a
 # silent string-sentinel collision.
-struct WatchEnvironmentKey
+#
+# `@auto_hash_equals` gives them value-based `==`/`hash` (the default for plain
+# structs compares `String` fields by identity, which is unsafe for use as
+# `Set`/`Dict` keys).
+@auto_hash_equals struct WatchEnvironmentKey
     project_path::String
     content_hash::UInt
 end
 
-struct WatchTestEnvironmentKey
+@auto_hash_equals struct WatchTestEnvironmentKey
     project_path::String
     package_name::String
     content_hash::UInt
 end
 
-struct CreateStandaloneProjectKey
+@auto_hash_equals struct CreateStandaloneProjectKey
     package_path::String
     content_hash::UInt
 end
@@ -64,6 +68,19 @@ end
 
 """Request an orderly shutdown of the reactor."""
 struct ShutdownMsg <: DynamicReactorMessage end
+
+"""
+Reconcile the set of running/required dynamic processes.
+
+Carries the full set of [`DJPKey`](@ref)s the workspace currently needs (as
+computed by `derived_required_dynamic_projects`). The reactor diffs this against
+the processes it is already running / has completed, spawning the missing ones
+and cancelling the ones that are no longer required. This replaces the previous
+design where launches were triggered as a side effect of lazy Salsa inputs.
+"""
+struct ReconcileMsg <: DynamicReactorMessage
+    required::Set{DJPKey}
+end
 
 # --- Internal follow-up messages: produced by reactor-spawned async tasks ---
 

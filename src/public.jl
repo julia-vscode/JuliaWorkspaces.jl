@@ -90,6 +90,34 @@ export JuliaWorkspace,
 # Files
 
 """
+    _reconcile!(jw::JuliaWorkspace)
+
+Recompute the set of dynamic processes the workspace currently needs (via
+`derived_required_dynamic_projects`) and, if it changed since the last
+reconcile, send a [`ReconcileMsg`](@ref) to the dynamic-feature reactor so it
+can spawn newly-required processes and cancel ones that are no longer needed.
+
+This is a no-op when no dynamic feature is attached, and a no-op when the
+required set is unchanged (so it is cheap to call after every mutation).
+"""
+function _reconcile!(jw::JuliaWorkspace)
+    jw.dynamic_feature === nothing && return
+    df = jw.dynamic_feature
+
+    required = derived_required_dynamic_projects(jw.runtime)
+
+    if required != df.last_required
+        # `df` is an immutable struct, but `last_required` is a mutable `Set`,
+        # so update it in place.
+        empty!(df.last_required)
+        union!(df.last_required, required)
+        put!(df.in_channel, ReconcileMsg(required))
+    end
+
+    return
+end
+
+"""
     add_file!(jw::JuliaWorkspace, file::TextFile)
 
 Add a file to the workspace. If the file already exists as a *regular* file,
@@ -101,7 +129,13 @@ function add_file!(jw::JuliaWorkspace, file::TextFile)
     @debug "add_file!" uri=file.uri
 
     process_from_dynamic(jw)
+    _add_file!(jw, file)
+    _reconcile!(jw)
+end
 
+# Input-only mutation for adding a file. Does not drain results or reconcile, so
+# it can be used as a building block for bulk operations that reconcile once.
+function _add_file!(jw::JuliaWorkspace, file::TextFile)
     files = input_files(jw.runtime)
 
     file.uri in files && throw(JWDuplicateFile("Duplicate file $(file.uri)"))
@@ -131,6 +165,8 @@ function update_file!(jw::JuliaWorkspace, file::TextFile)
     has_file(jw, file.uri) || throw(JWUnknownFile("Cannot update unknown file $(file.uri)."))
 
     set_input_text_file!(jw.runtime, file.uri, file)
+
+    _reconcile!(jw)
 end
 
 """
@@ -226,7 +262,12 @@ function remove_file!(jw::JuliaWorkspace, uri::URI)
     @debug "remove_file!" uri=uri
 
     process_from_dynamic(jw)
+    _remove_file!(jw, uri)
+    _reconcile!(jw)
+end
 
+# Input-only removal. Does not drain results or reconcile.
+function _remove_file!(jw::JuliaWorkspace, uri::URI)
     files = input_files(jw.runtime)
 
     uri in files || throw(JWUnknownFile("Trying to remove non-existing file $uri"))
@@ -256,9 +297,11 @@ function remove_all_children!(jw::JuliaWorkspace, uri::URI)
         file_as_string = string(file)
 
         if startswith(file_as_string, uri_as_string)
-            remove_file!(jw, file)
+            _remove_file!(jw, file)
         end
     end
+
+    _reconcile!(jw)
 end
 
 # Indirect files
@@ -286,6 +329,8 @@ function set_indirect_file_content!(jw::JuliaWorkspace, uri::URI, file::Union{Te
     process_from_dynamic(jw)
 
     set_input_indirect_text_file!(jw.runtime, uri, file)
+
+    _reconcile!(jw)
 end
 
 """
@@ -301,6 +346,8 @@ function clear_indirect_file!(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     _clear_indirect_tracking!(jw, uri)
+
+    _reconcile!(jw)
 end
 
 """
@@ -351,7 +398,12 @@ function set_active_project!(jw::JuliaWorkspace, uri_or_nothing::Union{URI,Nothi
     @debug "set_active_project!" uri=uri_or_nothing
 
     process_from_dynamic(jw)
+    _set_active_project!(jw, uri_or_nothing)
+    _reconcile!(jw)
+end
 
+# Input-only mutation. Does not drain results or reconcile.
+function _set_active_project!(jw::JuliaWorkspace, uri_or_nothing::Union{URI,Nothing})
     set_input_active_project!(jw.runtime, uri_or_nothing)
 end
 

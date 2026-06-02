@@ -326,6 +326,9 @@ struct JuliaWorkspace
         set_input_files!(rt, Set{URI}())
         set_input_active_project!(rt, nothing)
         set_input_env_ready!(rt, false)
+        set_input_ready_project_environments!(rt, Set{WatchEnvironmentKey}())
+        set_input_ready_test_environments!(rt, Dict{WatchTestEnvironmentKey,URI}())
+        set_input_standalone_projects!(rt, Dict{CreateStandaloneProjectKey,URI}())
 
         new(rt, dynamic_feature)
     end
@@ -382,61 +385,81 @@ function _load_package_caches_for_project!(jw, project_uri)
 end
 
 function process_from_dynamic(jw::JuliaWorkspace)
-    if jw.dynamic_feature !== nothing
-        while isready(jw.dynamic_feature.out_channel)
-            msg = take!(jw.dynamic_feature.out_channel)
+    jw.dynamic_feature === nothing && return
+    df = jw.dynamic_feature
+    isready(df.out_channel) || return
 
-            if msg isa FailedResult
-                @warn "DJP reported failure" msg.key
-                # Nothing to update — the failed_projects set was already populated in the reactor
+    # Accumulate all drained results into local copies of the collection inputs
+    # and write each input back at most once, so a burst of results causes a
+    # single invalidation per collection rather than one per message.
+    ready_envs = copy(input_ready_project_environments(jw.runtime))
+    ready_test_envs = copy(input_ready_test_environments(jw.runtime))
+    standalone_projects = copy(input_standalone_projects(jw.runtime))
+    envs_dirty = false
+    test_envs_dirty = false
+    standalone_dirty = false
+    any_env_ready = false
 
-            elseif msg isa EnvironmentReadyResult
-                @info "Processeing new env"
-                for i in jw.dynamic_feature.missing_pkg_metadata
-                    package_data = _try_load_package_cache(jw.dynamic_feature.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
-                    if package_data !== nothing
-                        # @info "Now package data is ready" i.name i.uuid i.version i.git_tree_sha1
-                        set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
-                    end
+    while isready(df.out_channel)
+        msg = take!(df.out_channel)
+
+        if msg isa FailedResult
+            @warn "DJP reported failure" msg.key
+            # Nothing to update — failed_projects was already populated in the reactor.
+
+        elseif msg isa EnvironmentReadyResult
+            @info "Processing new env"
+            for i in df.missing_pkg_metadata
+                package_data = _try_load_package_cache(df.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
+                if package_data !== nothing
+                    set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
                 end
-
-                # Mark THIS specific project's environment as ready. Per-project
-                # gating (in derived_file_env_ready) prevents env-dependent
-                # diagnostics for other projects from being flushed prematurely
-                # while their own DJPs are still pending.
-                set_input_project_environment!(jw.runtime, filepath2uri(msg.project_path), msg.content_hash, true)
-                set_input_env_ready!(jw.runtime, true)
-            elseif msg isa TestEnvironmentReadyResult
-                @info "Processeing new test env" msg.project_uri msg.package msg.test_project_uri
-
-                set_input_project_test_environment!(jw.runtime, msg.project_uri, msg.package, msg.content_hash, msg.test_project_uri)
-
-                # Preload package caches and mark environment as known for the test project,
-                # so the next get_diagnostics won't trigger another round of background processes.
-                _load_package_caches_for_project!(jw, msg.test_project_uri)
-                # Use the test project's own content_hash so Salsa keys match what callers compute
-                test_proj = derived_project(jw.runtime, msg.test_project_uri)
-                test_proj_hash = test_proj === nothing ? UInt(0) : test_proj.content_hash
-                set_input_project_environment!(jw.runtime, msg.test_project_uri, test_proj_hash, true)
-                set_input_env_ready!(jw.runtime, true)
-            elseif msg isa StandaloneProjectReadyResult
-                @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
-
-                set_input_standalone_package_project!(jw.runtime, msg.package_folder_uri, msg.content_hash, msg.project_uri)
-
-                _load_package_caches_for_project!(jw, msg.project_uri)
-                # Use the standalone project's own content_hash so Salsa keys match what callers compute
-                standalone_proj = derived_project(jw.runtime, msg.project_uri)
-                standalone_proj_hash = standalone_proj === nothing ? UInt(0) : standalone_proj.content_hash
-                set_input_project_environment!(jw.runtime, msg.project_uri, standalone_proj_hash, true)
-                set_input_env_ready!(jw.runtime, true)
-            else
-                error("Unknown message: $msg")
             end
-        end
 
-        # Clean up stale processes after draining all messages
-        required = derived_required_dynamic_projects(jw.runtime)
-        cleanup_stale_processes!(jw.dynamic_feature, jw.runtime, required)
+            # Mark THIS specific project's environment as ready. Per-project
+            # gating (in derived_file_env_ready) prevents env-dependent
+            # diagnostics for other projects from being flushed prematurely
+            # while their own DJPs are still pending.
+            push!(ready_envs, WatchEnvironmentKey(msg.project_path, msg.content_hash))
+            envs_dirty = true
+            any_env_ready = true
+
+        elseif msg isa TestEnvironmentReadyResult
+            @info "Processing new test env" msg.project_uri msg.package msg.test_project_uri
+
+            ready_test_envs[WatchTestEnvironmentKey(uri2filepath(msg.project_uri), msg.package, msg.content_hash)] = msg.test_project_uri
+            test_envs_dirty = true
+
+            # Preload package caches and mark the test project's own environment
+            # ready, so the next get_diagnostics won't trigger another round.
+            _load_package_caches_for_project!(jw, msg.test_project_uri)
+            test_proj = derived_project(jw.runtime, msg.test_project_uri)
+            test_proj_hash = test_proj === nothing ? UInt(0) : test_proj.content_hash
+            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.test_project_uri), test_proj_hash))
+            envs_dirty = true
+            any_env_ready = true
+
+        elseif msg isa StandaloneProjectReadyResult
+            @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
+
+            standalone_projects[CreateStandaloneProjectKey(uri2filepath(msg.package_folder_uri), msg.content_hash)] = msg.project_uri
+            standalone_dirty = true
+
+            _load_package_caches_for_project!(jw, msg.project_uri)
+            standalone_proj = derived_project(jw.runtime, msg.project_uri)
+            standalone_proj_hash = standalone_proj === nothing ? UInt(0) : standalone_proj.content_hash
+            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), standalone_proj_hash))
+            envs_dirty = true
+            any_env_ready = true
+        else
+            error("Unknown message: $msg")
+        end
     end
+
+    envs_dirty && set_input_ready_project_environments!(jw.runtime, ready_envs)
+    test_envs_dirty && set_input_ready_test_environments!(jw.runtime, ready_test_envs)
+    standalone_dirty && set_input_standalone_projects!(jw.runtime, standalone_projects)
+    any_env_ready && set_input_env_ready!(jw.runtime, true)
+
+    return
 end

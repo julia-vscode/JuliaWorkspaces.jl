@@ -150,8 +150,11 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
     files = read_path_into_textdocuments(path_uri, ignore_io_errors=ignore_io_errors)
 
     for i in files
-        add_file!(jw, i)
+        _add_file!(jw, i)
     end
+
+    # Reconcile once after the whole batch rather than after every file.
+    _reconcile!(jw)
 end
 
 function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM)

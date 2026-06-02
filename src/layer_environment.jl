@@ -3,6 +3,48 @@ function _stdlib_only_env()
     return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
 end
 
+# ─── Per-key readiness wrappers ──────────────────────────────────────────────
+#
+# These memoized derived functions expose the per-key readiness state held in
+# the `input_ready_*` collection inputs. Reading the collection directly from a
+# gate would make *every* readiness query depend on the single collection
+# input, so any update would invalidate all of them. By funnelling each key
+# through its own derived function, Salsa's early-cutoff means a collection
+# update only invalidates downstream queries whose specific key's result
+# actually changed — restoring fine-grained invalidation.
+
+"""
+    derived_project_environment_ready(rt, project_uri, content_hash) -> Bool
+
+Whether the environment for `project_uri` (at `content_hash`) has been indexed.
+"""
+Salsa.@derived function derived_project_environment_ready(rt, project_uri, content_hash::UInt)
+    key = WatchEnvironmentKey(uri2filepath(project_uri), content_hash)
+    return key in input_ready_project_environments(rt)
+end
+
+"""
+    derived_ready_test_environment(rt, project_uri, package, content_hash) -> Union{Nothing,URI}
+
+The ready test-project URI for `project_uri` + `package`, or `nothing` if the
+test environment has not been indexed yet.
+"""
+Salsa.@derived function derived_ready_test_environment(rt, project_uri, package, content_hash::UInt)
+    key = WatchTestEnvironmentKey(uri2filepath(project_uri), package, content_hash)
+    return get(input_ready_test_environments(rt), key, nothing)
+end
+
+"""
+    derived_ready_standalone_project(rt, package_folder_uri, content_hash) -> Union{Nothing,URI}
+
+The created standalone-project URI for `package_folder_uri`, or `nothing` if it
+has not been created yet.
+"""
+Salsa.@derived function derived_ready_standalone_project(rt, package_folder_uri, content_hash::UInt)
+    key = CreateStandaloneProjectKey(uri2filepath(package_folder_uri), content_hash)
+    return get(input_standalone_projects(rt), key, nothing)
+end
+
 # Salsa-memoized stdlib-only env. Sharing a single env instance is required
 # because `SymbolServer` stores compare by identity: refs resolved against this
 # env during the semantic pass must point at the same instance that later
@@ -109,7 +151,7 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
                 package_folder_uri
             else
                 # Check if there's a standalone project for this package
-                standalone_uri = input_standalone_package_project(rt, package_folder_uri, pkg_content_hash)
+                standalone_uri = derived_ready_standalone_project(rt, package_folder_uri, pkg_content_hash)
                 if standalone_uri !== nothing
                     standalone_uri
                 else
@@ -120,7 +162,7 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
             if project_for_test_env !== nothing
                 test_env_project = derived_project(rt, project_for_test_env)
                 test_env_hash = test_env_project === nothing ? UInt(0) : test_env_project.content_hash
-                test_project_uri = input_project_test_environment(rt, project_for_test_env, package_name, test_env_hash)
+                test_project_uri = derived_ready_test_environment(rt, project_for_test_env, package_name, test_env_hash)
 
                 if test_project_uri !== nothing
                     return test_project_uri
@@ -136,7 +178,7 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         # If the package is not a project (no manifest) and not dev'd into any workspace project,
         # trigger creation of a standalone project for it
         if !_is_package_deved_in_workspace(rt, package_folder_uri)
-            standalone_uri = input_standalone_package_project(rt, package_folder_uri, pkg_content_hash)
+            standalone_uri = derived_ready_standalone_project(rt, package_folder_uri, pkg_content_hash)
             if standalone_uri !== nothing
                 return standalone_uri
             end
@@ -206,7 +248,7 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
     if project_uri !== nothing
         project = derived_project(rt, project_uri)
         project_hash = project === nothing ? UInt(0) : project.content_hash
-        if !input_project_environment(rt, project_uri, project_hash) && !input_env_ready(rt)
+        if !derived_project_environment_ready(rt, project_uri, project_hash) && !input_env_ready(rt)
             return false
         end
     end
@@ -226,14 +268,14 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
     project_for_test_env = if package_folder_uri in derived_project_folders(rt)
         package_folder_uri
     else
-        standalone = input_standalone_package_project(rt, package_folder_uri, pkg_content_hash)
+        standalone = derived_ready_standalone_project(rt, package_folder_uri, pkg_content_hash)
         standalone !== nothing ? standalone : input_active_project(rt)
     end
     project_for_test_env === nothing && return true
 
     test_env_project = derived_project(rt, project_for_test_env)
     test_env_hash = test_env_project === nothing ? UInt(0) : test_env_project.content_hash
-    return input_project_test_environment(rt, project_for_test_env, pkg.name, test_env_hash) !== nothing
+    return derived_ready_test_environment(rt, project_for_test_env, pkg.name, test_env_hash) !== nothing
 end
 
 """

@@ -56,10 +56,6 @@ Salsa.@derived function derived_deved_package_meta(rt, pkg_entry_uri, project_ur
 
     cst = derived_julia_legacy_syntax_tree(rt, pkg_entry_uri)
 
-    # Trigger the dynamic process for this environment
-    project = derived_project(rt, project_uri)
-    input_project_environment(rt, project_uri, project === nothing ? UInt(0) : project.content_hash)
-
     StaticLint.semantic_pass(pkg_entry_uri, cst, env, meta_dict, include_dict, rt)
 
     # Extract the package name from the URI (src/PackageName.jl -> PackageName)
@@ -104,10 +100,6 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         env = derived_stdlib_only_env(rt)
     else
         env = derived_environment(rt, project_uri)
-
-        # This will trigger the launch of the dynamic process
-        project_for_hash = derived_project(rt, project_uri)
-        input_project_environment(rt, project_uri, project_for_hash === nothing ? UInt(0) : project_for_hash.content_hash)
     end
 
     # Build workspace_packages dict from cached deved package semantic info

@@ -264,6 +264,13 @@ struct DynamicFeature
     procs::Dict{DJPKey,DynamicJuliaProcess}
     failed_projects::Set{DJPKey}
     inflight::Set{DJPKey}
+    # Keys whose work has fully completed (indexed / fast-laned). Under
+    # DynamicIndexingOnly the process is killed but the key stays here so a
+    # later reconcile carrying the same `required` set does not re-spawn it.
+    done::Set{DJPKey}
+    # The `required` set from the most recent reconcile, used by `_reconcile!`
+    # to skip sending a `ReconcileMsg` when nothing changed.
+    last_required::Set{DJPKey}
     missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}
     pending_count::Threads.Atomic{Int}
     update_channel::Channel{Symbol}
@@ -280,6 +287,8 @@ struct DynamicFeature
             Channel{DynamicReactorMessage}(Inf),
             Channel{DynamicResultMessage}(Inf),
             Dict{DJPKey,DynamicJuliaProcess}(),
+            Set{DJPKey}(),
+            Set{DJPKey}(),
             Set{DJPKey}(),
             Set{DJPKey}(),
             Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}(),
@@ -651,6 +660,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         @info "All package caches available, skipping DJP" project_path=msg.project_path
         _report_progress(df, "All caches available for $(basename(msg.project_path))")
         put!(df.out_channel, EnvironmentReadyResult(msg.project_path, msg.content_hash))
+        push!(df.done, key)
         _complete_work_item!(df, key)
     elseif df.djp_mode != DynamicOff
         @info "Launching DJP for remaining missing packages" project_path=msg.project_path
@@ -661,6 +671,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
     else
         @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=msg.project_path
         put!(df.out_channel, EnvironmentReadyResult(msg.project_path, msg.content_hash))
+        push!(df.done, key)
         _complete_work_item!(df, key)
     end
 
@@ -760,6 +771,11 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), standalone_project_uri, key.content_hash))
     end
 
+    # Mark the work complete. Under DynamicIndexingOnly the child process is no
+    # longer needed, so it is torn down; under DynamicPersistent (and the
+    # default) the process is kept alive in `df.procs` and only the reconcile
+    # path may later kill it.
+    push!(df.done, key)
     if df.djp_mode == DynamicIndexingOnly && djp !== nothing
         kill(djp)
         delete!(df.procs, key)
@@ -825,24 +841,67 @@ function handle!(df::DynamicFeature, ::ShutdownMsg)
     return true
 end
 
-function cleanup_stale_processes!(df::DynamicFeature, rt, required::Set{DJPKey})
+# ─── Reconcile ──────────────────────────────────────────────────────────────
+
+"""
+    handle!(df::DynamicFeature, msg::ReconcileMsg)
+
+Drive the set of running dynamic processes towards `msg.required`:
+
+  * Processes whose key is no longer required are killed and forgotten. If such
+    a process was still in flight, its work item is completed so the
+    pending/progress accounting stays balanced.
+  * Completed (`done`) and `failed_projects` bookkeeping is pruned to the
+    required set, so a key that becomes required again later is re-spawned.
+  * Each required key that is not already running, in flight, completed, or
+    failed is dispatched to the appropriate work handler (which performs the
+    fast-lane missing-package check and, when needed, launches a child process).
+
+This is the single place that starts and stops dynamic processes; nothing is
+triggered as a side effect of Salsa input reads any more.
+"""
+function handle!(df::DynamicFeature, msg::ReconcileMsg)
+    required = msg.required
+
+    # ── Cancel processes that are no longer required ───────────────────────
     for (key, djp) in collect(df.procs)
         if key ∉ required
             @info "Killing stale DynamicJuliaProcess" key=key
-            kill(djp)
+            try kill(djp) catch; end
             delete!(df.procs, key)
-
-            # Clean up the corresponding Salsa inputs
-            if key isa WatchEnvironmentKey
-                delete_input_project_environment!(rt, filepath2uri(key.project_path), key.content_hash)
-            elseif key isa CreateStandaloneProjectKey
-                delete_input_standalone_package_project!(rt, filepath2uri(key.package_path), key.content_hash)
-            elseif key isa WatchTestEnvironmentKey
-                delete_input_project_test_environment!(rt, filepath2uri(key.project_path), key.package_name, key.content_hash)
+            # If the work was still in flight, balance the accounting now — the
+            # process's eventual ProcessTerminatedMsg is ignored once the proc
+            # has been removed from `df.procs`.
+            if key in df.inflight
+                _complete_work_item!(df, key)
             end
         end
     end
 
-    # Prune failed_projects for keys that are no longer required
+    # Drop completion/failure bookkeeping for keys that are no longer required,
+    # so the same key becoming required again later re-spawns its work.
+    filter!(k -> k in required, df.done)
     filter!(k -> k in required, df.failed_projects)
+
+    # ── Spawn work for newly-required keys ─────────────────────────────────
+    known = union(Set(keys(df.procs)), df.inflight, df.done, df.failed_projects)
+    for key in required
+        key in known && continue
+
+        # Accounting that previously lived in the lazy inputs: register one
+        # pending work item before dispatching the corresponding work message.
+        Threads.atomic_add!(df.pending_count, 1)
+        df.progress_state.total_items += 1
+        _report_progress(df, "Preparing to index...")
+
+        if key isa WatchEnvironmentKey
+            handle!(df, WatchEnvironmentMsg(key.project_path, key.content_hash))
+        elseif key isa WatchTestEnvironmentKey
+            handle!(df, WatchTestEnvironmentMsg(key.project_path, key.package_name, key.content_hash))
+        elseif key isa CreateStandaloneProjectKey
+            handle!(df, CreateStandaloneProjectMsg(key.package_path, key.content_hash))
+        end
+    end
+
+    return false
 end
