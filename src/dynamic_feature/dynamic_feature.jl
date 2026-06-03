@@ -210,7 +210,10 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 end
             catch err
                 if !(err isa CancellationTokens.OperationCanceledException)
-                    try kill(jl_process) catch end # Wrapped in try/catch because on Windows this fails if the process is already dead.
+                    # Kill the child only via the cancellation source: cancelling
+                    # fires `proc_kill_registration`, which is the single place
+                    # that actually kills the Julia process.
+                    CancellationTokens.cancel(djp.cancellation_source)
                     wait(jl_process)
                     put!(reactor_channel, ProcessIndexFailedMsg(djp.key, err))
                 else
@@ -230,12 +233,13 @@ end
 function Base.kill(djp::DynamicJuliaProcess)
     @info "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
 
+    # Killing the child process is done exclusively through the cancellation
+    # source: `start` registers a callback on this source's token that performs
+    # the actual `kill` on the Julia process. We must not kill `djp.proc`
+    # directly here.
     CancellationTokens.cancel(djp.cancellation_source)
 
-    if djp.proc !== nothing
-        try kill(djp.proc) catch end
-        djp.proc = nothing
-    end
+    djp.proc = nothing
     djp.endpoint = nothing
 
     if state(djp.fsm) != DynamicProcessDead
