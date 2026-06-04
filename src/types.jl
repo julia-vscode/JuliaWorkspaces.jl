@@ -313,7 +313,7 @@ struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing)
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, tracing::Bool=false)
         if store_path === nothing
             store_path = Scratch.@get_scratch!("store_path_v1")
         end
@@ -321,7 +321,7 @@ struct JuliaWorkspace
         dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback) : nothing
         dynamic_feature === nothing || start(dynamic_feature)
 
-        rt = Salsa.Runtime{SContext}(SContext(dynamic_feature, indirect_file_watch_callback))
+        rt = Salsa.Runtime{SContext}(SContext(dynamic_feature, indirect_file_watch_callback); tracing=tracing)
 
         set_input_files!(rt, Set{URI}())
         set_input_active_project!(rt, nothing)
