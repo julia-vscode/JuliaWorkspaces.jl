@@ -7,6 +7,10 @@ start_time = time_ns()
 using Pkg, SHA
 using Base: UUID
 
+# this is required to get parsedoc to work on Julia 1.11 and newer, since the implementation
+# moved there
+using REPL
+
 include("../../../shared/symbolserver/faketypes.jl")
 include("../../../shared/symbolserver/symbols.jl")
 include("../../../shared/symbolserver/utils.jl")

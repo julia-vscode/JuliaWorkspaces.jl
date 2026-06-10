@@ -107,6 +107,7 @@ end
         Base.show(io::IO, ::BType) = print(io, "B")
         Base.show(io::IO, ::MIME"text/plain", ::BType) = print(io, "B (verbose)")
         Base.length(::BType) = 0
+        "Docstring for myfunc."
         myfunc(x) = x
         end # module B
         """)
@@ -168,6 +169,8 @@ end
         @test myfunc_entry isa FunctionStore
         @test myfunc_entry.name == myfunc_entry.extends
         @test length(myfunc_entry.methods) == 1
+        # Docstrings must be captured (requires `using REPL` for parsedoc on 1.11+).
+        @test !isempty(myfunc_entry.doc)
     end
 end
 
