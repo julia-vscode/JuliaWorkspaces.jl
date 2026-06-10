@@ -174,33 +174,51 @@ end
     end
 end
 
-@testitem "SymbolServer: CacheStore rejects unknown header" begin
-    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read
+@testitem "SymbolServer: CacheStore validates file header" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, write
+    using JuliaWorkspaces.SymbolServer: VarRef
 
-    io = IOBuffer(UInt8[0xff])
-    @test_throws CacheCorruptedError read(io)
+    io = IOBuffer()
+    write(io, VarRef(nothing, :foo))
+    seekstart(io)
+    @test MagicHeader == Base.read(io, length(MagicHeader))
+    @test StoreVersion == Base.read(io, length(StoreVersion))
+
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x00], StoreVersion)))   # bad magic
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(MagicHeader, UInt8[0xff])))    # wrong version
+    @test_throws CacheCorruptedError read(IOBuffer(MagicHeader))                       # truncated header
+end
+
+@testitem "SymbolServer: CacheStore rejects unknown header" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read
+
+    @test_throws CacheCorruptedError read(IOBuffer(UInt8[0x00]))                              # bad magic
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(MagicHeader, StoreVersion, UInt8[0xff])))  # unknown tag
 end
 
 @testitem "SymbolServer: CacheStore rejects truncated stream" begin
-    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read
+
+    prefix = vcat(MagicHeader, StoreVersion)
 
     # SymbolHeader + length=100, but only 5 payload bytes
-    io = IOBuffer(vcat(UInt8[0x02], reinterpret(UInt8, [Int(100)]), UInt8[0x41, 0x41, 0x41, 0x41, 0x41]))
+    io = IOBuffer(vcat(prefix, UInt8[0x02], reinterpret(UInt8, [Int(100)]), UInt8[0x41, 0x41, 0x41, 0x41, 0x41]))
     @test_throws CacheCorruptedError read(io)
 
     @test_throws CacheCorruptedError read(IOBuffer(UInt8[]))
 
-    @test_throws CacheCorruptedError read(IOBuffer(UInt8[0x02, 0x00, 0x00]))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, UInt8[0x02, 0x00, 0x00])))
 end
 
 @testitem "SymbolServer: CacheStore rejects oversized length fields" begin
-    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read
 
+    prefix = vcat(MagicHeader, StoreVersion)
     huge = Int(10)^15
-    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x02], reinterpret(UInt8, [huge]))))
-    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x02], reinterpret(UInt8, [Int(-1)]))))
-    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x05], reinterpret(UInt8, [huge]))))
-    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x14], reinterpret(UInt8, [huge]))))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, UInt8[0x02], reinterpret(UInt8, [huge]))))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, UInt8[0x02], reinterpret(UInt8, [Int(-1)]))))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, UInt8[0x05], reinterpret(UInt8, [huge]))))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, UInt8[0x14], reinterpret(UInt8, [huge]))))
 end
 
 @testitem "SymbolServer: CacheStore rejects cyclic data on write" begin
@@ -223,7 +241,7 @@ end
 end
 
 @testitem "SymbolServer: CacheStore rejects deeply nested input on read" begin
-    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read
 
     # Hand-build `level` nested FakeTypeName encodings. Each level is:
     # FakeTypeNameHeader (0x07), name VarRef(nothing, :a), then a parameters
@@ -247,8 +265,9 @@ end
         return bytes
     end
 
-    @test_throws CacheCorruptedError read(IOBuffer(nested_bytes(300)))
-    read(IOBuffer(nested_bytes(100)))   # under MAX_DEPTH, no throw
+    prefix = vcat(MagicHeader, StoreVersion)
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, nested_bytes(300))))
+    read(IOBuffer(vcat(prefix, nested_bytes(100))))   # under MAX_DEPTH, no throw
 end
 
 @testitem "SymbolServer: corrupt cache file produces CacheCorruptedError" begin
@@ -271,9 +290,11 @@ end
 end
 
 @testitem "SymbolServer: length validation accepts valid lengths over IOStream buffer chunk" begin
-    using JuliaWorkspaces.SymbolServer.CacheStore: read
+    using JuliaWorkspaces.SymbolServer.CacheStore: read, MagicHeader, StoreVersion
 
     mktemp() do path, io
+        Base.write(io, MagicHeader)
+        Base.write(io, StoreVersion)
         Base.write(io, 0x05)            # StringHeader
         Base.write(io, Int(30))
         Base.write(io, repeat("a", 30))

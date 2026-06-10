@@ -648,13 +648,13 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
     if pid in keys(Base.loaded_modules)
         progress_callback !== nothing && progress_callback(:PROCESSPKG, pe_name, uuid, :noversion, percentage)
         Core.eval(loadingbay, :($(Symbol(pe_name)) = $(Base.loaded_modules[pid])))
-        m = Base.invokelatest(() -> getfield(loadingbay, Symbol(pe_name)))
+        m = Base.invokelatest(getfield, loadingbay, Symbol(pe_name))
     else
         m = try
             progress_callback !== nothing && progress_callback(:STARTLOAD, pe_name, uuid, :noversion, percentage)
             Core.eval(loadingbay, (:(import $(Symbol(pe_name)))))
             progress_callback !== nothing && progress_callback(:STOPLOAD, pe_name)
-            m = Base.invokelatest(() -> getfield(loadingbay, Symbol(pe_name)))
+            m = Base.invokelatest(getfield, loadingbay, Symbol(pe_name))
         catch err
             return
         end
