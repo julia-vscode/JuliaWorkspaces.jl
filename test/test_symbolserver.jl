@@ -170,3 +170,112 @@ end
         @test length(myfunc_entry.methods) == 1
     end
 end
+
+@testitem "SymbolServer: CacheStore rejects unknown header" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read
+
+    io = IOBuffer(UInt8[0xff])
+    @test_throws CacheCorruptedError read(io)
+end
+
+@testitem "SymbolServer: CacheStore rejects truncated stream" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read
+
+    # SymbolHeader + length=100, but only 5 payload bytes
+    io = IOBuffer(vcat(UInt8[0x02], reinterpret(UInt8, [Int(100)]), UInt8[0x41, 0x41, 0x41, 0x41, 0x41]))
+    @test_throws CacheCorruptedError read(io)
+
+    @test_throws CacheCorruptedError read(IOBuffer(UInt8[]))
+
+    @test_throws CacheCorruptedError read(IOBuffer(UInt8[0x02, 0x00, 0x00]))
+end
+
+@testitem "SymbolServer: CacheStore rejects oversized length fields" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read
+
+    huge = Int(10)^15
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x02], reinterpret(UInt8, [huge]))))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x02], reinterpret(UInt8, [Int(-1)]))))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x05], reinterpret(UInt8, [huge]))))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(UInt8[0x14], reinterpret(UInt8, [huge]))))
+end
+
+@testitem "SymbolServer: CacheStore rejects cyclic data on write" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: write
+    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName
+
+    name = VarRef(nothing, :A)
+    ft = FakeTypeName(name, Any[])
+    push!(ft.parameters, ft)        # cycle: ft.parameters[1] === ft
+
+    @test_throws ArgumentError write(IOBuffer(), ft)
+
+    deep = let d = FakeTypeName(name, Any[])
+        for _ in 1:300
+            d = FakeTypeName(name, Any[d])
+        end
+        d
+    end
+    @test_throws ArgumentError write(IOBuffer(), deep)
+end
+
+@testitem "SymbolServer: CacheStore rejects deeply nested input on read" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read
+
+    # Hand-build `level` nested FakeTypeName encodings. Each level is:
+    # FakeTypeNameHeader (0x07), name VarRef(nothing, :a), then a parameters
+    # vector of length 1 (or 0 for the innermost).
+    function nested_bytes(level::Int)
+        io = IOBuffer()
+        Base.write(io, 0x07)
+        Base.write(io, 0x06); Base.write(io, 0x01)
+        Base.write(io, 0x02); Base.write(io, Int(1)); Base.write(io, 0x61)
+        Base.write(io, Int(0))
+        bytes = take!(io)
+        for _ in 1:level
+            io = IOBuffer()
+            Base.write(io, 0x07)
+            Base.write(io, 0x06); Base.write(io, 0x01)
+            Base.write(io, 0x02); Base.write(io, Int(1)); Base.write(io, 0x61)
+            Base.write(io, Int(1))
+            Base.write(io, bytes)
+            bytes = take!(io)
+        end
+        return bytes
+    end
+
+    @test_throws CacheCorruptedError read(IOBuffer(nested_bytes(300)))
+    read(IOBuffer(nested_bytes(100)))   # under MAX_DEPTH, no throw
+end
+
+@testitem "SymbolServer: corrupt cache file produces CacheCorruptedError" begin
+    mktempdir() do store_path
+        pkg_dir = joinpath(store_path, "Bogus", "Bogus_00000000-0000-0000-0000-000000000000")
+        mkpath(pkg_dir)
+        cache_path = joinpath(pkg_dir, "v0.1.0_nothing.jstore")
+        open(cache_path, "w") do io
+            Base.write(io, UInt8[0xff])
+        end
+
+        threw = false
+        try
+            open(JuliaWorkspaces.SymbolServer.CacheStore.read, cache_path)
+        catch err
+            threw = err isa JuliaWorkspaces.SymbolServer.CacheStore.CacheCorruptedError
+        end
+        @test threw
+    end
+end
+
+@testitem "SymbolServer: length validation accepts valid lengths over IOStream buffer chunk" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: read
+
+    mktemp() do path, io
+        Base.write(io, 0x05)            # StringHeader
+        Base.write(io, Int(30))
+        Base.write(io, repeat("a", 30))
+        close(io)
+
+        @test open(read, path) == repeat("a", 30)
+    end
+end

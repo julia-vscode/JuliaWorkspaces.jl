@@ -64,7 +64,12 @@ function get_store(store_path::String, progress_callback)
                         @info "Package $pk_name ($uuid) is cached."
                     end
                 catch err
-                    @info "Couldn't load $pk_name ($uuid) from file, will recache."
+                    if err isa CacheStore.CacheCorruptedError
+                        @info "Couldn't load $pk_name ($uuid) from corrupt cache, will recache."
+                        push!(packages_to_load, uuid)
+                    else
+                        rethrow()
+                    end
                 end
             else
                 @info "Package $pk_name ($uuid) is cached."
