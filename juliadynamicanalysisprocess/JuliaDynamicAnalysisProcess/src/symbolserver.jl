@@ -75,6 +75,10 @@ function get_store(store_path::String, progress_callback)
         end
     end
 
+    # Stamp the world before loading packages, so cache_new_methods! below can
+    # find methods they add to functions defined elsewhere.
+    world_before = Base.get_world_counter()
+
     # Load all packages together
     # This is important, or methods added to functions in other packages that are loaded earlier would not be in the cache
     for (i, uuid) in enumerate(packages_to_load)
@@ -98,6 +102,9 @@ function get_store(store_path::String, progress_callback)
     end
 
     symbols(env_symbols, nothing, getallns(), visited)
+
+    # Pick up overloads of foreign functions (e.g. Base.show) added without importing the name.
+    cache_new_methods!(env_symbols, world_before; get_return_type=false)
 
     # Wrap the `ModuleStore`s as `Package`s.
     for (pkg_name, cache) in env_symbols
