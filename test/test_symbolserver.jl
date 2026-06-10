@@ -57,6 +57,60 @@ end
     @test length(entry.methods) == 1
 end
 
+@testitem "SymbolServer: #295 cache_methods handles Vararg{T,N} signatures" begin
+    using JuliaWorkspaces.SymbolServer: cache_methods, EnvStore, ModuleStore, VarRef,
+                                        FunctionStore, FakeTypeName
+
+    # Julia normalises bounded `Vararg{T,N}` out of the method's tuple sig:
+    # N=0 drops the slot entirely (used to BoundsError), and N>1 expands into
+    # N copies of T (used to be silently truncated to one slot).
+    fakemod = Module(:_TestPkgVararg)
+    Core.eval(fakemod, quote
+        f0(x::Vararg{Int,0})         = x
+        f1(x::Vararg{Int,1})         = x
+        f3(x::Vararg{Int,3})         = x
+        fu(x::Vararg{Int})           = x
+        h(x::Int, y::Vararg{Int,2})  = (x, y)
+    end)
+
+    env = EnvStore()
+    name = nameof(fakemod)
+    env[name] = ModuleStore(VarRef(fakemod), Dict{Symbol,Any}(),
+                            "", true, Symbol[], Symbol[])
+
+    for sym in (:f0, :f1, :f3, :fu, :h)
+        cache_methods(Core.eval(fakemod, sym), sym, env, false)
+        @test haskey(env[name], sym)
+        @test env[name][sym] isa FunctionStore
+    end
+
+    # Vararg{Int,0}: the slot has no positional type info — sig is empty.
+    @test isempty(env[name][:f0].methods[1].sig)
+
+    # Vararg{Int,1}: single slot reconstructed as Vararg{Int,1}.
+    sig1 = env[name][:f1].methods[1].sig
+    @test length(sig1) == 1
+    @test first(sig1).first == :x
+    @test first(sig1).second == FakeTypeName(Vararg{Int,1})
+
+    # Vararg{Int,3}: reconstructed as Vararg{Int,3} (previously truncated to one slot).
+    sig3 = env[name][:f3].methods[1].sig
+    @test length(sig3) == 1
+    @test first(sig3).second == FakeTypeName(Vararg{Int,3})
+
+    # Unbounded `Vararg{Int}` survives in the tuple as-is and must round-trip.
+    sigu = env[name][:fu].methods[1].sig
+    @test length(sigu) == 1
+    @test first(sigu).second == FakeTypeName(Vararg{Int})
+
+    # Fixed prefix + Vararg{T,N}: prefix recorded normally, vararg reconstructed.
+    sigh = env[name][:h].methods[1].sig
+    @test length(sigh) == 2
+    @test sigh[1] == (:x => FakeTypeName(Int))
+    @test sigh[2].first == :y
+    @test sigh[2].second == FakeTypeName(Vararg{Int,2})
+end
+
 @testitem "SymbolServer: cache_methods min_world filter skips pre-existing methods" begin
     using JuliaWorkspaces.SymbolServer: cache_methods, EnvStore, ModuleStore, VarRef,
                                         FunctionStore, method_world
