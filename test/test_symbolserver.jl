@@ -338,3 +338,12 @@ end
         @test any(m -> m.name == "Example", JuliaWorkspaces._get_missing_packages(proj, store))
     end
 end
+
+@testitem "SymbolServer: FakeTypeName caches nested type parameters" begin
+    using JuliaWorkspaces.SymbolServer: FakeTypeName
+    using JuliaWorkspaces.SymbolServer.CacheStore: storeunstore
+
+    ft = FakeTypeName(Dict{String, Vector{Int}})
+    @test !isempty(ft.parameters[2].parameters)   # nested Vector{Int} keeps its Int
+    @test storeunstore(ft) == ft                   # survives a serialize round-trip
+end
