@@ -347,3 +347,112 @@ end
     @test !isempty(ft.parameters[2].parameters)   # nested Vector{Int} keeps its Int
     @test storeunstore(ft) == ft                   # survives a serialize round-trip
 end
+
+@testitem "SymbolServer: #161 cross-package overload is captured" begin
+    using JuliaWorkspaces.SymbolServer: FunctionStore, EnvStore, VarRef, collect_extended_methods
+    using JuliaWorkspaces.SymbolServer.CacheStore: read
+
+    a_uuid = "5a61a11e-3d95-423b-8231-1a5bca90429f"
+    b_uuid = "09fe8bcb-ac26-410c-9c93-4f8b45323ba9"
+    symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
+
+    mktempdir() do root
+        proj = joinpath(root, "proj")
+        adir = joinpath(root, "A")
+        bdir = joinpath(root, "B")
+        store = joinpath(root, "store")
+        mkpath(joinpath(adir, "src"))
+        mkpath(joinpath(bdir, "src"))
+        mkpath(proj)
+        mkpath(store)
+
+        write(joinpath(adir, "Project.toml"), """
+        name = "A"
+        uuid = "$a_uuid"
+        version = "0.1.0"
+        """)
+        write(joinpath(adir, "src", "A.jl"), "module A\nfoo(x) = 1\nend # module A\n")
+
+        write(joinpath(bdir, "Project.toml"), """
+        name = "B"
+        uuid = "$b_uuid"
+        version = "0.1.0"
+
+        [deps]
+        A = "$a_uuid"
+        """)
+        # B extends A.foo for its own type without re-exporting the name.
+        write(joinpath(bdir, "src", "B.jl"), """
+        module B
+        import A
+        struct Foo end
+        A.foo(::Foo) = 2
+        end # module B
+        """)
+
+        write(joinpath(proj, "Project.toml"), """
+        [deps]
+        A = "$a_uuid"
+        B = "$b_uuid"
+        """)
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "1.11.0"
+        manifest_format = "2.0"
+        project_hash = "0000000000000000000000000000000000000000"
+
+        [[deps.A]]
+        path = "../A"
+        uuid = "$a_uuid"
+        version = "0.1.0"
+
+        [[deps.B]]
+        deps = ["A"]
+        path = "../B"
+        uuid = "$b_uuid"
+        version = "0.1.0"
+        """)
+
+        runner = joinpath(root, "run_indexer.jl")
+        write(runner, """
+        include(raw"$symbolserver_jl")
+        using Pkg
+        Pkg.activate(raw"$proj")
+        SymbolServer.get_store(raw"$store", nothing)
+        """)
+
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+            run(ignorestatus(`$jl --startup-file=no --project=$proj $runner`))
+        end
+        @test proc.exitcode == 0
+
+        a_store = open(read, joinpath(store, "A", "A", a_uuid, "0.1.0.jstore")).val
+        b_store = open(read, joinpath(store, "B", "B", b_uuid, "0.1.0.jstore")).val
+
+        # A defines `foo(x) = 1` — captured as-is.
+        @test haskey(a_store, :foo)
+        a_foo = a_store[:foo]
+        @test a_foo isa FunctionStore
+        @test a_foo.name == a_foo.extends
+        @test length(a_foo.methods) == 1
+
+        # B's `A.foo(::Foo) = 2` must appear in B's store extending A.foo.
+        @test haskey(b_store, :foo)
+        b_foo = b_store[:foo]
+        @test b_foo isa FunctionStore
+        @test b_foo.name != b_foo.extends
+        @test b_foo.name.parent !== nothing
+        @test b_foo.name.parent.name == :B
+        @test b_foo.extends.name == :foo
+        @test b_foo.extends.parent !== nothing
+        @test b_foo.extends.parent.name == :A
+        @test length(b_foo.methods) == 1
+        @test b_foo.methods[1].mod == :B
+
+        # collect_extended_methods should surface B as an overloader of A.foo.
+        exts = collect_extended_methods(EnvStore(:A => a_store, :B => b_store))
+        @test haskey(exts, b_foo.extends)
+        @test VarRef(nothing, :B) in exts[b_foo.extends]
+    end
+end
