@@ -335,7 +335,8 @@ struct JuliaWorkspace
 end
 
 function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1)
-    cache_path = joinpath(store_path, uppercase(string(name)[1:1]), string(name, "_", uuid), string("v", version, "_", git_tree_sha1, ".jstore"))
+    filename = replace(string(something(git_tree_sha1, version)), '+'=>'_')
+    cache_path = joinpath(store_path, uppercase(string(name)[1:1]), string(name), string(uuid), string(filename, ".jstore"))
 
     if isfile(cache_path)
         package_data = open(cache_path) do io

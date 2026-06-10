@@ -140,7 +140,7 @@ end
         end
         @test proc.exitcode == 0
 
-        cache_path = joinpath(store, "B", "B_$b_uuid", "v0.1.0_nothing.jstore")
+        cache_path = joinpath(store, "B", "B", b_uuid, "0.1.0.jstore")
         @test isfile(cache_path)
 
         modstore = open(CacheStore.read, cache_path).val
@@ -250,9 +250,9 @@ end
 
 @testitem "SymbolServer: corrupt cache file produces CacheCorruptedError" begin
     mktempdir() do store_path
-        pkg_dir = joinpath(store_path, "Bogus", "Bogus_00000000-0000-0000-0000-000000000000")
+        pkg_dir = joinpath(store_path, "B", "Bogus", "00000000-0000-0000-0000-000000000000")
         mkpath(pkg_dir)
-        cache_path = joinpath(pkg_dir, "v0.1.0_nothing.jstore")
+        cache_path = joinpath(pkg_dir, "0.1.0.jstore")
         open(cache_path, "w") do io
             Base.write(io, UInt8[0xff])
         end
@@ -277,5 +277,40 @@ end
         close(io)
 
         @test open(read, path) == repeat("a", 30)
+    end
+end
+
+@testitem "SymbolServer: dynamic-feature reader uses the cache layout get_store writes" begin
+    uuid = "7876af07-990d-54b4-ab0e-23690620f79a"
+    th = "46e44e869b4d90b96bd8ed1fdcf32244fddfb6cc"
+
+    mktempdir() do root
+        proj = joinpath(root, "proj")
+        store = joinpath(root, "store")
+        mkpath(proj)
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "1.11.0"
+        manifest_format = "2.0"
+
+        [[deps.Example]]
+        uuid = "$uuid"
+        version = "0.5.3"
+        git-tree-sha1 = "$th"
+        """)
+
+        @test any(m -> m.name == "Example", JuliaWorkspaces._get_missing_packages(proj, store))
+
+        # A cache at the layout get_cache_path/get_store produce satisfies the reader.
+        new_path = joinpath(store, "E", "Example", uuid, "$th.jstore")
+        mkpath(dirname(new_path))
+        write(new_path, "x")
+        @test !any(m -> m.name == "Example", JuliaWorkspaces._get_missing_packages(proj, store))
+
+        # The old layout must not.
+        rm(new_path)
+        old_path = joinpath(store, "E", "Example_$uuid", "v0.5.3_$th.jstore")
+        mkpath(dirname(old_path))
+        write(old_path, "x")
+        @test any(m -> m.name == "Example", JuliaWorkspaces._get_missing_packages(proj, store))
     end
 end

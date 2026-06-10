@@ -64,7 +64,8 @@ Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, versio
 
 
     if ctx.dynamic_feature !== nothing
-        cache_path = joinpath(ctx.dynamic_feature.store_path, uppercase(string(name)[1:1]), string(name, "_", uuid), string("v", version, "_", git_tree_sha1, ".jstore"))
+        filename = replace(string(something(git_tree_sha1, version)), '+'=>'_')
+        cache_path = joinpath(ctx.dynamic_feature.store_path, uppercase(string(name)[1:1]), string(name), string(uuid), string(filename, ".jstore"))
 
         if isfile(cache_path)
             package_data = open(cache_path) do io

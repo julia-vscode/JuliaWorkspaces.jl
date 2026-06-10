@@ -380,7 +380,8 @@ function _get_missing_packages(project_path::String, store_path::String)
             # Regular package
             ver = entry["version"]
             tree_sha = entry["git-tree-sha1"]
-            cache_path = joinpath(store_path, uppercase(k_entry[1:1]), string(k_entry, "_", uuid), string("v", ver, "_", tree_sha, ".jstore"))
+            filename = replace(string(something(tree_sha, ver)), '+'=>'_')
+            cache_path = joinpath(store_path, uppercase(k_entry[1:1]), k_entry, string(uuid), string(filename, ".jstore"))
             if !isfile(cache_path)
                 push!(missing, MissingPackage((k_entry, uuid, ver, tree_sha)))
             end
@@ -388,7 +389,8 @@ function _get_missing_packages(project_path::String, store_path::String)
             # Stdlib package
             ver_str = get(entry, "version", nothing)
             ver_str === nothing && continue
-            cache_path = joinpath(store_path, uppercase(k_entry[1:1]), string(k_entry, "_", uuid), string("v", ver_str, "_nothing.jstore"))
+            filename = replace(string(ver_str), '+'=>'_')
+            cache_path = joinpath(store_path, uppercase(k_entry[1:1]), k_entry, string(uuid), string(filename, ".jstore"))
             if !isfile(cache_path)
                 push!(missing, MissingPackage((k_entry, uuid, ver_str, nothing)))
             end
@@ -432,13 +434,11 @@ store path. Returns true on success, false on failure.
 """
 function _download_single_cache(pkg::MissingPackage, store_path::String, upstream_url::String, download_dir::String)
     name, uuid, version, git_tree_sha1 = pkg
-    tree_hash_str = git_tree_sha1 === nothing ? "nothing" : git_tree_sha1
 
     letter = uppercase(name[1:1])
-    name_uuid = string(name, "_", uuid)
-    filename = string("v", version, "_", tree_hash_str, ".jstore")
+    filename = string(replace(string(something(git_tree_sha1, version)), '+'=>'_'), ".jstore")
 
-    dest_dir = joinpath(store_path, letter, name_uuid)
+    dest_dir = joinpath(store_path, letter, name, string(uuid))
     dest_filepath = joinpath(dest_dir, filename)
     dest_filepath_unavailable = string(first(splitext(dest_filepath)), ".unavailable")
 
@@ -448,7 +448,7 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
         return false
     end
 
-    link = string(upstream_url, "/store/v1/packages/", letter, "/", name_uuid, "/", first(splitext(filename)), ".tar.gz")
+    link = string(upstream_url, "/store/v2/packages/", letter, "/", name, "/", string(uuid), "/", first(splitext(filename)), ".tar.gz")
 
     pkg_download_dir = joinpath(download_dir, string(name, "_", uuid, "_", version))
 
