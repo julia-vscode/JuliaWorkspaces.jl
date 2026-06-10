@@ -228,6 +228,34 @@ end
     end
 end
 
+@testitem "SymbolServer: #1395 DataTypeStore field types are serializable and aligned" begin
+    using JuliaWorkspaces.SymbolServer: DataTypeStore, FakeTypeName, MethodStore
+    using JuliaWorkspaces.SymbolServer.CacheStore: write, read
+
+    for T in (MethodStore, DataTypeStore, Pair{Int,String}, Dict{Symbol,Any})
+        ur = Base.unwrap_unionall(T)
+        d = DataTypeStore(T, nameof(ur), @__MODULE__, false)
+        @test length(d.types) == length(d.fieldnames) == fieldcount(ur)
+        @test !any(t -> t isa Type, d.types)        # no raw types leaked in
+        io = IOBuffer(); write(io, d); seekstart(io); read(io)   # must round-trip
+    end
+
+    # fieldtypes shorter than fieldnames -> padded with FakeTypeName(Any), not raw `Any`.
+    dts = DataTypeStore(
+        FakeTypeName(Int), FakeTypeName(Integer),
+        Any[],                  # parameters
+        Any[],                  # fieldtypes
+        Any[:a, :b],            # fieldnames
+        MethodStore[], "", false,
+    )
+    @test length(dts.types) == 2
+    @test all(t -> t isa FakeTypeName, dts.types)
+    io = IOBuffer(); write(io, dts); seekstart(io)
+    back = read(io)
+    @test length(back.types) == 2
+    @test back.fieldnames == [:a, :b]
+end
+
 @testitem "SymbolServer: CacheStore validates file header" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, write
     using JuliaWorkspaces.SymbolServer: VarRef
