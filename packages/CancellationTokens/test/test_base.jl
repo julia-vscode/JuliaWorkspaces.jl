@@ -3,6 +3,7 @@
 # ---------------------------------------------------------------------------
 
 @testitem "sleep completes normally without cancellation" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     t0 = time()
     sleep(0.1, get_token(src))
@@ -12,6 +13,7 @@
 end
 
 @testitem "sleep throws OperationCanceledException on cancel" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     @spawn begin
         sleep(0.1)
@@ -21,6 +23,7 @@ end
 end
 
 @testitem "sleep - exception carries the correct token" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     @spawn begin
@@ -37,12 +40,14 @@ end
 end
 
 @testitem "sleep - cancel before sleep throws immediately" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     cancel(src)
     @test_throws OperationCanceledException sleep(20.0, get_token(src))
 end
 
 @testitem "sleep - cancellation returns faster than timeout" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     @spawn begin
         sleep(0.1)
@@ -59,6 +64,7 @@ end
 end
 
 @testitem "sleep - zero duration completes immediately" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     sleep(0.0, get_token(src))
     @test !is_cancellation_requested(get_token(src))
@@ -69,6 +75,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "wait(Channel) returns when channel becomes ready" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(1)
     @spawn begin
@@ -81,6 +88,7 @@ end
 end
 
 @testitem "wait(Channel) throws on cancellation" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(1)
     @spawn begin
@@ -91,6 +99,7 @@ end
 end
 
 @testitem "wait(Channel) returns immediately if channel already has data" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(1)
     put!(ch, 1)
@@ -99,6 +108,7 @@ end
 end
 
 @testitem "wait(Channel) throws immediately if already cancelled" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     cancel(src)
     ch = Channel{Int}(1)
@@ -106,6 +116,7 @@ end
 end
 
 @testitem "wait(Channel) exception carries correct token" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     ch = Channel{Int}(1)
@@ -123,6 +134,7 @@ end
 end
 
 @testitem "wait(Channel) - closed channel throws" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(1)
     close(ch)
@@ -134,6 +146,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "take!(Channel) returns value when data available" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(10)
     put!(ch, 42)
@@ -142,6 +155,7 @@ end
 end
 
 @testitem "take!(Channel) blocks and returns when data arrives" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(10)
     @spawn begin
@@ -153,6 +167,7 @@ end
 end
 
 @testitem "take!(Channel) throws on cancellation" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(Inf)
     @spawn begin
@@ -163,6 +178,7 @@ end
 end
 
 @testitem "take!(Channel) throws immediately if already cancelled" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     cancel(src)
     ch = Channel{Int}(Inf)
@@ -172,6 +188,7 @@ end
 end
 
 @testitem "take!(Channel) exception carries correct token" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     ch = Channel{Int}(Inf)
@@ -189,6 +206,7 @@ end
 end
 
 @testitem "take!(Channel) preserves FIFO order" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(10)
     for i in 1:5
@@ -206,6 +224,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "wait(Channel) - cancel after data arrives does not leak notifications" begin
+    using CancellationTokens
     # Simulate: data arrives, then cancel fires immediately after.
     # A second waiter on the same channel must NOT be spuriously woken.
     for _ in 1:50  # repeat to exercise timing
@@ -228,6 +247,7 @@ end
 end
 
 @testitem "take!(Channel) - cancel after take succeeds does not leak notifications" begin
+    using CancellationTokens
     for _ in 1:50
         ch = Channel{Int}(1)
         src = CancellationTokenSource()
@@ -245,6 +265,7 @@ end
 end
 
 @testitem "wait(Channel) - concurrent cancel and data arrival" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:20
         ch = Channel{Int}(1)
         src = CancellationTokenSource()
@@ -275,6 +296,7 @@ end
 end
 
 @testitem "take!(Channel) - concurrent cancel and data arrival" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:20
         ch = Channel{Int}(1)
         src = CancellationTokenSource()
@@ -299,6 +321,7 @@ end
 end
 
 @testitem "take!(Channel) - closed empty channel throws" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(10)
     close(ch)
@@ -306,6 +329,7 @@ end
 end
 
 @testitem "take!(Channel) - closed channel with remaining data returns data" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(10)
     put!(ch, 1)
@@ -321,6 +345,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "readavailable(Pipe) - cancel" setup=[SpawnHelper] begin
+    using CancellationTokens
     p = Base.Pipe()
     Base.link_pipe!(p; reader_supports_async=true, writer_supports_async=true)
 
@@ -337,6 +362,7 @@ end
 end
 
 @testitem "readavailable(Pipe) - data arrives before cancel" begin
+    using CancellationTokens
     p = Base.Pipe()
     Base.link_pipe!(p; reader_supports_async=true, writer_supports_async=true)
 
@@ -354,6 +380,7 @@ end
 end
 
 @testitem "readavailable(Pipe) - already cancelled throws immediately" begin
+    using CancellationTokens
     p = Base.Pipe()
     Base.link_pipe!(p; reader_supports_async=true, writer_supports_async=true)
 
@@ -366,12 +393,14 @@ end
 end
 
 @testitem "take!(Channel) on unbuffered channel throws not-implemented" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(0)
     @test_throws ErrorException take!(ch, get_token(src))
 end
 
 @testitem "take!(Channel) - channel usable after cancelled take!" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(10)
 
@@ -387,6 +416,7 @@ end
 end
 
 @testitem "take!(Channel) with typed channel" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{String}(10)
     put!(ch, "hello")
@@ -396,6 +426,7 @@ end
 end
 
 @testitem "take!(Channel) - multiple sequential takes with token" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     ch = Channel{Int}(10)
     @spawn begin

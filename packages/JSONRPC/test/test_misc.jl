@@ -195,6 +195,7 @@ end
 end
 
 @testitem "endpoint constructor default serialization" begin
+    using JSONRPC
     using JSON
     buf = IOBuffer()
     ep = JSONRPC.JSONRPCEndpoint(buf, buf)
@@ -206,6 +207,7 @@ end
 end
 
 @testitem "generate_pipe_name returns valid name" begin
+    using JSONRPC
     name = JSONRPC.generate_pipe_name()
     @test name isa String
     @test length(name) > 0
@@ -221,6 +223,7 @@ end
 end
 
 @testitem "RPCErrorStrings constant" begin
+    using JSONRPC
     @test JSONRPC.RPCErrorStrings[JSONRPC.PARSE_ERROR] == "ParseError"
     @test JSONRPC.RPCErrorStrings[JSONRPC.INVALID_REQUEST] == "InvalidRequest"
     @test JSONRPC.RPCErrorStrings[JSONRPC.METHOD_NOT_FOUND] == "MethodNotFound"

@@ -1,4 +1,5 @@
 @testitem "endpoint with IOBuffer pipes (non-PipeEndpoint read path)" begin
+    using JSONRPC
     # This test exercises the read task's else branch that calls
     # read_transport_layer(stream) instead of read_transport_layer(stream, token)
     # when pipe_in is not a TCPSocket/PipeEndpoint.
@@ -28,6 +29,7 @@
 end
 
 @testitem "IOBuffer endpoint: request with id" begin
+    using JSONRPC
     # Ensure that requests with an id get a CancellationToken through the IOBuffer path
     payload = "{\"jsonrpc\":\"2.0\",\"method\":\"test_req\",\"id\":\"abc-123\",\"params\":null}"
     buf_in = IOBuffer()
@@ -50,6 +52,7 @@ end
 end
 
 @testitem "IOBuffer endpoint: multiple messages" begin
+    using JSONRPC
     # Test that the read task handles multiple messages through IOBuffer
     buf_in = IOBuffer()
     for i in 1:3
@@ -74,6 +77,7 @@ end
 end
 
 @testitem "IOBuffer endpoint: write task produces output" begin
+    using JSONRPC
     # Verify write task works with IOBuffer
     buf_in = IOBuffer()
     # Write one notification so read task has something to process
@@ -98,6 +102,7 @@ end
 end
 
 @testitem "IOBuffer endpoint: JSON parse failure in non-token path" begin
+    using JSONRPC
     # Ensure the non-PipeEndpoint read path also handles parse errors
     invalid_json = "this is not json"
     n = ncodeunits(invalid_json)
@@ -913,6 +918,7 @@ end
 end
 
 @testitem "check_dead_endpoint! on closed endpoint without err" begin
+    using JSONRPC
     buf = IOBuffer()
     ep = JSONRPC.JSONRPCEndpoint(buf, buf)
     close(ep)
@@ -930,6 +936,7 @@ end
 end
 
 @testitem "read_transport_layer rethrow: invalid Content-Length (non-token)" begin
+    using JSONRPC
     using CancellationTokens
     # Trigger the rethrow(err) path in read_transport_layer(stream) by
     # writing a Content-Length header with a non-integer value.

@@ -1,4 +1,5 @@
 @testitem "Dynamic message dispatcher" setup=[TestStructs] begin
+    using JSONRPC
     using Sockets
     using .TestStructs: Foo, Foo2
 
@@ -101,6 +102,7 @@
 end
 
 @testitem "check response type" begin
+    using JSONRPC
     using JSONRPC: typed_res
     
     @test typed_res(nothing, Nothing) isa Nothing
@@ -112,6 +114,7 @@ end
 end
 
 @testitem "Static message dispatcher" setup=[TestStructs] begin
+    using JSONRPC
     using Sockets
     using .TestStructs: Foo, Foo2
     

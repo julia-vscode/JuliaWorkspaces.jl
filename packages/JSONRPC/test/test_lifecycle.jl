@@ -27,6 +27,7 @@ end
 end
 
 @testitem "close on idle endpoint" begin
+    using JSONRPC
     # close() on a never-started endpoint should work without error
     buf_in = IOBuffer()
     buf_out = IOBuffer()
@@ -109,6 +110,7 @@ end
 end
 
 @testitem "send_notification on idle endpoint errors" begin
+    using JSONRPC
     buf = IOBuffer()
     ep = JSONRPC.JSONRPCEndpoint(buf, buf)
     threw = Ref(false)
@@ -122,6 +124,7 @@ end
 end
 
 @testitem "send_request on idle endpoint errors" begin
+    using JSONRPC
     buf = IOBuffer()
     ep = JSONRPC.JSONRPCEndpoint(buf, buf)
     threw = Ref(false)
@@ -135,6 +138,7 @@ end
 end
 
 @testitem "get_next_message on idle endpoint errors" begin
+    using JSONRPC
     buf = IOBuffer()
     ep = JSONRPC.JSONRPCEndpoint(buf, buf)
     threw = Ref(false)
@@ -148,6 +152,7 @@ end
 end
 
 @testitem "iterate on idle endpoint errors" begin
+    using JSONRPC
     buf = IOBuffer()
     ep = JSONRPC.JSONRPCEndpoint(buf, buf)
     threw = Ref(false)
@@ -161,6 +166,7 @@ end
 end
 
 @testitem "flush on idle endpoint errors" begin
+    using JSONRPC
     buf = IOBuffer()
     ep = JSONRPC.JSONRPCEndpoint(buf, buf)
     threw = Ref(false)

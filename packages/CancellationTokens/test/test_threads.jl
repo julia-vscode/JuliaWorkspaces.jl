@@ -5,6 +5,7 @@
 # ---------------------------------------------------------------------------
 
 @testitem "Concurrent cancel and wait" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:50
         src = CancellationTokenSource()
         token = get_token(src)
@@ -18,6 +19,7 @@
 end
 
 @testitem "Race between cancel and wait" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:50
         src = CancellationTokenSource()
         token = get_token(src)
@@ -30,6 +32,7 @@ end
 end
 
 @testitem "Concurrent is_cancellation_requested reads" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     results = Vector{Bool}(undef, 100)
@@ -44,6 +47,7 @@ end
 end
 
 @testitem "Concurrent take! cancellation" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:20
         src = CancellationTokenSource()
         ch = Channel{Int}(Inf)
@@ -57,6 +61,7 @@ end
 end
 
 @testitem "Concurrent wait(Channel) cancellation" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:20
         src = CancellationTokenSource()
         ch = Channel{Int}(Inf)
@@ -70,6 +75,7 @@ end
 end
 
 @testitem "Concurrent combined source" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:20
         src1 = CancellationTokenSource()
         src2 = CancellationTokenSource()
@@ -84,6 +90,7 @@ end
 end
 
 @testitem "Multiple threads cancel same source" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:50
         src = CancellationTokenSource()
         tasks = [@spawn(cancel(src)) for _ in 1:8]
@@ -95,6 +102,7 @@ end
 end
 
 @testitem "Concurrent sleep cancellation" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:10
         src = CancellationTokenSource()
         @spawn begin
@@ -106,6 +114,7 @@ end
 end
 
 @testitem "Stress: simultaneous cancel of both parents in combined source" setup=[SpawnHelper] begin
+    using CancellationTokens
     # Exercises the race where two monitoring tasks inside a combined source
     # fire at the same time.  Before the fix, each task would call
     # schedule() on its sibling, corrupting the workqueue.
@@ -124,6 +133,7 @@ end
 end
 
 @testitem "Stress: cancel token while channel data arrives" setup=[SpawnHelper] begin
+    using CancellationTokens
     # Exercises the race where the monitoring task is executing
     # lock(c) do notify(cond) end on one thread while the main task
     # finishes and tries to clean up the monitoring task.
@@ -148,6 +158,7 @@ end
 end
 
 @testitem "Stress: cancel token while waiting on channel" setup=[SpawnHelper] begin
+    using CancellationTokens
     for _ in 1:200
         src = CancellationTokenSource()
         ch = Channel{Int}(1)

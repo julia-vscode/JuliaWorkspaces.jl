@@ -1,4 +1,5 @@
 @testitem "readline(TCPSocket) - cancel" setup=[SpawnHelper] begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8000)
@@ -28,6 +29,7 @@
 end
 
 @testitem "readline(TCPSocket) - data arrives before cancel" setup=[SpawnHelper] begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8001)
@@ -51,6 +53,7 @@ end
 end
 
 @testitem "readline(TCPSocket) - cancel does not crash other readers" setup=[SpawnHelper] begin
+    using CancellationTokens
     import Sockets
 
     # Regression test for issue #24:
@@ -110,6 +113,7 @@ end
 end
 
 @testitem "read(TCPSocket, nb) - cancel" begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8003)
@@ -139,6 +143,7 @@ end
 end
 
 @testitem "accept(TCPServer) - cancel before call" begin
+    using CancellationTokens
     import Sockets
 
     _port, server = Sockets.listenany(Sockets.localhost, 8004)
@@ -153,6 +158,7 @@ end
 end
 
 @testitem "accept(TCPServer) - cancel while blocking" begin
+    using CancellationTokens
     import Sockets
 
     _port, server = Sockets.listenany(Sockets.localhost, 8005)
@@ -179,6 +185,7 @@ end
 end
 
 @testitem "accept(TCPServer) - client arrives before cancel" begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8006)
@@ -200,6 +207,7 @@ end
 end
 
 @testitem "accept(TCPServer) - server reusable after cancel" begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8007)
@@ -227,6 +235,7 @@ end
 end
 
 @testitem "accept(TCPServer, client) - cancel while blocking" begin
+    using CancellationTokens
     import Sockets
 
     _port, server = Sockets.listenany(Sockets.localhost, 8008)
@@ -255,6 +264,7 @@ end
 end
 
 @testitem "accept(PipeServer) - cancel before call" begin
+    using CancellationTokens
     import Sockets
 
     path = Sys.iswindows() ? string(raw"\\.\pipe\CancellationTokens-", time_ns()) : tempname()
@@ -275,6 +285,7 @@ end
 end
 
 @testitem "accept(PipeServer) - cancel while blocking" begin
+    using CancellationTokens
     import Sockets
 
     path = Sys.iswindows() ? string(raw"\\.\pipe\CancellationTokens-", time_ns()) : tempname()
@@ -307,6 +318,7 @@ end
 end
 
 @testitem "accept(PipeServer) - client arrives before cancel" begin
+    using CancellationTokens
     import Sockets
 
     path = Sys.iswindows() ? string(raw"\\.\pipe\CancellationTokens-", time_ns()) : tempname()
@@ -335,6 +347,7 @@ end
 end
 
 @testitem "accept(PipeServer) - server reusable after cancel" begin
+    using CancellationTokens
     import Sockets
 
     path = Sys.iswindows() ? string(raw"\\.\pipe\CancellationTokens-", time_ns()) : tempname()
@@ -369,6 +382,7 @@ end
 end
 
 @testitem "accept(PipeServer, client) - cancel while blocking" begin
+    using CancellationTokens
     import Sockets
 
     path = Sys.iswindows() ? string(raw"\\.\pipe\CancellationTokens-", time_ns()) : tempname()
@@ -403,6 +417,7 @@ end
 end
 
 @testitem "read(TCPSocket, nb) - data arrives before cancel" begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8009)
@@ -426,6 +441,7 @@ end
 end
 
 @testitem "read(TCPSocket, nb) - data arrived, cancel after completion returns data" begin
+    using CancellationTokens
     import Sockets
 
     # .NET semantics: if the operation completed successfully, it should
@@ -461,6 +477,7 @@ end
 end
 
 @testitem "read(TCPSocket, nb) - cancel does not crash other readers" begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8011)
@@ -516,6 +533,7 @@ end
 end
 
 @testitem "readavailable(TCPSocket) - cancel" begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8012)
@@ -545,6 +563,7 @@ end
 end
 
 @testitem "readavailable(TCPSocket) - data arrives before cancel" begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8013)
@@ -571,6 +590,7 @@ end
 end
 
 @testitem "readavailable(TCPSocket) - cancel does not crash other readers" begin
+    using CancellationTokens
     import Sockets
 
     port, server = Sockets.listenany(Sockets.localhost, 8014)

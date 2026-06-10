@@ -1,4 +1,5 @@
 @testitem "Custom JSON serialization" setup=[NamedPipes] begin
+    using JSONRPC
     using JSON
     using JSON: StructuralContext, begin_object, show_pair, end_object, show_json, Serializations.StandardSerialization
 

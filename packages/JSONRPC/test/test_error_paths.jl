@@ -237,6 +237,7 @@ end
 end
 
 @testitem "check_dead_endpoint! error message includes status" begin
+    using JSONRPC
     buf = IOBuffer()
     ep = JSONRPC.JSONRPCEndpoint(buf, buf)
     # ep is idle, not running

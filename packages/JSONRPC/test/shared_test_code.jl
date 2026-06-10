@@ -1,7 +1,8 @@
 @testmodule TestStructs begin
     using JSONRPC: @dict_readable, Outbound
+    import JSONRPC, CancellationTokens
 
-    export Foo, Foo2
+    export Foo, Foo2, JSONRPC, CancellationTokens
 
     @dict_readable struct Foo <: Outbound
         fieldA::Int
@@ -20,9 +21,9 @@
 end
 
 @testmodule NamedPipes begin
-    using Sockets, JSONRPC
+    using Sockets, JSONRPC, CancellationTokens
 
-    export get_named_pipe
+    export get_named_pipe, JSONRPC, CancellationTokens
 
     function get_named_pipe()
         socket_name = JSONRPC.generate_pipe_name()

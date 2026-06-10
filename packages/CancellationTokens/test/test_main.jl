@@ -3,17 +3,20 @@
 # ---------------------------------------------------------------------------
 
 @testitem "CancellationTokenSource starts in non-cancelled state" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     @test !is_cancellation_requested(get_token(src))
 end
 
 @testitem "cancel sets is_cancellation_requested" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     cancel(src)
     @test is_cancellation_requested(get_token(src))
 end
 
 @testitem "cancel is idempotent" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     cancel(src)
     cancel(src)
@@ -22,6 +25,7 @@ end
 end
 
 @testitem "close cancels the source" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     close(src)
     @test is_cancellation_requested(get_token(src))
@@ -32,12 +36,14 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "get_token returns a token that supports is_cancellation_requested" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     @test !is_cancellation_requested(token)
 end
 
 @testitem "Token reflects source cancellation state" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     @test !is_cancellation_requested(token)
@@ -46,6 +52,7 @@ end
 end
 
 @testitem "Multiple tokens from the same source share state" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     t1 = get_token(src)
     t2 = get_token(src)
@@ -59,6 +66,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "wait returns immediately when already cancelled" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     cancel(src)
     # Should not block
@@ -67,6 +75,7 @@ end
 end
 
 @testitem "wait blocks until cancel is called" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     done = Ref(false)
@@ -83,6 +92,7 @@ end
 end
 
 @testitem "wait returns immediately when cancelled before wait but after token creation" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     cancel(src)
@@ -91,6 +101,7 @@ end
 end
 
 @testitem "Multiple waiters all unblock on cancel" setup=[SpawnHelper] begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     results = Channel{Int}(10)
@@ -118,6 +129,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "Timeout source cancels after specified duration" begin
+    using CancellationTokens
     src = CancellationTokenSource(0.1)
     @test !is_cancellation_requested(get_token(src))
     wait(get_token(src))
@@ -125,6 +137,7 @@ end
 end
 
 @testitem "Timeout source can be cancelled early" begin
+    using CancellationTokens
     src = CancellationTokenSource(10.0)
     @test !is_cancellation_requested(get_token(src))
     cancel(src)
@@ -132,6 +145,7 @@ end
 end
 
 @testitem "Timeout source - wait returns after timeout" begin
+    using CancellationTokens
     t0 = time()
     src = CancellationTokenSource(0.1)
     wait(get_token(src))
@@ -145,6 +159,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "Combined source cancels when first token cancels" begin
+    using CancellationTokens
     src1 = CancellationTokenSource()
     src2 = CancellationTokenSource()
     combined = CancellationTokenSource(get_token(src1), get_token(src2))
@@ -156,6 +171,7 @@ end
 end
 
 @testitem "Combined source cancels when second token cancels" begin
+    using CancellationTokens
     src1 = CancellationTokenSource()
     src2 = CancellationTokenSource()
     combined = CancellationTokenSource(get_token(src1), get_token(src2))
@@ -168,6 +184,7 @@ end
 end
 
 @testitem "Combined source - wait unblocks on any parent cancel" setup=[SpawnHelper] begin
+    using CancellationTokens
     src1 = CancellationTokenSource()
     src2 = CancellationTokenSource()
     combined = CancellationTokenSource(get_token(src1), get_token(src2))
@@ -184,6 +201,7 @@ end
 end
 
 @testitem "Combined source with already-cancelled token cancels immediately" begin
+    using CancellationTokens
     src1 = CancellationTokenSource()
     cancel(src1)
     src2 = CancellationTokenSource()
@@ -194,6 +212,7 @@ end
 end
 
 @testitem "Combined source with already-cancelled token stress test" begin
+    using CancellationTokens
     # Regression test: creating a combined source with an already-cancelled
     # parent must not corrupt Julia's task workqueue.  The bug manifested as
     # `TypeError(expected=Task, got=nothing)` in `popfirst!(Workqueue)`.
@@ -208,6 +227,7 @@ end
 end
 
 @testitem "Combined source with single token" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     combined = CancellationTokenSource(get_token(src))
 
@@ -218,6 +238,7 @@ end
 end
 
 @testitem "Combined source with three tokens" begin
+    using CancellationTokens
     src1 = CancellationTokenSource()
     src2 = CancellationTokenSource()
     src3 = CancellationTokenSource()
@@ -231,6 +252,7 @@ end
 end
 
 @testitem "Combined source with timeout token" begin
+    using CancellationTokens
     timeout_src = CancellationTokenSource(0.1)
     manual_src = CancellationTokenSource()
     combined = CancellationTokenSource(get_token(timeout_src), get_token(manual_src))
@@ -246,6 +268,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "OperationCanceledException carries the token" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     token = get_token(src)
     ex = OperationCanceledException(token)
@@ -254,6 +277,7 @@ end
 end
 
 @testitem "OperationCanceledException is a subtype of Exception" begin
+    using CancellationTokens
     @test OperationCanceledException <: Exception
 end
 
@@ -262,6 +286,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "register callback invoked on cancel" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     called = Ref(false)
     register(get_token(src)) do
@@ -273,6 +298,7 @@ end
 end
 
 @testitem "register on already-cancelled token invokes immediately" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     cancel(src)
     called = Ref(false)
@@ -283,6 +309,7 @@ end
 end
 
 @testitem "register with source directly errors" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     @test_throws MethodError register(src) do
         nothing
@@ -290,6 +317,7 @@ end
 end
 
 @testitem "deregistration prevents callback invocation" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     called = Ref(false)
     reg = register(get_token(src)) do
@@ -301,6 +329,7 @@ end
 end
 
 @testitem "deregistration is idempotent" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     reg = register(get_token(src)) do
         nothing
@@ -311,6 +340,7 @@ end
 end
 
 @testitem "multiple callbacks all invoked" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     results = Int[]
     for i in 1:5
@@ -323,6 +353,7 @@ end
 end
 
 @testitem "callback error does not prevent other callbacks" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     called = Ref(false)
     register(get_token(src)) do
@@ -336,6 +367,7 @@ end
 end
 
 @testitem "combined source uses register (no tasks spawned)" begin
+    using CancellationTokens
     src1 = CancellationTokenSource()
     src2 = CancellationTokenSource()
     combined = CancellationTokenSource(get_token(src1), get_token(src2))
@@ -348,6 +380,7 @@ end
 end
 
 @testitem "combined source propagates synchronously from second parent" begin
+    using CancellationTokens
     src1 = CancellationTokenSource()
     src2 = CancellationTokenSource()
     combined = CancellationTokenSource(get_token(src1), get_token(src2))
@@ -358,6 +391,7 @@ end
 end
 
 @testitem "register returns CancellationTokenRegistration" begin
+    using CancellationTokens
     src = CancellationTokenSource()
     reg = register(get_token(src)) do
         nothing
@@ -370,6 +404,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testitem "Type stability (@inferred) of all public methods" begin
+    using CancellationTokens
     import Sockets
 
     # --- Core constructors ---

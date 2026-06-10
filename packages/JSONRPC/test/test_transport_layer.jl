@@ -1,4 +1,5 @@
 @testitem "write_transport_layer round-trip" begin
+    using JSONRPC
     using CancellationTokens
     # Write a message into a buffer, then read it back via read_transport_layer
     buf = IOBuffer()
@@ -10,6 +11,7 @@
 end
 
 @testitem "write_transport_layer Unicode round-trip" begin
+    using JSONRPC
     using CancellationTokens
     buf = IOBuffer()
     payload = "{\"text\":\"héllo wörld 🚀\"}"
@@ -21,6 +23,7 @@ end
 end
 
 @testitem "read_transport_layer: missing Content-Length" begin
+    using JSONRPC
     using CancellationTokens
     # A header block that has no Content-Length should return nothing
     buf = IOBuffer("X-Custom: value\r\n\r\n{\"a\":1}")
@@ -30,6 +33,7 @@ end
 end
 
 @testitem "read_transport_layer: empty stream" begin
+    using JSONRPC
     using CancellationTokens
     # An empty/closed stream should return nothing (first readline returns "")
     buf = IOBuffer("")
@@ -39,6 +43,7 @@ end
 end
 
 @testitem "read_transport_layer: truncated payload" begin
+    using JSONRPC
     using CancellationTokens
     # Content-Length says 100 bytes, but only a few bytes follow
     header = "Content-Length: 100\r\n\r\n"
@@ -49,6 +54,7 @@ end
 end
 
 @testitem "read_transport_layer: IOError returns nothing" begin
+    using JSONRPC
     # Simulate an IOError during read by using a closed PipeEndpoint
     using Sockets, CancellationTokens
     pipe_name = JSONRPC.generate_pipe_name()
@@ -71,6 +77,7 @@ end
 end
 
 @testitem "read_transport_layer: extra colons in header value" begin
+    using JSONRPC
     using CancellationTokens
     # Header value "Content-Length: 13" has one colon, but what about
     # "X-Custom: foo:bar:baz"? The split(line, ":", limit=2) should handle it.
@@ -84,6 +91,7 @@ end
 end
 
 @testitem "read_transport_layer: header with no colon is skipped" begin
+    using JSONRPC
     using CancellationTokens
     # A malformed header line with no colon should be silently skipped
     payload = "{\"ok\":true}"
@@ -96,6 +104,7 @@ end
 end
 
 @testitem "write_transport_layer Content-Length is byte count" begin
+    using JSONRPC
     # Verify that Content-Length reflects byte count, not character count for multi-byte chars
     buf = IOBuffer()
     payload = "{\"emoji\":\"🎉\"}"  # 🎉 is 4 bytes in UTF-8
@@ -112,6 +121,7 @@ end
 # ── NewlineDelimitedFraming tests ──────────────────────────────────────────────
 
 @testitem "NewlineDelimited: write/read round-trip" begin
+    using JSONRPC
     using CancellationTokens
     buf = IOBuffer()
     framing = JSONRPC.NewlineDelimitedFraming()
@@ -123,6 +133,7 @@ end
 end
 
 @testitem "NewlineDelimited: Unicode round-trip" begin
+    using JSONRPC
     using CancellationTokens
     buf = IOBuffer()
     framing = JSONRPC.NewlineDelimitedFraming()
@@ -135,6 +146,7 @@ end
 end
 
 @testitem "NewlineDelimited: empty stream returns nothing" begin
+    using JSONRPC
     using CancellationTokens
     buf = IOBuffer("")
     framing = JSONRPC.NewlineDelimitedFraming()
@@ -144,6 +156,7 @@ end
 end
 
 @testitem "NewlineDelimited: multiple messages" begin
+    using JSONRPC
     using CancellationTokens
     buf = IOBuffer()
     framing = JSONRPC.NewlineDelimitedFraming()
@@ -162,6 +175,7 @@ end
 end
 
 @testitem "NewlineDelimited: write has no Content-Length header" begin
+    using JSONRPC
     buf = IOBuffer()
     framing = JSONRPC.NewlineDelimitedFraming()
     JSONRPC.write_transport_layer(buf, "{\"a\":1}", framing)
@@ -172,6 +186,7 @@ end
 end
 
 @testitem "NewlineDelimited: IOError returns nothing" begin
+    using JSONRPC
     using Sockets, CancellationTokens
     pipe_name = JSONRPC.generate_pipe_name()
     server = listen(pipe_name)
@@ -193,6 +208,7 @@ end
 end
 
 @testitem "NewlineDelimited: named-pipe round-trip" begin
+    using JSONRPC
     using Sockets, CancellationTokens
     pipe_name = JSONRPC.generate_pipe_name()
     server = listen(pipe_name)
@@ -220,6 +236,7 @@ end
 end
 
 @testitem "JSONRPCEndpoint: constructor with framing kwarg" begin
+    using JSONRPC
     # Default framing
     ep_default = JSONRPC.JSONRPCEndpoint(IOBuffer(), IOBuffer())
     @test ep_default.framing isa JSONRPC.ContentLengthFraming
@@ -234,6 +251,7 @@ end
 end
 
 @testitem "NewlineDelimited: full endpoint round-trip over pipes" begin
+    using JSONRPC
     using Sockets, CancellationTokens
 
     pipe_name = JSONRPC.generate_pipe_name()
