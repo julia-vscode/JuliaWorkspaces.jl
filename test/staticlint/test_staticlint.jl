@@ -2477,3 +2477,35 @@ end
         """)
     @test cst isa EXPR
 end
+
+@testitem "constructors on parameterized type aliases (#394)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module M
+        struct Container{T}
+            value::T
+        end
+        const IntContainer = Container{Int}
+        function IntContainer(x::Float64)
+            return IntContainer(round(Int, x))
+        end
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module M
+        struct Foo{A,B} end
+        const Bar = Foo{Int}
+        const Baz = Bar{Int}
+        Baz() = 1
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end

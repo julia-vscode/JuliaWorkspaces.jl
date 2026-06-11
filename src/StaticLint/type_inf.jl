@@ -75,6 +75,19 @@ function infer_type_assignment_rhs(binding, state, scope)
                     end
                 end
             end
+        elseif CSTParser.iscurly(rhs)
+            # `const Alias = SomeType{...}` aliases a parameterized type; the
+            # alias is itself a DataType, so adding methods to it is valid.
+            callname = CSTParser.get_name(rhs)
+            if isidentifier(callname)
+                resolve_ref(callname, scope, state)
+                if hasref(callname, meta_dict)
+                    rb = get_root_method(refof(callname, meta_dict))
+                    if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
+                        settype!(binding, CoreTypes.DataType)
+                    end
+                end
+            end
         elseif headof(rhs) === :INTEGER
             settype!(binding, CoreTypes.Int)
         elseif headof(rhs) === :HEXINT
