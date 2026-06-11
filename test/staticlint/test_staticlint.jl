@@ -2377,3 +2377,84 @@ end
         @test refof(helpers[1], meta_dict) !== nothing
     end
 end
+
+@testitem "assignment to outer local inside inner scope (#393)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
+
+    function has_unused(src)
+        cst, meta_dict, jw = parse_and_pass(src)
+        any(errorof(x, meta_dict) === UnusedBinding for (_, x) in collect_hints(cst, meta_dict, jw))
+    end
+
+    # Assigning to a variable already local in an enclosing scope reassigns it
+    # rather than introducing a new (unused) local.
+    @test !has_unused("""
+        function f()
+            x = 1
+            let y = 2
+                x = y + 1
+            end
+            return x
+        end""")
+
+    @test !has_unused("""
+        function f()
+            x = 1
+            let
+                let
+                    x = 2
+                end
+            end
+            return x
+        end""")
+
+    # Closure capturing/reassigning an outer local.
+    @test !has_unused("""
+        function f()
+            x = 1
+            g() = (x = 2)
+            g()
+            return x
+        end""")
+
+    # `do` block (also a closure).
+    @test !has_unused("""
+        function f()
+            x = 1
+            map([1]) do _
+                x = 2
+            end
+            return x
+        end""")
+
+    # Nested soft scopes reaching an enclosing local.
+    @test !has_unused("""
+        function f()
+            x = 1
+            for i in 1:2
+                for j in 1:2
+                    x = i + j
+                end
+            end
+            return x
+        end""")
+
+    # A genuinely unused local introduced inside a `let` is still flagged.
+    @test has_unused("""
+        function f()
+            let
+                z = 1
+            end
+        end""")
+
+    # An explicit `local` inside a `let` introduces a distinct binding; here the
+    # inner unused `local x` is still flagged.
+    @test has_unused("""
+        function f()
+            x = 1
+            @show x
+            let
+                local x = 2
+            end
+        end""")
+end

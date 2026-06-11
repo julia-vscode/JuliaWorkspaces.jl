@@ -380,6 +380,11 @@ function add_binding(x, state, scope=state.scope)
             scope.names[name] = b
         elseif is_soft_scope(scope) && parentof(scope) isa Scope && isidentifier(b.name) && scopehasbinding(parentof(scope), valofid(b.name)) && !enforce_hard_scope(x, scope)
             add_binding(x, state, scope.parent)
+        elseif isidentifier(b.name) && !enforce_hard_scope(x, scope) &&
+                (outer_scope = enclosing_local_binding_scope(scope, valofid(b.name))) !== nothing
+            # Assigning to a name already local in an enclosing local scope
+            # (let block / closure) reassigns it rather than introducing a new local.
+            add_binding(x, state, outer_scope)
         else
             scope.names[name] = b
         end
@@ -391,6 +396,19 @@ end
 
 function enforce_hard_scope(x::EXPR, scope)
     scope.expr.head === :for && is_in_fexpr(x, x-> x == scope.expr.args[1])
+end
+
+# Nearest enclosing *local* scope (stopping before the global module/file scope)
+# that already binds `name`, or nothing. Used to decide whether an assignment in
+# a local scope reassigns a variable inherited from an enclosing local scope
+# (let block / closure) rather than introducing a fresh local.
+function enclosing_local_binding_scope(scope, name::String)
+    p = parentof(scope)
+    while p isa Scope && !is_toplevel_scope(p)
+        scopehasbinding(p, name) && return p
+        p = parentof(p)
+    end
+    return nothing
 end
 
 name_is_getfield(x) = parentof(x) isa EXPR && parentof(parentof(x)) isa EXPR && CSTParser.is_getfield_w_quotenode(parentof(parentof(x)))
