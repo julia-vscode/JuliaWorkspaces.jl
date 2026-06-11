@@ -2834,6 +2834,63 @@ end
         """) == [true, true, true, true, true, true, true, true, true]
 end
 
+@testitem "property destructuring infers the field type (#357)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof
+
+    # `(; s) = t` should infer `s`'s type as the field's declared type (S),
+    # the same as the explicit `s = t.s`.
+    cst, meta_dict = parse_and_pass("""
+        struct S
+            a
+        end
+
+        struct T
+            s::S
+        end
+
+        function f1(t::T)
+            (; s) = t
+            a = s.a
+        end
+
+        function f2(t::T)
+            s = t.s
+            x = s.a
+        end
+        """)
+    sc = scopeof(cst, meta_dict)
+    S = sc.names["S"]
+    @test scopeof(sc.names["f1"].val, meta_dict).names["s"].type == S
+    @test scopeof(sc.names["f2"].val, meta_dict).names["s"].type == S
+end
+
+@testitem "hint offsets with unicode (#253)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: headof
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # Hint offsets are byte offsets into the source. Multibyte unicode
+    # characters (e.g. `α`) preceding an error must not shift the reported
+    # offset off the start of the flagged expression.
+    src = "struct Buz\n    x::Integers\n    α::Array{Float65,1}\nend\n"
+    cst, meta_dict, jw = parse_and_pass(src)
+    cu = codeunits(src)
+    hints = collect_hints(cst, meta_dict, jw)
+
+    # For every hint carrying a value, byte offset + span extracts its own text.
+    for (offset, x) in hints
+        v = CSTParser.valof(x)
+        v isa String || continue
+        @test String(cu[offset+1:offset+x.span]) == v
+    end
+
+    # `Float65` sits after the multibyte `α`; its offset must be the byte offset.
+    float65 = find_first(cst, x -> headof(x) === :IDENTIFIER && CSTParser.valof(x) == "Float65")
+    @test float65 !== nothing
+    off = first(o for (o, x) in hints if x === float65)
+    @test String(cu[off+1:off+float65.span]) == "Float65"
+    @test off == first(findfirst("Float65", src)) - 1  # 0-based byte offset
+end
+
 @testitem "using Base in baremodule (#368)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: headof, hasref
     CSTParser = JuliaWorkspaces.CSTParser
