@@ -642,10 +642,10 @@ function check_farg_unused(x::EXPR, meta_dict)
                 arg = sig.args[i]
                 if arg.head === :parameters
                     for arg2 in arg.args
-                        !check_farg_unused_(arg2, arg_names, meta_dict) && return
+                        !check_farg_unused_(arg2, arg_names, meta_dict) && continue
                     end
                 else
-                    !check_farg_unused_(arg, arg_names, meta_dict) && return
+                    !check_farg_unused_(arg, arg_names, meta_dict) && continue
                 end
             end
         end

@@ -576,3 +576,45 @@ end
     @test !isempty(result.items)
     @test any(item -> item.label == "greet", result.items)
 end
+
+@testitem "Completions: unresolvable VarRef does not truncate module symbols" begin
+    using JuliaWorkspaces.URIs2: @uri_str
+    const SS = JuliaWorkspaces.SymbolServer
+    const SL = JuliaWorkspaces.StaticLint
+
+    # Regression for the `_collect_completions` fix: a matching but unresolvable
+    # `VarRef` symbol in a module (e.g. a re-export whose target is absent from
+    # the store) must skip just that symbol — not abort the whole loop and drop
+    # every remaining symbol in the module.
+    modname = SS.VarRef(nothing, :M)
+    genname(s) = SS.VarRef(modname, Symbol(s))
+    gen(s) = SS.GenericStore(genname(s), SS.FakeTypeName(SS.VarRef(nothing, :Any), SS.FakeTypeName[]), "", true)
+
+    goods = ["tst_a", "tst_b", "tst_c", "tst_d", "tst_e", "tst_f", "tst_g", "tst_h", "tst_i", "tst_j"]
+    vals = Dict{Symbol,Any}()
+    for g in goods
+        vals[Symbol(g)] = gen(g)
+    end
+    # A dangling VarRef (its target is not in the depot) that also matches "tst".
+    vals[:tst_bad] = SS.VarRef(modname, :tst_bad)
+
+    mod = SS.ModuleStore(modname, vals, "", true, Symbol.(vcat(goods, ["tst_bad"])), Symbol[])
+    # Empty depot ⇒ `_lookup(::VarRef, …)` returns nothing for the dangling ref.
+    env = SL.ExternalEnv(Dict{Symbol,SS.ModuleStore}(), Dict{SS.VarRef,Vector{SS.VarRef}}(), Symbol[])
+
+    st = SourceText("tst", "julia")
+    cst = JuliaWorkspaces.CSTParser.parse("tst")
+    state = JuliaWorkspaces._CompletionState(
+        3, Dict{String,JuliaWorkspaces.CompletionResultItem}(), 3, 3, nothing, cst,
+        uri"file:///t.jl", st, JuliaWorkspaces.MetaDict(), env, :normal, Dict{String,Any}(), nothing)
+
+    JuliaWorkspaces._collect_completions(mod, "tst", state, true)
+
+    labels = keys(state.completions)
+    # Every resolvable symbol must be offered, regardless of where the dangling
+    # VarRef falls in iteration order.
+    for g in goods
+        @test g in labels
+    end
+    @test !("tst_bad" in labels)
+end

@@ -861,6 +861,23 @@ end
     @test errorof(CSTParser.get_sig(cst.args[1]).args[5].args[1], meta_dict) === UnusedFunctionArgument
 end
 
+@testitem "check_farg_unused skipped argument (#330)" setup=[shared_static_lint] begin
+    import CSTParser
+    using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument
+
+    # An underscore (or otherwise skipped) argument must not stop subsequent
+    # arguments from being checked.
+    let (cst, meta_dict) = parse_and_pass("function f(_, y)\n    return\nend")
+        @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === nothing
+        @test errorof(CSTParser.get_sig(cst[1])[5], meta_dict) === UnusedFunctionArgument
+    end
+    let (cst, meta_dict) = parse_and_pass("function f(x, _, z)\n    return\nend")
+        @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === UnusedFunctionArgument
+        @test errorof(CSTParser.get_sig(cst[1])[5], meta_dict) === nothing
+        @test errorof(CSTParser.get_sig(cst[1])[7], meta_dict) === UnusedFunctionArgument
+    end
+end
+
 @testitem "check_farg_unused reassigned argument" setup=[shared_static_lint] begin
     import CSTParser
     using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument

@@ -703,7 +703,7 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
         length(possible_names) == 0 && continue
         if v isa SymbolServer.VarRef
             v = SymbolServer._lookup(v, symbols, true)
-            v === nothing && return
+            v === nothing && continue
         end
         if StaticLint.isexportedby(canonical_name, m) || inclexported
             foreach(possible_names) do n
