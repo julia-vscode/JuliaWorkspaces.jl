@@ -109,3 +109,26 @@ end
 
     @test has_lint_code(jw, IncludeLoop)
 end
+
+@testitem "include: joinpath with string literals resolves (#311)" setup=[shared_include_diagnostics] begin
+    # `include(joinpath("subdir", "myfile.jl"))` must resolve like
+    # `include("subdir/myfile.jl")`: the file is loaded, its bindings are
+    # visible, and no MissingFile is reported.
+    jw = load_scenario("joinpath_resolve")
+
+    @test !has_lint_code(jw, MissingFile)
+    # the included file is actually part of the workspace
+    @test any(u -> endswith(string(u), "subdir/myfile.jl"), get_julia_files(jw))
+    # `foo` (defined in the included file) resolves — no missing-reference diag
+    main = file_uri("joinpath_resolve", "main.jl")
+    @test !any(d -> startswith(d.message, "Missing reference"), get_diagnostic(jw, main))
+end
+
+@testitem "include: joinpath and string resolve to same path (#311)" setup=[shared_include_diagnostics] begin
+    # Including the same file via a plain string and via joinpath must resolve to
+    # the same path, detected as a DuplicateInclude.
+    jw = load_scenario("joinpath_duplicate")
+
+    @test has_lint_code(jw, DuplicateInclude)
+    @test !has_lint_code(jw, MissingFile)
+end
