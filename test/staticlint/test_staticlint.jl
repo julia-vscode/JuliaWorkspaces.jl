@@ -2288,3 +2288,19 @@ end
         @test refof(cst.args[1].args[3].args[5].args[3].args[3].args[2].args[1], meta_dict).is_public
     end
 end
+
+@testitem "circular binding resolution does not overflow (#404)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: @uri_str
+
+    # `const Bar = Foo.Bar` inside `module Foo` makes resolving `Foo.Bar`
+    # recurse into itself; without a visited guard in `_get_field` the
+    # semantic pass stack-overflows.
+    jw = JuliaWorkspace()
+    root = uri"file:///d/test.jl"
+    add_file!(jw, TextFile(root, SourceText(
+        "module Foo\nimport Bar\nimport Bar: foo\ninclude(\"test2.jl\")\nend\n", "julia")))
+    add_file!(jw, TextFile(uri"file:///d/test2.jl", SourceText("const Bar = Foo.Bar\n", "julia")))
+
+    meta_dict, _ = JuliaWorkspaces.derived_static_lint_meta_for_root(jw.runtime, root)
+    @test meta_dict isa Dict
+end
