@@ -2556,6 +2556,51 @@ end
     end
 end
 
+@testitem "function definition satisfying a `local` declaration (#349)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # A bare `local f` declaration does not assign a value, so a later method
+    # definition for that name is not a redefinition.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function fun()
+            local inner_fun
+            let
+                inner_fun(x) = x
+            end
+        end""")
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function fun()
+            local inner_fun
+            inner_fun(x) = x
+        end""")
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    # But once a value is assigned, defining a method is still flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function fun()
+            local inner_fun
+            inner_fun = 1
+            inner_fun(x) = x
+        end""")
+        @test has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function fun()
+            inner_fun = 1
+            inner_fun(x) = x
+        end""")
+        @test has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
 @testitem "constructor for existing type (#395)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, InvalidTypeDeclaration
 
