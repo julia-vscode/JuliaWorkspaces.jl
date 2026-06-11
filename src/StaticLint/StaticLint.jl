@@ -150,9 +150,11 @@ mutable struct Delayed <: TraverseState
     workspace_packages::Dict{String,Any}
     flags::Int
     meta_dict::Dict{UInt64,Meta}
+    urefs::Vector{EXPR} # refs that failed to resolve
+    deferred_unused::Vector{Tuple{Binding,Scope}} # unused checks pending parent-scope completion
 end
 
-Delayed(scope, env, workspace_packages, meta_dict) = Delayed(scope, env, workspace_packages, 0, meta_dict)
+Delayed(scope, env, workspace_packages, meta_dict, flags=0) = Delayed(scope, env, workspace_packages, flags, meta_dict, EXPR[], Tuple{Binding,Scope}[])
 
 function process_EXPR(x::EXPR, state::Delayed)
     meta_dict = state.meta_dict
@@ -169,9 +171,13 @@ function process_EXPR(x::EXPR, state::Delayed)
     traverse(x, state)
     state.flags = old
     if state.scope != s0
+        retry_urefs!(state)
         for b in values(state.scope.names)
             infer_type_by_use(b, state.env, meta_dict)
-            check_unused_binding(b, state.scope, meta_dict)
+            # Defer the unused-binding check until the enclosing scope has been
+            # fully traversed: a binding may be captured by a closure that is
+            # defined textually later (see retry_urefs!).
+            push!(state.deferred_unused, (b, state.scope))
         end
         state.scope = s0
     end
@@ -230,13 +236,20 @@ function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr
     unique!(state.delayed)
     for x in state.delayed
         if hasscope(x, meta_dict)
-            traverse(x, Delayed(scopeof(x, meta_dict), env, workspace_packages, meta_dict))
+            ds = Delayed(scopeof(x, meta_dict), env, workspace_packages, meta_dict)
+            traverse(x, ds)
+            retry_urefs!(ds)
             for (k, b) in scopeof(x, meta_dict).names
                 infer_type_by_use(b, env, meta_dict)
                 check_unused_binding(b, scopeof(x, meta_dict), meta_dict)
             end
         else
-            traverse(x, Delayed(retrieve_delayed_scope(x, meta_dict), env, workspace_packages, meta_dict))
+            ds = Delayed(retrieve_delayed_scope(x, meta_dict), env, workspace_packages, meta_dict)
+            traverse(x, ds)
+            retry_urefs!(ds)
+        end
+        for (b, sc) in ds.deferred_unused
+            check_unused_binding(b, sc, meta_dict)
         end
     end
     if state.resolveonly !== nothing

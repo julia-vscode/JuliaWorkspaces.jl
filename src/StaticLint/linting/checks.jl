@@ -1108,10 +1108,21 @@ function check_unused_binding(b::Binding, scope::Scope, meta_dict)
         refs = loose_refs(b, meta_dict)
         if (isempty(refs) || length(refs) == 1 && refs[1] == b.name) &&
                 !is_sig_arg(b.name) && !is_overwritten_in_loop(b.name, meta_dict) &&
-                !is_overwritten_subsequently(b, scope, meta_dict) && !is_kw_of_macrocall(b)
+                !is_overwritten_subsequently(b, scope, meta_dict) && !is_kw_of_macrocall(b) &&
+                !captures_outer_local(b, scope)
             seterror!(b.name, UnusedBinding, meta_dict)
         end
     end
+end
+
+# A binding whose name also exists as a local in an enclosing scope may be a
+# closure capturing that outer local (assigned-into rather than a fresh local),
+# so it shouldn't be reported as unused.
+function captures_outer_local(b::Binding, scope::Scope)
+    isidentifier(b.name) || return false
+    name = valofid(b.name)
+    name isa String || return false
+    return enclosing_local_binding_scope(scope, name) !== nothing
 end
 
 all_underscore(s) = false

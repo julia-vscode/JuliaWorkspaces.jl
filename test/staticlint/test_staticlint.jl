@@ -2879,3 +2879,174 @@ end
         @test all(id -> refof(id, meta_dict) !== nothing, uses)
     end
 end
+
+@testitem "closures referencing variables defined later (#313)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, refof, bindingof, UnusedBinding
+
+    has_unused(cst, meta_dict, jw) =
+        any(errorof(x, meta_dict) === UnusedBinding for (_, x) in collect_hints(cst, meta_dict, jw))
+    # A missing reference is collected as an identifier hint with no error code.
+    has_missingref(cst, meta_dict, jw) =
+        any(errorof(x, meta_dict) === nothing for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            function g()
+                println("hello, \$(who)")
+            end
+            who = "world"
+            g()
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            g() = who
+            who = 1
+            g()
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            function g()
+                function h()
+                    return who
+                end
+                h()
+            end
+            who = 1
+            g()
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            let
+                g() = v
+                v = 1
+                g()
+            end
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    # A genuinely undefined reference is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            g() = undefined_var
+            g()
+        end""")
+        @test has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    # Closure writes to an outer local declared later; both resolve to it.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function foo()
+            function bar()
+                x = 2
+            end
+            local x
+            bar()
+            return x
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+        local_x = bindingof(cst[1][3][2][2], meta_dict)
+        return_x = refof(cst[1][3][4][2], meta_dict)
+        @test return_x === local_x
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            function g()
+                return x
+            end
+            local x = 10
+            g()
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            function g1()
+                return v
+            end
+            function g2()
+                return v + 1
+            end
+            v = 1
+            g1() + g2()
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function foo()
+            function reader()
+                return x
+            end
+            function writer()
+                x = 2
+            end
+            local x
+            writer()
+            reader()
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            function g()
+                function h()
+                    x = 99
+                end
+                h()
+            end
+            local x
+            g()
+            return x
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function foo()
+            function bar()
+                tmp = x + 1
+                x = tmp
+                return tmp
+            end
+            local x = 0
+            bar()
+            return x
+        end""")
+        @test !has_missingref(cst, meta_dict, jw)
+        @test !has_unused(cst, meta_dict, jw)
+    end
+
+    # A truly unused inner local is still flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function foo()
+            function bar()
+                y = 2
+            end
+            bar()
+        end""")
+        @test has_unused(cst, meta_dict, jw)
+    end
+end
