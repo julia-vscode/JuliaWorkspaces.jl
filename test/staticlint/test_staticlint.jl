@@ -925,6 +925,52 @@ end
     @test getmeta(cst[2], meta_dict).error === nothing
 end
 
+@testitem "importing a type is not a const redefinition (#352)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidRedefofConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    let (cst, meta_dict, jw) = parse_and_pass("import Base: AbstractDict")
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        import Base: AbstractDict
+        import Base: AbstractDict
+        """)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        using Base
+        using Base: AbstractDict
+        """)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        import Base
+        import Base: AbstractDict
+        """)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        using Base
+        import Base: AbstractDict
+        """)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        import Base: AbstractDict
+        const AbstractDict = 1
+        """)
+        @test has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+end
+
 @testitem "hoisting of inner constructors" setup=[shared_static_lint] begin
     let (cst, meta_dict, jw) = parse_and_pass("""
     struct ASDF
