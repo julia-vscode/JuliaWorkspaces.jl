@@ -468,6 +468,25 @@ end
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2], meta_dict) == JuliaWorkspaces.StaticLint.IncorrectCallArgs
 end
 
+@testitem "check_call function with no methods (#445)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, FunctionHasNoMethods, IncorrectCallArgs
+
+    # A bare forward declaration `function f end` defines no methods, so any
+    # call to it can only MethodError.
+    for src in ["function f end\nf(1)", "function f end\nf()", "function f end\nf(1, 2, 3)"]
+        cst, meta_dict = parse_and_pass(src)
+        @test errorof(cst.args[2], meta_dict) === FunctionHasNoMethods
+    end
+
+    # Once a real method exists, normal arg-count checking applies.
+    let (cst, meta_dict) = parse_and_pass("function f end\nf(x) = x\nf(1)")
+        @test errorof(cst.args[3], meta_dict) === nothing
+    end
+    let (cst, meta_dict) = parse_and_pass("function f end\nf(x) = x\nf(1, 2, 3)")
+        @test errorof(cst.args[3], meta_dict) === IncorrectCallArgs
+    end
+end
+
 @testitem "check_call method definition" setup=[shared_static_lint] begin
     (cst, meta_dict) = parse_and_pass("""
     Base.sin(a,b) = 1

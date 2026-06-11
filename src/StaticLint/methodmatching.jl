@@ -273,6 +273,12 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
         # `rem_wheres_decls` strips outer `where` clauses (so parametric
         # `Vararg{T,N} where N` is reachable) and the outer return-type decl.
         sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(method))
+
+        # Bare forward declaration `function f end`: `get_sig` returns the lone
+        # name (an EXPR with `args === nothing`), no signature to match. It is
+        # not a method, so it matches no call.
+        sig.args === nothing && return false
+
         # Element type for an explicit `::Vararg{T,...}` slot.
         vararg_T = nothing
         if length(sig.args) > 0
