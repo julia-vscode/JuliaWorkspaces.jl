@@ -2618,3 +2618,21 @@ end
         @test errorof(cst.args[2], meta_dict) === IncorrectCallArgs
     end
 end
+
+@testitem "using Base in baremodule (#368)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: headof, hasref
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # Top-level baremodule (no enclosing module to supply Base).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        baremodule Flags
+        using Base: @enum
+        @enum Flag flag
+        end
+        """)
+        baseid = find_first(cst, x -> headof(x) === :IDENTIFIER && CSTParser.valof(x) == "Base")
+        @test baseid !== nothing
+        @test hasref(baseid, meta_dict)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
