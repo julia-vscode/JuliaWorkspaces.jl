@@ -190,7 +190,13 @@ function func_nargs(x::EXPR)
                 (isdeclaration(arg) &&
                 ((isidentifier(arg.args[2]) && valofid(arg.args[2]) == "Vararg") ||
                 (iscurly(arg.args[2]) && isidentifier(arg.args[2].args[1]) && valofid(arg.args[2].args[1]) == "Vararg")))
-                maxargs = typemax(Int)
+                bn = bounded_vararg_N(arg)
+                if bn !== nothing
+                    minargs += bn
+                    maxargs !== typemax(Int) && (maxargs += bn)
+                else
+                    maxargs = typemax(Int)
+                end
             else
                 minargs += 1
                 maxargs !== typemax(Int) && (maxargs += 1)
@@ -205,8 +211,17 @@ function func_nargs(m::SymbolServer.MethodStore)
     minargs, maxargs, kws, kwsplat = 0, 0, Symbol[], false
 
     for arg in m.sig
-        if CoreTypes.isva(last(arg))
-            maxargs = typemax(Int)
+        t = last(arg)
+        if CoreTypes.isva(t)
+            va = unwrap_fakeunionall(t)
+            # Bounded `Vararg{T,N}` contributes exactly N args. Unbounded forms
+            # (`Vararg{T}` / `Vararg{T,N} where N`) allow any count.
+            if va isa SymbolServer.FakeTypeofVararg && isdefined(va, :N) && va.N isa Integer
+                minargs += va.N
+                maxargs !== typemax(Int) && (maxargs += va.N)
+            else
+                maxargs = typemax(Int)
+            end
         else
             minargs += 1
             maxargs !== typemax(Int) && (maxargs += 1)
@@ -302,17 +317,30 @@ function check_call(x, env::ExternalEnv, meta_dict)
         tls = retrieve_toplevel_scope(x, meta_dict)
         tls === nothing && return @warn "Couldn't get top-level scope." # General check, this means something has gone wrong.
         func_ref === nothing && return
-        !sig_match_any(func_ref, x, call_counts, tls, env) && seterror!(x, IncorrectCallArgs, meta_dict)
+        !sig_match_any(func_ref, x, call_counts, tls, env, meta_dict) && seterror!(x, IncorrectCallArgs, meta_dict)
     end
 end
 
-function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, x, call_counts, tls::Scope, env::ExternalEnv)
-    iterate_over_ss_methods(func_ref, tls, env, m -> compare_f_call(func_nargs(m), call_counts))
+function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
+    # we can't statically determine how many arguments a splat will take up
+    if call_has_splat(x)
+        return iterate_over_ss_methods(func_ref, tls, env, m -> compare_f_call(func_nargs(m), call_counts))
+    end
+    args, kws = call_arg_types(x, false, meta_dict)
+    iterate_over_ss_methods(func_ref, tls, env, m -> match_method(args, kws, m, getsymbols(env), meta_dict))
 end
 
-function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::ExternalEnv)
+function call_has_splat(x::EXPR)
+    x.args === nothing && return false
+    for a in x.args
+        CSTParser.issplat(a) && return true
+    end
+    return false
+end
+
+function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
     if func_ref.val isa SymbolServer.FunctionStore || func_ref.val isa SymbolServer.DataTypeStore
-        match = sig_match_any(func_ref.val, x, call_counts, tls, env)
+        match = sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict)
         match && return true
     end
 
@@ -325,35 +353,44 @@ function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::Exter
     # function-name node, so get_method() below won't find it.  Checking val
     # directly ensures the first method definition is always considered.
     if has_at_least_one_method
-        sig_match_any(func_ref.val, x, call_counts, tls, env) && return true
+        sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict) && return true
     end
 
     for r in func_ref.refs
         method = get_method(r)
         method === nothing && continue
         has_at_least_one_method = true
-        sig_match_any(method, x, call_counts, tls, env) && return true
+        sig_match_any(method, x, call_counts, tls, env, meta_dict) && return true
     end
     return !has_at_least_one_method
 end
 
-function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv)
-    if CSTParser.defines_function(func)
-        m_counts = func_nargs(func)
-    elseif CSTParser.defines_struct(func)
-        m_counts = struct_nargs(func)
-    else
-        return true # We shouldn't get here
-    end
-    if compare_f_call(m_counts, call_counts)
-        return true
-    else
+function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
+    if CSTParser.defines_function(func) || CSTParser.defines_struct(func)
+        # `@kwdef`-style macro-wrapped struct defs synthesise extra
+        # constructors at expansion time; we can't see them statically.
+        # `struct_nargs` already returns a permissive `(0, typemax, …)` for
+        # that case — defer to arity-only here.
+        if CSTParser.defines_struct(func) && parentof(func) isa EXPR && CSTParser.ismacrocall(parentof(func))
+            return compare_f_call(struct_nargs(func), call_counts)
+        end
+        # Splat in the call → unknown actual arity, fall back to arity-only.
+        if call_has_splat(x)
+            m_counts = CSTParser.defines_struct(func) ? struct_nargs(func) : func_nargs(func)
+            compare_f_call(m_counts, call_counts) && return true
+        else
+            args, kws = call_arg_types(x, false, meta_dict)
+            match_method(args, kws, func, getsymbols(env), meta_dict) && return true
+        end
+        # Preserve the existing sig-self check: if the call expression being
+        # analysed *is* the method's own signature, don't flag it.
         x1 = CSTParser.rem_where_decl(CSTParser.get_sig(func))
         if (x1.head == :call && x1 == x) || (!(x1.args isa Nothing) && x1.args[1].head == :call && x1.args[1] == x)
             return true
         end
+        return false
     end
-    return false
+    return true # We shouldn't get here
 end
 
 function get_method(name::EXPR)
@@ -421,7 +458,7 @@ function check_incorrect_iter_spec(x, body, env, meta_dict)
         elseif hasref(rng, meta_dict) && refof(rng, meta_dict) isa Binding && refof(rng, meta_dict).type !== nothing
             type = get_eventual_datatype(refof(rng, meta_dict).type, env)
             try
-                if type !== nothing && _issubtype(type, getsymbols(env)[:Core][:Number], env.symbols)
+                if type !== nothing && _issubtype(type, getsymbols(env)[:Core][:Number], env.symbols, meta_dict)
                     seterror!(x, IncorrectIterSpec, meta_dict)
                 end
             catch err

@@ -368,3 +368,55 @@ end
         @test my.ref.type.name.name.name == :Float64
     end
 end
+
+@testitem "bounded Vararg{T,N} matching (#422)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: func_nargs, match_method, ExternalEnv, errorof, IncorrectCallArgs
+    using JuliaWorkspaces.SymbolServer: MethodStore, FakeTypeName, FakeTypeofVararg, VarRef, EnvStore
+
+    int = FakeTypeName(VarRef(VarRef(nothing, :Core), :Int64), Any[])
+    any_t = FakeTypeName(VarRef(VarRef(nothing, :Core), :Any), Any[])
+    mk(sig) = MethodStore(:f, :M, "/tmp/M.jl", Int32(1), sig, Symbol[], any_t)
+
+    m_bound = mk(Pair{Any,Any}[:x => FakeTypeofVararg(int, 3)])
+    m_unb   = mk(Pair{Any,Any}[:x => FakeTypeofVararg(int)])
+    m_pref  = mk(Pair{Any,Any}[:p => int, :x => FakeTypeofVararg(int, 2)])
+
+    # func_nargs: bounded → exact, unbounded → typemax.
+    @test func_nargs(m_bound) == (3, 3,            Symbol[], false)
+    @test func_nargs(m_unb)   == (0, typemax(Int), Symbol[], false)
+    @test func_nargs(m_pref)  == (3, 3,            Symbol[], false)
+
+    md = Dict{UInt64,JuliaWorkspaces.StaticLint.Meta}()
+    store = EnvStore()
+    mm(args, m) = match_method(Any[args...], Any[], m, store, md)
+
+    @test mm((),                   m_bound) == false
+    @test mm((int, int),           m_bound) == false
+    @test mm((int, int, int),      m_bound) == true
+    @test mm((int, int, int, int), m_bound) == false
+
+    @test mm((),                        m_unb) == true
+    @test mm((int, int),                m_unb) == true
+    @test mm((int, int, int, int, int), m_unb) == true
+
+    @test mm((int,),               m_pref) == false
+    @test mm((int, int, int),      m_pref) == true
+    @test mm((int, int, int, int), m_pref) == false
+
+    # Full lint pipeline (EXPR path): bounded arity mismatches flag, matching
+    # arities and unbounded varargs stay clean.
+    for (src, expected) in [
+        ("f(x::Vararg{Int,3}) = x\nf(1,2,3)"   => nothing),
+        ("f(x::Vararg{Int,3}) = x\nf(1,2)"     => IncorrectCallArgs),
+        ("f(x::Vararg{Int,3}) = x\nf()"        => IncorrectCallArgs),
+        ("f(x::Vararg{Int,3}) = x\nf(1,2,3,4)" => IncorrectCallArgs),
+        ("f(x::Vararg{Int,0}) = x\nf()"        => nothing),
+        ("f(x::Vararg{Int,0}) = x\nf(1)"       => IncorrectCallArgs),
+        ("f(x::Int...)        = x\nf(1,2,3)"   => nothing),
+        ("h(p::Int, x::Vararg{Int,2}) = (p,x)\nh(1,2,3)" => nothing),
+        ("h(p::Int, x::Vararg{Int,2}) = (p,x)\nh(1)"     => IncorrectCallArgs),
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        @test errorof(cst.args[2], meta_dict) === expected
+    end
+end
