@@ -48,7 +48,7 @@ end
 
 isquotedsymbol(x) = x isa EXPR && x.head === :quotenode && length(x.args) == 1 && x.args[1].head === :IDENTIFIER && hastrivia(x)
 
-function call_arg_types(call::EXPR, ismethod)
+function call_arg_types(call::EXPR, ismethod, meta_dict)
     types, kws = [], []
     call.args === nothing && return types, kws
     if length(call.args) > 1 && headof(call.args[2]) === :parameters
@@ -66,7 +66,7 @@ function call_arg_types(call::EXPR, ismethod)
     types, kws
 end
 
-function method_arg_types(call::EXPR)
+function method_arg_types(call::EXPR, meta_dict)
     types, opts, kws = [], [], []
     call.args === nothing && return types, opts, kws
     if length(call.args) > 1 && headof(call.args[2]) === :parameters
@@ -92,20 +92,20 @@ function method_arg_types(call::EXPR)
     types, opts, kws
 end
 
-function find_methods(x::EXPR, store)
+function find_methods(x::EXPR, store, meta_dict)
     possibles = []
     if iscall(x)
         length(x.args) === 0 && return possibles
         func_ref = refof_call_func(x, meta_dict)
         func_ref === nothing && return possibles
-        args, kws = call_arg_types(x, false)
+        args, kws = call_arg_types(x, false, meta_dict)
         if func_ref isa Binding && func_ref.val isa SymbolServer.FunctionStore ||
             func_ref isa Binding && func_ref.val isa SymbolServer.DataTypeStore
             func_ref = func_ref.val
         end
         if func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore
             for method in func_ref.methods
-                if match_method(args, kws, method, store)
+                if match_method(args, kws, method, store, meta_dict)
                     push!(possibles, method)
                 end
             end
@@ -116,17 +116,17 @@ function find_methods(x::EXPR, store)
                     if method !== nothing
                         if method isa SymbolServer.FunctionStore
                             for method1 in method.methods
-                                if match_method(args, kws, method1, store)
+                                if match_method(args, kws, method1, store, meta_dict)
                                     push!(possibles, method1)
                                 end
                             end
-                        elseif match_method(args, kws, method, store)
+                        elseif match_method(args, kws, method, store, meta_dict)
                             push!(possibles, method)
                         end
                     end
                 end
             elseif (method = method_of_callable_datatype(func_ref)) !== nothing
-                if match_method(args, kws, method, store)
+                if match_method(args, kws, method, store, meta_dict)
                     push!(possibles, method)
                 end
             end
@@ -135,7 +135,7 @@ function find_methods(x::EXPR, store)
     possibles
 end
 
-function match_method(args::Vector{Any}, kws::Vector{Any}, method::SymbolServer.MethodStore, store)
+function match_method(args::Vector{Any}, kws::Vector{Any}, method::SymbolServer.MethodStore, store, meta_dict)
     !isempty(kws) && isempty(method.kws) && return false
     nmargs = length(method.sig)
     varargval = nothing
@@ -162,7 +162,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::SymbolServer.
     return false
 end
 
-function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store)
+function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, meta_dict)
     margs, mkws = [], []
     vararg = false
     if CSTParser.defines_struct(method)
@@ -172,7 +172,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store)
                 # Hit an inner constructor so forget about the default one.
                 for arg in method.args[3].args
                     if defines_function(arg)
-                        !match_method(args, kws, arg, store) && return false
+                        !match_method(args, kws, arg, store, meta_dict) && return false
                     end
                 end
                 return true
@@ -181,7 +181,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store)
         end
     else
         sig = CSTParser.rem_decl(CSTParser.get_sig(method))
-        margs, mopts, mkws = method_arg_types(sig)
+        margs, mopts, mkws = method_arg_types(sig, meta_dict)
         # vararg
         if length(sig.args) > 0
             if CSTParser.issplat(last(sig.args))
