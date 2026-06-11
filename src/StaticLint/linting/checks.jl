@@ -663,6 +663,7 @@ end
 
 function unwrap_nospecialize(x)
     is_nospecialize_call(x) || return x
+    length(x.args) >= 3 || return x
     x.args[3]
 end
 

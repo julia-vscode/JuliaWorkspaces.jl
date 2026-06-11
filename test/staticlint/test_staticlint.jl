@@ -2458,3 +2458,22 @@ end
             end
         end""")
 end
+
+@testitem "@nospecialize without argument (#390)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: func_nargs
+    using JuliaWorkspaces.CSTParser: parse, EXPR
+
+    @test func_nargs(parse("function f(@nospecialize) end")) == (1, 1, Symbol[], false)
+    @test func_nargs(parse("function f(@nospecialize()) end")) == (1, 1, Symbol[], false)
+    @test func_nargs(parse("f(@nospecialize) = 1")) == (1, 1, Symbol[], false)
+
+    # Full pipeline: defining and calling such a function must not crash.
+    cst, meta_dict, jw = parse_and_pass("""
+        function f(@nospecialize(x))
+            @nospecialize
+            return x
+        end
+        f(1)
+        """)
+    @test cst isa EXPR
+end
