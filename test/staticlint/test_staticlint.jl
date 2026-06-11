@@ -2509,3 +2509,71 @@ end
         @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
     end
 end
+
+@testitem "constructor for existing type (#395)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidTypeDeclaration
+
+    n_invalid(cst, meta_dict, jw) =
+        count(e -> errorof(e, meta_dict) === InvalidTypeDeclaration,
+              (e for (_, e) in collect_hints(cst, meta_dict, jw)))
+
+    # Qualified `Base.BigFloat(x::MyNumber)` extends the type; later use of
+    # BigFloat as a type decl is fine.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module M
+        struct MyNumber
+            sign::Bool
+            exponent::Int
+            mantissa::Int
+        end
+        function Base.BigFloat(x::MyNumber)
+            x
+        end
+        function foo(x::BigFloat)
+            x
+        end
+        end
+        """)
+        @test n_invalid(cst, meta_dict, jw) == 0
+    end
+
+    # Same, extending via an explicit `import Base: BigFloat`.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module M
+        import Base: BigFloat
+        struct MyNumber
+            sign::Bool
+            exponent::Int
+            mantissa::Int
+        end
+        function BigFloat(x::MyNumber)
+            x
+        end
+        function cube_root(x::BigFloat)
+            x
+        end
+        end
+        """)
+        @test n_invalid(cst, meta_dict, jw) == 0
+    end
+
+    # A bare unqualified definition introduces a new local that shadows the
+    # type, so the later type declaration is correctly flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module M
+        struct MyNumber
+            sign::Bool
+            exponent::Int
+            mantissa::Int
+        end
+        function BigFloat(x::MyNumber)
+            x
+        end
+        function cube_root(x::BigFloat)
+            x
+        end
+        end
+        """)
+        @test n_invalid(cst, meta_dict, jw) == 1
+    end
+end
