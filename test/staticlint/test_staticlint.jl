@@ -2607,6 +2607,42 @@ end
     end
 end
 
+@testitem "where-wrapped type aliases (#438)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # Aliasing a UnionAll via a `where` clause is a valid constructor target.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        const MyVec = Vector{T} where T
+
+        MyVec(x::Int64) = [x]
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    # Multiple type variables in the `where` clause.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        const MyArray = Array{T,N} where {T,N}
+
+        MyArray(x::Int64) = [x]
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    # User-defined struct aliased through a `where` clause.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module M
+        struct Foo{T} end
+        const Bar = Foo{T} where T
+        Bar(x::Int64) = 1
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
 @testitem "function definition satisfying a `local` declaration (#349)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue
 
