@@ -2814,3 +2814,68 @@ end
         @test isempty(collect_hints(cst, meta_dict, jw))
     end
 end
+
+@testitem "global definition inside local scope (#315)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: headof, refof
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    get_ids(x, ids=[]) = (headof(x) === :IDENTIFIER ? push!(ids, x) :
+        (x.args !== nothing && foreach(a -> get_ids(a, ids), x.args)); ids)
+
+    # `global function` / `global struct` / `global x = …` inside a local scope
+    # must bind at the enclosing global scope so later uses resolve.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        let x = 1
+            global function foo()
+            end
+        end
+
+        function bar()
+            foo()
+        end
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        let
+            global gvar = 1
+            global gfunc(x) = x
+            global struct GStruct end
+        end
+
+        use_gvar() = gvar
+        use_gfunc() = gfunc(1)
+        use_gstruct() = GStruct
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Bare `global single` followed by assignment.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        let
+            global single
+            single = 1
+        end
+
+        use_single() = single
+        """)
+        use = last(filter(id -> CSTParser.valof(id) == "single", get_ids(cst)))
+        @test refof(use, meta_dict) !== nothing
+    end
+
+    # Comma-separated `global foo, bar, baz` — every name must be marked.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        let
+            global foo, bar, baz
+            foo = 1
+            bar = 2
+            baz = 3
+        end
+
+        use() = foo + bar + baz
+        """)
+        uses = filter(id -> CSTParser.valof(id) in ("foo", "bar", "baz"), get_ids(cst))[end-2:end]
+        @test all(id -> refof(id, meta_dict) !== nothing, uses)
+    end
+end

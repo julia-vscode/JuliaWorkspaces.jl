@@ -147,12 +147,16 @@ end
 #     return rets, false
 # end
 
-function find_exported_names(x::EXPR)
+# NOTE: currently unused. Kept for parity with upstream; fixed defensively.
+# The vendored `:export` EXPR has no leading keyword token (`export x` ⇒
+# args == [x]), so iterating from index 1 is required — starting at 2 dropped
+# the first exported name (same class as the global_decl_name #439 fix).
+function find_exported_names(x::EXPR, meta_dict)
     exported_vars = EXPR[]
     for i in 1:length(x.args[3].args)
         expr = x.args[3].args[i]
         if headof(expr) === :export
-            for j = 2:length(expr.args)
+            for j = 1:length(expr.args)
                 if isidentifier(expr.args[j]) && hasref(expr.args[j], meta_dict)
                     push!(exported_vars, expr.args[j])
                 end
