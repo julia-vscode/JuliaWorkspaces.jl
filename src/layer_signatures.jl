@@ -103,7 +103,7 @@ end
 
 function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict)
     if CSTParser.defines_function(x)
-        sig = CSTParser.rem_where_decl(CSTParser.get_sig(x))
+        sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
         params = ParameterInfo[]
         if sig isa CSTParser.EXPR && sig.args !== nothing
             for i = 2:length(sig.args)

@@ -444,6 +444,21 @@ end
     @test errorof(cst[4], meta_dict) === JuliaWorkspaces.StaticLint.NotEqDef
 end
 
+@testitem "pirates with nested where clauses (#436)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, TypePiracy
+
+    # Piracy detection must strip all (nested) `where` clauses to find the name.
+    (cst, meta_dict) = parse_and_pass("""
+    import Base:sin
+    sin(x::Array{Number}) where {S} = 1
+    sin(x::Array{Number}) where {S} where {R} = 1
+    sin(x::Array{Number}) where {S} where {R} where {Q} = 1
+    """)
+    @test errorof(cst[2], meta_dict) === TypePiracy
+    @test errorof(cst[3], meta_dict) === TypePiracy
+    @test errorof(cst[4], meta_dict) === TypePiracy
+end
+
 @testitem "check_call incorrect call args" setup=[shared_static_lint] begin
     (cst, meta_dict) = parse_and_pass("""
     sin(1)
@@ -615,6 +630,25 @@ end
 
     # ensure we strip all type decl code from around signature
     @test isempty(get_diagnostic(jw, uri"file://test.jl"))
+end
+
+@testitem "check_call strip nested where clauses (#436)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A default positional arg makes the definition's signature read like a call
+    # with a keyword arg, so the self-signature match falls back to comparing
+    # against the stripped signature — which must strip *all* `where` clauses,
+    # regardless of nesting depth.
+    (cst, meta_dict) = parse_and_pass("""
+        f1(c::TT=[1,1]) where {TT<:AbstractVector{T}} where {T} = (c,TT,T)
+        f2(c::TT=[1,1]) where {TT<:AbstractVector} = (c,TT)
+        f3(c::TT) where {TT<:AbstractVector{T}} where {T} = (c,TT,T)
+        f4(c::TT=[1,1]) where {TT<:AbstractArray{T,N}} where {T} where {N} = (c,TT,T,N)
+        """)
+    has_callargs_err(x) = errorof(x, meta_dict) === IncorrectCallArgs
+    for i in 1:4
+        @test find_first(cst[i], has_callargs_err) === nothing
+    end
 end
 
 @testitem "check_modulename" setup=[shared_static_lint] begin
