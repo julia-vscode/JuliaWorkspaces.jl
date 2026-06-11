@@ -1,9 +1,8 @@
 function arg_type(arg, ismethod, meta_dict)
     # Strip `@nospecialize` and `x...` wrappers — the binding/type info
-    # lives on the inner expression in both cases.
-    if is_nospecialize_call(arg)
-        arg = arg.args[3]
-    end
+    # lives on the inner expression in both cases. unwrap_nospecialize handles
+    # a bare `@nospecialize` (no inner arg) safely.
+    arg = unwrap_nospecialize(arg)
     if CSTParser.issplat(arg) && length(arg.args) >= 1
         arg = arg.args[1]
     end
@@ -282,8 +281,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
         # Element type for an explicit `::Vararg{T,...}` slot.
         vararg_T = nothing
         if length(sig.args) > 0
-            last_arg = last(sig.args)
-            is_nospecialize_call(last_arg) && (last_arg = last_arg.args[3])
+            last_arg = unwrap_nospecialize(last(sig.args))
             vararg_N = bounded_vararg_N(last_arg)
             if vararg_N !== nothing || is_explicit_vararg_decl(last_arg)
                 vararg = true

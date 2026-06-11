@@ -2625,6 +2625,15 @@ end
         f(1)
         """)
     @test cst isa EXPR
+
+    # #448: calling a function with a bare `@nospecialize` arg must match without
+    # the method-matcher tripping over the missing inner arg.
+    let (cst, meta_dict) = parse_and_pass("f(@nospecialize) = 1\nf(1)")
+        @test JuliaWorkspaces.StaticLint.errorof(cst.args[2], meta_dict) === nothing
+    end
+    let (cst, meta_dict) = parse_and_pass("f(a, @nospecialize) = a\nf(1, 2)")
+        @test JuliaWorkspaces.StaticLint.errorof(cst.args[2], meta_dict) === nothing
+    end
 end
 
 @testitem "constructors on parameterized type aliases (#394)" setup=[shared_static_lint] begin
