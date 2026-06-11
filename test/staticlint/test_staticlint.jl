@@ -483,6 +483,24 @@ end
     @test CSTParser.valof(sup("struct MyS <: Number end")) == "Number"
 end
 
+@testitem "check_call struct constructor arity (#447)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # Default field constructor arity: the number of call args must match the
+    # number of fields. (Regression: match_method used `mopts` without declaring
+    # it, throwing UndefVarError on the struct branch.)
+    for (src, expected) in [
+        ("struct Foo\n    x\nend\nFoo(1)", nothing),
+        ("struct Foo\n    x\nend\nFoo(1, 2)", IncorrectCallArgs),
+        ("struct Foo\n    x\n    y\nend\nFoo(1)", IncorrectCallArgs),
+        ("struct Foo\n    x\n    y\nend\nFoo(1, 2)", nothing),
+        ("struct Foo\n    x\n    y\nend\nFoo(1, 2, 3)", IncorrectCallArgs),
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        @test errorof(cst.args[2], meta_dict) === expected
+    end
+end
+
 @testitem "check_call function with no methods (#445)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, FunctionHasNoMethods, IncorrectCallArgs
 
