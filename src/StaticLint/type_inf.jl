@@ -116,7 +116,8 @@ function infer_type_assignment_rhs(binding, state, scope)
     end
 end
 
-function infer_destructuring_type(binding, rb::SymbolServer.DataTypeStore, meta_dict)
+const MAX_DESTRUCTURE_INFER_DEPTH = 20
+function infer_destructuring_type(binding, rb::SymbolServer.DataTypeStore, meta_dict, depth=0)
     assigned_name = CSTParser.get_name(binding.val)
     for (fieldname, fieldtype) in zip(rb.fieldnames, rb.types)
         if fieldname == assigned_name
@@ -125,16 +126,28 @@ function infer_destructuring_type(binding, rb::SymbolServer.DataTypeStore, meta_
         end
     end
 end
-function infer_destructuring_type(binding::Binding, rb::EXPR, meta_dict)
-    assigned_name = string(to_codeobject(binding.name))
+function infer_destructuring_type(binding::Binding, rb::EXPR, meta_dict, depth=0)
     scope = scopeof(rb, meta_dict)
+    if scope === nothing
+        # `const FOO = Foo` — follow the alias's RHS to the real constructor.
+        if depth < MAX_DESTRUCTURE_INFER_DEPTH && isassignment(rb) && !CSTParser.defines_datatype(rb)
+            infer_destructuring_type(binding, refof_maybe_getfield(rb.args[2], meta_dict), meta_dict, depth + 1)
+        end
+        return
+    end
+    assigned_name = string(to_codeobject(binding.name))
     names = scope.names
     if haskey(names, assigned_name)
         b = names[assigned_name]
         settype!(binding, b.type)
     end
 end
-infer_destructuring_type(binding, rb::Binding, meta_dict) = infer_destructuring_type(binding, rb.val, meta_dict)
+function infer_destructuring_type(binding, rb::Binding, meta_dict, depth=0)
+    depth >= MAX_DESTRUCTURE_INFER_DEPTH && return
+    return infer_destructuring_type(binding, rb.val, meta_dict, depth + 1)
+end
+# An alias may resolve to something carrying no field information (or `nothing`).
+infer_destructuring_type(binding, rb, meta_dict, depth=0) = nothing
 
 function infer_type_decl(binding, state, scope)
     meta_dict = state.meta_dict

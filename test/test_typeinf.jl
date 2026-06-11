@@ -118,3 +118,47 @@ end
 
     @test scopeof(scopeof(cst, meta_dict).names["f"].val, meta_dict).names["t"].type == scopeof(cst, meta_dict).names["T"]
 end
+
+@testitem "destructuring aliased constructor (#398)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof, CoreTypes
+
+    # Unpacking via a `const` alias of a struct must resolve field types
+    # (and not crash / infinitely recurse).
+    cst, meta_dict = parse_and_pass("""
+    struct Foo
+        a::Int
+        b::Int
+    end
+
+    const FOO = Foo
+
+    function bar(x)
+        (; a, b) = FOO(x, 2x)
+        a + b
+    end
+    """)
+
+    barscope = scopeof(scopeof(cst, meta_dict).names["bar"].val, meta_dict)
+    @test CoreTypes.isint(barscope.names["a"].type)
+    @test CoreTypes.isint(barscope.names["b"].type)
+end
+
+@testitem "destructuring direct constructor" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof, CoreTypes
+
+    cst, meta_dict = parse_and_pass("""
+    struct Foo
+        a::Int
+        b::Int
+    end
+
+    function bar(x)
+        (; a, b) = Foo(x, 2x)
+        a + b
+    end
+    """)
+
+    barscope = scopeof(scopeof(cst, meta_dict).names["bar"].val, meta_dict)
+    @test CoreTypes.isint(barscope.names["a"].type)
+    @test CoreTypes.isint(barscope.names["b"].type)
+end
