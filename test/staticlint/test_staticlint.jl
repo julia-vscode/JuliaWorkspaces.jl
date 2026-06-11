@@ -2797,6 +2797,43 @@ end
     end
 end
 
+@testitem "@enum with explicit values (#275)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: haserror
+
+    # missing-reference hints are the collect_hints entries with no error code.
+    missing_refs(cst, meta_dict, jw) =
+        [x for (_, x) in collect_hints(cst, meta_dict, jw) if !haserror(x, meta_dict)]
+
+    # Members given explicit values must still be bound and exportable.
+    let (cst, meta_dict, jw) = parse_and_pass("@enum Foo x=1; export x")
+        @test isempty(missing_refs(cst, meta_dict, jw))
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("@enum Foo x=1 y=2")
+        @test isempty(missing_refs(cst, meta_dict, jw))
+    end
+
+    # Block form with explicit values.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @enum Foo begin
+            x = 1
+            y = 2
+        end
+        export x, y
+        """)
+        @test isempty(missing_refs(cst, meta_dict, jw))
+    end
+
+    # Mixed bare and explicit-value members; every identifier resolves.
+    @test check_resolved("""
+        @enum E a b=2 c
+        E
+        a
+        b
+        c
+        """) == [true, true, true, true, true, true, true, true, true]
+end
+
 @testitem "using Base in baremodule (#368)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: headof, hasref
     CSTParser = JuliaWorkspaces.CSTParser

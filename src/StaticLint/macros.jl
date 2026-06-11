@@ -59,11 +59,11 @@ function handle_macro(x::EXPR, state)
                 end
                 if i == 4 && headof(x.args[4]) === :block
                     for j in 1:length(x.args[4].args)
-                        mark_binding!(x.args[4].args[j], meta_dict, x)
+                        mark_enum_member_binding!(x.args[4].args[j], meta_dict, x)
                     end
                     break
                 end
-                mark_binding!(x.args[i], meta_dict, x)
+                mark_enum_member_binding!(x.args[i], meta_dict, x)
             end
         elseif _points_to_Base_macro(x.args[1], Symbol("@goto"), state)
             if length(x.args) == 3 && isidentifier(x.args[3])
@@ -134,6 +134,14 @@ function handle_macro(x::EXPR, state)
         #         end
         #     end
         end
+    end
+end
+
+function mark_enum_member_binding!(arg::EXPR, meta_dict, val)
+    if CSTParser.isassignment(arg)
+        mark_binding!(arg.args[1], meta_dict, val)
+    else
+        mark_binding!(arg, meta_dict, val)
     end
 end
 
