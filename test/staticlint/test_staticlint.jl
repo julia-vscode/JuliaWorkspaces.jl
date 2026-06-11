@@ -3144,3 +3144,42 @@ end
         @test has_unused(cst, meta_dict, jw)
     end
 end
+
+@testitem "missing reference in macrocall args (#282)" setup=[shared_static_lint] begin
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # Identifiers passed as macro arguments must not be flagged as missing refs:
+    # the macro may rewrite/introduce them.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro Jacobian(u, v, w)
+            :( (u, v) -> \$w )
+        end
+        f = @Jacobian(u, v, u+v^2)
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro m(x)
+            :(\$x)
+        end
+        @m(undefined_var)
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # But identifiers in a user-written local scope (here a function body, even
+    # when the function is wrapped by the doc macro) are still checked.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        \"\"\"
+        docstring
+        \"\"\"
+        function foo()
+            undefined_in_body
+        end
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+        @test CSTParser.valof(hints[1][2]) == "undefined_in_body"
+    end
+end
