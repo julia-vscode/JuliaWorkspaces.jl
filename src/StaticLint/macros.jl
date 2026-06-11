@@ -168,6 +168,17 @@ function _points_to_Base_macro(x::EXPR, name, state)
     (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
 end
 
+# Variant usable in the check phase, where only the ExternalEnv + meta_dict are
+# available (no analysis `state`).
+function _points_to_Base_macro(x::EXPR, name, env::ExternalEnv, meta_dict)
+    CSTParser.is_getfield_w_quotenode(x) && return _points_to_Base_macro(x.args[2].args[1], name, env, meta_dict)
+    syms = getsymbols(env)
+    haskey(syms[:Base], name) || return false
+    targetmacro = maybe_lookup(syms[:Base][name], env)
+    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x, meta_dict)) !== nothing &&
+    (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
+end
+
 function _points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, state)
     CSTParser.is_getfield_w_quotenode(x) && return _points_to_arbitrary_macro(x.args[2].args[1], module_name, name, state)
     haskey(getsymbols(state), module_name) || return false

@@ -2577,3 +2577,44 @@ end
         @test n_invalid(cst, meta_dict, jw) == 1
     end
 end
+
+@testitem "macro-rewritten call signature (#389)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: func_nargs, errorof, IncorrectCallArgs
+
+    # An unknown macro wrapping a function can rewrite its call signature
+    # (e.g. KernelAbstractions' @kernel), so a differing argument count must
+    # not be flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @kernel function mul2_kernel(A)
+            A[I] = 2 * A[I]
+        end
+        mul2_kernel(dev, 64)
+        """)
+        env = get_env(jw)
+        @test errorof(cst.args[2], meta_dict) === nothing
+        @test func_nargs(cst.args[1].args[end], env, meta_dict) == (0, typemax(Int), Symbol[], true)
+    end
+
+    # Signature-preserving Base macros (@inline, ...) resolve to known Base
+    # macros, so argument counts are still checked.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @inline function g(x)
+            x
+        end
+        g(1, 2)
+        """)
+        env = get_env(jw)
+        @test errorof(cst.args[2], meta_dict) === IncorrectCallArgs
+        @test func_nargs(cst.args[1].args[end], env, meta_dict) == (1, 1, Symbol[], false)
+    end
+
+    # The module-qualified form (Base.@propagate_inbounds) resolves too.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        Base.@propagate_inbounds function h(a, b)
+            a + b
+        end
+        h(1)
+        """)
+        @test errorof(cst.args[2], meta_dict) === IncorrectCallArgs
+    end
+end

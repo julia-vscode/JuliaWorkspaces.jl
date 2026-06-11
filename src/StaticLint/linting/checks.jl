@@ -147,7 +147,7 @@ function _typeof(x, state)
 end
 
 # Call
-function struct_nargs(x::EXPR)
+function struct_nargs(x::EXPR, env=nothing, meta_dict=nothing)
     # struct defs wrapped in macros are likely to have some arbirtary additional constructors, so lets allow anything
     parentof(x) isa EXPR && CSTParser.ismacrocall(parentof(x)) && return 0, typemax(Int), Symbol[], true
     minargs, maxargs, kws, kwsplat = 0, 0, Symbol[], false
@@ -155,14 +155,33 @@ function struct_nargs(x::EXPR)
     length(args.args) == 0 && return 0, typemax(Int), kws, kwsplat
     inner_constructor = findfirst(a -> CSTParser.defines_function(a), args.args)
     if inner_constructor !== nothing
-        return func_nargs(args.args[inner_constructor])
+        return func_nargs(args.args[inner_constructor], env, meta_dict)
     else
         minargs = maxargs = length(args.args)
     end
     return minargs, maxargs, kws, kwsplat
 end
 
-function func_nargs(x::EXPR)
+const SIGNATURE_PRESERVING_MACROS = Symbol[
+    Symbol("@inline"),
+    Symbol("@noinline"),
+    Symbol("@propagate_inbounds"),
+    Symbol("@generated"),
+    Symbol("@assume_effects"),
+    Symbol("@constprop"),
+    Symbol("@pure"),
+    Symbol("@nospecializeinfer"),
+]
+
+function func_nargs(x::EXPR, env=nothing, meta_dict=nothing)
+    # early return for macro-wrapped functions, unless we know the macro does
+    # not modify the signature (requires env + meta_dict to resolve the macro)
+    if env !== nothing && meta_dict !== nothing && parentof(x) isa EXPR && CSTParser.ismacrocall(parentof(x))
+        macroname = parentof(x).args[1]
+        any(n -> _points_to_Base_macro(macroname, n, env, meta_dict), SIGNATURE_PRESERVING_MACROS) ||
+            return 0, typemax(Int), Symbol[], true
+    end
+
     minargs, maxargs, kws, kwsplat = 0, 0, Symbol[], false
     sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
 
@@ -352,7 +371,13 @@ function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::Exter
     # Binding (the last include's).  Later bindings' refs lists may lack the
     # function-name node, so get_method() below won't find it.  Checking val
     # directly ensures the first method definition is always considered.
-    if has_at_least_one_method
+    #
+    # Restrict this to plain defs: a macrocall-wrapped val (e.g. an `@eval`-
+    # interpreted binding, whose val keeps the macrocall as parent) would hit
+    # the macro-permissive early return in sig_match_any(::EXPR) and wrongly
+    # tolerate any arity. Such defs fall through to the refs/get_method path
+    # below, matching upstream behaviour.
+    if has_at_least_one_method && !(parentof(func_ref.val) isa EXPR && CSTParser.ismacrocall(parentof(func_ref.val)))
         sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict) && return true
     end
 
@@ -367,16 +392,18 @@ end
 
 function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
     if CSTParser.defines_function(func) || CSTParser.defines_struct(func)
-        # `@kwdef`-style macro-wrapped struct defs synthesise extra
-        # constructors at expansion time; we can't see them statically.
-        # `struct_nargs` already returns a permissive `(0, typemax, …)` for
-        # that case — defer to arity-only here.
-        if CSTParser.defines_struct(func) && parentof(func) isa EXPR && CSTParser.ismacrocall(parentof(func))
-            return compare_f_call(struct_nargs(func), call_counts)
+        # Macro-wrapped definitions can rewrite arity/constructors at expansion
+        # time (`@kwdef` structs, `@kernel` functions, …). For unknown macros we
+        # can't see that statically — fall back to arity-only matching, which
+        # func_nargs/struct_nargs render permissive ((0, typemax, …)) for
+        # non-signature-preserving macros.
+        if parentof(func) isa EXPR && CSTParser.ismacrocall(parentof(func))
+            m_counts = CSTParser.defines_struct(func) ? struct_nargs(func, env, meta_dict) : func_nargs(func, env, meta_dict)
+            return compare_f_call(m_counts, call_counts)
         end
         # Splat in the call → unknown actual arity, fall back to arity-only.
         if call_has_splat(x)
-            m_counts = CSTParser.defines_struct(func) ? struct_nargs(func) : func_nargs(func)
+            m_counts = CSTParser.defines_struct(func) ? struct_nargs(func, env, meta_dict) : func_nargs(func, env, meta_dict)
             compare_f_call(m_counts, call_counts) && return true
         else
             args, kws = call_arg_types(x, false, meta_dict)
