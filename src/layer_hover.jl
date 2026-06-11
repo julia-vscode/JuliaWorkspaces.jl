@@ -484,9 +484,9 @@ end
 # Function call position hover (argument N of M / datatype field)
 # ============================================================================
 
-_get_fcall_position(x, documentation, meta_dict) = documentation
+_get_fcall_position(x, documentation, env, meta_dict) = documentation
 
-function _get_fcall_position(x::CSTParser.EXPR, documentation, meta_dict, depth=0)
+function _get_fcall_position(x::CSTParser.EXPR, documentation, env, meta_dict, depth=0)
     # Guard against infinite loops via depth limit instead of Set{EXPR}
     depth > 100 && return documentation
 
@@ -503,14 +503,14 @@ function _get_fcall_position(x::CSTParser.EXPR, documentation, meta_dict, depth=
 
             # hovering over the function name, so we might as well check the parent
             if arg_i == 0
-                return _get_fcall_position(CSTParser.parentof(x), documentation, meta_dict, depth + 1)
+                return _get_fcall_position(CSTParser.parentof(x), documentation, env, meta_dict, depth + 1)
             end
 
             minargs < 4 && return documentation
 
             fname = CSTParser.get_name(CSTParser.parentof(x))
             if StaticLint.hasref(fname, meta_dict) &&
-               (StaticLint.refof(fname, meta_dict) isa StaticLint.Binding && StaticLint.refof(fname, meta_dict).val isa CSTParser.EXPR && CSTParser.defines_struct(StaticLint.refof(fname, meta_dict).val) && StaticLint.struct_nargs(StaticLint.refof(fname, meta_dict).val)[1] == minargs)
+               (StaticLint.refof(fname, meta_dict) isa StaticLint.Binding && StaticLint.refof(fname, meta_dict).val isa CSTParser.EXPR && CSTParser.defines_struct(StaticLint.refof(fname, meta_dict).val) && StaticLint.struct_nargs(StaticLint.refof(fname, meta_dict).val, env, meta_dict)[1] == minargs)
                 dt_ex = StaticLint.refof(fname, meta_dict).val
                 args = dt_ex.args[3]
                 args.args === nothing || arg_i > length(args.args) && return documentation
@@ -531,7 +531,7 @@ function _get_fcall_position(x::CSTParser.EXPR, documentation, meta_dict, depth=
             end
             return documentation
         else
-            return _get_fcall_position(CSTParser.parentof(x), documentation, meta_dict, depth + 1)
+            return _get_fcall_position(CSTParser.parentof(x), documentation, env, meta_dict, depth + 1)
         end
     end
     return documentation
@@ -562,7 +562,7 @@ function _get_hover_text(rt, uri, index)
     x isa CSTParser.EXPR && CSTParser.isoperator(x) && _resolve_op_ref(x, env, meta_dict)
     documentation = _get_hover(x, "", x, env, meta_dict)
     documentation = _get_closer_hover(x, documentation)
-    documentation = _get_fcall_position(x, documentation, meta_dict)
+    documentation = _get_fcall_position(x, documentation, env, meta_dict)
     documentation = _sanitize_docstring(documentation)
 
     return isempty(documentation) ? nothing : documentation

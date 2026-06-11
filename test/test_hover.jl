@@ -481,3 +481,31 @@ end
     @test occursin("Variable doc via @doc", get_hover_text(jw, uri, index_of(source, 7, 2)))
     @test occursin("Raw doc via @doc", get_hover_text(jw, uri, index_of(source, 8, 2)))
 end
+
+@testitem "Hover: struct constructor argument field (#1392)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Hovering an argument of a struct's default constructor names the field.
+    # This routes through _get_fcall_position → struct_nargs(val, env, …); the
+    # env threading is the applicable part of the JuliaFormatter-v2 PR. Needs
+    # >= 4 fields (get_fcall_position returns early for fewer).
+    source = """
+    struct Foo
+        a
+        b
+        c
+        d
+    end
+    Foo(1, 2, 3, 4)
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///structarg/test.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    # offset of the `2` argument (line 8: `Foo(1, 2, 3, 4)`).
+    rng = findfirst("Foo(1, 2", source)
+    result = get_hover_text(jw, uri, last(rng))
+    @test result !== nothing
+    @test occursin("Datatype field `b` of Foo", result)
+end
