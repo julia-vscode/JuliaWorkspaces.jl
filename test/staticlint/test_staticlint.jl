@@ -468,6 +468,21 @@ end
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2], meta_dict) == JuliaWorkspaces.StaticLint.IncorrectCallArgs
 end
 
+@testitem "_super resolves declared supertype (#446)" setup=[shared_static_lint] begin
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    function sup(src)
+        cst, meta_dict, jw = parse_and_pass(src)
+        env = get_env(jw)
+        JuliaWorkspaces.StaticLint._super(cst.args[1], env.symbols, meta_dict)
+    end
+
+    # primitive-type supertype must resolve (the `:primitive` head was a typo).
+    @test CSTParser.valof(sup("primitive type MyInt <: Integer 8 end")) == "Integer"
+    @test CSTParser.valof(sup("abstract type MyAbs <: Real end")) == "Real"
+    @test CSTParser.valof(sup("struct MyS <: Number end")) == "Number"
+end
+
 @testitem "check_call function with no methods (#445)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, FunctionHasNoMethods, IncorrectCallArgs
 

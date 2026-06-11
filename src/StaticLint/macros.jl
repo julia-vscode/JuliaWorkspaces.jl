@@ -154,7 +154,11 @@ end
 
 is_nospecialize(x) = isidentifier(x) && valofid(x) == "@nospecialize"
 
-function _mark_JuMP_binding(arg)
+# NOTE: currently unused (only referenced from commented-out JuMP handling).
+# Fixed defensively: `:comparision` was a typo for the real head `:comparison`
+# (same class as the _super `:primtive` fix), so the `lb <= x <= ub` branch
+# was dead; also threaded the missing meta_dict.
+function _mark_JuMP_binding(arg, meta_dict)
     if isidentifier(arg) || headof(arg) === :ref
         mark_binding!(_rem_ref(arg), meta_dict)
     elseif isbinarycall(arg, "==") || isbinarycall(arg, "<=")  || isbinarycall(arg, ">=")
@@ -163,7 +167,7 @@ function _mark_JuMP_binding(arg)
         else
             mark_binding!(_rem_ref(arg.args[3]), meta_dict)
         end
-    elseif headof(arg) === :comparision && length(arg.args) == 5
+    elseif headof(arg) === :comparison && length(arg.args) == 5
         mark_binding!(_rem_ref(arg.args[3]), meta_dict)
     end
 end

@@ -54,7 +54,7 @@ end
 function _super(x::EXPR, store, meta_dict)::Union{EXPR,Nothing}
     if x.head === :struct
         _super(x.args[2], store, meta_dict)
-    elseif x.head === :abstract || x.head === :primtive
+    elseif x.head === :abstract || x.head === :primitive
         _super(x.args[1], store, meta_dict)
     elseif CSTParser.issubtypedecl(x)
         x.args[2]
