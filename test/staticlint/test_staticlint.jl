@@ -2304,3 +2304,76 @@ end
     meta_dict, _ = JuliaWorkspaces.derived_static_lint_meta_for_root(jw.runtime, root)
     @test meta_dict isa Dict
 end
+
+@testitem "@testitem/@testset blocks have isolated scopes (#405)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof, errorof, refof, Scope, InvalidRedefofConst, CannotDeclareConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    function get_ids(x, ids=[])
+        if JuliaWorkspaces.StaticLint.headof(x) === :IDENTIFIER
+            push!(ids, x)
+        elseif x.args !== nothing
+            for a in x.args
+                get_ids(a, ids)
+            end
+        end
+        ids
+    end
+
+    # Sibling @testitem blocks each run in their own module — reusing const/
+    # struct names across them must not be flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @testitem "A" begin
+            const X = 1
+            struct Foo end
+        end
+        @testitem "B" begin
+            const X = 2
+            struct Foo end
+        end
+        """)
+        @test scopeof(cst.args[1], meta_dict) isa Scope
+        @test scopeof(cst.args[2], meta_dict) isa Scope
+        @test scopeof(cst.args[1], meta_dict) !== scopeof(cst.args[2], meta_dict)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+        @test !has_error(cst, meta_dict, jw, CannotDeclareConst)
+    end
+
+    # @testset blocks evaluate in a local scope; same isolation applies.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @testset "A" begin
+            const X = 1
+        end
+        @testset "B" begin
+            const X = 2
+        end
+        """)
+        @test scopeof(cst.args[1], meta_dict) isa Scope
+        @test scopeof(cst.args[2], meta_dict) isa Scope
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    # A genuine redefinition within a single block is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @testitem "A" begin
+            const X = 1
+            const X = 2
+        end
+        """)
+        @test has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    # References to file-level bindings still resolve from inside the block.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        helper(x) = x
+        @testitem "A" begin
+            helper(1)
+        end
+        """)
+        helpers = filter(x -> JuliaWorkspaces.CSTParser.valof(x) == "helper", get_ids(cst.args[2]))
+        @test length(helpers) == 1
+        @test refof(helpers[1], meta_dict) !== nothing
+    end
+end
