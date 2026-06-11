@@ -445,3 +445,39 @@ end
     result = get_hover_text(jw, uri, index_of(source, 7, 1))
     @test result !== nothing
 end
+
+@testitem "Hover: docs from @doc macro (#1377)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    @doc "Function doc via @doc" function docfun() end
+    @doc "Struct doc via @doc" struct DocType end
+    @doc "Variable doc via @doc" docvar = 1
+    @doc raw\"\"\"Raw doc via @doc\"\"\" function rawdocfun() end
+    docfun
+    DocType
+    docvar
+    rawdocfun
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///docmacro/test.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    # offset (1-based) of (1-based line, col); col 2 lands mid-identifier.
+    function index_of(src, line, col)
+        lines = split(src, '\n'); idx = 0
+        for l in 1:(line - 1)
+            idx += ncodeunits(lines[l]) + 1
+        end
+        return idx + col
+    end
+
+    # The explicit `@doc "..."` form (macroname `@doc`, not the implicit
+    # `:globalrefdoc`) must be recognised — including a raw-string payload and
+    # `@doc "..." target` referencing a binding via its refs.
+    @test occursin("Function doc via @doc", get_hover_text(jw, uri, index_of(source, 5, 2)))
+    @test occursin("Struct doc via @doc", get_hover_text(jw, uri, index_of(source, 6, 2)))
+    @test occursin("Variable doc via @doc", get_hover_text(jw, uri, index_of(source, 7, 2)))
+    @test occursin("Raw doc via @doc", get_hover_text(jw, uri, index_of(source, 8, 2)))
+end

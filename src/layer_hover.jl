@@ -206,9 +206,69 @@ get_typed_definition(b::StaticLint.Binding) =
 function _maybe_get_doc_expr(x)
     while CSTParser.hasparent(x) && CSTParser.ismacrocall(CSTParser.parentof(x))
         x = CSTParser.parentof(x)
-        CSTParser.headof(x.args[1]) === :globalrefdoc && return x
+        _is_doc_expr(x) && return x
     end
     return x
+end
+
+# Recognise the documentation macro in any of its spellings: the implicit
+# `:globalrefdoc`, an explicit `@doc`, or a module-qualified `Foo.@doc`.
+_is_doc_macro_name(x) = false
+function _is_doc_macro_name(x::CSTParser.EXPR)
+    if CSTParser.headof(x) === :globalrefdoc
+        return true
+    elseif CSTParser.isidentifier(x)
+        return CSTParser.valof(x) == "@doc"
+    elseif CSTParser.is_getfield_w_quotenode(x)
+        return _is_doc_macro_name(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
+    else
+        return false
+    end
+end
+
+# A string-macro name like `raw` / `html` (`@raw_str`-style).
+_is_string_macro_name(x) = false
+function _is_string_macro_name(x::CSTParser.EXPR)
+    if CSTParser.isidentifier(x)
+        name = CSTParser.valof(x)
+        return name isa String && endswith(name, "_str")
+    elseif CSTParser.is_getfield_w_quotenode(x)
+        return _is_string_macro_name(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
+    else
+        return false
+    end
+end
+
+# The doc payload may itself be a string macrocall (e.g. `raw"..."`); unwrap to
+# the underlying string literal.
+_normalize_doc_payload_expr(x) = x
+function _normalize_doc_payload_expr(x::CSTParser.EXPR)
+    if CSTParser.ismacrocall(x) &&
+       length(x.args) >= 3 &&
+       _is_string_macro_name(x.args[1]) &&
+       CSTParser.isstring(x.args[3])
+        return x.args[3]
+    end
+    return x
+end
+
+_get_doc_payload_expr(x::CSTParser.EXPR) = length(x.args) >= 3 ? _normalize_doc_payload_expr(x.args[3]) : nothing
+_get_doc_target_expr(x::CSTParser.EXPR) = length(x.args) >= 4 ? x.args[4] : nothing
+
+# `@doc "..." target` written explicitly produces a doc macrocall referencing
+# the binding via its refs rather than as a preceding doc on `b.val`.
+function _maybe_get_doc_expr_from_refs(b::StaticLint.Binding, meta_dict)
+    for r in b.refs
+        r isa CSTParser.EXPR || continue
+        doc_expr = _maybe_get_doc_expr(r)
+        _is_doc_expr(doc_expr) || continue
+        doc_target = _get_doc_target_expr(doc_expr)
+        doc_target isa CSTParser.EXPR || continue
+        if doc_target === r || StaticLint.bindingof(doc_target, meta_dict) === b
+            return doc_expr
+        end
+    end
+    return nothing
 end
 
 _expr_has_preceding_docs(x) = false
@@ -221,8 +281,8 @@ _is_doc_expr(x) = false
 function _is_doc_expr(x::CSTParser.EXPR)
     return CSTParser.ismacrocall(x) &&
            length(x.args) == 4 &&
-           CSTParser.headof(x.args[1]) === :globalrefdoc &&
-           CSTParser.isstring(x.args[3])
+           _is_doc_macro_name(x.args[1]) &&
+           CSTParser.isstring(_get_doc_payload_expr(x))
 end
 
 _binding_has_preceding_docs(b::StaticLint.Binding) = _expr_has_preceding_docs(b.val)
@@ -234,9 +294,9 @@ end
 
 function _get_preceding_docs(expr::CSTParser.EXPR, documentation)
     if _expr_has_preceding_docs(expr)
-        string(documentation, CSTParser.to_codeobject(_maybe_get_doc_expr(expr).args[3]))
+        string(documentation, CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(expr))))
     elseif _is_const_expr(CSTParser.parentof(expr)) && _expr_has_preceding_docs(CSTParser.parentof(expr))
-        string(documentation, CSTParser.to_codeobject(_maybe_get_doc_expr(CSTParser.parentof(expr)).args[3]))
+        string(documentation, CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(CSTParser.parentof(expr)))))
     else
         documentation
     end
@@ -296,9 +356,11 @@ function _get_tooltip(b::StaticLint.Binding, documentation::String, meta_dict::M
                     )
                 end
                 documentation = if _binding_has_preceding_docs(b)
-                    string(documentation, CSTParser.to_codeobject(_maybe_get_doc_expr(b.val).args[3]))
+                    string(documentation, CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(b.val))))
                 elseif _const_binding_has_preceding_docs(b)
-                    string(documentation, CSTParser.to_codeobject(_maybe_get_doc_expr(CSTParser.parentof(b.val)).args[3]))
+                    string(documentation, CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(CSTParser.parentof(b.val)))))
+                elseif (doc_expr = _maybe_get_doc_expr_from_refs(b, meta_dict)) !== nothing
+                    string(documentation, CSTParser.to_codeobject(_get_doc_payload_expr(doc_expr)))
                 else
                     documentation
                 end
