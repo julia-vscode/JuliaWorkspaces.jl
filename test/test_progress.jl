@@ -83,7 +83,7 @@ end
     df.progress_state.total_items = 1
 
     # Should not propagate the error
-    _report_progress(df, "test")
+    @test_logs (:warn, "progress_callback threw") _report_progress(df, "test")
 end
 
 @testitem "Progress with zero total_items" begin

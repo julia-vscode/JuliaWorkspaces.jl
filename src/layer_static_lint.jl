@@ -174,7 +174,7 @@ Salsa.@derived function derived_static_lint_all_diagnostics(rt)
     roots = derived_roots(rt)
     for root in roots
         project_uri = derived_project_uri_for_root(rt, root)
-        @info "Workspace root" root=root project=project_uri
+        @debug "Workspace root" root=root project=project_uri
     end
 
     for root in roots
