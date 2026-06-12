@@ -88,13 +88,13 @@ Details of a Julia package.
 - `project_file_uri`::URI
 - name::String
 - uuid::UUID
-- content_hash::UInt
+- content_hash::UInt64
 """
 @auto_hash_equals struct JuliaPackage
     project_file_uri::URI
     name::String
     uuid::UUID
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 """
@@ -154,7 +154,7 @@ Details of a Julia project.
 - `project_file_uri`::URI
 - `manifest_file_uri`::URI
 - `julia_version`::Union{Nothing,VersionNumber}
-- content_hash::UInt
+- content_hash::UInt64
 - deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
 - regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
 - stdlib_packages::Dict{String,JuliaProjectEntryStdlibPackage}
@@ -163,7 +163,7 @@ Details of a Julia project.
     project_file_uri::URI
     manifest_file_uri::URI
     julia_version::Union{Nothing,VersionNumber}
-    content_hash::UInt
+    content_hash::UInt64
     deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
     regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
     stdlib_packages::Dict{String,JuliaProjectEntryStdlibPackage}
@@ -435,7 +435,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
             # ready, so the next get_diagnostics won't trigger another round.
             _load_package_caches_for_project!(jw, msg.test_project_uri)
             test_proj = derived_project(jw.runtime, msg.test_project_uri)
-            test_proj_hash = test_proj === nothing ? UInt(0) : test_proj.content_hash
+            test_proj_hash = test_proj === nothing ? UInt64(0) : test_proj.content_hash
             push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.test_project_uri), test_proj_hash))
             envs_dirty = true
             any_env_ready = true
@@ -448,7 +448,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
 
             _load_package_caches_for_project!(jw, msg.project_uri)
             standalone_proj = derived_project(jw.runtime, msg.project_uri)
-            standalone_proj_hash = standalone_proj === nothing ? UInt(0) : standalone_proj.content_hash
+            standalone_proj_hash = standalone_proj === nothing ? UInt64(0) : standalone_proj.content_hash
             push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), standalone_proj_hash))
             envs_dirty = true
             any_env_ready = true

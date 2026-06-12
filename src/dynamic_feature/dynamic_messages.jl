@@ -16,18 +16,18 @@
 # `Set`/`Dict` keys).
 @auto_hash_equals struct WatchEnvironmentKey
     project_path::String
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 @auto_hash_equals struct WatchTestEnvironmentKey
     project_path::String
     package_name::String
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 @auto_hash_equals struct CreateStandaloneProjectKey
     package_path::String
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey}
@@ -50,20 +50,20 @@ abstract type DynamicReactorMessage end
 """Request to index/watch the environment of a project."""
 struct WatchEnvironmentMsg <: DynamicReactorMessage
     project_path::String
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 """Request to index/watch the test environment of a project + package."""
 struct WatchTestEnvironmentMsg <: DynamicReactorMessage
     project_path::String
     package::String
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 """Request to create a standalone project for a package folder."""
 struct CreateStandaloneProjectMsg <: DynamicReactorMessage
     package_path::String
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 """Request an orderly shutdown of the reactor."""
@@ -91,7 +91,7 @@ once the (potentially slow) missing-package check + cloud download finished.
 """
 struct EnvironmentPrepDoneMsg <: DynamicReactorMessage
     project_path::String
-    content_hash::UInt
+    content_hash::UInt64
     still_missing::Bool
 end
 
@@ -141,7 +141,7 @@ end
 """The environment for a project has been fully processed."""
 struct EnvironmentReadyResult <: DynamicResultMessage
     project_path::String
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 """The test environment for a project + package is ready."""
@@ -149,12 +149,12 @@ struct TestEnvironmentReadyResult <: DynamicResultMessage
     project_uri::URI
     package::String
     test_project_uri::URI
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 """A standalone package project has been created."""
 struct StandaloneProjectReadyResult <: DynamicResultMessage
     package_folder_uri::URI
     project_uri::URI
-    content_hash::UInt
+    content_hash::UInt64
 end

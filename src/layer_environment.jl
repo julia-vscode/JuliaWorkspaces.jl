@@ -18,7 +18,7 @@ end
 
 Whether the environment for `project_uri` (at `content_hash`) has been indexed.
 """
-Salsa.@derived function derived_project_environment_ready(rt, project_uri, content_hash::UInt)
+Salsa.@derived function derived_project_environment_ready(rt, project_uri, content_hash::UInt64)
     key = WatchEnvironmentKey(uri2filepath(project_uri), content_hash)
     return key in input_ready_project_environments(rt)
 end
@@ -29,7 +29,7 @@ end
 The ready test-project URI for `project_uri` + `package`, or `nothing` if the
 test environment has not been indexed yet.
 """
-Salsa.@derived function derived_ready_test_environment(rt, project_uri, package, content_hash::UInt)
+Salsa.@derived function derived_ready_test_environment(rt, project_uri, package, content_hash::UInt64)
     key = WatchTestEnvironmentKey(uri2filepath(project_uri), package, content_hash)
     return get(input_ready_test_environments(rt), key, nothing)
 end
@@ -40,7 +40,7 @@ end
 The created standalone-project URI for `package_folder_uri`, or `nothing` if it
 has not been created yet.
 """
-Salsa.@derived function derived_ready_standalone_project(rt, package_folder_uri, content_hash::UInt)
+Salsa.@derived function derived_ready_standalone_project(rt, package_folder_uri, content_hash::UInt64)
     key = CreateStandaloneProjectKey(uri2filepath(package_folder_uri), content_hash)
     return get(input_standalone_projects(rt), key, nothing)
 end
@@ -138,7 +138,7 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         runtests_path = joinpath(package_folder, "test", "runtests.jl")
 
         pkg = derived_package(rt, package_folder_uri)
-        pkg_content_hash = pkg === nothing ? UInt(0) : pkg.content_hash
+        pkg_content_hash = pkg === nothing ? UInt64(0) : pkg.content_hash
 
         # TODO Is this lowercase the right move? On Windows for sure, not clear about other platforms
         file_needs_test_env = lowercase(uri2filepath(uri)) == lowercase(runtests_path) ||
@@ -161,7 +161,7 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
 
             if project_for_test_env !== nothing
                 test_env_project = derived_project(rt, project_for_test_env)
-                test_env_hash = test_env_project === nothing ? UInt(0) : test_env_project.content_hash
+                test_env_hash = test_env_project === nothing ? UInt64(0) : test_env_project.content_hash
                 test_project_uri = derived_ready_test_environment(rt, project_for_test_env, package_name, test_env_hash)
 
                 if test_project_uri !== nothing
@@ -247,7 +247,7 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
     project_uri = derived_project_uri_for_root(rt, uri)
     if project_uri !== nothing
         project = derived_project(rt, project_uri)
-        project_hash = project === nothing ? UInt(0) : project.content_hash
+        project_hash = project === nothing ? UInt64(0) : project.content_hash
         if !derived_project_environment_ready(rt, project_uri, project_hash) && !input_env_ready(rt)
             return false
         end
@@ -274,7 +274,7 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
     project_for_test_env === nothing && return true
 
     test_env_project = derived_project(rt, project_for_test_env)
-    test_env_hash = test_env_project === nothing ? UInt(0) : test_env_project.content_hash
+    test_env_hash = test_env_project === nothing ? UInt64(0) : test_env_project.content_hash
     return derived_ready_test_environment(rt, project_for_test_env, pkg.name, test_env_hash) !== nothing
 end
 
@@ -342,7 +342,7 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
         project_for_test === nothing && continue
 
         proj = derived_project(rt, project_for_test)
-        proj_hash = proj === nothing ? UInt(0) : proj.content_hash
+        proj_hash = proj === nothing ? UInt64(0) : proj.content_hash
 
         push!(required, WatchTestEnvironmentKey(
             uri2filepath(project_for_test),

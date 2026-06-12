@@ -1,7 +1,7 @@
 mutable struct IncludeOnly{RT} <: TraverseState
     uri::URI
     included_files::Set{URI}
-    include_dict::Dict{UInt,URI}
+    include_dict::Dict{UInt64,URI}
     rt::RT
 end
 
@@ -81,7 +81,7 @@ function process_EXPR(x::EXPR, state::IncludeOnly)
             if path!==nothing
                 uri = filepath2uri(path)
                 push!(state.included_files, uri)
-                state.include_dict[objectid(x)] = uri
+                state.include_dict[UInt64(objectid(x))] = uri
             end
         end
     elseif !(CSTParser.defines_function(x) || CSTParser.defines_macro(x) || headof(x) === :export || headof(x) === :public)
