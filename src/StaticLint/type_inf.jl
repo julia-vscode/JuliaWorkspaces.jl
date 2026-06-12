@@ -48,7 +48,10 @@ function infer_type_assignment_rhs(binding, state, scope)
     is_destructuring = CSTParser.istuple(lhs) && !isempty(lhs.args) && CSTParser.isparameters(lhs.args[1])
     if is_loop_iter_assignment(binding.val)
         settype!(binding, infer_eltype(rhs, state))
-    elseif headof(rhs) === :ref && length(rhs.args) > 1
+    elseif headof(rhs) === :ref && length(rhs.args) > 1 && all(a -> _is_scalar_index(a, state, scope), @view rhs.args[2:end])
+        # Only infer the element type when every index is provably scalar
+        # (integer literal / `begin`/`end` / `Number`-typed ref). A slice or
+        # otherwise non-scalar index yields an array, not an element (#449).
         ref = refof_maybe_getfield(rhs.args[1], meta_dict)
         if ref isa Binding && ref.val isa EXPR
             settype!(binding, infer_eltype(ref.val, state))
@@ -368,7 +371,68 @@ function get_arg_type_at_position(m::SymbolServer.MethodStore, argi, types, meta
 end
 
 # Assumes x.head.val == "="
-is_loop_iter_assignment(x::EXPR) = x.parent isa EXPR && ((x.parent.head == :for || x.parent.head == :generator) || (x.parent.head == :block && x.parent.parent isa EXPR && (x.parent.parent.head == :for || x.parent.parent.head == :generator)))
+# Is `x` (an assignment) a loop's *iteration spec* (e.g. the `i = 1:n` in
+# `for i in 1:n`), as opposed to an ordinary assignment in the loop body?
+# A single iterator is a direct child of the `:for`/`:generator`. Multiple
+# iterators (`for i in a, j in b`) are grouped in a block, which for a `:for`
+# is the FIRST arg (args[1]) — the second arg is the body block, whose
+# assignments must NOT be treated as iteration specs. For a `:generator` the
+# yielded expression is args[1] and iterators follow, so the spec block is any
+# block that is not args[1].
+function is_loop_iter_assignment(x::EXPR)
+    p = parentof(x)
+    p isa EXPR || return false
+    (p.head === :for || p.head === :generator) && return true
+    if p.head === :block && parentof(p) isa EXPR
+        gp = parentof(p)
+        gp.head === :for && return length(gp.args) >= 1 && gp.args[1] === p
+        gp.head === :generator && return length(gp.args) >= 1 && gp.args[1] !== p
+    end
+    return false
+end
+
+_is_scalar_index(a, state, scope) = false
+function _is_scalar_index(a::EXPR, state, scope)
+    (headof(a) === :INTEGER || headof(a) === :END || headof(a) === :BEGIN) && return true
+    meta_dict = state.meta_dict
+    if isidentifier(a) || CSTParser.is_getfield_w_quotenode(a)
+        # We may be inferring the assignment LHS before the index ref on the RHS
+        # has been resolved / had its own type inferred (binding-pass ordering),
+        # e.g. `for i in 1:n; x = v[i]`. Resolve + infer on demand (both are
+        # idempotent) so a loop variable's scalar type is visible here.
+        isidentifier(a) && !hasref(a, meta_dict) && resolve_ref(a, scope, state)
+        r = isidentifier(a) ? refof(a, meta_dict) : refof_maybe_getfield(a, meta_dict)
+        r isa Binding || return false
+        r.type === nothing && infer_type(r, scope, state)
+        r.type !== nothing || return false
+        store = getsymbols(state.env)
+        (haskey(store, :Core) && haskey(store[:Core], :Number)) || return false
+        return _issubtype(r.type, store[:Core][:Number], store, meta_dict)
+    end
+    return false
+end
+
+# Best-effort scalar type of an expression used as a range bound: a numeric/char
+# literal, or a reference whose type is known. Returns `nothing` when unknown.
+function _infer_scalar_type(x::EXPR, state)
+    headof(x) === :INTEGER && return CoreTypes.Int
+    headof(x) === :FLOAT && return CoreTypes.Float64
+    headof(x) === :CHAR && return CoreTypes.Char
+    meta_dict = state.meta_dict
+    if isidentifier(x) || CSTParser.is_getfield_w_quotenode(x)
+        r = isidentifier(x) ? refof(x, meta_dict) : refof_maybe_getfield(x, meta_dict)
+        r isa Binding && return r.type
+    end
+    return nothing
+end
+_infer_scalar_type(x, state) = nothing
+
+# Is `t` (a type binding / DataTypeStore) a `Number`?
+function _is_number(t, state)
+    store = getsymbols(state.env)
+    (haskey(store, :Core) && haskey(store[:Core], :Number)) || return false
+    return _issubtype(t, store[:Core][:Number], store, state.meta_dict)
+end
 
 function infer_eltype(x::EXPR, state)
     meta_dict = state.meta_dict
@@ -391,12 +455,13 @@ function infer_eltype(x::EXPR, state)
     elseif headof(x) === :STRING
         return CoreTypes.Char
     elseif headof(x) === :call && length(x.args) > 2 && CSTParser.is_colon(x.args[1])
-        if headof(x.args[2]) === :INTEGER && headof(x.args[3]) === :INTEGER
-            return CoreTypes.Int
-        elseif headof(x.args[2]) === :FLOAT && headof(x.args[3]) === :FLOAT
-            return CoreTypes.Float64
-        elseif headof(x.args[2]) === :CHAR && headof(x.args[3]) === :CHAR
-            return CoreTypes.Char
+        # number ranges are likely scalar
+        t = _infer_scalar_type(x.args[2], state)
+        if t !== nothing && all(3:length(x.args)) do i
+                b = _infer_scalar_type(x.args[i], state)
+                b !== nothing && (_type_compare(t, b) || (_is_number(t, state) && _is_number(b, state)))
+            end
+            return t
         end
     elseif hasbinding(x, meta_dict) && isdeclaration(x) && length(x.args) == 2
         return maybe_get_vec_eltype(x.args[2], state)
