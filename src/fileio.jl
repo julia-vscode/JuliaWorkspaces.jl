@@ -3,18 +3,22 @@ function our_isvalid(s)
 end
 
 function is_path_project_file(path)
+    isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
     return basename_lower_case=="project.toml" || basename_lower_case=="juliaproject.toml"
 end
 
 function is_path_manifest_file(path)
+    isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
-    return basename_lower_case=="manifest.toml" || basename_lower_case=="juliamanifest.toml"
+    # Manifest.toml, Manifest-v1.11.toml, JuliaManifest.toml, etc.
+    return occursin(r"^(julia)?manifest(\-v\d+(\.\d+)*)?\.toml$", basename_lower_case)
 end
 
 function is_path_lintconfig_file(path)
+    isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
     return basename_lower_case == "julialint.toml"
@@ -27,21 +31,21 @@ function is_path_formatconfig_file(path)
 end
 
 function is_path_julia_file(path)
-    _, ext = splitext(lowercase(path))
+    _, ext = splitext(path)
 
-    return ext == ".jl"
+    return isvalid(ext) && lowercase(ext) == ".jl"
 end
 
 function is_path_markdown_file(path)
-    _, ext = splitext(lowercase(path))
+    _, ext = splitext(path)
 
-    return ext == ".md"
+    return isvalid(ext) && lowercase(ext) == ".md"
 end
 
 function is_path_juliamarkdown_file(path)
-    _, ext = splitext(lowercase(path))
+    _, ext = splitext(path)
 
-    return ext == ".jmd"
+    return isvalid(ext) && lowercase(ext) == ".jmd"
 end
 
 is_walkdir_error(_) = false
@@ -50,6 +54,13 @@ is_walkdir_error(::Base.SystemError) = true
 is_walkdir_error(err::Base.TaskFailedException) = is_walkdir_error(err.task.exception)
 
 function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
+    if uri.scheme !== "file"
+        if ignore_io_errors
+            return nothing
+        else
+            error("Trying to read non-file content from $uri.")
+        end
+    end
     path = uri2filepath(uri)
 
     language_id = if is_path_julia_file(path)
@@ -67,7 +78,11 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
     elseif is_path_juliamarkdown_file(path)
         "juliamarkdown"
     else
-        throw(JWUnknownFileType("Unknown file type for $uri"))
+        if ignore_io_errors
+            return nothing
+        else
+            throw(JWUnknownFileType("Unknown file type for $uri"))
+        end
     end
 
     content = try
@@ -92,9 +107,17 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
 end
 
 function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
-    path = uri2filepath(uri)
-
     result = TextFile[]
+
+    if uri.scheme !== "file"
+        if ignore_io_errors
+            return result
+        else
+            error("Trying to read non-file content from $uri.")
+        end
+    end
+
+    path = uri2filepath(uri)
 
     for (root, _, files) in walkdir(path, onerror=x -> x)
         for file in files

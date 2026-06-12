@@ -49,6 +49,8 @@ Salsa.@derived function derived_potential_project_folders(rt)
     mf = Dict{URI,URI}()
 
     for file_uri in project_files
+        @assert file_uri.scheme === "file"
+
         file_path = uri2filepath(file_uri)
         folder_path = dirname(file_path)
         folder_uri = filepath2uri(folder_path)
@@ -128,7 +130,7 @@ Salsa.@derived function derived_project(rt, uri)
     project_file = toml_files.project_file
     manifest_file = toml_files.manifest_file
 
-    if manifest_file===nothing
+    if manifest_file === nothing || manifest_file.scheme != "file"
         return nothing
     end
 
@@ -149,8 +151,12 @@ Salsa.@derived function derived_project(rt, uri)
 
     manifest_deps = if manifest_version.major == 1
         manifest_content
-    elseif manifest_version.major == 2 && haskey(manifest_content, "deps") && manifest_content["deps"] isa Dict
-        manifest_content["deps"]
+    elseif manifest_version.major == 2
+        if haskey(manifest_content, "deps") && manifest_content["deps"] isa Dict
+            manifest_content["deps"]
+        else
+            Dict{String,Any}()
+        end
     else
         return nothing
     end

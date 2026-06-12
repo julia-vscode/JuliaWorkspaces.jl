@@ -1,12 +1,3 @@
-import JuliaSyntax
-using JuliaSyntax: @K_str, kind, children, haschildren, first_byte, last_byte, SyntaxNode
-
-import ..URIs2
-using ..URIs2: URI, uri2filepath
-
-import ...JuliaWorkspaces
-using ...JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail, JuliaPackage, JuliaProject, splitpath
-
 function vec_startswith(a, b)
     if length(a) < length(b)
         return false
@@ -21,6 +12,8 @@ function vec_startswith(a, b)
 end
 
 function find_project_for_file(projects::Vector{URI}, file::URI)
+    file.scheme != "file" && return nothing
+
     file_path = uri2filepath(file)
     project = projects |>
         x -> map(x) do i
@@ -48,6 +41,48 @@ Salsa.@derived function derived_testitems(rt, uri)
     syntax_tree = derived_julia_syntax_tree(rt, uri)
 
     TestItemDetection.find_test_detail!(syntax_tree, testitems, testsetups, testerrors)
+
+    package_uri = derived_package_for_file(rt, uri)
+
+    if isnothing(package_uri) && (!isempty(testitems) || !isempty(testsetups))
+        all_testerrors = [
+            TestErrorDetail(
+                uri,
+                "$uri:error$i",
+                string(te.name),
+                te.message,
+                te.range
+            ) for (i,te) in enumerate(testerrors)
+        ]
+
+        error_offset = length(testerrors)
+
+        for (i, ti) in enumerate(testitems)
+            push!(all_testerrors, TestErrorDetail(
+                uri,
+                "$uri:error$(error_offset + i)",
+                ti.name,
+                "Test items must be defined inside a Julia package.",
+                ti.range
+            ))
+        end
+
+        for (i, ts) in enumerate(testsetups)
+            push!(all_testerrors, TestErrorDetail(
+                uri,
+                "$uri:error$(error_offset + length(testitems) + i)",
+                string(ts.name),
+                "Test setups must be defined inside a Julia package.",
+                ts.range
+            ))
+        end
+
+        return TestDetails(
+            TestItemDetail[],
+            TestSetupDetail[],
+            all_testerrors
+        )
+    end
 
     return TestDetails(
         [TestItemDetail(
@@ -114,7 +149,7 @@ Salsa.@derived function derived_testenv(rt, uri)
     elseif project_uri in projects
         relevant_project = derived_project(rt, project_uri)
 
-        if findfirst(i->i.uri == package_uri, collect(values(relevant_project.deved_packages))) === nothing
+        if relevant_project === nothing || findfirst(i->i.uri == package_uri, collect(values(relevant_project.deved_packages))) === nothing
             project_uri = nothing
         end
     else
