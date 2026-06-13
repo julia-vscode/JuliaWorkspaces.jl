@@ -4,8 +4,6 @@ include("URIs2/URIs2.jl")
 
 include("SymbolServer/SymbolServer.jl")
 
-include("StaticLint/StaticLint.jl")
-
 include("compat.jl")
 
 import Pkg
@@ -26,6 +24,9 @@ include("sourcetext.jl")
 include("inputs.jl")
 include("layer_files.jl")
 include("layer_syntax_trees.jl")
+
+include("StaticLint/StaticLint.jl")
+
 include("layer_includes.jl")
 include("layer_static_lint.jl")
 include("layer_projects.jl")
