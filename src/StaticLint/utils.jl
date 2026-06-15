@@ -37,8 +37,8 @@ function clear_scope(x::EXPR, meta_dict)
         if headof(x) === :file && scopeof(x, meta_dict).modules isa Dict && scopehasmodule(scopeof(x, meta_dict), :Base) && scopehasmodule(scopeof(x, meta_dict), :Core)
             m1, m2 = getscopemodule(scopeof(x, meta_dict), :Base), getscopemodule(scopeof(x, meta_dict), :Core)
             empty!(scopeof(x, meta_dict).modules)
-            addmoduletoscope!(scopeof(x, meta_dict), m1)
-            addmoduletoscope!(scopeof(x, meta_dict), m2)
+            addmoduletoscope!(scopeof(x, meta_dict), m1, meta_dict)
+            addmoduletoscope!(scopeof(x, meta_dict), m2, meta_dict)
         else
             scopeof(x, meta_dict).modules = nothing
         end

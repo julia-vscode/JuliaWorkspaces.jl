@@ -3244,3 +3244,70 @@ end
         @test CSTParser.valof(hints[1][2]) == "undefined_in_body"
     end
 end
+
+@testitem "addmoduletoscope! with module EXPR" setup=[shared_static_lint] begin
+    StaticLint = JuliaWorkspaces.StaticLint
+
+    cst, meta_dict, jw = parse_and_pass("""
+        module Foo
+        end
+        """)
+
+    modexpr = find_module_by_name(cst, "Foo")
+    @test modexpr !== nothing
+    modscope = StaticLint.scopeof(modexpr, meta_dict)
+    @test modscope isa StaticLint.Scope
+
+    s = StaticLint.Scope(cst)
+    @test !StaticLint.scopehasmodule(s, :Foo)
+
+    StaticLint.addmoduletoscope!(s, modexpr, meta_dict)
+
+    @test StaticLint.scopehasmodule(s, :Foo)
+    @test StaticLint.getscopemodule(s, :Foo) === modscope
+end
+
+@testitem "addmoduletoscope! accepts meta_dict for every module type" setup=[shared_static_lint] begin
+    StaticLint = JuliaWorkspaces.StaticLint
+    SymbolServer = JuliaWorkspaces.SymbolServer
+
+    cst, meta_dict, jw = parse_and_pass("""
+        module Foo
+        end
+        """)
+    modexpr = find_module_by_name(cst, "Foo")
+    modscope = StaticLint.scopeof(modexpr, meta_dict)
+
+    # A ModuleStore from the environment (the type :Base/:Core normally hold).
+    env = get_env(jw)
+    modulestore = env.symbols[:Base]
+    @test modulestore isa SymbolServer.ModuleStore
+
+    # Callers thread `meta_dict` uniformly without knowing the concrete module type;
+    # the ModuleStore and Scope methods accept and ignore it.
+    s = StaticLint.Scope(cst)
+    StaticLint.addmoduletoscope!(s, modulestore, meta_dict)
+    StaticLint.addmoduletoscope!(s, modscope, meta_dict)
+    StaticLint.addmoduletoscope!(s, modexpr, meta_dict)
+    @test StaticLint.scopehasmodule(s, :Base)
+    @test StaticLint.scopehasmodule(s, :Foo)
+end
+
+@testitem "clear_scope re-adds modules via the meta_dict callsite" setup=[shared_static_lint] begin
+    StaticLint = JuliaWorkspaces.StaticLint
+
+    # File scopes carry :Base/:Core; clear_scope (utils.jl) empties and re-adds them
+    # through addmoduletoscope!, passing meta_dict so any stored module type resolves.
+    cst, meta_dict, jw = parse_and_pass("""
+        x = 1
+        """)
+    filescope = StaticLint.scopeof(cst, meta_dict)
+    @test StaticLint.headof(cst) === :file
+    @test StaticLint.scopehasmodule(filescope, :Base)
+    @test StaticLint.scopehasmodule(filescope, :Core)
+
+    StaticLint.clear_scope(cst, meta_dict)
+
+    @test StaticLint.scopehasmodule(filescope, :Base)
+    @test StaticLint.scopehasmodule(filescope, :Core)
+end

@@ -42,9 +42,13 @@ function addmoduletoscope!(s::Scope, m, mname::Symbol)
     end
     s.modules[mname] = m
 end
-addmoduletoscope!(s::Scope, m::SymbolServer.ModuleStore) = addmoduletoscope!(s, m, m.name.name)
-addmoduletoscope!(s::Scope, m::EXPR) =  CSTParser.defines_module(m) && addmoduletoscope!(s, scopeof(m, meta_dict), Symbol(valof(CSTParser.get_name(m))))
-addmoduletoscope!(s::Scope, s1::Scope) = CSTParser.defines_module(s1.expr) && addmoduletoscope!(s, s1, Symbol(valof(CSTParser.get_name(s1.expr))))
+# `meta_dict` is accepted by every type-dispatched method (and ignored by the ones that
+# don't need it) so callers can pass it uniformly without knowing the concrete module
+# type. It is typed to exclude `Symbol`, keeping these distinct from the
+# `(s, m, mname::Symbol)` storage method above.
+addmoduletoscope!(s::Scope, m::SymbolServer.ModuleStore, meta_dict::Union{Nothing,AbstractDict}=nothing) = addmoduletoscope!(s, m, m.name.name)
+addmoduletoscope!(s::Scope, m::EXPR, meta_dict::AbstractDict) = CSTParser.defines_module(m) && addmoduletoscope!(s, scopeof(m, meta_dict), Symbol(valof(CSTParser.get_name(m))))
+addmoduletoscope!(s::Scope, s1::Scope, meta_dict::Union{Nothing,AbstractDict}=nothing) = CSTParser.defines_module(s1.expr) && addmoduletoscope!(s, s1, Symbol(valof(CSTParser.get_name(s1.expr))))
 
 
 getscopemodule(s::Scope, m::Symbol) = s.modules[m]
