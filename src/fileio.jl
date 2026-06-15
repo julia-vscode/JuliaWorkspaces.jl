@@ -55,7 +55,7 @@ is_walkdir_error(err::Base.TaskFailedException) = is_walkdir_error(err.task.exce
 
 function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
     if uri.scheme !== "file"
-        if ignore_io_errors
+        if return_nothing_on_io_error
             return nothing
         else
             error("Trying to read non-file content from $uri.")
@@ -78,7 +78,7 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
     elseif is_path_juliamarkdown_file(path)
         "juliamarkdown"
     else
-        if ignore_io_errors
+        if return_nothing_on_io_error
             return nothing
         else
             throw(JWUnknownFileType("Unknown file type for $uri"))
