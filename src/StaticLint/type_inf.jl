@@ -1,0 +1,479 @@
+function settype!(b::Binding, type::Binding)
+    push!(type.refs, b)
+    b.type = type
+end
+
+function settype!(b::Binding, type)
+    b.type = type
+end
+
+function infer_type(binding::Binding, scope, state)
+    if binding isa Binding
+        binding.type !== nothing && return
+        if binding.val isa EXPR && CSTParser.defines_module(binding.val)
+            settype!(binding, CoreTypes.Module)
+        elseif binding.val isa EXPR && CSTParser.defines_function(binding.val)
+            settype!(binding, CoreTypes.Function)
+        elseif binding.val isa EXPR && CSTParser.defines_datatype(binding.val)
+            settype!(binding, CoreTypes.DataType)
+        elseif binding.val isa EXPR
+            if isassignment(binding.val)
+                if CSTParser.is_func_call(binding.val.args[1])
+                    settype!(binding, CoreTypes.Function)
+                else
+                    lhs = binding.val.args[1]
+                    if lhs.head isa EXPR && valof(lhs.head) == "::"
+                        infer_type_decl(binding, lhs.args[2], state, scope)
+                    else
+                        infer_type_assignment_rhs(binding, state, scope)
+                    end
+                end
+            elseif binding.val.head isa EXPR && valof(binding.val.head) == "::"
+                infer_type_decl(binding, state, scope)
+            elseif CSTParser.issplat(binding.val) && length(binding.val.args) >= 1 &&
+                   binding.val.args[1].head isa EXPR && valof(binding.val.args[1].head) == "::"
+                infer_type_decl(binding, binding.val.args[1].args[2], state, scope)
+            elseif iswhere(parentof(binding.val))
+                settype!(binding, CoreTypes.DataType)
+            end
+        end
+    end
+end
+
+function infer_type_assignment_rhs(binding, state, scope)
+    meta_dict = state.meta_dict
+    lhs = binding.val.args[1]
+    rhs = binding.val.args[2]
+
+    is_destructuring = CSTParser.istuple(lhs) && !isempty(lhs.args) && CSTParser.isparameters(lhs.args[1])
+    if is_loop_iter_assignment(binding.val)
+        settype!(binding, infer_eltype(rhs, state))
+    elseif headof(rhs) === :ref && length(rhs.args) > 1 && all(a -> _is_scalar_index(a, state, scope), @view rhs.args[2:end])
+        # Only infer the element type when every index is provably scalar
+        # (integer literal / `begin`/`end` / `Number`-typed ref). A slice or
+        # otherwise non-scalar index yields an array, not an element (#449).
+        ref = refof_maybe_getfield(rhs.args[1], meta_dict)
+        if ref isa Binding && ref.val isa EXPR
+            settype!(binding, infer_eltype(ref.val, state))
+        end
+    else
+        if CSTParser.is_func_call(rhs)
+            if CSTParser.istuple(lhs) && !is_destructuring
+                return
+            end
+            callname = CSTParser.get_name(rhs)
+            if isidentifier(callname)
+                resolve_ref(callname, scope, state)
+                if hasref(callname, meta_dict)
+                    rb = get_root_method(refof(callname, meta_dict))
+                    if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
+                        if is_destructuring
+                            infer_destructuring_type(binding, rb, meta_dict)
+                        else
+                            settype!(binding, rb)
+                        end
+                    end
+                end
+            end
+        elseif CSTParser.iscurly(rhs) || CSTParser.iswhere(rhs)
+            # `const Alias = SomeType{...}` aliases a parameterized type, possibly
+            # behind `where` clauses (e.g. `const Alias = SomeType{T} where T`).
+            # The alias is itself a type, so adding methods to it is valid. Peel
+            # any `where`/declaration wrappers to get at the underlying `curly`.
+            unwrapped = CSTParser.rem_wheres_decls(rhs)
+            if CSTParser.iscurly(unwrapped)
+                callname = CSTParser.get_name(unwrapped)
+                if isidentifier(callname)
+                    resolve_ref(callname, scope, state)
+                    if hasref(callname, meta_dict)
+                        rb = get_root_method(refof(callname, meta_dict))
+                        if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
+                            settype!(binding, CoreTypes.DataType)
+                        end
+                    end
+                end
+            end
+        elseif headof(rhs) === :INTEGER
+            settype!(binding, CoreTypes.Int)
+        elseif headof(rhs) === :HEXINT
+            if length(rhs.val) < 5
+                settype!(binding, CoreTypes.UInt8)
+            elseif length(rhs.val) < 7
+                settype!(binding, CoreTypes.UInt16)
+            elseif length(rhs.val) < 11
+                settype!(binding, CoreTypes.UInt32)
+            else
+                settype!(binding, CoreTypes.UInt64)
+            end
+        elseif headof(rhs) === :FLOAT
+            settype!(binding, CoreTypes.Float64)
+        elseif CSTParser.isstringliteral(rhs)
+            settype!(binding, CoreTypes.String)
+        elseif headof(rhs) === :TRUE || headof(rhs) === :FALSE
+            settype!(binding, CoreTypes.Bool)
+        elseif isidentifier(rhs) || is_getfield_w_quotenode(rhs)
+            refof_rhs = isidentifier(rhs) ? refof(rhs, meta_dict) : refof_maybe_getfield(rhs, meta_dict)
+            if is_destructuring
+                # property destructuring `(; field) = obj`: infer the field's
+                # declared type from `obj`'s type rather than `obj`'s type itself.
+                if refof_rhs isa Binding
+                    infer_destructuring_type(binding, refof_rhs.type, meta_dict)
+                else
+                    infer_destructuring_type(binding, refof_rhs, meta_dict)
+                end
+            elseif refof_rhs isa Binding
+                if refof_rhs.val isa SymbolServer.GenericStore && refof_rhs.val.typ isa SymbolServer.FakeTypeName
+                    settype!(binding, maybe_lookup(refof_rhs.val.typ.name, state))
+                elseif refof_rhs.val isa SymbolServer.FunctionStore
+                    settype!(binding, CoreTypes.Function)
+                elseif refof_rhs.val isa SymbolServer.DataTypeStore
+                    settype!(binding, CoreTypes.DataType)
+                else
+                    settype!(binding, refof_rhs.type)
+                end
+            elseif refof_rhs isa SymbolServer.GenericStore && refof_rhs.typ isa SymbolServer.FakeTypeName
+                settype!(binding, maybe_lookup(refof_rhs.typ.name, state))
+            elseif refof_rhs isa SymbolServer.FunctionStore
+                settype!(binding, CoreTypes.Function)
+            elseif refof_rhs isa SymbolServer.DataTypeStore
+                settype!(binding, CoreTypes.DataType)
+            end
+        end
+    end
+end
+
+const MAX_DESTRUCTURE_INFER_DEPTH = 20
+function infer_destructuring_type(binding, rb::SymbolServer.DataTypeStore, meta_dict, depth=0)
+    assigned_name = CSTParser.get_name(binding.val)
+    for (fieldname, fieldtype) in zip(rb.fieldnames, rb.types)
+        if fieldname == assigned_name
+            settype!(binding, fieldtype)
+            return
+        end
+    end
+end
+function infer_destructuring_type(binding::Binding, rb::EXPR, meta_dict, depth=0)
+    scope = scopeof(rb, meta_dict)
+    if scope === nothing
+        # `const FOO = Foo` — follow the alias's RHS to the real constructor.
+        if depth < MAX_DESTRUCTURE_INFER_DEPTH && isassignment(rb) && !CSTParser.defines_datatype(rb)
+            infer_destructuring_type(binding, refof_maybe_getfield(rb.args[2], meta_dict), meta_dict, depth + 1)
+        end
+        return
+    end
+    assigned_name = string(to_codeobject(binding.name))
+    names = scope.names
+    if haskey(names, assigned_name)
+        b = names[assigned_name]
+        settype!(binding, b.type)
+    end
+end
+function infer_destructuring_type(binding, rb::Binding, meta_dict, depth=0)
+    depth >= MAX_DESTRUCTURE_INFER_DEPTH && return
+    return infer_destructuring_type(binding, rb.val, meta_dict, depth + 1)
+end
+# An alias may resolve to something carrying no field information (or `nothing`).
+infer_destructuring_type(binding, rb, meta_dict, depth=0) = nothing
+
+function infer_type_decl(binding, state, scope)
+    meta_dict = state.meta_dict
+    t = binding.val.args[2]
+    if isidentifier(t)
+        resolve_ref(t, scope, state)
+    end
+    if iscurly(t)
+        t = t.args[1]
+        resolve_ref(t, scope, state)
+    end
+    if CSTParser.is_getfield_w_quotenode(t)
+        resolve_getfield(t, scope, state)
+        t = t.args[2].args[1]
+    end
+    if refof(t, meta_dict) isa Binding
+        rb = get_root_method(refof(t, meta_dict))
+        if rb isa Binding && CoreTypes.isdatatype(rb.type)
+            settype!(binding, rb)
+        else
+            settype!(binding, refof(t, meta_dict))
+        end
+    else
+        edt = get_eventual_datatype(refof(t, meta_dict), state.env)
+        if edt !== nothing
+            settype!(binding, edt)
+        end
+    end
+end
+
+function infer_type_decl(binding, t, state, scope)
+    if isidentifier(t)
+        resolve_ref(t, scope, state)
+    end
+    if iscurly(t)
+        t = t.args[1]
+        resolve_ref(t, scope, state)
+    end
+    if CSTParser.is_getfield_w_quotenode(t)
+        resolve_getfield(t, scope, state)
+        t = t.args[2].args[1]
+    end
+    if refof(t, state.meta_dict) isa Binding
+        rb = get_root_method(refof(t, state.meta_dict))
+        if rb isa Binding && CoreTypes.isdatatype(rb.type)
+            settype!(binding, rb)
+        else
+            settype!(binding, refof(t, state.meta_dict))
+        end
+    else
+        edt = get_eventual_datatype(refof(t, state.meta_dict), state.env)
+        if edt !== nothing
+            settype!(binding, edt)
+        end
+    end
+end
+
+get_eventual_datatype(_, _::ExternalEnv) = nothing
+get_eventual_datatype(b::SymbolServer.DataTypeStore, _::ExternalEnv) = b
+function get_eventual_datatype(b::SymbolServer.FunctionStore, env::ExternalEnv)
+    return SymbolServer._lookup(b.extends, getsymbols(env))
+end
+
+# Work out what type a bound variable has by functions that are called on it.
+function infer_type_by_use(b::Binding, env::ExternalEnv, meta_dict)
+    b.type !== nothing && return # b already has a type
+    possibletypes = []
+    visitedmethods = []
+    ifbranch = nothing
+    for ref in b.refs
+        new_possibles = []
+        ref isa EXPR || continue # skip non-EXPR (i.e. used for handling of globals)
+        # Some simple handling for :if blocks
+        if ifbranch === nothing
+            ifbranch = find_if_parents(ref)
+        else
+            newbranch = find_if_parents(ref)
+            if !in_same_if_branch(ifbranch, newbranch)
+                return
+            end
+            ifbranch = newbranch
+        end
+        check_ref_against_calls(ref, visitedmethods, new_possibles, env, meta_dict)
+        if !isempty(new_possibles)
+            if isempty(possibletypes)
+                possibletypes = new_possibles
+            else
+                possibletypes = intersect(possibletypes, new_possibles)
+            end
+            if isempty(possibletypes)
+                return
+            end
+        end
+    end
+    # Only do something if we're left with a singleton set at the end.
+    if length(possibletypes) == 1
+        type = first(possibletypes)
+        if type isa Binding
+            settype!(b, type)
+        elseif type isa SymbolServer.DataTypeStore
+            settype!(b, type)
+        elseif type isa SymbolServer.VarRef
+            settype!(b, SymbolServer._lookup(type, getsymbols(env))) # could be nothing
+        elseif type isa SymbolServer.FakeTypeName && isempty(type.parameters)
+            settype!(b, SymbolServer._lookup(type.name, getsymbols(env))) # could be nothing
+        end
+    end
+end
+
+function check_ref_against_calls(x, visitedmethods, new_possibles, env::ExternalEnv, meta_dict)
+    if is_arg_of_resolved_call(x, meta_dict) && !call_is_func_sig(x.parent)
+        sig = parentof(x)
+        # x is argument of function call (func) and we know what that function is
+        if CSTParser.isidentifier(sig.args[1])
+            func = refof(sig.args[1], meta_dict)
+        else
+            func = refof(sig.args[1].args[2].args[1], meta_dict)
+        end
+        argi = get_arg_position_in_call(sig, x) # what slot does ref sit in?
+        tls = retrieve_toplevel_scope(x, meta_dict)
+        if func isa Binding
+            for method in func.refs
+                method = get_method(method)
+                method === nothing && continue
+                if method isa EXPR
+                    if defines_function(method)
+                        get_arg_type_at_position(method, argi, new_possibles, meta_dict)
+                    # elseif CSTParser.defines_struct(method)
+                        # Can we ignore this? Default constructor gives us no type info?
+                    end
+                else # elseif what?
+                    iterate_over_ss_methods(method, tls, env, m -> (get_arg_type_at_position(m, argi, new_possibles, meta_dict);false))
+                end
+            end
+        else
+            iterate_over_ss_methods(func, tls, env, m -> (get_arg_type_at_position(m, argi, new_possibles, meta_dict);false))
+        end
+    end
+end
+
+function call_is_func_sig(call::EXPR)
+    # assume initially called on a :call
+    if call.parent isa EXPR
+        if call.parent.head === :function || CSTParser.is_eq(call.parent.head)
+            true
+        elseif isdeclaration(call.parent) || iswhere(call.parent)
+            call_is_func_sig(call.parent)
+        else
+            false
+        end
+    else
+        false
+    end
+end
+
+function is_arg_of_resolved_call(x::EXPR, meta_dict)
+    parentof(x) isa EXPR && headof(parentof(x)) === :call && # check we're in a call signature
+    (caller = parentof(x).args[1]) !== x && # and that x is not the caller
+    ((CSTParser.isidentifier(caller) && hasref(caller, meta_dict)) || (is_getfield(caller) && headof(caller.args[2]) === :quotenode && hasref(caller.args[2].args[1], meta_dict)))
+end
+
+function get_arg_position_in_call(sig::EXPR, arg)
+    for i in 1:length(sig.args)
+        sig.args[i] == arg && return i
+    end
+end
+
+function get_arg_type_at_position(method, argi, types, meta_dict)
+    if method isa EXPR
+        sig = CSTParser.get_sig(method)
+        if sig !== nothing &&
+            sig.args !== nothing && argi <= length(sig.args) &&
+            hasbinding(sig.args[argi], meta_dict) &&
+            (argb = bindingof(sig.args[argi], meta_dict); argb isa Binding && argb.type !== nothing) &&
+            !(argb.type in types)
+            push!(types, argb.type)
+            return
+        end
+    elseif method isa SymbolServer.DataTypeStore || method isa SymbolServer.FunctionStore
+        for m in method.methods
+            get_arg_type_at_position(m, argi, types, meta_dict)
+        end
+    end
+    return
+end
+
+function get_arg_type_at_position(m::SymbolServer.MethodStore, argi, types, meta_dict)
+    argi -= 1
+    if !(0 < argi < length(m.sig))
+        return
+    end
+    if m.sig[argi][2] != SymbolServer.VarRef(SymbolServer.VarRef(nothing, :Core), :Any) && !(m.sig[argi][2] in types)
+        push!(types, m.sig[argi][2])
+    end
+end
+
+# Assumes x.head.val == "="
+# Is `x` (an assignment) a loop's *iteration spec* (e.g. the `i = 1:n` in
+# `for i in 1:n`), as opposed to an ordinary assignment in the loop body?
+# A single iterator is a direct child of the `:for`/`:generator`. Multiple
+# iterators (`for i in a, j in b`) are grouped in a block, which for a `:for`
+# is the FIRST arg (args[1]) — the second arg is the body block, whose
+# assignments must NOT be treated as iteration specs. For a `:generator` the
+# yielded expression is args[1] and iterators follow, so the spec block is any
+# block that is not args[1].
+function is_loop_iter_assignment(x::EXPR)
+    p = parentof(x)
+    p isa EXPR || return false
+    (p.head === :for || p.head === :generator) && return true
+    if p.head === :block && parentof(p) isa EXPR
+        gp = parentof(p)
+        gp.head === :for && return length(gp.args) >= 1 && gp.args[1] === p
+        gp.head === :generator && return length(gp.args) >= 1 && gp.args[1] !== p
+    end
+    return false
+end
+
+_is_scalar_index(a, state, scope) = false
+function _is_scalar_index(a::EXPR, state, scope)
+    (headof(a) === :INTEGER || headof(a) === :END || headof(a) === :BEGIN) && return true
+    meta_dict = state.meta_dict
+    if isidentifier(a) || CSTParser.is_getfield_w_quotenode(a)
+        # We may be inferring the assignment LHS before the index ref on the RHS
+        # has been resolved / had its own type inferred (binding-pass ordering),
+        # e.g. `for i in 1:n; x = v[i]`. Resolve + infer on demand (both are
+        # idempotent) so a loop variable's scalar type is visible here.
+        isidentifier(a) && !hasref(a, meta_dict) && resolve_ref(a, scope, state)
+        r = isidentifier(a) ? refof(a, meta_dict) : refof_maybe_getfield(a, meta_dict)
+        r isa Binding || return false
+        r.type === nothing && infer_type(r, scope, state)
+        r.type !== nothing || return false
+        store = getsymbols(state.env)
+        (haskey(store, :Core) && haskey(store[:Core], :Number)) || return false
+        return _issubtype(r.type, store[:Core][:Number], store, meta_dict)
+    end
+    return false
+end
+
+# Best-effort scalar type of an expression used as a range bound: a numeric/char
+# literal, or a reference whose type is known. Returns `nothing` when unknown.
+function _infer_scalar_type(x::EXPR, state)
+    headof(x) === :INTEGER && return CoreTypes.Int
+    headof(x) === :FLOAT && return CoreTypes.Float64
+    headof(x) === :CHAR && return CoreTypes.Char
+    meta_dict = state.meta_dict
+    if isidentifier(x) || CSTParser.is_getfield_w_quotenode(x)
+        r = isidentifier(x) ? refof(x, meta_dict) : refof_maybe_getfield(x, meta_dict)
+        r isa Binding && return r.type
+    end
+    return nothing
+end
+_infer_scalar_type(x, state) = nothing
+
+# Is `t` (a type binding / DataTypeStore) a `Number`?
+function _is_number(t, state)
+    store = getsymbols(state.env)
+    (haskey(store, :Core) && haskey(store[:Core], :Number)) || return false
+    return _issubtype(t, store[:Core][:Number], store, state.meta_dict)
+end
+
+function infer_eltype(x::EXPR, state)
+    meta_dict = state.meta_dict
+    if isidentifier(x) && hasref(x, meta_dict) # assume is IDENT
+        r = refof(x, meta_dict)
+        if r isa Binding && r.val isa EXPR
+            if isassignment(r.val) && r.val.args[2] != x
+                return infer_eltype(r.val.args[2], state)
+            end
+        end
+    elseif headof(x) === :ref && hasref(x.args[1], meta_dict)
+        r = refof(x.args[1], meta_dict)
+        if r isa Binding && CoreTypes.isdatatype(r.type)
+            return r
+        end
+        edt = get_eventual_datatype(r, state.env)
+        if edt isa SymbolServer.DataTypeStore
+            return edt
+        end
+    elseif headof(x) === :STRING
+        return CoreTypes.Char
+    elseif headof(x) === :call && length(x.args) > 2 && CSTParser.is_colon(x.args[1])
+        # number ranges are likely scalar
+        t = _infer_scalar_type(x.args[2], state)
+        if t !== nothing && all(3:length(x.args)) do i
+                b = _infer_scalar_type(x.args[i], state)
+                b !== nothing && (_type_compare(t, b) || (_is_number(t, state) && _is_number(b, state)))
+            end
+            return t
+        end
+    elseif hasbinding(x, meta_dict) && isdeclaration(x) && length(x.args) == 2
+        return maybe_get_vec_eltype(x.args[2], state)
+    end
+end
+
+function maybe_get_vec_eltype(t, state)
+    meta_dict = state.meta_dict
+    if iscurly(t)
+        lhs_ref = refof_maybe_getfield(t.args[1], meta_dict)
+        if lhs_ref isa SymbolServer.DataTypeStore && CoreTypes.isarray(lhs_ref) && length(t.args) > 1
+            refof(t.args[2], meta_dict)
+        end
+    end
+end

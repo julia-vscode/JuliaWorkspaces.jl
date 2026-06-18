@@ -88,13 +88,13 @@ Details of a Julia package.
 - `project_file_uri`::URI
 - name::String
 - uuid::UUID
-- content_hash::UInt
+- content_hash::UInt64
 """
 @auto_hash_equals struct JuliaPackage
     project_file_uri::URI
     name::String
     uuid::UUID
-    content_hash::UInt
+    content_hash::UInt64
 end
 
 """
@@ -153,7 +153,8 @@ Details of a Julia project.
 
 - `project_file_uri`::URI
 - `manifest_file_uri`::URI
-- content_hash::UInt
+- `julia_version`::Union{Nothing,VersionNumber}
+- content_hash::UInt64
 - deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
 - regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
 - stdlib_packages::Dict{String,JuliaProjectEntryStdlibPackage}
@@ -161,7 +162,8 @@ Details of a Julia project.
 @auto_hash_equals struct JuliaProject
     project_file_uri::URI
     manifest_file_uri::URI
-    content_hash::UInt
+    julia_version::Union{Nothing,VersionNumber}
+    content_hash::UInt64
     deved_packages::Dict{String,JuliaProjectEntryDevedPackage}
     regular_packages::Dict{String,JuliaProjectEntryRegularPackage}
     stdlib_packages::Dict{String,JuliaProjectEntryStdlibPackage}
@@ -205,17 +207,41 @@ A source text, consisting of its content, line indices, and language ID.
     end
 end
 
+"""
+    struct Position
+
+A position in a source file expressed as a 1-based line number and a 1-based
+UTF-8 byte column within that line.
+
+- `line::Int`: 1-based line number.
+- `column::Int`: 1-based UTF-8 byte offset from the start of the line.
+"""
+struct Position
+    line::Int    # 1-based
+    column::Int  # 1-based, UTF-8 byte offset within the line
+end
+
 function position_at(source_text::SourceText, x)
     line_indices = source_text.line_indices
 
     # TODO Implement a more efficient algorithm
     for line in length(line_indices):-1:1
         if x >= line_indices[line]
-            return line, x - line_indices[line] + 1
+            return Position(line, x - line_indices[line] + 1)
         end
     end
 
     error("This should never happen")
+end
+
+"""
+    _offset_to_position(runtime, uri, offset)
+
+Convert a 0-based byte offset in the file identified by `uri` to a `Position`.
+"""
+function _offset_to_position(runtime, uri::URI, offset::Int)
+    st = input_text_file(runtime, uri).content
+    return position_at(st, offset + 1)
 end
 
 """
@@ -252,14 +278,29 @@ A diagnostic struct, consisting of range, severity, message, and source.
 - range::UnitRange{Int64}
 - severity::Symbol
 - message::String
+- uri::Union{Nothing,URI}
+- tags::Vector{Symbol}
 - source::String
 """
 @auto_hash_equals struct Diagnostic
     range::UnitRange{Int64}
     severity::Symbol
     message::String
+    uri::Union{Nothing,URI}
+    tags::Vector{Symbol}
     source::String
 end
+
+struct SContext
+    dynamic_feature::Union{Nothing,DynamicFeature}
+    # Optional callback invoked once when an indirect file URI is first
+    # requested via the lazy input. Receives the URI; intended for the LS to
+    # register an LSP file watcher for future updates. The lazy input itself
+    # already loads initial content synchronously from disc.
+    indirect_file_watch_callback::Union{Nothing,Function}
+end
+
+SContext(dynamic_feature) = SContext(dynamic_feature, nothing)
 
 """
     struct JuliaWorkspace
@@ -269,14 +310,157 @@ A Julia workspace, consisting of a [`Salsa`](https://github.com/julia-vscode/Sal
 - runtime::Salsa.Runtime
 """
 struct JuliaWorkspace
-    runtime::Salsa.Runtime
+    runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
+    dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace()
-        rt = Salsa.Runtime()
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing)
+        if store_path === nothing
+            store_path = Scratch.@get_scratch!("store_path_v1")
+        end
+        need_dynamic_feature = dynamic != DynamicOff || symbolcache_download
+        dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback) : nothing
+        dynamic_feature === nothing || start(dynamic_feature)
+
+        rt = Salsa.Runtime{SContext}(SContext(dynamic_feature, indirect_file_watch_callback))
 
         set_input_files!(rt, Set{URI}())
-        set_input_fallback_test_project!(rt, nothing)
+        set_input_active_project!(rt, nothing)
+        set_input_env_ready!(rt, false)
+        set_input_ready_project_environments!(rt, Set{WatchEnvironmentKey}())
+        set_input_ready_test_environments!(rt, Dict{WatchTestEnvironmentKey,URI}())
+        set_input_standalone_projects!(rt, Dict{CreateStandaloneProjectKey,URI}())
 
-        new(rt)
+        new(rt, dynamic_feature)
     end
+end
+
+function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1)
+    filename = replace(string(something(git_tree_sha1, version)), '+'=>'_')
+    cache_path = joinpath(store_path, uppercase(string(name)[1:1]), string(name), string(uuid), string(filename, ".jstore"))
+
+    if isfile(cache_path)
+        package_data = open(cache_path) do io
+            SymbolServer.CacheStore.read(io)
+        end
+
+        pkg_path = Base.locate_package(Base.PkgId(uuid, string(name)))
+
+        # TODO Reenable this
+        # if pkg_path === nothing || !isfile(pkg_path)
+        #     pkg_path = SymbolServer.get_pkg_path(Base.PkgId(uuid, pe_name), environment_path, ctx.dynamic_feature.depot_path)
+        # end
+
+        if pkg_path !== nothing
+            SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
+        end
+
+        return package_data
+    end
+
+    return nothing
+end
+
+function _load_package_caches_for_project!(jw, project_uri)
+    project = derived_project(jw.runtime, project_uri)
+    project === nothing && return
+
+    store_path = jw.dynamic_feature.store_path
+
+    for (_, v) in project.regular_packages
+        package_data = _try_load_package_cache(store_path, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1)
+        if package_data !== nothing
+            # @info "Now package data is ready" v.name v.uuid v.version v.git_tree_sha1
+            set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1, package_data)
+        end
+    end
+
+    for (_, v) in project.stdlib_packages
+        v.version === nothing && continue
+        ver = parse(VersionNumber, v.version)
+        package_data = _try_load_package_cache(store_path, Symbol(v.name), v.uuid, ver, nothing)
+        if package_data !== nothing
+            # @info "Now package data is ready (stdlib)" v.name v.uuid v.version
+            set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, ver, nothing, package_data)
+        end
+    end
+end
+
+function process_from_dynamic(jw::JuliaWorkspace)
+    jw.dynamic_feature === nothing && return
+    df = jw.dynamic_feature
+    isready(df.out_channel) || return
+
+    # Accumulate all drained results into local copies of the collection inputs
+    # and write each input back at most once, so a burst of results causes a
+    # single invalidation per collection rather than one per message.
+    ready_envs = copy(input_ready_project_environments(jw.runtime))
+    ready_test_envs = copy(input_ready_test_environments(jw.runtime))
+    standalone_projects = copy(input_standalone_projects(jw.runtime))
+    envs_dirty = false
+    test_envs_dirty = false
+    standalone_dirty = false
+    any_env_ready = false
+
+    while isready(df.out_channel)
+        msg = take!(df.out_channel)
+
+        if msg isa FailedResult
+            @warn "DJP reported failure" msg.key
+            # Nothing to update — failed_projects was already populated in the reactor.
+
+        elseif msg isa EnvironmentReadyResult
+            @info "Processing new env"
+            for i in df.missing_pkg_metadata
+                package_data = _try_load_package_cache(df.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
+                if package_data !== nothing
+                    set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
+                end
+            end
+
+            # Mark THIS specific project's environment as ready. Per-project
+            # gating (in derived_file_env_ready) prevents env-dependent
+            # diagnostics for other projects from being flushed prematurely
+            # while their own DJPs are still pending.
+            push!(ready_envs, WatchEnvironmentKey(msg.project_path, msg.content_hash))
+            envs_dirty = true
+            any_env_ready = true
+
+        elseif msg isa TestEnvironmentReadyResult
+            @info "Processing new test env" msg.project_uri msg.package msg.test_project_uri
+
+            ready_test_envs[WatchTestEnvironmentKey(uri2filepath(msg.project_uri), msg.package, msg.content_hash)] = msg.test_project_uri
+            test_envs_dirty = true
+
+            # Preload package caches and mark the test project's own environment
+            # ready, so the next get_diagnostics won't trigger another round.
+            _load_package_caches_for_project!(jw, msg.test_project_uri)
+            test_proj = derived_project(jw.runtime, msg.test_project_uri)
+            test_proj_hash = test_proj === nothing ? UInt64(0) : test_proj.content_hash
+            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.test_project_uri), test_proj_hash))
+            envs_dirty = true
+            any_env_ready = true
+
+        elseif msg isa StandaloneProjectReadyResult
+            @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
+
+            standalone_projects[CreateStandaloneProjectKey(uri2filepath(msg.package_folder_uri), msg.content_hash)] = msg.project_uri
+            standalone_dirty = true
+
+            _load_package_caches_for_project!(jw, msg.project_uri)
+            standalone_proj = derived_project(jw.runtime, msg.project_uri)
+            standalone_proj_hash = standalone_proj === nothing ? UInt64(0) : standalone_proj.content_hash
+            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), standalone_proj_hash))
+            envs_dirty = true
+            any_env_ready = true
+        else
+            error("Unknown message: $msg")
+        end
+    end
+
+    envs_dirty && set_input_ready_project_environments!(jw.runtime, ready_envs)
+    test_envs_dirty && set_input_ready_test_environments!(jw.runtime, ready_test_envs)
+    standalone_dirty && set_input_standalone_projects!(jw.runtime, standalone_projects)
+    any_env_ready && set_input_env_ready!(jw.runtime, true)
+
+    return
 end

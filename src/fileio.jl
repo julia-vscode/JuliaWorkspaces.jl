@@ -21,7 +21,13 @@ function is_path_lintconfig_file(path)
     isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
-    return basename_lower_case == ".julialint.toml"
+    return basename_lower_case == "julialint.toml"
+end
+
+function is_path_formatconfig_file(path)
+    basename_lower_case = basename(lowercase(path))
+
+    return basename_lower_case == "juliaformat.toml"
 end
 
 function is_path_julia_file(path)
@@ -49,7 +55,7 @@ is_walkdir_error(err::Base.TaskFailedException) = is_walkdir_error(err.task.exce
 
 function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
     if uri.scheme !== "file"
-        if ignore_io_errors
+        if return_nothing_on_io_error
             return nothing
         else
             error("Trying to read non-file content from $uri.")
@@ -65,12 +71,14 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
         "toml"
     elseif is_path_lintconfig_file(path)
         "toml"
+    elseif is_path_formatconfig_file(path)
+        "toml"
     elseif is_path_markdown_file(path)
         "markdown"
     elseif is_path_juliamarkdown_file(path)
         "juliamarkdown"
     else
-        if ignore_io_errors
+        if return_nothing_on_io_error
             return nothing
         else
             throw(JWUnknownFileType("Unknown file type for $uri"))
@@ -118,6 +126,7 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
                         is_path_project_file(filepath) ||
                         is_path_manifest_file(filepath) ||
                         is_path_lintconfig_file(filepath) ||
+                        is_path_formatconfig_file(filepath) ||
                         is_path_markdown_file(filepath) ||
                         is_path_juliamarkdown_file(filepath)
 
@@ -133,6 +142,10 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
 end
 
 function add_file_from_disc!(jw::JuliaWorkspace, path)
+    @debug "add_file_from_disc!" path=path
+
+    process_from_dynamic(jw)
+
     uri = filepath2uri(path)
     text_file = read_text_file_from_uri(uri)
 
@@ -140,6 +153,10 @@ function add_file_from_disc!(jw::JuliaWorkspace, path)
 end
 
 function update_file_from_disc!(jw::JuliaWorkspace, path)
+    @debug "update_file_from_disc!" path=path
+
+    process_from_dynamic(jw)
+
     uri = filepath2uri(path)
     text_file = read_text_file_from_uri(uri)
 
@@ -147,21 +164,29 @@ function update_file_from_disc!(jw::JuliaWorkspace, path)
 end
 
 function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
+    @debug "add_folder_from_disc!" path=path
+
+    process_from_dynamic(jw)
+
     path_uri = filepath2uri(path)
 
     files = read_path_into_textdocuments(path_uri, ignore_io_errors=ignore_io_errors)
 
     for i in files
-        add_file!(jw, i)
+        _add_file!(jw, i)
     end
+
+    # Reconcile once after the whole batch rather than after every file.
+    _reconcile!(jw)
 end
 
-function workspace_from_folders(workspace_folders::Vector{String})
-    jw = JuliaWorkspace()
+function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM)
+    @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic symbolcache_download=symbolcache_download
+
+    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream)
 
     for folder in workspace_folders
         add_folder_from_disc!(jw, folder)
     end
-
     return jw
 end

@@ -1,5 +1,7 @@
 Salsa.@derived function derived_julia_parse_result(rt, uri)
-    tf = input_text_file(rt, uri)
+    @debug "derived_julia_parse_result" uri=uri
+
+    tf = derived_text_file_content(rt, uri)
 
     content = tf.content.content
 
@@ -30,6 +32,8 @@ Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
             _range(i),
             i.level,
             i.message,
+            nothing,
+            Symbol[],
             "JuliaSyntax.jl"
         )
     end
@@ -37,15 +41,31 @@ Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
     return diag_results
 end
 
+Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
+    @debug "derived_julia_legacy_syntax_tree" uri=uri
+
+    tf = derived_text_file_content(rt, uri)
+
+    content = tf.content.content
+
+    cst = CSTParser.parse(content, true)
+
+    return cst
+end
+
 Salsa.@derived function derived_toml_parse_result(rt, uri)
-    tf = input_text_file(rt, uri)
+    @debug "derived_toml_parse_result" uri=uri
+
+    tf = derived_text_file_content(rt, uri)
+
+    tf === nothing && return Dict{String,Any}(), Diagnostic[Diagnostic(1:1, :error, "File not found", nothing, Symbol[], "JuliaWorkspaces")]
 
     content = tf.content.content
 
     parse_result = Pkg.TOML.tryparse(content)
 
     if parse_result isa Pkg.TOML.ParserError
-        return parse_result.table, Diagnostic[Diagnostic(parse_result.pos:parse_result.pos, :error, Base.TOML.format_error_message_for_err_type(parse_result), "TOML.jl")]
+        return parse_result.table, Diagnostic[Diagnostic(parse_result.pos:parse_result.pos, :error, Base.TOML.format_error_message_for_err_type(parse_result), nothing, Symbol[], "TOML.jl")]
     else
         return parse_result, Diagnostic[]
     end

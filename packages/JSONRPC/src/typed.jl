@@ -1,0 +1,213 @@
+abstract type AbstractMessageType end
+
+struct NotificationType{TPARAM} <: AbstractMessageType
+    method::String
+end
+
+struct RequestType{TPARAM,TR} <: AbstractMessageType
+    method::String
+end
+
+function NotificationType(method::AbstractString, ::Type{TPARAM}) where TPARAM
+    return NotificationType{TPARAM}(method)
+end
+
+function RequestType(method::AbstractString, ::Type{TPARAM}, ::Type{TR}) where {TPARAM,TR}
+    return RequestType{TPARAM,TR}(method)
+end
+
+get_param_type(::NotificationType{TPARAM}) where {TPARAM} = TPARAM
+get_param_type(::RequestType{TPARAM,TR}) where {TPARAM,TR} = TPARAM
+get_return_type(::RequestType{TPARAM,TR}) where {TPARAM,TR} = TR
+
+function send(x::JSONRPCEndpoint, request::RequestType{TPARAM,TR}, params::TPARAM; server_token::Union{Nothing,CancellationTokens.CancellationToken}=nothing, client_token::Union{Nothing,CancellationTokens.CancellationToken}=nothing) where {TPARAM,TR}
+    res = send_request(x, request.method, params; server_token=server_token, client_token=client_token)
+    return typed_res(res, TR)::TR
+end
+
+# `send_request` must have returned nothing in this case, we pass this on
+# so that we get an error in the typecast at the end of `send`
+# if that is not the case.
+typed_res(res, TR::Type{Nothing}) = res
+typed_res(res, TR::Type{<:T}) where {T <: AbstractArray{Any}} = T(res)
+typed_res(res, TR::Type{<:AbstractArray{T}}) where T = T.(res)
+typed_res(res, TR::Type) = TR(res)
+
+function send(x::JSONRPCEndpoint, notification::NotificationType{TPARAM}, params::TPARAM) where TPARAM
+    send_notification(x, notification.method, params)
+end
+
+struct Handler
+    message_type::AbstractMessageType
+    func::Function
+end
+
+mutable struct MsgDispatcher
+    _handlers::Dict{String,Handler}
+    _currentlyHandlingMsg::Bool
+
+    function MsgDispatcher()
+        new(Dict{String,Handler}(), false)
+    end
+end
+
+function Base.setindex!(dispatcher::MsgDispatcher, @nospecialize(func::Function), @nospecialize(message_type::AbstractMessageType))
+    dispatcher._handlers[message_type.method] = Handler(message_type, func)
+end
+
+function dispatch_msg(x::JSONRPCEndpoint, dispatcher::MsgDispatcher, msg::Request)
+    dispatcher._currentlyHandlingMsg = true
+    is_request = msg.id !== nothing
+    try
+        method_name = msg.method
+        handler = get(dispatcher._handlers, method_name, nothing)
+        if handler !== nothing
+            param_type = get_param_type(handler.message_type)
+            local params
+            try
+                params = param_type === Nothing ? nothing : param_type <: NamedTuple ? convert(param_type,(;(Symbol(i[1])=>i[2] for i in msg.params)...)) : param_type(msg.params)
+            catch err
+                if is_request
+                    send_error_response(x, msg, INVALID_PARAMS, string("Invalid params: ", err), nothing)
+                end
+                rethrow()
+            end
+
+            local res
+            try
+                if handler.message_type isa RequestType
+                    res = handler.func(x, params, msg.token)
+                else
+                    res = handler.func(x, params)
+                end
+            catch err
+                if err isa CancellationTokens.OperationCanceledException
+                    if is_request
+                        send_error_response(x, msg, REQUEST_CANCELLED, "Request cancelled", nothing)
+                    end
+                    return
+                end
+
+                if is_request
+                    if err isa JSONRPCError
+                        send_error_response(x, msg, err.code, err.msg, err.data)
+                    else
+                        send_error_response(x, msg, INTERNAL_ERROR, string("Error handling request: ", err), nothing)
+                    end
+                end
+
+                if err isa JSONRPCError
+                    return
+                else
+                    rethrow()
+                end
+            end
+
+            if handler.message_type isa RequestType
+                if res isa JSONRPCError
+                    send_error_response(x, msg, res.code, res.msg, res.data)
+                elseif res isa get_return_type(handler.message_type)
+                    send_success_response(x, msg, res)
+                else
+                    error_msg = "The handler for the '$method_name' request returned a value of type $(typeof(res)), which is not a valid return type according to the request definition."
+                    send_error_response(x, msg, -32603, error_msg, nothing)
+                    error(error_msg)
+                end
+            end
+        else
+            if is_request
+                send_error_response(x, msg, METHOD_NOT_FOUND, "Unknown method $method_name.", nothing)
+            end
+            error("Unknown method $method_name.")
+        end
+    finally
+        dispatcher._currentlyHandlingMsg = false
+    end
+end
+
+is_currently_handling_msg(d::MsgDispatcher) = d._currentlyHandlingMsg
+
+macro message_dispatcher(name, body)
+    quote
+        function $(esc(name))(x, msg::Request, context=nothing)
+            method_name = msg.method
+            is_request = msg.id !== nothing
+
+            $(
+                (
+                    :(
+                        if method_name == $(esc(i.args[2])).method
+                            param_type = get_param_type($(esc(i.args[2])))
+                            local params
+                            try
+                                params = param_type === Nothing ? nothing : param_type <: NamedTuple ? convert(param_type,(;(Symbol(i[1])=>i[2] for i in msg.params)...)) : param_type(msg.params)
+                            catch err
+                                if is_request
+                                    send_error_response(x, msg, INVALID_PARAMS, string("Invalid params: ", err), nothing)
+                                end
+                                rethrow()
+                            end
+
+                            local res
+                            try
+                                if context===nothing
+                                    if $(esc(i.args[2])) isa RequestType
+                                        res = $(esc(i.args[3]))(params, msg.token)
+                                    else
+                                        res = $(esc(i.args[3]))(params)
+                                    end
+                                else
+                                    if $(esc(i.args[2])) isa RequestType
+                                        res = $(esc(i.args[3]))(params, context, msg.token)
+                                    else
+                                        res = $(esc(i.args[3]))(params, context)
+                                    end
+                                end
+                            catch err
+                                if err isa CancellationTokens.OperationCanceledException
+                                    if is_request
+                                        send_error_response(x, msg, REQUEST_CANCELLED, "Request cancelled", nothing)
+                                    end
+                                    return
+                                end
+
+                                if is_request
+                                    if err isa JSONRPCError
+                                        send_error_response(x, msg, err.code, err.msg, err.data)
+                                    else
+                                        send_error_response(x, msg, INTERNAL_ERROR, string("Error handling request: ", err), nothing)
+                                    end
+                                end
+
+                                if err isa JSONRPCError
+                                    return
+                                else
+                                    rethrow()
+                                end
+                            end
+
+                            if $(esc(i.args[2])) isa RequestType
+                                if res isa JSONRPCError
+                                    send_error_response(x, msg, res.code, res.msg, res.data)
+                                elseif res isa get_return_type($(esc(i.args[2])))
+                                    send_success_response(x, msg, res)
+                                else
+                                    error_msg = "The handler for the '$method_name' request returned a value of type $(typeof(res)), which is not a valid return type according to the request definition."
+                                    send_error_response(x, msg, -32603, error_msg, nothing)
+                                    error(error_msg)
+                                end
+                            end
+
+                            return
+                        end
+                    ) for i in filter(i->i isa Expr, body.args)
+                )...
+            )
+
+            if is_request
+                send_error_response(x, msg, METHOD_NOT_FOUND, "Unknown method $method_name.", nothing)
+            end
+            error("Unknown method $method_name.")
+        end
+    end
+end

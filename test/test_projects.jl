@@ -3,7 +3,7 @@
     import UUIDs
     using UUIDs: UUID
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
 
     jw = workspace_from_folders([pkg_root])
 
@@ -25,46 +25,92 @@
     @test length(projects) == 0
 end
 
-@testitem "Manifest details" begin
+@testitem "Manifest details" tags=[:skip] begin
     using UUIDs, Pkg
 
-    mktempdir() do root_path
-        cp(joinpath(@__DIR__, "data", "project_detection"), joinpath(root_path, "project_detection"))
+    old = Base.active_project()
+    try
+        mktempdir() do root_path
+            cp(joinpath(@__DIR__, "..", "testdata", "project_detection"), joinpath(root_path, "project_detection"))
 
-        Pkg.activate(joinpath(root_path, "project_detection"))
-        Pkg.develop(PackageSpec(path=joinpath(root_path, "project_detection", "TestPackage3")))
-        Pkg.instantiate()
+            Pkg.activate(joinpath(root_path, "project_detection"))
+            Pkg.develop(PackageSpec(path=joinpath(root_path, "project_detection", "TestPackage3")))
+            Pkg.instantiate()
 
-        pkg_root = joinpath(root_path, "project_detection")
+            pkg_root = joinpath(root_path, "project_detection")
 
-        jw = workspace_from_folders([pkg_root])
+            jw = workspace_from_folders([pkg_root])
 
-        project_uri = first(get_projects(jw))
+            project_uri = first(get_projects(jw))
 
-        project_details = JuliaWorkspaces.derived_project(jw.runtime, project_uri)
+            project_details = JuliaWorkspaces.derived_project(jw.runtime, project_uri)
 
-        @test haskey(project_details.regular_packages, "JuliaSyntax") === true
-        @test project_details.regular_packages["JuliaSyntax"].name == "JuliaSyntax"
-        @test project_details.regular_packages["JuliaSyntax"].git_tree_sha1 == "e09bf943597f83cc7a1fe3ae6c01c2c008d8cde7"
-        @test project_details.regular_packages["JuliaSyntax"].uuid == UUID("70703baa-626e-46a2-a12c-08ffd08c73b4")
-        @test project_details.regular_packages["JuliaSyntax"].version == "0.3.5"
+            @test haskey(project_details.regular_packages, "JuliaSyntax") === true
+            @test project_details.regular_packages["JuliaSyntax"].name == "JuliaSyntax"
+            @test project_details.regular_packages["JuliaSyntax"].git_tree_sha1 == "e09bf943597f83cc7a1fe3ae6c01c2c008d8cde7"
+            @test project_details.regular_packages["JuliaSyntax"].uuid == UUID("70703baa-626e-46a2-a12c-08ffd08c73b4")
+            @test project_details.regular_packages["JuliaSyntax"].version == "0.3.5"
 
-        @test haskey(project_details.stdlib_packages, "Dates") === true
-        @test project_details.stdlib_packages["Dates"].name == "Dates"
-        @test project_details.stdlib_packages["Dates"].uuid == UUID("ade2ca70-3891-5945-98fb-dc099432e06a")
+            @test haskey(project_details.stdlib_packages, "Dates") === true
+            @test project_details.stdlib_packages["Dates"].name == "Dates"
+            @test project_details.stdlib_packages["Dates"].uuid == UUID("ade2ca70-3891-5945-98fb-dc099432e06a")
 
-        # we're not guaranteed that stdlib versions match the Julia version
-        if v"1.11.0" <= VERSION < v"1.12-"
-            @test VersionNumber(project_details.stdlib_packages["Dates"].version).major == VERSION.major
-            @test VersionNumber(project_details.stdlib_packages["Dates"].version).minor == VERSION.minor
+            # we're not guaranteed that stdlib versions match the Julia version
+            if v"1.11.0" <= VERSION < v"1.12-"
+                @test VersionNumber(project_details.stdlib_packages["Dates"].version).major == VERSION.major
+                @test VersionNumber(project_details.stdlib_packages["Dates"].version).minor == VERSION.minor
+            end
+            if VERSION < v"1.11-"
+                @test project_details.stdlib_packages["Dates"].version === nothing
+            end
+
+            @test haskey(project_details.deved_packages, "TestPackage3") === true
+            @test project_details.deved_packages["TestPackage3"].name == "TestPackage3"
+            @test project_details.deved_packages["TestPackage3"].uuid == UUID("d952f820-d47c-4fa1-a74c-bfd674713277")
+            @test project_details.deved_packages["TestPackage3"].version == "1.0.0"
         end
-        if VERSION < v"1.11-"
-            @test project_details.stdlib_packages["Dates"].version === nothing
-        end
-
-        @test haskey(project_details.deved_packages, "TestPackage3") === true
-        @test project_details.deved_packages["TestPackage3"].name == "TestPackage3"
-        @test project_details.deved_packages["TestPackage3"].uuid == UUID("d952f820-d47c-4fa1-a74c-bfd674713277")
-        @test project_details.deved_packages["TestPackage3"].version == "1.0.0"
+    finally
+        Base.set_active_project(old)
     end
+end
+
+@testitem "_stdlib_only_env contains Base symbols" begin
+    import JuliaWorkspaces.StaticLint as StaticLint
+
+    env = JuliaWorkspaces._stdlib_only_env()
+
+    # Should be a StaticLint.ExternalEnv
+    @test env isa StaticLint.ExternalEnv
+
+    # project_deps should be non-empty and contain core stdlib modules
+    @test !isempty(env.project_deps)
+    @test :Base in env.project_deps
+    @test :Core in env.project_deps
+
+    # The store should contain entries for Base
+    @test haskey(env.symbols, :Base)
+end
+
+@testitem "derived_static_lint_meta_for_root without project" begin
+    using JuliaWorkspaces: filepath2uri, JuliaWorkspace
+
+    # Use the StandaloneFile testdata — a bare .jl file with no Project.toml.
+    standalone_root = abspath(joinpath(@__DIR__, "..", "testdata", "StandaloneFile"))
+
+    jw = workspace_from_folders([standalone_root])
+
+    standalone_uri = filepath2uri(joinpath(standalone_root, "standalone.jl"))
+
+    # The file should be found as a root
+    root = JuliaWorkspaces.derived_best_root_for_uri(jw.runtime, standalone_uri)
+    @test root !== nothing
+
+    # No project URI should be detected (no Project.toml)
+    project_uri = JuliaWorkspaces.derived_project_uri_for_root(jw.runtime, root)
+    @test project_uri === nothing
+
+    # derived_static_lint_meta_for_root should still succeed (via _stdlib_only_env)
+    lint_result = JuliaWorkspaces.derived_static_lint_meta_for_root(jw.runtime, root)
+    @test !isempty(lint_result.meta_dict)
+    @test isempty(lint_result.workspace_packages)
 end

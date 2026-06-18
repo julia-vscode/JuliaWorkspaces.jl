@@ -1,0 +1,5 @@
+[deps]
+JuliaDynamicAnalysisProcess = "d3729fb9-06c0-4e86-aa34-36de5a1c1049"
+
+[sources]
+JuliaDynamicAnalysisProcess = {path = "../../JuliaDynamicAnalysisProcess"}

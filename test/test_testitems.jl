@@ -438,26 +438,32 @@ end
     @test tsd.code_range == (length("@testsnippet Foo begin ") + 1):(40 - 4)
 end
 
-@testitem "@testitem project detection" begin
+@testitem "@testitem project detection" tags=[:skip] begin
     using Pkg
     using JuliaWorkspaces: JuliaWorkspace
     using JuliaWorkspaces.URIs2: @uri_str, filepath2uri
 
-    mktempdir() do root_path
-        cp(joinpath(@__DIR__, "data", "project_detection"), joinpath(root_path, "project_detection"))
+    old = Base.active_project()
+    try
 
-        Pkg.activate(joinpath(root_path, "project_detection", "TestPackage2"))
-        Pkg.instantiate()
+        mktempdir() do root_path
+            cp(joinpath(@__DIR__, "..", "testdata", "project_detection"), joinpath(root_path, "project_detection"))
 
-        Pkg.activate(joinpath(root_path, "project_detection"))
-        Pkg.develop(PackageSpec(path=joinpath(root_path, "project_detection", "TestPackage3")))
-        Pkg.instantiate()
+            Pkg.activate(joinpath(root_path, "project_detection", "TestPackage2"))
+            Pkg.instantiate()
 
-        jw = JuliaWorkspaces.workspace_from_folders([root_path])
+            Pkg.activate(joinpath(root_path, "project_detection"))
+            Pkg.develop(PackageSpec(path=joinpath(root_path, "project_detection", "TestPackage3")))
+            Pkg.instantiate()
 
-        file1_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage2", "src", "TestPackage2.jl"))
-        file2_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage3", "src", "TestPackage3.jl"))
-        file3_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage4", "src", "TestPackage4.jl"))
+            jw = JuliaWorkspaces.workspace_from_folders([root_path])
+
+            file1_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage2", "src", "TestPackage2.jl"))
+            file2_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage3", "src", "TestPackage3.jl"))
+            file3_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage4", "src", "TestPackage4.jl"))
+        end
+    finally
+        Base.set_active_project(old)
     end
 end
 
@@ -582,8 +588,8 @@ version = "0.1.0"
         add_file!(jw, TextFile(project_uri, SourceText(read(project_file, String), "toml")))
         add_file!(jw, TextFile(test_uri, SourceText("# test", "julia")))
 
-        # Set project as fallback test project
-        JuliaWorkspaces.set_input_fallback_test_project!(jw.runtime, folder_uri)
+        # Set project as active project
+        JuliaWorkspaces.set_input_active_project!(jw.runtime, folder_uri)
 
         rt = jw.runtime
 

@@ -1,7 +1,7 @@
 @testitem "Read folder into workspace" begin
     using JuliaWorkspaces: filepath2uri, get_text_files
 
-    pkg_root = abspath(joinpath(@__DIR__, "data", "TestPackage1"))
+    pkg_root = abspath(joinpath(@__DIR__, "..", "testdata", "TestPackage1"))
 
     if Sys.islinux()
 

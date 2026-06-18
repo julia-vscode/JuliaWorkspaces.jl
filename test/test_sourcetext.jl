@@ -41,17 +41,17 @@ end
 @testitem "Test position_at start" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    @test position_at(st, 1) == (1,1)
+    @test position_at(st, 1) == JuliaWorkspaces.Position(1,1)
 end
 
 @testitem "Test position_at end" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    @test position_at(st, 14) == (3,4)
+    @test position_at(st, 14) == JuliaWorkspaces.Position(3,4)
 end
 
 @testitem "Test position_at mid" begin
     st = SourceText("asdf\nasdf\nasdf\n", "julia")
 
-    @test position_at(st, 8) == (2,3)
+    @test position_at(st, 8) == JuliaWorkspaces.Position(2,3)
 end
