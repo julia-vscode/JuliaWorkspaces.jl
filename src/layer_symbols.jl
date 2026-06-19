@@ -8,6 +8,17 @@
 # Result types
 # ============================================================================
 
+"""
+    struct DocumentSymbolResult
+
+A node in the document-outline tree (document symbols).
+
+- `name::String`: Display name of the symbol.
+- `kind::Int`: LSP `SymbolKind` integer.
+- `start::Position`: Start of the symbol's range.
+- `stop::Position`: End of the symbol's range.
+- `children::Vector{DocumentSymbolResult}`: Nested symbols.
+"""
 struct DocumentSymbolResult
     name::String
     kind::Int  # LSP SymbolKind integer
@@ -16,6 +27,17 @@ struct DocumentSymbolResult
     children::Vector{DocumentSymbolResult}
 end
 
+"""
+    struct WorkspaceSymbolResult
+
+A single match returned by a workspace-wide symbol search.
+
+- `name::String`: Display name of the symbol.
+- `kind::Int`: LSP `SymbolKind` integer.
+- `uri::URI`: File containing the symbol.
+- `start::Position`: Start of the symbol's range.
+- `stop::Position`: End of the symbol's range.
+"""
 struct WorkspaceSymbolResult
     name::String
     kind::Int

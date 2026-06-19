@@ -8,17 +8,43 @@
 # Result types
 # ============================================================================
 
+"""
+    struct ParameterInfo
+
+Describes a single parameter of a function signature in signature help.
+
+- `label::String`: The parameter's textual label as it appears in the signature.
+- `documentation::Union{String,Nothing}`: Optional documentation for the parameter.
+"""
 struct ParameterInfo
     label::String
     documentation::Union{String,Nothing}
 end
 
+"""
+    struct SignatureInfo
+
+Describes a single callable signature in a signature-help result.
+
+- `label::String`: The full signature rendered as text.
+- `documentation::String`: Documentation for the signature.
+- `parameters::Vector{ParameterInfo}`: The signature's parameters in order.
+"""
 struct SignatureInfo
     label::String
     documentation::String
     parameters::Vector{ParameterInfo}
 end
 
+"""
+    struct SignatureResult
+
+The result of a signature-help request at a call site.
+
+- `signatures::Vector{SignatureInfo}`: Candidate signatures for the call.
+- `active_signature::Int`: Index of the signature to highlight.
+- `active_parameter::Int`: Index of the parameter to highlight.
+"""
 struct SignatureResult
     signatures::Vector{SignatureInfo}
     active_signature::Int

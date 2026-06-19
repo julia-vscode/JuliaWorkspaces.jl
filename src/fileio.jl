@@ -141,6 +141,15 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
     return result
 end
 
+"""
+    add_file_from_disc!(jw::JuliaWorkspace, path)
+
+Read the file at the local `path` from disc and add it to the workspace `jw` as
+a new file (see [`add_file!`](@ref)). The file content is read eagerly and the
+file's language is inferred from its extension.
+
+Throws if a file with the same URI is already part of the workspace.
+"""
 function add_file_from_disc!(jw::JuliaWorkspace, path)
     @debug "add_file_from_disc!" path=path
 
@@ -152,6 +161,15 @@ function add_file_from_disc!(jw::JuliaWorkspace, path)
     add_file!(jw, text_file)
 end
 
+"""
+    update_file_from_disc!(jw::JuliaWorkspace, path)
+
+Re-read the file at the local `path` from disc and update its content in the
+workspace `jw` (see [`update_file!`](@ref)). Use this to refresh a file whose
+on-disc content changed outside of the workspace.
+
+Throws if no file with the corresponding URI is part of the workspace.
+"""
 function update_file_from_disc!(jw::JuliaWorkspace, path)
     @debug "update_file_from_disc!" path=path
 
@@ -163,6 +181,18 @@ function update_file_from_disc!(jw::JuliaWorkspace, path)
     update_file!(jw, text_file)
 end
 
+"""
+    add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
+
+Recursively read all relevant files under the local folder `path` from disc and
+add them to the workspace `jw`. Julia sources, `Project.toml`/`Manifest.toml`,
+and configuration files are picked up. The whole batch is added before a single
+reconciliation step runs, so this is more efficient than calling
+[`add_file!`](@ref) per file.
+
+If `ignore_io_errors` is `true`, files that cannot be read are skipped instead
+of raising an error.
+"""
 function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
     @debug "add_folder_from_disc!" path=path
 
@@ -180,6 +210,24 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
     _reconcile!(jw)
 end
 
+"""
+    workspace_from_folders(workspace_folders::Vector{String}; dynamic=DynamicOff, symbolcache_download=false, symbolcache_upstream=DEFAULT_SYMBOLCACHE_UPSTREAM)
+
+Create a new [`JuliaWorkspace`](@ref) and populate it by recursively reading
+every folder in `workspace_folders` from disc. This is the most convenient entry
+point for analysing a project that lives on the local file system.
+
+# Keyword arguments
+- `dynamic::DynamicMode`: Whether and how to run the out-of-process dynamic
+  feature. See [`DynamicMode`](@ref). Defaults to `DynamicOff`.
+- `symbolcache_download::Bool`: If `true`, allow downloading precomputed package
+  symbol caches from `symbolcache_upstream` instead of indexing locally.
+- `symbolcache_upstream::String`: Upstream URL for symbol-cache downloads.
+  Defaults to [`DEFAULT_SYMBOLCACHE_UPSTREAM`](@ref).
+
+# Returns
+- A [`JuliaWorkspace`](@ref) containing all files found under the given folders.
+"""
 function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM)
     @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic symbolcache_download=symbolcache_download
 

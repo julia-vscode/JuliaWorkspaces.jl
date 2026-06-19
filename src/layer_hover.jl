@@ -150,6 +150,13 @@ _ensure_ends_with(s, c = "\n") = endswith(s, c) ? s : string(s, c)
 # Type annotation helpers (for variable hover + completions)
 # ============================================================================
 
+"""
+    completion_type(b) -> Union{Symbol,Missing}
+
+Infer the type of a binding `b` as a `Symbol` suitable for display in hover and
+completion results, stripping a leading `Core.` qualifier. Returns `missing`
+when the type cannot be determined or `b` is not a `StaticLint.Binding`.
+"""
 function completion_type(b::StaticLint.Binding)
     typ = _inner_completion_type(b.type)
     typ === missing && return missing
@@ -195,6 +202,13 @@ function _prettify_expr(ex::Expr)
 end
 _prettify_expr(ex) = string(ex)
 
+"""
+    get_typed_definition(b) -> Union{String,Symbol,Missing}
+
+Return a human-readable definition string for the binding `b` with its inferred
+type annotation inserted where possible (for example `x::Int`). Falls back to
+[`completion_type`](@ref) when `b` is not a `StaticLint.Binding`.
+"""
 get_typed_definition(b) = completion_type(b)
 get_typed_definition(b::StaticLint.Binding) =
     _prettify_expr(_maybe_insert_type_declaration(b))

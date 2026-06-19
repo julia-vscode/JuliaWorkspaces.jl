@@ -8,12 +8,35 @@
 # Result types
 # ============================================================================
 
+"""
+    struct SelectionRangeResult
+
+A nested selection range used to grow/shrink an editor selection. Each result
+points to its enclosing range via `parent`, forming a chain from the innermost
+to the outermost syntactic construct.
+
+- `start::Position`: Start of this selection range.
+- `stop::Position`: End of this selection range.
+- `parent::Union{Nothing,SelectionRangeResult}`: The enclosing range, or
+  `nothing` for the outermost range.
+"""
 struct SelectionRangeResult
     start::Position
     stop::Position
     parent::Union{Nothing,SelectionRangeResult}
 end
 
+"""
+    struct BlockRangeResult
+
+Describes the syntactic block surrounding a position, distinguishing the full
+block extent from the sub-range to highlight.
+
+- `block_start::Position`: Start of the enclosing block.
+- `highlight_start::Position`: Start of the range to highlight.
+- `highlight_stop::Position`: End of the range to highlight.
+- `block_stop::Position`: End of the enclosing block.
+"""
 struct BlockRangeResult
     block_start::Position
     highlight_start::Position

@@ -1,3 +1,22 @@
+"""
+    @enum DynamicMode DynamicOff DynamicIndexingOnly DynamicPersistent
+
+Controls how a [`JuliaWorkspace`](@ref) uses the out-of-process *dynamic
+feature* that indexes package environments and resolves symbol information.
+
+- `DynamicOff`: No dynamic feature is started. The workspace only relies on
+  statically available information (parsed sources, `Project.toml`/`Manifest.toml`
+  contents, and any locally cached symbol data). Environment-dependent
+  diagnostics are suppressed because no environment can be resolved.
+- `DynamicIndexingOnly`: Child Julia processes are spawned to index project and
+  test environments (populating the on-disc symbol cache), but they are torn
+  down once indexing completes. Use this for one-shot tools such as CI runs.
+- `DynamicPersistent`: Like `DynamicIndexingOnly`, but the child processes are
+  kept alive so the workspace can react to ongoing changes. Use this for
+  long-running hosts such as a language server.
+
+See also [`is_ready`](@ref), [`wait_until_ready`](@ref).
+"""
 @enum DynamicMode DynamicOff DynamicIndexingOnly DynamicPersistent
 
 # The DJPKey identity types (`WatchEnvironmentKey`, `WatchTestEnvironmentKey`,
@@ -247,6 +266,13 @@ function Base.kill(djp::DynamicJuliaProcess)
     end
 end
 
+"""
+    DEFAULT_SYMBOLCACHE_UPSTREAM
+
+Default upstream URL from which precomputed package symbol caches are
+downloaded when `symbolcache_download` is enabled on a [`JuliaWorkspace`](@ref).
+Downloading a cached index avoids having to index a package locally.
+"""
 const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://www.julia-vscode.org/symbolcache"
 
 mutable struct ProgressState

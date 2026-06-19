@@ -10,6 +10,19 @@
 # Result types
 # ============================================================================
 
+"""
+    struct CodeActionInfo
+
+Describes a code action that is available at a given location, without yet
+computing its edits. Pass its `id` to [`execute_code_action`](@ref) to obtain
+the concrete edits.
+
+- `id::String`: Stable identifier of the action.
+- `title::String`: Human-readable title shown to the user.
+- `kind::Symbol`: One of `:quickfix`, `:refactor`, `:refactor_rewrite`,
+  `:source_organize_imports`, or `:empty`.
+- `is_preferred::Bool`: Whether this action should be offered as the preferred fix.
+"""
 struct CodeActionInfo
     id::String
     title::String
@@ -17,12 +30,30 @@ struct CodeActionInfo
     is_preferred::Bool
 end
 
+"""
+    struct TextEditResult
+
+A single text replacement produced by a code action.
+
+- `start::Position`: Start of the range to replace.
+- `stop::Position`: End of the range to replace.
+- `new_text::String`: Replacement text.
+"""
 struct TextEditResult
     start::Position
     stop::Position
     new_text::String
 end
 
+"""
+    struct WorkspaceFileEdit
+
+A group of [`TextEditResult`](@ref) edits that apply to a single file, as part
+of a workspace-wide edit produced by a code action.
+
+- `uri::URI`: File the edits apply to.
+- `edits::Vector{TextEditResult}`: Edits for that file.
+"""
 struct WorkspaceFileEdit
     uri::URI
     edits::Vector{TextEditResult}

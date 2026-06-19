@@ -221,6 +221,12 @@ struct Position
     column::Int  # 1-based, UTF-8 byte offset within the line
 end
 
+"""
+    position_at(source_text::SourceText, x::Int) -> Position
+
+Convert the 1-based byte offset `x` within `source_text` into a [`Position`](@ref)
+(a 1-based line number and a 1-based UTF-8 byte column).
+"""
 function position_at(source_text::SourceText, x)
     line_indices = source_text.line_indices
 
@@ -305,9 +311,40 @@ SContext(dynamic_feature) = SContext(dynamic_feature, nothing)
 """
     struct JuliaWorkspace
 
-A Julia workspace, consisting of a [`Salsa`](https://github.com/julia-vscode/Salsa.jl) runtime.
+The central handle representing a Julia workspace. It wraps a
+[`Salsa`](https://github.com/julia-vscode/Salsa.jl) runtime that holds all
+mutable inputs (the set of files, the active project, and dynamic-feature
+results) and memoizes every derived query computed from them. A workspace is
+manipulated through the mutation functions ([`add_file!`](@ref),
+[`update_file!`](@ref), [`remove_file!`](@ref), …) and inspected through the
+query functions ([`get_diagnostics`](@ref), [`get_julia_syntax_tree`](@ref), …).
 
-- runtime::Salsa.Runtime
+# Constructor
+
+    JuliaWorkspace(; dynamic=DynamicOff, store_path=nothing,
+                     symbolcache_download=false,
+                     symbolcache_upstream=DEFAULT_SYMBOLCACHE_UPSTREAM,
+                     indirect_file_watch_callback=nothing,
+                     progress_callback=nothing)
+
+Create an empty workspace. To build one directly from folders on disc, use
+[`workspace_from_folders`](@ref) instead.
+
+## Keyword arguments
+- `dynamic::DynamicMode`: Whether and how to run the out-of-process dynamic
+  feature that indexes environments. See [`DynamicMode`](@ref).
+- `store_path::Union{Nothing,String}`: Directory used to cache package symbol
+  data (`.jstore` files). Defaults to a managed scratch space.
+- `symbolcache_download::Bool`: If `true`, allow downloading precomputed symbol
+  caches from `symbolcache_upstream` rather than indexing locally.
+- `symbolcache_upstream::String`: Upstream URL for symbol-cache downloads.
+  Defaults to [`DEFAULT_SYMBOLCACHE_UPSTREAM`](@ref).
+- `indirect_file_watch_callback::Union{Nothing,Function}`: Invoked once with a
+  `URI` the first time an *indirect* file (a file pulled in via `include` but
+  not explicitly added) is requested. Intended for a host to register a file
+  watcher.
+- `progress_callback::Union{Nothing,Function}`: Invoked with progress updates
+  while the dynamic feature indexes environments.
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
