@@ -8,18 +8,46 @@
 # Result types
 # ============================================================================
 
+"""
+    struct DefinitionResult
+
+The location a go-to-definition request resolves to.
+
+- `uri::URI`: File containing the definition.
+- `start::Position`: Start of the definition's name range.
+- `stop::Position`: End of the definition's name range.
+"""
 struct DefinitionResult
     uri::URI
     start::Position
     stop::Position
 end
 
+"""
+    struct ReferenceResult
+
+A single location where a symbol is referenced (used by find-references).
+
+- `uri::URI`: File containing the reference.
+- `start::Position`: Start of the reference range.
+- `stop::Position`: End of the reference range.
+"""
 struct ReferenceResult
     uri::URI
     start::Position
     stop::Position
 end
 
+"""
+    struct RenameEdit
+
+A single text edit that renames an occurrence of a symbol.
+
+- `uri::URI`: File the edit applies to.
+- `start::Position`: Start of the range to replace.
+- `stop::Position`: End of the range to replace.
+- `new_text::String`: Replacement text.
+"""
 struct RenameEdit
     uri::URI
     start::Position
@@ -27,6 +55,16 @@ struct RenameEdit
     new_text::String
 end
 
+"""
+    struct HighlightResult
+
+A document-highlight range for an occurrence of a symbol.
+
+- `start::Position`: Start of the occurrence.
+- `stop::Position`: End of the occurrence.
+- `kind::Symbol`: `:read` or `:write`, indicating whether the occurrence reads
+  or writes the symbol.
+"""
 struct HighlightResult
     start::Position
     stop::Position

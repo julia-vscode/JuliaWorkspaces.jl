@@ -13,7 +13,10 @@ using .URIs2: uri2filepath
 # ============================================================================
 
 """
-Completion item kinds, mirroring LSP CompletionItemKind values.
+    module CompletionKinds
+
+Named constants for completion item kinds, mirroring the LSP `CompletionItemKind`
+enumeration. Used as the `kind` field of [`CompletionResultItem`](@ref JuliaWorkspaces.CompletionResultItem).
 """
 module CompletionKinds
     const Text     = 1
@@ -31,7 +34,11 @@ module CompletionKinds
 end
 
 """
-Insert text format constants.
+    module InsertFormats
+
+Named constants for completion insert-text formats: `PlainText` (literal text)
+and `Snippet` (LSP snippet syntax with placeholders). Used as the
+`insert_text_format` field of [`CompletionResultItem`](@ref JuliaWorkspaces.CompletionResultItem).
 """
 module InsertFormats
     const PlainText = 1
@@ -39,7 +46,15 @@ module InsertFormats
 end
 
 """
-A text edit expressed as Positions.
+    struct CompletionEdit
+
+A text edit attached to a completion item, expressed with [`Position`](@ref)
+values rather than LSP types.
+
+- `start::Position`: Start of the range to replace.
+- `stop::Position`: End of the range to replace.
+- `new_text::String`: Replacement text.
+- `uri::Union{Nothing,URI}`: Target file, or `nothing` for the current file.
 """
 struct CompletionEdit
     start::Position
@@ -49,7 +64,19 @@ struct CompletionEdit
 end
 
 """
-A single completion result item (LSP-free).
+    struct CompletionResultItem
+
+A single completion candidate, expressed without any LSP types.
+
+- `label::String`: Text shown in the completion list.
+- `kind::Int`: A [`CompletionKinds`](@ref) value.
+- `detail`, `detail_label`, `detail_description`: Optional detail strings.
+- `documentation::Union{Nothing,String}`: Optional markdown documentation.
+- `sort_text`, `filter_text`: Optional overrides for sorting/filtering.
+- `insert_text_format::Int`: An [`InsertFormats`](@ref) value.
+- `text_edit::CompletionEdit`: The primary edit applied on acceptance.
+- `additional_edits::Vector{CompletionEdit}`: Extra edits (for example new imports).
+- `data::Union{Nothing,String}`: Opaque payload carried through to resolution.
 """
 struct CompletionResultItem
     label::String
@@ -78,7 +105,13 @@ function CompletionResultItem(label, kind, detail, documentation, text_edit;
 end
 
 """
-A complete completion result.
+    struct CompletionResult
+
+The full result of a completion request.
+
+- `is_incomplete::Bool`: `true` if the list is truncated and should be
+  recomputed as the user keeps typing.
+- `items::Vector{CompletionResultItem}`: The completion candidates.
 """
 struct CompletionResult
     is_incomplete::Bool

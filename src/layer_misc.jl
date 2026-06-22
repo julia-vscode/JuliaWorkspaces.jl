@@ -10,12 +10,33 @@
 # Result types
 # ============================================================================
 
+"""
+    struct DocumentLinkResult
+
+A clickable link discovered in a source file (for example a path in a string
+literal passed to `include`).
+
+- `start::Position`: Start of the link's text range.
+- `stop::Position`: End of the link's text range.
+- `target_uri::URI`: The link target.
+"""
 struct DocumentLinkResult
     start::Position
     stop::Position
     target_uri::URI
 end
 
+"""
+    struct InlayHintResult
+
+A single inlay hint rendered inline in the editor.
+
+- `position::Position`: Where the hint is anchored.
+- `label::String`: Hint text.
+- `kind::Symbol`: `:parameter` (a parameter name) or `:type` (an inferred type).
+- `padding_left::Bool`: Whether to render padding before the hint.
+- `padding_right::Bool`: Whether to render padding after the hint.
+"""
 struct InlayHintResult
     position::Position
     label::String
@@ -24,6 +45,16 @@ struct InlayHintResult
     padding_right::Bool
 end
 
+"""
+    struct InlayHintConfig
+
+Configuration controlling which inlay hints are produced.
+
+- `enabled::Bool`: Master switch for inlay hints.
+- `variable_types::Bool`: Whether to show inferred variable type hints.
+- `parameter_names::Symbol`: Which parameter-name hints to show: `:all`,
+  `:literals`, or `:nothing`.
+"""
 struct InlayHintConfig
     enabled::Bool
     variable_types::Bool

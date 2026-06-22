@@ -1,14 +1,117 @@
 # JuliaWorkspaces.jl
 
-Underlying engine for LanguageServer.jl
+*The analysis engine that powers [LanguageServer.jl](https://github.com/julia-vscode/LanguageServer.jl).*
 
-## Design ideas
+JuliaWorkspaces.jl takes a set of files — Julia sources, `Project.toml` /
+`Manifest.toml`, configuration files — and answers questions about them:
+diagnostics, hover text, completions, go-to-definition, references, document and
+workspace symbols, signature help, formatting, code actions, test items, and
+more. It is designed to be reusable: the same engine can back an interactive
+language server, a CI linter, or a command-line tool.
 
-### Planned transitions
-The first transition is that we want to adopt JuliaSyntax.jl for parsing and probably also its node types for representing code. Most of the LS at the moment is powered by CSTParser, which has its own parsing implementation and brings the main node type along that is used throughout the LS. At the same time, we have started to use JuliaSyntax in the LS (yes, at the moment everything gets parsed twice, once by CSTParser and once by JuliaSyntax) for some things, namely the test item detection stuff. The roadmap here is that I want to completely get rid of the CSTParser parser and exclusively use the JuliaSyntax parser. The medium term plan is that we will have one parsing pass that then generates trees for the old CSTParser node types and the JuliaSyntax node types. Once we are at that stage we’ll need to spend some more time thinking about node types and what exactly is the right fit for the LS.
+Internally it is an **incremental, memoized query system** built on
+[Salsa.jl](https://github.com/julia-vscode/Salsa.jl). Mutable *inputs* (files,
+the active project, results from background indexing) feed a graph of pure,
+cached *derived queries*. Change one file and only the queries that depend on it
+recompute. For the full picture, read the [Architecture](architecture.md) page.
 
-The second transition is towards a more functional/immutable/incremental computational model for most of the logic in the LS. At the moment the LS uses mutable data structures throughout, and keeping track of where state is mutated, and when is really, really tricky (well, at least for me). It also makes it completely hopeless that we might use multi threading at some point, for example. So this summer I started tackling that problem, and the strategy for that is that we use [Salsa.jl](https://github.com/julia-vscode/Salsa.jl) as the core underlying design for the LS. There is an awesome JuliaCon video about that package from a couple of years ago for anyone curious. So that whole design is essentially inspired by the Rust language server. The outcome of that transition will be a much, much easier to reason about data model.
+## Installation
+
+```julia
+using Pkg
+Pkg.add(url="https://github.com/julia-vscode/JuliaWorkspaces.jl")
+```
+
+## Quick start
+
+```julia
+using JuliaWorkspaces
+
+# Build a workspace from one or more folders on disc.
+jw = workspace_from_folders(["/path/to/my/project"])
+
+# Inspect the files that were picked up.
+for uri in get_julia_files(jw)
+    println(uri)
+end
+
+# Query diagnostics for the whole workspace.
+diags = get_diagnostics(jw)
+for (uri, file_diags) in diags
+    for d in file_diags
+        println("$(uri): [$(d.severity)] $(d.message)")
+    end
+end
+```
+
+You can also build a workspace incrementally and feed it in-memory content
+(this is what a language server does as the user edits):
+
+```julia
+using JuliaWorkspaces
+using JuliaWorkspaces.URIs2
+
+jw = JuliaWorkspace()
+
+uri = filepath2uri("/path/to/file.jl")
+add_file!(jw, TextFile(uri, SourceText("x = 1\n", "julia")))
+
+tree = get_julia_syntax_tree(jw, uri)
+```
+
+To resolve symbols from a package's dependencies, enable the
+[dynamic feature](architecture.md#the-dynamic-feature) by passing a
+[`DynamicMode`](@ref):
+
+```julia
+jw = workspace_from_folders(["/path/to/my/project"]; dynamic=DynamicIndexingOnly)
+wait_until_ready(jw)            # block until background indexing finishes
+diags = get_diagnostics(jw)    # now environment-aware
+```
+
+## Documentation map
+
+- [Architecture](architecture.md) — the Salsa query model, the layer structure,
+  the public API design, and the dynamic feature. **Start here if you are
+  working on the package.**
+- [Functions](functions.md) — reference for the exported functions.
+- [Types](types.md) — reference for the exported and internal types.
+
+## Design and roadmap
+
+JuliaWorkspaces.jl is the home of two deliberate transitions of the Julia
+tooling stack.
+
+### Transition 1: CSTParser → JuliaSyntax
+
+The first transition is adopting [JuliaSyntax.jl](https://github.com/JuliaLang/JuliaSyntax.jl)
+for parsing and, eventually, for representing code. Most of the language server
+is currently powered by CSTParser, which has its own parser and node type. At
+the same time JuliaSyntax is already used for some features (such as test-item
+detection), so today every file is parsed twice. The roadmap is to drop the
+CSTParser parser entirely, settle on a single parse pass, and then decide on the
+right node types for the engine.
+
+### Transition 2: mutable state → incremental Salsa model
+
+The second transition is towards a functional, immutable, incremental
+computational model. The older design used mutable data structures throughout,
+which made it very hard to reason about when and where state changed (and
+effectively ruled out multithreading). The strategy is to use
+[Salsa.jl](https://github.com/julia-vscode/Salsa.jl) as the core design — an
+approach inspired by the Rust language server — yielding a data model that is far
+easier to reason about. This is the model the rest of the package is built on;
+see [Architecture](architecture.md).
 
 ### Goal
-Very roughly, StaticLint/CSTParser/SymbolServer has all the code pre these transitions, and JuliaWorkspaces has the code that is in this new world of the two transitions I mentioned above. So the division is by generation of when stuff was added to the LS, not by functionality. My expectation is that once the transition is finished, StaticLint and SymbolServer will be no more as individual packages but their code will have been incorporated into JuliaWorkspaces. The final design I have in mind is that the [LanguageServer.jl](https://github.com/julia-vscode/LanguageServer.jl) package really only has the code that implements the LSP wire protocol, but not much functionality in it, and all the functionality lives in JuliaWorkspaces. The idea being that we can then create for example CI tools that use the functionality in JuliaWorkspaces directly (like GitHub - julia-actions/julia-lint), or command line apps etc.
+
+Roughly, StaticLint / CSTParser / SymbolServer hold the code from before these
+transitions, while JuliaWorkspaces holds the code written in the new world — the
+split is by *generation*, not by functionality. The expectation is that once the
+transition is complete, StaticLint and SymbolServer cease to exist as separate
+packages and their code is incorporated into JuliaWorkspaces. The end state:
+[LanguageServer.jl](https://github.com/julia-vscode/LanguageServer.jl) contains
+only the LSP wire protocol, and all functionality lives in JuliaWorkspaces — so
+that CI tools (such as julia-actions/julia-lint), command-line apps, and other
+hosts can use it directly.
 
