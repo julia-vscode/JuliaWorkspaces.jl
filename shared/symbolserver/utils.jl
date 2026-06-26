@@ -664,10 +664,22 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
 end
 
 function write_cache(uuid, pkg::Package, outpath)
-    mkpath(dirname(outpath))
+    dir = dirname(outpath)
+    mkpath(dir)
     @info "Now writing to disc $uuid"
-    open(outpath, "w") do io
+    # Write to a unique temp file, then rename atomically so a shared store under
+    # parallel indexing can't tear a cache (last writer wins, intact). mktemp (not
+    # a getpid()-based name): containerized workers all run as PID 1 in their own
+    # namespace, so a PID-based temp would collide and one rename would hit ENOENT.
+    tmp, io = mktemp(dir; cleanup = false)
+    try
         CacheStore.write(io, pkg)
+        close(io)
+        mv(tmp, outpath; force=true)
+    catch
+        close(io)
+        isfile(tmp) && rm(tmp; force=true)
+        rethrow()
     end
     outpath
 end
@@ -704,6 +716,13 @@ function write_depot(server::Server, ctx, written_caches)
         cache_paths = get_cache_path(manifest(ctx), uuid)
         outpath = joinpath(server.storedir, cache_paths...)
         outpath in written_caches && continue
+
+        # A registered cache is keyed by tree hash, so an existing file is already
+        # correct — skip it. Dev'ed/stdlib caches are version-keyed, so still write.
+        if isfile(outpath) && tree_hash(frommanifest(manifest(ctx), uuid)) !== nothing
+            push!(written_caches, outpath)
+            continue
+        end
 
         written_path = write_cache(uuid, pkg, outpath)
         !isempty(written_path) && push!(written_caches, written_path)

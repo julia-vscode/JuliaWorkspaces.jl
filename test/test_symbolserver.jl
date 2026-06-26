@@ -352,6 +352,40 @@ end
     read(IOBuffer(vcat(prefix, nested_bytes(100))))   # under MAX_DEPTH, no throw
 end
 
+@testitem "SymbolServer: write_cache uses unique temp names under concurrent same-path writes" begin
+    using JuliaWorkspaces.SymbolServer: write_cache, Package, ModuleStore, VarRef
+    using JuliaWorkspaces.SymbolServer.CacheStore: read as cache_read
+
+    # Regression: the temp file used to be `<outpath>.tmp.<getpid()>`. Containerized
+    # workers all run as PID 1 in their own PID namespace, so two workers scrubbing
+    # the same shared dependency cache picked the identical temp name; one renamed it
+    # into place and the other's rename failed with ENOENT. Concurrent tasks here
+    # share one getpid(), reproducing the collision; mktemp makes each writer unique.
+    mktempdir() do store_path
+        pkg_dir = joinpath(store_path, "F", "Foo", "00000000-0000-0000-0000-000000000001")
+        mkpath(pkg_dir)
+        outpath = joinpath(pkg_dir, "deadbeef.jstore")
+        mod = ModuleStore(VarRef(nothing, :Foo), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+        pkg = Package("Foo", mod, Base.UUID("00000000-0000-0000-0000-000000000001"), nothing)
+
+        errs = Channel{Any}(64)
+        @sync for _ in 1:32
+            @async try
+                write_cache(pkg.uuid, pkg, outpath)
+            catch err
+                put!(errs, err)
+            end
+        end
+        close(errs)
+        collected = collect(errs)
+        @test isempty(collected)                          # no rename ENOENT
+        @test isfile(outpath)
+        @test open(cache_read, outpath).name == "Foo"     # final file is intact
+        # No predictable PID-named temp left behind.
+        @test isempty(filter(f -> occursin(".tmp.", f), readdir(pkg_dir)))
+    end
+end
+
 @testitem "SymbolServer: corrupt cache file produces CacheCorruptedError" begin
     mktempdir() do store_path
         pkg_dir = joinpath(store_path, "B", "Bogus", "00000000-0000-0000-0000-000000000000")
