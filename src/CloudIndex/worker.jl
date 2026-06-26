@@ -6,9 +6,10 @@
 # argv: <jw_src_root> <store_path> <uuid> <name> <version> <tree_hash>
 # Runs with --project=<pinned env>. Reuses SymbolServer.get_store.
 #
-# import + include are TOP-LEVEL (illegal inside a function). Loading the
-# extractor at top level also puts its module in an earlier world age than
-# main()'s call, so we can call its functions directly (no invokelatest).
+# Flow: resolve/install FIRST, then load the extractor only if that succeeded —
+# so an unresolvable version exits without paying to compile SymbolServer. The
+# include stays top-level (and precedes the call that uses it) so no invokelatest
+# is needed.
 
 import Pkg
 
@@ -20,8 +21,6 @@ const EXIT_INTERRUPTED = 130   # 128 + SIGINT; the driver maps this to :cancelle
 # argv[1] = JuliaWorkspaces `src/` dir. symbolserver.jl is one level up from it.
 const SYMBOLSERVER_JL = abspath(joinpath(ARGS[1], "..",
     "juliadynamicanalysisprocess", "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
-include(SYMBOLSERVER_JL)                 # defines module `SymbolServer` in Main
-using .SymbolServer: get_store, CacheStore, modify_dirs, modify_dir, write_cache
 
 function list_jstores(store_path)
     out = Set{String}()
@@ -34,18 +33,15 @@ function list_jstores(store_path)
     return out
 end
 
-function main(args)
-    _jwroot, store_path, uuid_s, name, version_s, _tree_hash = args
-    uuid = Base.UUID(uuid_s)
-    version = VersionNumber(version_s)
-
-    # 1. Ensure the pinned version is present. If the active project already has it
-    #    (e.g. a path-deved test fixture), skip the registry add.
+# Ensure the pinned version is present. If the active project already has it
+# (e.g. a path-deved test fixture), skip the registry add.
+function ensure_installed(uuid_s, name, version_s)
     try
         ctx = Pkg.Types.Context()
         # ctx.env.manifest.deps :: Dict{UUID,PackageEntry} (verified on 1.12.6)
-        if !haskey(ctx.env.manifest.deps, uuid)
-            Pkg.add(Pkg.PackageSpec(name = name, uuid = uuid, version = version))
+        if !haskey(ctx.env.manifest.deps, Base.UUID(uuid_s))
+            Pkg.add(Pkg.PackageSpec(name = name, uuid = Base.UUID(uuid_s),
+                                    version = VersionNumber(version_s)))
         end
         Pkg.instantiate()
     catch err
@@ -53,10 +49,23 @@ function main(args)
         @error "resolve/instantiate failed" exception=(err, catch_backtrace())
         return EXIT_UNSAT
     end
+    return EXIT_OK
+end
 
-    # 2 & 3. Index via the existing extractor (which loads the pkg itself), then
-    #        scrub every cache it wrote this run so each package's own src dir
-    #        becomes PLACEHOLDER.
+_jwroot, store_path, uuid_s, name, version_s, _tree_hash = ARGS
+
+# Step 1: resolve. Bail before loading the extractor if it's unsatisfiable.
+let rc = ensure_installed(uuid_s, name, version_s)
+    rc == EXIT_OK || exit(rc)
+end
+
+# Step 2: load the extractor (only reached once resolution succeeded).
+include(SYMBOLSERVER_JL)                 # defines module `SymbolServer` in Main
+using .SymbolServer: get_store, CacheStore, modify_dirs, modify_dir, write_cache
+
+# Step 3: index via the extractor (which loads the pkg itself), then scrub every
+# cache it wrote this run so each package's own src dir becomes PLACEHOLDER.
+function index_and_scrub(store_path)
     try
         # get_store writes the target and overwrites every dependency cache it
         # loads with this machine's real paths, so scrub every file whose mtime
@@ -88,4 +97,4 @@ function main(args)
     return EXIT_OK
 end
 
-exit(main(ARGS))
+exit(index_and_scrub(store_path))
