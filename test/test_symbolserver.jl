@@ -57,6 +57,89 @@ end
     @test length(entry.methods) == 1
 end
 
+@testitem "SymbolServer: cache_methods follows VarRef-aliased module entries" begin
+    using JuliaWorkspaces.SymbolServer: cache_methods, EnvStore, ModuleStore, VarRef, FunctionStore
+
+    # A method whose defining (sub)module is recorded in the env as a VarRef alias
+    # (e.g. a re-exported/used submodule) used to crash cache_methods with
+    # `MethodError: haskey(::VarRef, ::Symbol)`. It must now resolve through the
+    # alias to the real ModuleStore (regression for the registry-sweep failures).
+    root = Module(:_VRefAliasRoot)
+    Core.eval(root, :(module Sub; struct T end; foo(::T) = 1; end))
+    sub = root.Sub
+
+    env = EnvStore()
+    target = ModuleStore(VarRef(sub), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+    env[nameof(root)] = ModuleStore(VarRef(root),
+        Dict{Symbol,Any}(:Sub => VarRef(nothing, :_VRefAliasDest)), "", true, Symbol[], Symbol[])
+    env[:_VRefAliasDest] = target   # Sub's entry is a VarRef alias pointing here
+
+    cache_methods(sub.foo, :foo, env, false)   # must not throw
+
+    @test haskey(target, :foo)
+    @test target[:foo] isa FunctionStore
+    @test length(target[:foo].methods) == 1
+end
+
+@testitem "SymbolServer: _lookup breaks cyclic VarRef alias chains" begin
+    using JuliaWorkspaces.SymbolServer: _lookup, EnvStore, ModuleStore, VarRef
+
+    # `_lookup(..., true)` follows VarRef aliases. A malformed store with a cyclic
+    # alias chain (Top.A -> Top.B -> Top.A) used to recurse to a StackOverflowError
+    # (regression for KrylovPreconditioners@0.2.3/0.3.8 in the registry sweep). It
+    # must now terminate with `nothing` while normal aliases still resolve.
+    env = EnvStore()
+    top = ModuleStore(VarRef(nothing, :Top), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+    top.vals[:A] = VarRef(VarRef(nothing, :Top), :B)
+    top.vals[:B] = VarRef(VarRef(nothing, :Top), :A)   # cycle back to A
+    m = ModuleStore(VarRef(nothing, :M), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+    top.vals[:M] = m
+    top.vals[:C] = VarRef(VarRef(nothing, :Top), :M)   # plain alias to a ModuleStore
+    env[:Top] = top
+
+    @test _lookup(VarRef(VarRef(nothing, :Top), :A), env, true) === nothing   # no StackOverflow
+    @test _lookup(VarRef(VarRef(nothing, :Top), :C), env, true) === m         # alias still resolves
+    # cont=false never follows aliases: returns the VarRef as-is.
+    @test _lookup(VarRef(VarRef(nothing, :Top), :C), env, false) isa VarRef
+end
+
+@testitem "SymbolServer: _try_getglobal skips bindings whose getglobal throws" begin
+    using JuliaWorkspaces.SymbolServer: _try_getglobal
+
+    # On Julia 1.12, a name brought in by `using` that is also a Base binding is
+    # ambiguous: it shows up in `names(...; usings=true)` but `getglobal` throws
+    # UndefVarError. That throw used to abort indexing the whole package (the
+    # registry sweep's dominant `UndefVarError` failures: CSV.Lockable,
+    # HTTP.WebSockets.readuntil, ...). `_try_getglobal` swallows it.
+    m = Module(:SSTryGetglobalTest)
+    Core.eval(m, :(module A; export stack; stack() = 1; end))
+    Core.eval(m, :(module C; using ..A; end))   # C.stack ambiguous with Base.stack
+    C = invokelatest(getglobal, m, :C)
+    A = invokelatest(getglobal, m, :A)
+
+    @test_throws UndefVarError invokelatest(getglobal, C, :stack)   # the underlying failure
+    @test _try_getglobal(C, :stack) === (false, nothing)           # ...is swallowed
+    @test _try_getglobal(A, :stack)[1] === true                    # normal binding resolves
+    @test _try_getglobal(A, :nope) === (false, nothing)            # missing name too
+end
+
+@testitem "SymbolServer: _isdefinedglobal reports ambiguous using-bindings as undefined" begin
+    using JuliaWorkspaces.SymbolServer: _isdefinedglobal
+
+    m = Module(:SSIsDefGlobalTest)
+    Core.eval(m, :(module A; export stack; stack() = 1; end))
+    Core.eval(m, :(module C; using ..A; end))   # C.stack ambiguous with Base.stack
+    C = invokelatest(getglobal, m, :C)
+    A = invokelatest(getglobal, m, :A)
+
+    @test _isdefinedglobal(A, :stack)            # real binding
+    @test !_isdefinedglobal(A, :nope)            # missing name
+    # On 1.12+ the guard skips the ambiguous binding before any access throws.
+    @static if isdefined(Base, :isdefinedglobal)
+        @test !_isdefinedglobal(C, :stack)
+    end
+end
+
 @testitem "SymbolServer: #295 cache_methods handles Vararg{T,N} signatures" begin
     using JuliaWorkspaces.SymbolServer: cache_methods, EnvStore, ModuleStore, VarRef,
                                         FunctionStore, FakeTypeName

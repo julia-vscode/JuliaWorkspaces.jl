@@ -245,31 +245,25 @@ end
 _lookup(vr::FakeUnion, depot::EnvStore, cont=false) = nothing
 _lookup(vr::FakeTypeName, depot::EnvStore, cont=false) = _lookup(vr.name, depot, cont)
 _lookup(vr::FakeUnionAll, depot::EnvStore, cont=false) = _lookup(vr.body, depot, cont)
-function _lookup(vr::VarRef, depot::EnvStore, cont=false)
+# cont=true follows VarRef alias chains; `seen` breaks cycles (A -> B -> A) that
+# would otherwise recurse to a StackOverflowError.
+_lookup(vr::VarRef, depot::EnvStore, cont=false) =
+    _lookup(vr, depot, cont, cont ? Set{VarRef}() : nothing)
+function _lookup(vr::VarRef, depot::EnvStore, cont::Bool, seen::Union{Nothing,Set{VarRef}})
     if vr.parent === nothing
-        if haskey(depot, vr.name)
-            val = depot[vr.name]
-            if cont && val isa VarRef
-                return _lookup(val, depot, cont)
-            else
-                return val
-            end
-        else
-            return nothing
-        end
+        haskey(depot, vr.name) || return nothing
+        val = depot[vr.name]
     else
-        par = _lookup(vr.parent, depot, cont)
-        if par !== nothing && par isa ModuleStore && haskey(par, vr.name)
-            val = par[vr.name]
-            if cont && val isa VarRef
-                return _lookup(val, depot, cont)
-            else
-                return val
-            end
-        else
-            return nothing
-        end
+        par = _lookup(vr.parent, depot, cont, seen)
+        (par isa ModuleStore && haskey(par, vr.name)) || return nothing
+        val = par[vr.name]
     end
+    if cont && val isa VarRef
+        val in seen && return nothing      # cycle — give up
+        push!(seen, val)
+        return _lookup(val, depot, cont, seen)
+    end
+    return val
 end
 
 maybe_lookup(x, env) = x isa VarRef ? _lookup(x, env, true) : x
@@ -648,13 +642,13 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
     if pid in keys(Base.loaded_modules)
         progress_callback !== nothing && progress_callback(:PROCESSPKG, pe_name, uuid, :noversion, percentage)
         Core.eval(loadingbay, :($(Symbol(pe_name)) = $(Base.loaded_modules[pid])))
-        m = Base.invokelatest(getfield, loadingbay, Symbol(pe_name))
+        m = Base.invokelatest(getglobal, loadingbay, Symbol(pe_name))
     else
         m = try
             progress_callback !== nothing && progress_callback(:STARTLOAD, pe_name, uuid, :noversion, percentage)
             Core.eval(loadingbay, (:(import $(Symbol(pe_name)))))
             progress_callback !== nothing && progress_callback(:STOPLOAD, pe_name)
-            m = Base.invokelatest(getfield, loadingbay, Symbol(pe_name))
+            m = Base.invokelatest(getglobal, loadingbay, Symbol(pe_name))
         catch err
             return
         end
