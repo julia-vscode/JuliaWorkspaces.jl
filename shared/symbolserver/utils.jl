@@ -245,31 +245,25 @@ end
 _lookup(vr::FakeUnion, depot::EnvStore, cont=false) = nothing
 _lookup(vr::FakeTypeName, depot::EnvStore, cont=false) = _lookup(vr.name, depot, cont)
 _lookup(vr::FakeUnionAll, depot::EnvStore, cont=false) = _lookup(vr.body, depot, cont)
-function _lookup(vr::VarRef, depot::EnvStore, cont=false)
+# cont=true follows VarRef alias chains; `seen` breaks cycles (A -> B -> A) that
+# would otherwise recurse to a StackOverflowError.
+_lookup(vr::VarRef, depot::EnvStore, cont=false) =
+    _lookup(vr, depot, cont, cont ? Set{VarRef}() : nothing)
+function _lookup(vr::VarRef, depot::EnvStore, cont::Bool, seen::Union{Nothing,Set{VarRef}})
     if vr.parent === nothing
-        if haskey(depot, vr.name)
-            val = depot[vr.name]
-            if cont && val isa VarRef
-                return _lookup(val, depot, cont)
-            else
-                return val
-            end
-        else
-            return nothing
-        end
+        haskey(depot, vr.name) || return nothing
+        val = depot[vr.name]
     else
-        par = _lookup(vr.parent, depot, cont)
-        if par !== nothing && par isa ModuleStore && haskey(par, vr.name)
-            val = par[vr.name]
-            if cont && val isa VarRef
-                return _lookup(val, depot, cont)
-            else
-                return val
-            end
-        else
-            return nothing
-        end
+        par = _lookup(vr.parent, depot, cont, seen)
+        (par isa ModuleStore && haskey(par, vr.name)) || return nothing
+        val = par[vr.name]
     end
+    if cont && val isa VarRef
+        val in seen && return nothing      # cycle — give up
+        push!(seen, val)
+        return _lookup(val, depot, cont, seen)
+    end
+    return val
 end
 
 maybe_lookup(x, env) = x isa VarRef ? _lookup(x, env, true) : x
@@ -648,13 +642,13 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
     if pid in keys(Base.loaded_modules)
         progress_callback !== nothing && progress_callback(:PROCESSPKG, pe_name, uuid, :noversion, percentage)
         Core.eval(loadingbay, :($(Symbol(pe_name)) = $(Base.loaded_modules[pid])))
-        m = Base.invokelatest(getfield, loadingbay, Symbol(pe_name))
+        m = Base.invokelatest(getglobal, loadingbay, Symbol(pe_name))
     else
         m = try
             progress_callback !== nothing && progress_callback(:STARTLOAD, pe_name, uuid, :noversion, percentage)
             Core.eval(loadingbay, (:(import $(Symbol(pe_name)))))
             progress_callback !== nothing && progress_callback(:STOPLOAD, pe_name)
-            m = Base.invokelatest(getfield, loadingbay, Symbol(pe_name))
+            m = Base.invokelatest(getglobal, loadingbay, Symbol(pe_name))
         catch err
             return
         end
@@ -664,10 +658,22 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
 end
 
 function write_cache(uuid, pkg::Package, outpath)
-    mkpath(dirname(outpath))
+    dir = dirname(outpath)
+    mkpath(dir)
     @info "Now writing to disc $uuid"
-    open(outpath, "w") do io
+    # Write to a unique temp file, then rename atomically so a shared store under
+    # parallel indexing can't tear a cache (last writer wins, intact). mktemp (not
+    # a getpid()-based name): containerized workers all run as PID 1 in their own
+    # namespace, so a PID-based temp would collide and one rename would hit ENOENT.
+    tmp, io = mktemp(dir; cleanup = false)
+    try
         CacheStore.write(io, pkg)
+        close(io)
+        mv(tmp, outpath; force=true)
+    catch
+        close(io)
+        isfile(tmp) && rm(tmp; force=true)
+        rethrow()
     end
     outpath
 end
@@ -704,6 +710,13 @@ function write_depot(server::Server, ctx, written_caches)
         cache_paths = get_cache_path(manifest(ctx), uuid)
         outpath = joinpath(server.storedir, cache_paths...)
         outpath in written_caches && continue
+
+        # A registered cache is keyed by tree hash, so an existing file is already
+        # correct — skip it. Dev'ed/stdlib caches are version-keyed, so still write.
+        if isfile(outpath) && tree_hash(frommanifest(manifest(ctx), uuid)) !== nothing
+            push!(written_caches, outpath)
+            continue
+        end
 
         written_path = write_cache(uuid, pkg, outpath)
         !isempty(written_path) && push!(written_caches, written_path)

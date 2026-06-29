@@ -293,8 +293,11 @@ function cache_methods(@nospecialize(f), name, env, get_return_type; min_world::
     func_vr = VarRef(VarRef(parentmodule(f)), name)
     for m in ms
         mvr = VarRef(m[1])
-        modstore = _lookup(mvr, env)
-        modstore === nothing && continue
+        # `cont=true` follows VarRef chains to the actual ModuleStore: a module's
+        # env entry can be a VarRef alias (e.g. a re-exported/used module), and an
+        # unresolved VarRef has no `haskey`/`setindex!` (would throw MethodError).
+        modstore = _lookup(mvr, env, true)
+        modstore isa ModuleStore || continue
 
         if !haskey(modstore, name)
             modstore[name] = FunctionStore(VarRef(mvr, name), MethodStore[m[2]], "", func_vr, false)
@@ -327,12 +330,35 @@ else
     end
 end
 
+# Whether `m.s` resolves to one concrete global. On 1.12+ `isdefinedglobal`
+# returns false for a name ambiguously brought in by two `using`d modules
+# (`isdefined` would say true, then `getglobal` throws), so it filters those out
+# before we read them. Only on 1.12+; fall back to `isdefined` on 1.11.
+@static if isdefined(Base, :isdefinedglobal)
+    _isdefinedglobal(m::Module, s::Symbol) = invokelatest(Base.isdefinedglobal, m, s)
+else
+    _isdefinedglobal(m::Module, s::Symbol) = invokelatest(isdefined, m, s)
+end
+
+# Read global `m.s`, returning `(false, nothing)` rather than throwing on an
+# ambiguous `using` binding. Backstop for the 1.11 path (1.12+ skips these via
+# `_isdefinedglobal`); without it one such name aborts the whole package.
+function _try_getglobal(m::Module, s::Symbol)
+    try
+        return (true, invokelatest(getglobal, m, s))
+    catch err
+        err isa UndefVarError && return (false, nothing)
+        rethrow()
+    end
+end
+
 function apply_to_everything(f, m = nothing, visited = Base.IdSet{Module}())
     if m isa Module
         push!(visited, m)
         for s in unsorted_names(m, all = true, imported = true, usings = true)
-            (!isdefined(m, s) || s == nameof(m)) && continue
-            x = invokelatest(getfield, m, s)
+            (!_isdefinedglobal(m, s) || s == nameof(m)) && continue
+            ok, x = _try_getglobal(m, s)
+            ok || continue
             f(x)
             if x isa Module && !in(x, visited)
                 apply_to_everything(f, x, visited)
@@ -352,8 +378,9 @@ function oneverything(f, m = nothing, visited = Base.IdSet{Module}())
         push!(visited, m)
         state = nothing
         for s in unsorted_names(m, all = true, imported = true, usings = true)
-            !isdefined(m, s) && continue
-            x = invokelatest(getfield, m, s)
+            !_isdefinedglobal(m, s) && continue
+            ok, x = _try_getglobal(m, s)
+            ok || continue
             state = f(m, s, x, state)
             if x isa Module && !in(x, visited)
                 oneverything(f, x, visited)
@@ -429,15 +456,24 @@ function cache_new_methods!(env, world_before::UInt; get_return_type = false)
     end
 end
 
-usedby(outer, inner) = outer !== inner && isdefined(outer, nameof(inner)) && getproperty(outer, nameof(inner)) === inner && all(isdefined(outer, name) || !isdefined(inner, name) for name in unsorted_names(inner))
+# Accesses go through invokelatest: getmoduletree's frame predates the LoadingBay
+# package loads, so a bare access would trip Julia 1.12's world-age binding warning.
+function usedby(outer, inner)
+    outer !== inner || return false
+    _isdefinedglobal(outer, nameof(inner)) || return false
+    ok, val = _try_getglobal(outer, nameof(inner))
+    (ok && val === inner) || return false
+    return all(_isdefinedglobal(outer, name) || !_isdefinedglobal(inner, name) for name in unsorted_names(inner))
+end
 istoplevelmodule(m) = parentmodule(m) === m || parentmodule(m) === Main
 
 function getmoduletree(m::Module, amn, visited = Base.IdSet{Module}())
     push!(visited, m)
     cache = ModuleStore(m)
     for s in unsorted_names(m, all = true, imported = true, usings = true)
-        !isdefined(m, s) && continue
-        x = invokelatest(getfield, m, s)
+        !_isdefinedglobal(m, s) && continue
+        ok, x = _try_getglobal(m, s)
+        ok || continue
         if x isa Module
             if istoplevelmodule(x)
                 cache[s] = VarRef(x)
@@ -449,8 +485,9 @@ function getmoduletree(m::Module, amn, visited = Base.IdSet{Module}())
         end
     end
     for n in amn
-        if n !== nameof(m) && isdefined(m, n)
-            x = invokelatest(getfield, m, n)
+        if n !== nameof(m) && _isdefinedglobal(m, n)
+            ok, x = _try_getglobal(m, n)
+            ok || continue
             if x isa Module
                 if !haskey(cache, n)
                     cache[n] = VarRef(x)
@@ -470,14 +507,15 @@ function getenvtree(names = nothing)
 end
 
 # faster and more correct split_module_names
-all_names(m) = all_names(m, x -> isdefined(m, x))
+all_names(m) = all_names(m, x -> _isdefinedglobal(m, x))
 function all_names(m, pred, symbols = Set(Symbol[]), seen = Set(Module[]))
     push!(seen, m)
     ns = unsorted_names(m; all = true, imported = false, usings = false)
     for n in ns
-        isdefined(m, n) || continue
+        _isdefinedglobal(m, n) || continue
         Base.isdeprecated(m, n) && continue
-        val = invokelatest(getfield, m, n)
+        ok, val = _try_getglobal(m, n)
+        ok || continue
         if val isa Module && !(val in seen)
             all_names(val, pred, symbols, seen)
         end
@@ -500,10 +538,11 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
         push!(visited, m)
         ns = all_names(m)
         for s in ns
-            !isdefined(m, s) && continue
-            x = Base.invokelatest(getfield, m, s)
+            !_isdefinedglobal(m, s) && continue
+            ok, x = _try_getglobal(m, s)
+            ok || continue
 
-            if CORE_BASE_NAMES_CONFUSION && m === Base && isdefined(Core, s) && getfield(Core, s) === x
+            if CORE_BASE_NAMES_CONFUSION && m === Base && _isdefinedglobal(Core, s) && getglobal(Core, s) === x
                 continue
             end
 
@@ -594,11 +633,11 @@ function load_core(; get_return_type = false)
     cache[:Base][Symbol("@.")] = cache[:Base][Symbol("@__dot__")]
     cache[:Core][:Main] = GenericStore(VarRef(nothing, :Main), FakeTypeName(Module), _doc(Main, :Main), true)
     # Add built-ins
-    builtins = Symbol[nameof(getfield(Core, n).instance) for n in unsorted_names(Core, all = true) if isdefined(Core, n) && getfield(Core, n) isa DataType && isdefined(getfield(Core, n), :instance) && getfield(Core, n).instance isa Core.Builtin]
+    builtins = Symbol[nameof(getglobal(Core, n).instance) for n in unsorted_names(Core, all = true) if _isdefinedglobal(Core, n) && getglobal(Core, n) isa DataType && isdefined(getglobal(Core, n), :instance) && getglobal(Core, n).instance isa Core.Builtin]
     cnames = unsorted_names(Core)
     for f in builtins
         if !haskey(cache[:Core], f)
-            cache[:Core][f] = FunctionStore(getfield(Core, Symbol(f)), Symbol(f), Core, Symbol(f) in cnames)
+            cache[:Core][f] = FunctionStore(getglobal(Core, Symbol(f)), Symbol(f), Core, Symbol(f) in cnames)
         end
     end
     haskey(cache[:Core], :_typevar) && push!(cache[:Core][:_typevar].methods, MethodStore(:_typevar, :Core, "built-in", 0, [:n => FakeTypeName(Symbol), :lb => FakeTypeName(Any), :ub => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
@@ -650,7 +689,7 @@ function load_core(; get_return_type = false)
     push!(cache[:Core][:(<:)].methods, MethodStore(:(<:), :Core, "built-in", 0, [:a => FakeTypeName(Type{T} where T), :b => FakeTypeName(Type{T} where T)], Symbol[], FakeTypeName(Any)))
     # Add unspecified methods for Intrinsics, working out the actual methods will need to be done by hand?
     for n in names(Core.Intrinsics)
-        if getfield(Core.Intrinsics, n) isa Core.IntrinsicFunction
+        if getglobal(Core.Intrinsics, n) isa Core.IntrinsicFunction
             push!(cache[:Core][:Intrinsics][n].methods, MethodStore(n, :Intrinsics, "built-in", 0, [:args => FakeTypeName(Vararg{Any})], Symbol[], FakeTypeName(Any)))
             :args => FakeTypeName(Vararg{Any})
         end
@@ -672,7 +711,7 @@ function load_core(; get_return_type = false)
         true)
     push!(cache[:Core].exportednames, :ccall)
     cache[:Core][Symbol("@__doc__")] = FunctionStore(VarRef(VarRef(Core), Symbol("@__doc__")), [], "", VarRef(VarRef(Core), Symbol("@__doc__")), true)
-    cache_methods(getfield(Core, Symbol("@__doc__")), Symbol("@__doc__"), cache, false)
+    cache_methods(getglobal(Core, Symbol("@__doc__")), Symbol("@__doc__"), cache, false)
     # Accounts for the dd situation where Base.rand only has methods from Random which doesn't appear to be explicitly used.
     # append!(cache[:Base][:rand].methods, cache_methods(Base.rand, cache))
     for m in cache_methods(Base.rand, :rand, cache, get_return_type)
@@ -717,7 +756,7 @@ all others, including imported symbols and those introduced by the `using` of mo
 """
 function split_module_names(m::Module, allns)
     internal_names = getnames(m)
-    availablenames = Set{Symbol}([s for s in allns if isdefined(m, s)])
+    availablenames = Set{Symbol}([s for s in allns if _isdefinedglobal(m, s)])
     # usinged_names = Set{Symbol}()
 
     for n in availablenames
