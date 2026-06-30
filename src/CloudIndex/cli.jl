@@ -15,7 +15,11 @@ struct CliConfig
     mode::Symbol                # :index :dry_run :report_missing
     out::Union{Nothing,String}
     emit_index::Union{Nothing,String}
+    done_set::Union{Nothing,String}
 end
+
+_load_done(path::AbstractString) =
+    Set(String[s for s in strip.(readlines(path)) if !isempty(s)])
 
 function _usage()
     println("""
@@ -44,6 +48,7 @@ function _usage()
       --report-missing       print only not-yet-indexed entries; don't index
       --out FILE             with --dry-run/--report-missing, write JSONL
       --emit-index FILE      write the availability index for --store to FILE; don't index
+      --done-set FILE        skip versions whose "<uuid>/<stem>" key is listed in FILE
       -h | --help            this message
     """)
 end
@@ -56,7 +61,7 @@ function parse_args(argv::Vector{String})
     n = 1; per_break = false; all_versions = false
     jobs = max(1, Sys.CPU_THREADS ÷ 2); timeout = 600.0; resume = true; progress = true
     launcher_template = nothing; depot = nothing; workdir = nothing
-    shard = nothing; mode = :index; out = nothing; emit_index = nothing
+    shard = nothing; mode = :index; out = nothing; emit_index = nothing; done_set = nothing
 
     i = 1
     next!() = (i += 1; i <= length(argv) ? argv[i] : error("missing value for $(argv[i-1])"))
@@ -86,6 +91,7 @@ function parse_args(argv::Vector{String})
         elseif a == "--report-missing"; mode = :report_missing
         elseif a == "--out"; out = next!()
         elseif a == "--emit-index"; emit_index = next!()
+        elseif a == "--done-set"; done_set = next!()
         elseif a == "-h" || a == "--help"; mode = :help
         else; error("unknown argument: $a")
         end
@@ -95,7 +101,7 @@ function parse_args(argv::Vector{String})
     spec = FilterSpec(; include=inc, exclude=exc, skip_yanked, skip_jll,
                       julia_version, n, per_break, all_versions)
     return CliConfig(registry, store, spec, jobs, timeout, resume, progress,
-                     launcher_template, depot, workdir, shard, mode, out, emit_index)
+                     launcher_template, depot, workdir, shard, mode, out, emit_index, done_set)
 end
 
 function _print_worklist(rows::Vector{PkgVersion}, out::Union{Nothing,String})
@@ -133,9 +139,12 @@ function cli_main(argv::Vector{String})
     end
 
     if cfg.mode === :dry_run
-        _print_worklist(rows, cfg.out); return 0
+        worklist = cfg.done_set !== nothing ? find_missing(rows, _load_done(cfg.done_set)) : rows
+        _print_worklist(worklist, cfg.out); return 0
     elseif cfg.mode === :report_missing
-        missing_rows = find_missing(rows, abspath(cfg.store))
+        missing_rows = cfg.done_set !== nothing ?
+            find_missing(rows, _load_done(cfg.done_set)) :
+            find_missing(rows, abspath(cfg.store))
         _print_worklist(missing_rows, cfg.out); return 0
     end
 
@@ -148,7 +157,8 @@ function cli_main(argv::Vector{String})
                      depot=abspath(depot), workdir=abspath(workdir), jwroot=jwroot,
                      jobs=cfg.jobs, timeout=cfg.timeout, resume=cfg.resume,
                      progress=cfg.progress,
-                     launcher=launcher, logfile=joinpath(workdir, "results.jsonl"))
+                     launcher=launcher, logfile=joinpath(workdir, "results.jsonl"),
+                     done=cfg.done_set !== nothing ? _load_done(cfg.done_set) : nothing)
     results = try
         run_index(rows, opts)
     catch err

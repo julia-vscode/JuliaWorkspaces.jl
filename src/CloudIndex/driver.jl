@@ -25,6 +25,7 @@ Base.@kwdef mutable struct IndexOpts
     # julia regardless of PATH.
     julia_exe::String = Base.julia_exename()
     logfile::Union{Nothing,String} = nothing
+    done::Union{Nothing,Set{String}} = nothing
 end
 
 # Deterministic, process-independent hash for sharding (FNV-1a 64-bit).
@@ -149,7 +150,9 @@ is applied first. Each result is appended to `opts.logfile` (JSONL) as it comple
 """
 function run_index(rows::Vector{PkgVersion}, opts::IndexOpts)
     mkpath(opts.store); mkpath(opts.workdir); mkpath(opts.depot)
-    todo = opts.resume ? find_missing(rows, opts.store) : rows
+    todo = !opts.resume ? rows :
+           opts.done !== nothing ? find_missing(rows, opts.done) :
+           find_missing(rows, opts.store)
     total = length(todo)
     if opts.progress
         skipped = length(rows) - total
