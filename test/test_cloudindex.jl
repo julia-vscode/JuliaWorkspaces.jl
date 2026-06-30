@@ -594,3 +594,20 @@ end
         @test count(!isempty, readlines(outfile)) == 1
     end
 end
+
+@testitem "CloudIndex: build_index lists one <uuid>/<stem> per .jstore" begin
+    using JuliaWorkspaces.CloudIndexApp: build_index, write_index
+    mktempdir() do store
+        mk(p) = (mkpath(dirname(p)); write(p, "x"))
+        mk(joinpath(store, "E", "Example", "uuid-a", "h1.jstore"))
+        mk(joinpath(store, "C", "Crayons", "uuid-b", "h2.jstore"))
+        mk(joinpath(store, "C", "Crayons", "uuid-b", "h2.unavailable"))  # tombstone: ignored
+        mk(joinpath(store, "C", "Crayons", "uuid-b", "h3.jstore.tmp"))   # not a .jstore: ignored
+
+        idx = build_index(store)
+        @test idx == ["uuid-a/h1", "uuid-b/h2"]      # sorted, unique, .jstore only
+
+        io = IOBuffer(); write_index(store, io)
+        @test String(take!(io)) == "uuid-a/h1\nuuid-b/h2\n"
+    end
+end
