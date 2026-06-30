@@ -41,3 +41,24 @@ Used both as the post-resume worklist and by `--report-missing`.
 """
 find_missing(rows::Vector{PkgVersion}, store_path) =
     filter(pv -> !is_cached(pv, store_path), rows)
+
+"""
+    done_key(pv) -> String
+
+Return the canonical `"<uuid>/<stem>"` key for `pv`, where stem is the tree-hash
+with `'+'` replaced by `'_'` (matching `get_cache_path` / the published index).
+Used to build a done-set for stateless incremental runs that diff against a
+bucket key-list instead of scanning a local store.
+"""
+done_key(pv::PkgVersion) = string(pv.uuid, '/', replace(pv.tree_hash, '+' => '_'))
+
+"""
+    find_missing(rows, done::AbstractSet) -> Vector{PkgVersion}
+
+The subset of `rows` whose `done_key` is not in `done`.  `done` is a set of
+`"<uuid>/<stem>"` strings (e.g. downloaded from a bucket index).  Successes and,
+on incremental runs, tombstones should populate it; this lets a stateless
+regeneration job diff against the bucket's key-set instead of scanning a local store.
+"""
+find_missing(rows::Vector{PkgVersion}, done::AbstractSet) =
+    filter(pv -> !(done_key(pv) in done), rows)

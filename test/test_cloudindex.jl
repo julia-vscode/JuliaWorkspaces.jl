@@ -608,6 +608,21 @@ end
     end
 end
 
+@testitem "CloudIndex: find_missing(rows, done-set) filters by uuid/treehash key" begin
+    using JuliaWorkspaces.CloudIndexApp: PkgVersion, find_missing, done_key
+    u = Base.UUID("22222222-2222-2222-2222-222222222222")
+    rows = [PkgVersion("A", u, v"1.0.0", "h1", false, nothing),
+            PkgVersion("B", u, v"1.0.0", "h2", false, nothing)]
+    done = Set(["$(u)/h1"])
+    left = find_missing(rows, done)
+    @test length(left) == 1 && left[1].tree_hash == "h2"
+    @test done_key(rows[1]) == "$(u)/h1"
+
+    # '+' in tree_hash must map to '_' in done_key
+    pv_plus = PkgVersion("C", u, v"1.0.0", "a+b", false, nothing)
+    @test endswith(done_key(pv_plus), "a_b")
+end
+
 @testitem "CloudIndex: build_index lists one <uuid>/<stem> per .jstore" begin
     using JuliaWorkspaces.CloudIndexApp: build_index, write_index
     mktempdir() do store
