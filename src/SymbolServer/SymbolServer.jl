@@ -116,13 +116,23 @@ function download_cache_files(ssi, environment_path, progress_callback)
             try
                 remove_non_general_pkgs!(to_download)
             catch err
-                # if any errors, err on the side of caution and mark all as private, and continue
                 @error """
                 Symbol cache downloading: Failed to identify which packages to omit based on the General registry.
                 All packages will be processsed locally""" err
                 empty!(to_download)
             end
             isempty(to_download) && continue
+
+            # Consult the published availability index: fetch it once, then keep
+            # only packages known to exist on the server (skipping a 404 per missing
+            # package). If the index can't be fetched, fall back to attempting each.
+            index = fetch_availability_index(ssi.symbolcache_upstream)
+            if index !== nothing
+                keep_available!(to_download, manifest, index)
+                isempty(to_download) && continue
+            else
+                @debug "Availability index unavailable; attempting per-package downloads."
+            end
 
             n_done = 0
             n_total = length(to_download)
