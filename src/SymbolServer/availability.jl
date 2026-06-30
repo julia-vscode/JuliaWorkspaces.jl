@@ -16,3 +16,29 @@ function parse_availability_index(io::IO)
     return keys
 end
 parse_availability_index(s::AbstractString) = parse_availability_index(IOBuffer(s))
+
+function keep_available!(to_download, manifest, index::Set{String})
+    filter!(to_download) do pkg
+        cache_key_from_path(get_cache_path(manifest, packageuuid(pkg))) in index
+    end
+    return to_download
+end
+
+# Network: fetch <upstream>/store/v2/index.tar.gz (a tarball containing index.txt)
+# and parse it. Returns `nothing` on any failure so callers can fall back to the
+# legacy per-file attempt. Uses the same unpack path as the cache tarballs, so no
+# new dependency is needed.
+function fetch_availability_index(upstream::AbstractString)
+    url = join([upstream, "store", "v2", "index.tar.gz"], '/')
+    try
+        return mktempdir() do dir
+            dest = joinpath(dir, "idx")  # must NOT pre-exist: download_verify_unpack returns false if isdir(dest)
+            Pkg.PlatformEngines.download_verify_unpack(url, nothing, dest) || return nothing
+            idx = joinpath(dest, "index.txt")
+            isfile(idx) ? open(parse_availability_index, idx) : nothing
+        end
+    catch err
+        @debug "Could not fetch availability index" exception = (err, catch_backtrace())
+        return nothing
+    end
+end
