@@ -43,6 +43,7 @@ function _usage()
       --dry-run              print the filtered worklist; don't index
       --report-missing       print only not-yet-indexed entries; don't index
       --out FILE             with --dry-run/--report-missing, write JSONL
+      --emit-index FILE      write the availability index for --store to FILE; don't index
       -h | --help            this message
     """)
 end
@@ -115,6 +116,13 @@ function cli_main(argv::Vector{String})
     cfg = parse_args(argv)
     cfg.mode === :help && (_usage(); return 0)
 
+    if cfg.emit_index !== nothing
+        open(cfg.emit_index, "w") do io
+            write_index(abspath(cfg.store), io)
+        end
+        return 0
+    end
+
     regpath = cfg.registry !== nothing ? cfg.registry : general_registry_path()
     regpath === nothing && (println(stderr, "No registry found; pass --registry"); return 2)
 
@@ -129,13 +137,6 @@ function cli_main(argv::Vector{String})
     elseif cfg.mode === :report_missing
         missing_rows = find_missing(rows, abspath(cfg.store))
         _print_worklist(missing_rows, cfg.out); return 0
-    end
-
-    if cfg.emit_index !== nothing
-        open(cfg.emit_index, "w") do io
-            write_index(abspath(cfg.store), io)
-        end
-        return 0
     end
 
     workdir = cfg.workdir !== nothing ? cfg.workdir : mktempdir()

@@ -3,7 +3,7 @@
 #   per-package tar.gz artifacts + an index.tar.gz, under OUT/store/v2/.
 # Usage: publish_symbolcache.sh STORE OUT [PKG_DIR]
 set -euo pipefail
-STORE=${1:?store dir}; OUT=${2:?out dir}; PKG=${3:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
+STORE=${1:?store dir}; STORE=${STORE%/}; OUT=${2:?out dir}; PKG=${3:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
 JOBS=$(nproc)
 PKGS_OUT="$OUT/store/v2/packages"; mkdir -p "$PKGS_OUT"
 

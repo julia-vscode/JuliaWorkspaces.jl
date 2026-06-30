@@ -14,6 +14,20 @@ end
     @test isempty(parse_availability_index(""))
 end
 
+@testitem "SymbolCache client: fetch_availability_index loads a real index tarball" begin
+    using JuliaWorkspaces.SymbolServer: fetch_availability_index
+    mktempdir() do up
+        # lay out <up>/store/v2/index.tar.gz containing index.txt
+        d = mkpath(joinpath(up, "store", "v2"))
+        idxtxt = joinpath(up, "index.txt"); write(idxtxt, "u1/h1\nu2/h2\n")
+        run(`tar -czf $(joinpath(d, "index.tar.gz")) -C $up index.txt`)
+        got = fetch_availability_index("file://" * up)
+        @test got == Set(["u1/h1", "u2/h2"])
+    end
+    # unreachable upstream -> nothing (graceful)
+    @test fetch_availability_index("file:///no/such/path/xyz") === nothing
+end
+
 @testitem "SymbolCache client: keep_available! intersects with the index" begin
     using JuliaWorkspaces.SymbolServer: keep_available!, cache_key_from_path, get_cache_path, read_manifest
     using Base: UUID
