@@ -567,7 +567,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `scripts/run_cloudindex_docker.sh` (existing sweep), `scripts/publish_symbolcache.sh` (Task 6), `rclone` configured with a remote (env `RCLONE_REMOTE`, e.g. `r2:symbolcache` or a local test remote).
-- Produces: an end-to-end run that downloads state, computes missing, indexes, uploads artifacts + index + tombstones, under a lock.
+- Produces: an end-to-end run that downloads state, computes missing, indexes, uploads artifacts + index + tombstones. Single-flight is the scheduler's responsibility (no bucket lock).
 
 - [ ] **Step 1: Write the script**
 
@@ -584,20 +584,12 @@ REMOTE=${RCLONE_REMOTE:?set RCLONE_REMOTE}; MODE=${MODE:-incremental}
 WORK=${WORK:-$(mktemp -d)}; PFX="store/v2"; STATE="$PFX/_state"
 mkdir -p "$WORK"
 
-# 1. Heartbeat lock. A full run can take ~36h, so we can't use a fixed TTL; instead
-#    the lock holds a unix timestamp refreshed every 5 min, and is considered stale
-#    after 15 min (3 missed beats). Prefer the scheduler's own mutex (Actions
-#    `concurrency:` / `flock`) as primary; this is the cross-runner backstop.
-LOCK="$REMOTE/$STATE/lock"; STALE=900; BEAT=300
-if rclone copyto "$LOCK" "$WORK/lock.cur" 2>/dev/null; then
-    ts=$(cat "$WORK/lock.cur" 2>/dev/null || echo 0)
-    if [ $(( $(date +%s) - ts )) -lt "$STALE" ]; then echo "locked; another run active" >&2; exit 0; fi
-    echo "stale lock ($(( $(date +%s) - ts ))s old) — stealing" >&2
-fi
-date +%s > "$WORK/lock"; rclone copyto "$WORK/lock" "$LOCK"
-( while sleep "$BEAT"; do date +%s > "$WORK/lock"; rclone copyto "$WORK/lock" "$LOCK"; done ) &
-HEARTBEAT=$!
-trap 'kill "$HEARTBEAT" 2>/dev/null || true; rclone deletefile "$LOCK" || true' EXIT
+# 1. No bucket lock. Single-flight is the scheduler's job (run this under a GitHub
+#    Actions `concurrency:` group, or `flock` on a single runner). Concurrent
+#    overlap is not a correctness risk — artifacts are immutable/additive, and a
+#    lost-update on the index/tombstone lists is self-healed by the periodic full
+#    reconcile (worst case: duplicated work + a transiently-stale index). See the
+#    spec's "Why no lock".
 
 # 2. Download key-sets (small): index (successes) + tombstones.
 : > "$WORK/successes.txt"; : > "$WORK/tombstones.txt"
@@ -683,7 +675,7 @@ ok={key(json.loads(l)) for l in open(results) if json.loads(l)["status"]=="ok"}
 open(out,"w").write("\n".join(sorted(new-ok))+"\n")
 PY
 
-# 6. Publish: package the new artifacts, upload additively, refresh index + tombstones under lock.
+# 6. Publish: package the new artifacts, upload additively, refresh index + tombstones.
 bash "$(dirname "$0")/publish_symbolcache.sh" "$REAL_STORE" "$WORK/pub"
 rclone copy "$WORK/pub/store/v2/packages" "$REMOTE/$PFX/packages" --immutable --transfers=32
 rclone copyto "$WORK/pub/store/v2/index.tar.gz" "$REMOTE/$PFX/index.tar.gz"     # short TTL set on the bucket

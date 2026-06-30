@@ -76,7 +76,6 @@ limits motivate the move to R2.
 store/v2/packages/<I>/<Name>/<uuid>/<treehash>.tar.gz   # immutable artifacts (public)
 store/v2/index.txt.gz                                   # availability index (public, short TTL)
 store/v2/_state/tombstones.txt.gz                       # generation state (private)
-store/v2/_state/lock                                    # cron mutex (conditional PUT)
 store/v2/_state/runs/<ts>.jsonl.gz                      # optional: per-run results, audit/stats
 ```
 
@@ -114,13 +113,13 @@ gzip + upload it.
 
 ## Server: regeneration job (stateless cron)
 
-1. Acquire `store/v2/_state/lock` (conditional `PUT If-None-Match: *`). Because a
-   **full** run can take ~36 h, the lock is **heartbeat-renewed** (rewrite with a
-   fresh timestamp every ~5 min) and considered **stale after ~15 min** without a
-   beat, rather than given a fixed TTL that would have to exceed the longest run.
-   Prefer the scheduler's native mutex (GitHub Actions `concurrency:` group, or
-   `flock` on a single runner) as the primary guard; the bucket lock is the
-   cross-runner backstop.
+1. Ensure single-flight via the **scheduler**, not a bucket lock — a GitHub
+   Actions `concurrency:` group (or `flock` on a single runner). No lock object is
+   stored. Concurrent overlap is not a correctness risk: artifacts are immutable
+   and additive (idempotent uploads), and a lost-update on the mutable index/
+   tombstone lists is self-healed by the periodic full reconcile (and the next
+   run) — at worst it causes duplicated indexing work and a transiently-stale
+   index, never corruption. See "Why no lock" below.
 2. Download `index.txt.gz` (successes) + `tombstones.txt.gz` → in-memory key-sets.
 3. Refresh General registry; enumerate + filter (newest-N per breaking, etc.).
 4. `missing = candidates − skip-set` where skip-set is:
@@ -132,7 +131,6 @@ gzip + upload it.
    tombstones := this-run failures (full). Rebuild `index.txt.gz` from the
    success set. Upload both (short TTL).
 8. Optionally archive the run's `results.jsonl` to `_state/runs/<ts>`.
-9. Release lock.
 
 Periodic **full reconcile** (monthly / on demand): bucket `LIST` of the
 `.tar.gz` prefix is authoritative; rebuild the index from it and drop any
@@ -148,6 +146,28 @@ tombstone that now has an artifact. Catches drift from partial uploads.
   are the only carried-forward state.
 - Integrity: the CacheStore format self-validates (magic/version/length) and the
   client raises `CacheCorruptedError` on bad data — no extra checksums.
+
+### Why no lock
+
+There is deliberately **no bucket lock**. A lock would only guard the
+read-modify-write of the two mutable objects (`index.tar.gz`, `tombstones.txt.gz`)
+against concurrent runs clobbering each other's updates. That is a lost-update
+*consistency* issue, not corruption:
+
+- **Artifacts** are content-addressed and immutable → concurrent uploads write
+  identical bytes; order is irrelevant.
+- **Duplicated indexing work** from two overlapping runs is wasted compute, not
+  incorrectness (idempotent outputs).
+- A **clobbered index/tombstone** list is recoverable: the index only ever makes
+  the client fall back to attempting a fetch (the artifact still exists), and the
+  **periodic full reconcile** (and the next run) rebuilds the index from a bucket
+  `LIST` and re-derives tombstones. The inconsistency is transient and
+  self-healing.
+
+So single-flight is the **scheduler's** responsibility (Actions `concurrency:` /
+`flock`), and the reconcile is the consistency net. Dropping the lock removes the
+conditional-PUT/heartbeat/stale-steal machinery entirely; the worst case of a
+rare overlap is some redundant work and a briefly-stale index, never data loss.
 
 ## Rollout / phasing
 
