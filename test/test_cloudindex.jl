@@ -595,6 +595,19 @@ end
     end
 end
 
+@testitem "CloudIndex: --emit-index writes the index and exits 0" begin
+    using JuliaWorkspaces.CloudIndexApp: cli_main
+    mktempdir() do root
+        store = joinpath(root, "store")
+        mk(p) = (mkpath(dirname(p)); write(p, "x"))
+        mk(joinpath(store, "E", "Example", "uuid-a", "h1.jstore"))
+        out = joinpath(root, "index.txt")
+        rc = cli_main(["--store", store, "--emit-index", out])
+        @test rc == 0
+        @test read(out, String) == "uuid-a/h1\n"
+    end
+end
+
 @testitem "CloudIndex: build_index lists one <uuid>/<stem> per .jstore" begin
     using JuliaWorkspaces.CloudIndexApp: build_index, write_index
     mktempdir() do store
