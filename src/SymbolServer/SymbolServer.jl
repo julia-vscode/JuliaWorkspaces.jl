@@ -16,6 +16,8 @@ include("../../shared/symbolserver/utils.jl")
 include("../../shared/symbolserver/serialize.jl")
 using .CacheStore
 
+include("availability.jl")
+
 mutable struct SymbolServerInstance
     process::Union{Nothing,Base.Process}
     depot_path::String
