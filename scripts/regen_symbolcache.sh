@@ -2,15 +2,18 @@
 #
 # Stateless symbol-cache regeneration driver.
 #
-# Env vars:
-#   RCLONE_REMOTE  (required) rclone remote + bucket prefix, e.g. "r2:symbolcache"
-#                  or ":local:/path/to/dir" for local testing.
-#   MODE           incremental (default) | full
-#   WORK           scratch dir (default: fresh mktemp)
-#   SWEEP_CMD      override the sweep orchestrator (default: bash <scriptdir>/run_cloudindex_docker.sh)
+# Usage:
+#   regen_symbolcache.sh --remote REMOTE [--mode incremental|full] [--work DIR]
+#                        [--sweep-cmd CMD] [-- SWEEP_ARGS...]
 #
-# Any positional args ($@) are forwarded verbatim to the sweep command
-# (e.g. --newest 3 --per-break --shard 0/100).
+#   --remote REMOTE   (required) rclone remote + bucket prefix, e.g.
+#                     "r2:symbolcache" or ":local:/path/to/dir" for local testing.
+#   --mode MODE       incremental (default) | full
+#   --work DIR        scratch dir (default: fresh mktemp)
+#   --sweep-cmd CMD   sweep orchestrator (default: bash <scriptdir>/run_cloudindex_docker.sh)
+#
+# Anything after `--` is forwarded verbatim to the sweep command
+# (e.g. -- --newest 3 --per-break --shard 0/100).
 #
 # Requires: rclone, jwcloudindex (via julia --project), gzip, tar.
 # Single-flight is the scheduler's responsibility (Actions concurrency: / flock).
@@ -21,11 +24,34 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/symbolcache_common.sh"
 
+usage() { cat <<'EOF'
+Usage: regen_symbolcache.sh --remote REMOTE [--mode incremental|full] [--work DIR]
+                            [--sweep-cmd CMD] [-- SWEEP_ARGS...]
+  --remote REMOTE   (required) rclone remote + bucket prefix (e.g. r2:symbolcache)
+  --mode MODE       incremental (default) | full
+  --work DIR        scratch dir (default: fresh mktemp)
+  --sweep-cmd CMD   sweep orchestrator (default: run_cloudindex_docker.sh)
+  args after --     forwarded verbatim to the sweep command
+EOF
+}
+
 # ---------------------------------------------------------------------------
-# Configuration
+# Arguments
 # ---------------------------------------------------------------------------
-REMOTE="${RCLONE_REMOTE:?RCLONE_REMOTE must be set}"
-MODE="${MODE:-incremental}"
+REMOTE=""; MODE="incremental"; WORK=""; SWEEP_CMD=""
+sweep_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --remote)    REMOTE="$2"; shift 2 ;;
+        --mode)      MODE="$2"; shift 2 ;;
+        --work)      WORK="$2"; shift 2 ;;
+        --sweep-cmd) SWEEP_CMD="$2"; shift 2 ;;
+        -h|--help)   usage; exit 0 ;;
+        --)          shift; sweep_args=("$@"); break ;;
+        *)           echo "[regen] ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+[[ -n "$REMOTE" ]] || { echo "[regen] ERROR: --remote is required" >&2; usage >&2; exit 2; }
 WORK="${WORK:-$(mktemp -d /tmp/regen_symbolcache.XXXXXX)}"
 SWEEP_CMD="${SWEEP_CMD:-bash ${SCRIPT_DIR}/run_cloudindex_docker.sh}"
 PKG="$(dirname "$SCRIPT_DIR")"  # package root == scripts/..
@@ -86,7 +112,7 @@ $SWEEP_CMD \
     --work "$sweepwork" \
     --done-set "$WORK/done.txt" \
     --out "$sweepwork/results.jsonl" \
-    "$@"
+    ${sweep_args[@]+"${sweep_args[@]}"}
 
 echo "[regen] sweep complete"
 

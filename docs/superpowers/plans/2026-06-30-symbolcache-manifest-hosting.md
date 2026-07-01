@@ -584,7 +584,7 @@ Create `scripts/regen_symbolcache.sh`:
 # Stateless symbol-cache regeneration. State (tombstones) lives in the bucket;
 # successes are re-derived from the published index. Two modes: incremental
 # (skip successes + tombstones) and full (skip successes only).
-# Env: RCLONE_REMOTE (e.g. r2:symbolcache), MODE=incremental|full, WORK (scratch).
+# Args: --remote (e.g. r2:symbolcache), --mode incremental|full, --work (scratch).
 set -euo pipefail
 REMOTE=${RCLONE_REMOTE:?set RCLONE_REMOTE}; MODE=${MODE:-incremental}
 WORK=${WORK:-$(mktemp -d)}; PFX="store/v2"; STATE="$PFX/_state"
@@ -695,12 +695,11 @@ echo "regen ($MODE) done"
 mkdir -p /tmp/r2local
 rclone --config /dev/null lsf ":local:/tmp/r2local" >/dev/null 2>&1 || true   # ':local:' backend needs no config
 # First run (empty remote → everything missing). Use a 1-shard, name-filtered tiny sweep:
-RCLONE_REMOTE=":local:/tmp/r2local" MODE=full WORK=/tmp/regenwork \
-  bash scripts/regen_symbolcache.sh   # add --include '^(Example|Crayons)$' --shard 0/1 to the docker call for a fast test
+bash scripts/regen_symbolcache.sh --remote :local:/tmp/r2local --mode full --work /tmp/regenwork \
+  -- --include '^(Example|Crayons)$' --shard 0/1   # args after -- go to the docker sweep for a fast test
 test -f /tmp/r2local/store/v2/index.tar.gz && echo "index published"
 # Second run (incremental) should index nothing new:
-RCLONE_REMOTE=":local:/tmp/r2local" MODE=incremental WORK=/tmp/regenwork2 \
-  bash scripts/regen_symbolcache.sh
+bash scripts/regen_symbolcache.sh --remote :local:/tmp/r2local --mode incremental --work /tmp/regenwork2
 ```
 
 Expected: first run publishes artifacts + index; second run's `results.jsonl` is empty (nothing missing) and the index is unchanged. Acceptance criterion from the spec: a no-change incremental run does zero indexing work.
@@ -722,10 +721,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 2:** Configure `rclone` with an `r2:` remote (account id + token).
 - [ ] **Step 3:** Seed the bucket from the existing full store (packages + derived index, uploaded with Cache-Control):
   ```bash
-  RCLONE_REMOTE=r2:symbolcache bash scripts/seed_symbolcache.sh ~/jwci-work/store
+  bash scripts/seed_symbolcache.sh --remote r2:symbolcache --store ~/jwci-work/store
   ```
 - [ ] **Step 4:** Verify the client end-to-end against the seeded bucket: point a `SymbolServerInstance(symbolcache_upstream="https://<cdn-host>/symbolcache")` at a test project with a couple of General deps, call `getstore(...; download=true)`, and confirm it fetches only indexed packages (watch `@debug`), unpacks, and loads.
-- [ ] **Step 5:** Schedule `regen_symbolcache.sh` (GitHub Actions `schedule` or cron): `MODE=incremental` daily; `MODE=full` monthly or on a Julia-version bump.
+- [ ] **Step 5:** Schedule `regen_symbolcache.sh` (GitHub Actions `schedule` or cron): `--mode incremental` daily; `--mode full` monthly or on a Julia-version bump.
 
 ---
 

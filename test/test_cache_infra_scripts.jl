@@ -78,12 +78,7 @@ $json_lines
 
         script = joinpath(scripts, "regen_symbolcache.sh")
         remote = ":local:" * abspath(bucket)
-        cmd = Cmd(`bash $script`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote,
-            "MODE"          => "full",
-            "WORK"          => workdir,
-            "SWEEP_CMD"     => "bash $stub",
-        )))
+        cmd = `bash $script --remote $remote --mode full --work $workdir --sweep-cmd $("bash " * stub)`
         @test success(cmd)
 
         # 1a. artifact present at expected path
@@ -158,18 +153,14 @@ $json_lines
             ["E/Example/$uuid_ok/h1"],
             [(uuid=uuid_ok,  treehash="h1", status="ok"),
              (uuid=uuid_bad, treehash="h2", status="unsatisfiable")])
-        @test success(Cmd(`bash $regen`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote, "MODE" => "full",
-            "WORK" => workdir1, "SWEEP_CMD" => "bash $stub"))))
+        @test success(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
 
         @test "$uuid_ok/h1" in read_index_tar(bucket)
 
         # --- Run 2: incremental, stub produces EMPTY store + empty results ---
         workdir2 = joinpath(tmp, "work2"); mkpath(workdir2)
         make_stub_sweep(stub, String[], NamedTuple[])
-        @test success(Cmd(`bash $regen`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote, "MODE" => "incremental",
-            "WORK" => workdir2, "SWEEP_CMD" => "bash $stub"))))
+        @test success(`bash $regen --remote $remote --mode incremental --work $workdir2 --sweep-cmd $("bash " * stub)`)
 
         # KEY ASSERTION: original key must still be in the index (union never shrinks)
         @test "$uuid_ok/h1" in read_index_tar(bucket)
@@ -233,9 +224,7 @@ $json_lines
             ["E/Example/$uuid_ok/h1"],
             [(uuid=uuid_ok,   treehash="h1", status="ok"),
              (uuid=uuid_bad1, treehash="h2", status="unsatisfiable")])
-        @test success(Cmd(`bash $regen`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote, "MODE" => "full",
-            "WORK" => workdir1, "SWEEP_CMD" => "bash $stub"))))
+        @test success(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
 
         @test "$uuid_bad1/h2" in read_tombstones_gz(bucket)
 
@@ -243,9 +232,7 @@ $json_lines
         workdir2 = joinpath(tmp, "work2"); mkpath(workdir2)
         make_stub_sweep(stub, String[],
             [(uuid=uuid_bad2, treehash="h3", status="unsatisfiable")])
-        @test success(Cmd(`bash $regen`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote, "MODE" => "incremental",
-            "WORK" => workdir2, "SWEEP_CMD" => "bash $stub"))))
+        @test success(`bash $regen --remote $remote --mode incremental --work $workdir2 --sweep-cmd $("bash " * stub)`)
 
         tombs2 = read_tombstones_gz(bucket)
         # Both old and new tombstone keys must be present
@@ -308,9 +295,7 @@ $json_lines
             [(uuid=uuid_cancelled, treehash="hc", status="cancelled"),
              (uuid=uuid_failed,    treehash="hf", status="failed")])
 
-        @test success(Cmd(`bash $(joinpath(scripts, "regen_symbolcache.sh"))`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote, "MODE" => "full",
-            "WORK" => workdir, "SWEEP_CMD" => "bash $stub"))))
+        @test success(`bash $(joinpath(scripts, "regen_symbolcache.sh")) --remote $remote --mode full --work $workdir --sweep-cmd $("bash " * stub)`)
 
         tombs = read_tombstones_gz(bucket)
         # cancelled must NOT appear in tombstones
@@ -372,8 +357,7 @@ end
         # uuid_a/h1: stale marker alongside its artifact — must be dropped (disjoint).
         write(joinpath(store, "E", "Example", uuid_a, "h1.unavailable"), "failed\n")
 
-        cmd = Cmd(`bash $(joinpath(scripts, "seed_symbolcache.sh")) $store`;
-                  env=merge(ENV, Dict("RCLONE_REMOTE" => remote, "WORK" => workdir)))
+        cmd = `bash $(joinpath(scripts, "seed_symbolcache.sh")) --remote $remote --store $store --work $workdir`
         @test success(cmd)
 
         # Artifacts uploaded at the expected paths
@@ -454,10 +438,7 @@ end
                      `gzip -c`,
                      joinpath(statedir, "tombstones.txt.gz")))
 
-        cmd = Cmd(`bash $(joinpath(scripts, "reconcile_symbolcache.sh"))`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote,
-            "WORK"          => workdir,
-        )))
+        cmd = `bash $(joinpath(scripts, "reconcile_symbolcache.sh")) --remote $remote --work $workdir`
         @test success(cmd)
 
         # 5a. Rebuilt index lists BOTH artifact keys
@@ -503,10 +484,7 @@ end
         # rclone exits non-zero with an error that does NOT match the
         # "directory not found" pattern, triggering layer-1 abort.
         bad_remote = "badremote_does_not_exist_xyz:bucket"
-        cmd = Cmd(`bash $(joinpath(scripts, "reconcile_symbolcache.sh"))`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => bad_remote,
-            "WORK"          => workdir,
-        )))
+        cmd = `bash $(joinpath(scripts, "reconcile_symbolcache.sh")) --remote $bad_remote --work $workdir`
 
         # Script must exit non-zero
         @test !success(ignorestatus(cmd))
@@ -554,10 +532,7 @@ end
 
         original_bytes = read(idx_path)
 
-        cmd = Cmd(`bash $(joinpath(scripts, "reconcile_symbolcache.sh"))`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote,
-            "WORK"          => workdir,
-        )))
+        cmd = `bash $(joinpath(scripts, "reconcile_symbolcache.sh")) --remote $remote --work $workdir`
 
         # Must exit non-zero (layer-2 abort: empty list, non-empty existing index)
         @test !success(ignorestatus(cmd))
@@ -593,10 +568,7 @@ end
         # Empty packages/ dir + NO existing index
         mkpath(joinpath(bucket, "store", V, "packages"))
 
-        cmd = Cmd(`bash $(joinpath(scripts, "reconcile_symbolcache.sh"))`; env=merge(ENV, Dict(
-            "RCLONE_REMOTE" => remote,
-            "WORK"          => workdir,
-        )))
+        cmd = `bash $(joinpath(scripts, "reconcile_symbolcache.sh")) --remote $remote --work $workdir`
 
         # Must exit 0
         @test success(cmd)

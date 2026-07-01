@@ -4,10 +4,12 @@
 # rebuild the index from the artifacts present, drop tombstones that now have an
 # artifact. Never mutates artifacts. No lock (single-flight is the scheduler's job).
 #
-# Env vars:
-#   RCLONE_REMOTE  (required) rclone remote + bucket prefix, e.g. "r2:symbolcache"
-#                  or ":local:/path/to/dir" for local testing.
-#   WORK           scratch dir (default: fresh mktemp)
+# Usage:
+#   reconcile_symbolcache.sh --remote REMOTE [--work DIR]
+#
+#   --remote REMOTE   (required) rclone remote + bucket prefix, e.g.
+#                     "r2:symbolcache" or ":local:/path/to/dir" for local testing.
+#   --work DIR        scratch dir (default: fresh mktemp)
 #
 # Requires: rclone, gzip, tar, sort, awk, comm.
 # Single-flight is the scheduler's responsibility (Actions concurrency: / flock).
@@ -16,10 +18,26 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/symbolcache_common.sh"
 
+usage() { cat <<'EOF'
+Usage: reconcile_symbolcache.sh --remote REMOTE [--work DIR]
+  --remote REMOTE   (required) rclone remote + bucket prefix (e.g. r2:symbolcache)
+  --work DIR        scratch dir (default: fresh mktemp)
+EOF
+}
+
 # ---------------------------------------------------------------------------
-# Configuration
+# Arguments
 # ---------------------------------------------------------------------------
-REMOTE="${RCLONE_REMOTE:?RCLONE_REMOTE must be set}"
+REMOTE=""; WORK=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --remote)  REMOTE="$2"; shift 2 ;;
+        --work)    WORK="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *)         echo "[reconcile] ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+[[ -n "$REMOTE" ]] || { echo "[reconcile] ERROR: --remote is required" >&2; usage >&2; exit 2; }
 WORK="${WORK:-$(mktemp -d /tmp/reconcile_symbolcache.XXXXXX)}"
 
 PFX="${STORE_PREFIX}"

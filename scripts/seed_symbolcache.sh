@@ -6,20 +6,40 @@
 # then upload all three with Cache-Control. Carrying the tombstones forward
 # stops the first incremental regen from re-attempting known failures.
 #
-# Env vars:
-#   RCLONE_REMOTE  (required) rclone remote + bucket prefix, e.g. "r2:symbolcache"
-#                  or ":local:/path/to/dir" for local testing.
-#   WORK           scratch dir for the packaged tree (default: fresh mktemp).
+# Usage:
+#   seed_symbolcache.sh --remote REMOTE --store DIR [--work DIR]
 #
-# Usage: RCLONE_REMOTE=r2:symbolcache bash scripts/seed_symbolcache.sh STORE
+#   --remote REMOTE   (required) rclone remote + bucket prefix, e.g.
+#                     "r2:symbolcache" or ":local:/path/to/dir" for local testing.
+#   --store DIR       (required) the existing store to seed from.
+#   --work DIR        scratch dir for the packaged tree (default: fresh mktemp).
 #
 # Requires: rclone, gzip, tar, find, sort, awk, comm.
 set -euo pipefail
 here="$(dirname "${BASH_SOURCE[0]}")"
 source "$here/symbolcache_common.sh"
 
-STORE="${1:?usage: seed_symbolcache.sh STORE}"; STORE="${STORE%/}"
-REMOTE="${RCLONE_REMOTE:?RCLONE_REMOTE must be set}"
+usage() { cat <<'EOF'
+Usage: seed_symbolcache.sh --remote REMOTE --store DIR [--work DIR]
+  --remote REMOTE   (required) rclone remote + bucket prefix (e.g. r2:symbolcache)
+  --store DIR       (required) the existing store to seed from
+  --work DIR        scratch dir for the packaged tree (default: fresh mktemp)
+EOF
+}
+
+REMOTE=""; STORE=""; WORK=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --remote)  REMOTE="$2"; shift 2 ;;
+        --store)   STORE="$2"; shift 2 ;;
+        --work)    WORK="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *)         echo "[seed] ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+[[ -n "$REMOTE" ]] || { echo "[seed] ERROR: --remote is required" >&2; usage >&2; exit 2; }
+[[ -n "$STORE"  ]] || { echo "[seed] ERROR: --store is required"  >&2; usage >&2; exit 2; }
+STORE="${STORE%/}"
 WORK="${WORK:-$(mktemp -d /tmp/seed_symbolcache.XXXXXX)}"
 PFX="${STORE_PREFIX}"
 STATE="$PFX/_state"
