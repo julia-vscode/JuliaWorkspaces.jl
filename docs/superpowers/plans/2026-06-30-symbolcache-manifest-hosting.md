@@ -37,11 +37,20 @@
 - `src/SymbolServer/SymbolServer.jl` — **modify.** `include("availability.jl")`; wire the index into `download_cache_files`. (No URL change — `get_file_from_cloud` already requests `store/v2/packages`.)
 - `src/CloudIndex/index.jl` — **new.** `build_index(store_path)`, `write_index(store_path, io)`.
 - `src/CloudIndexApp.jl` — **modify.** `include("CloudIndex/index.jl")`.
-- `src/CloudIndex/cli.jl` — **modify.** Add `--emit-index PATH`.
+- `src/CloudIndex/cli.jl` — **modify.** Add `--emit-index PATH` and `--done-set FILE`.
+- `src/CloudIndex/cache_state.jl` — **modify.** `done_key` + `find_missing(rows, ::AbstractSet)` (stateless resume predicate).
 - `test/test_symbolcache_client.jl` — **new.** Phase 1 tests.
-- `test/test_cloudindex.jl` — **modify.** Phase 2 index tests.
-- `scripts/publish_symbolcache.sh` — **new.** Phase 3 packaging + upload + index publish.
-- `scripts/regen_symbolcache.sh` — **new.** Phase 3 stateless cron driver.
+- `test/test_cloudindex.jl` — **modify.** Phase 2 index tests + done-set tests.
+- `test/test_cache_infra_scripts.jl` — **new.** rclone-gated integration tests for the regen + reconcile scripts (`:local:` remote, stub sweep; skip when rclone absent).
+- `scripts/publish_symbolcache.sh` — **new.** Packaging: store → v2 tar.gz + index.
+- `scripts/regen_symbolcache.sh` — **new.** Stateless incremental/full regeneration driver.
+- `scripts/reconcile_symbolcache.sh` — **new.** Periodic full-reconcile safety net (rebuild index from artifacts; drop stale tombstones; abort rather than wipe on a failed/empty list).
+
+## Implementation status (2026-07-01, branch `sp/cache-infra`)
+
+**Done + tested:** Phase 1 (client manifest lookup), Phase 2 (index generation + `--emit-index`), and the Phase-3 *code* — `publish_symbolcache.sh`, `regen_symbolcache.sh`, `reconcile_symbolcache.sh`, the `--done-set` flag + `find_missing` done-set predicate, and committed rclone-gated integration tests (`test/test_cache_infra_scripts.jl`). The bucket lock was dropped (scheduler single-flight + reconcile). Design deviations from the original plan text below: the marker-file resume hack was replaced by `--done-set`; reconcile was added as its own script.
+
+**Not done (infra/ops — need R2 credentials + deployment):** provisioning the bucket + CDN, seeding the initial corpus, scheduling the regen/reconcile jobs (Actions `concurrency:` for single-flight), and end-to-end client verification against the live host. The task steps below that invoke `rclone`/Docker against a real remote are superseded by the committed integration tests for logic coverage; the remaining work is deployment.
 
 ---
 
