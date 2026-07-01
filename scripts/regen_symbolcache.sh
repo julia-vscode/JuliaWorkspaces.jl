@@ -111,32 +111,11 @@ echo "[regen] published index will have $(wc -l < "$WORK/index_new.txt") entries
 #     Status in {failed, unsatisfiable, timeout} → tombstone; cancelled is retryable → excluded.
 touch "$WORK/new_tombstones.txt"
 if [[ -f "$sweepwork/results.jsonl" ]]; then
-    # Use awk to parse JSONL: extract status, uuid, treehash fields.
-    # Fields are simple JSON strings with no nesting — safe to parse with awk/sed.
-    awk '
-        function extract(line, key,    pat, val) {
-            pat = "\"" key "\"[[:space:]]*:[[:space:]]*\"([^\"]+)\""
-            if (match(line, pat)) {
-                val = substr(line, RSTART, RLENGTH)
-                sub(".*\"" key "\"[[:space:]]*:[[:space:]]*\"", "", val)
-                sub("\".*", "", val)
-                return val
-            }
-            return ""
-        }
-        {
-            status = extract($0, "status")
-            if (status == "failed" || status == "unsatisfiable" || status == "timeout") {
-                uuid = extract($0, "uuid")
-                treehash = extract($0, "treehash")
-                if (uuid != "" && treehash != "") {
-                    # replace + with _ in treehash (per get_cache_path convention)
-                    gsub(/\+/, "_", treehash)
-                    print uuid "/" treehash
-                }
-            }
-        }
-    ' "$sweepwork/results.jsonl" | sort -u > "$WORK/new_tombstones.txt"
+    # Parse the JSONL with jq. failed/unsatisfiable/timeout → tombstone (cancelled
+    # is retryable → excluded); key = <uuid>/<treehash with + → _>.
+    jq -r 'select(.status == "failed" or .status == "unsatisfiable" or .status == "timeout")
+           | .uuid + "/" + (.treehash | gsub("\\+"; "_"))' \
+        "$sweepwork/results.jsonl" | sort -u > "$WORK/new_tombstones.txt"
 fi
 echo "[regen] this run produced $(wc -l < "$WORK/new_tombstones.txt") tombstone candidates"
 
