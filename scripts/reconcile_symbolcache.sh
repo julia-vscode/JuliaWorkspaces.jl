@@ -96,7 +96,7 @@ cp "$WORK/artifacts.txt" "$idxdir/index.txt"
 tar -czf "$WORK/index.tar.gz" -C "$idxdir" index.txt
 
 echo "[reconcile] uploading rebuilt index.tar.gz ($artifact_count entries) ..."
-rclone copyto "$WORK/index.tar.gz" "${REMOTE}/${PFX}/index.tar.gz"
+rclone copyto "$WORK/index.tar.gz" "${REMOTE}/${PFX}/index.tar.gz" --header-upload "$CC_INDEX"
 echo "[reconcile] index.tar.gz uploaded"
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ dropped=$(( tombstone_count - new_tombstone_count ))
 echo "[reconcile] reconciled tombstones: $new_tombstone_count kept, $dropped dropped (had artifact)"
 
 # Upload reconciled tombstones.
-gzip -c "$WORK/tombstones_new.txt" | rclone rcat "${REMOTE}/${STATE}/tombstones.txt.gz"
+gzip -c "$WORK/tombstones_new.txt" | rclone rcat "${REMOTE}/${STATE}/tombstones.txt.gz" --header-upload "$CC_PRIVATE"
 echo "[reconcile] tombstones.txt.gz uploaded"
 
 echo "[reconcile] done"

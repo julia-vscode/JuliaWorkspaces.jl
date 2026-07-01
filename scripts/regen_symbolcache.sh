@@ -143,7 +143,7 @@ if find "$sweepwork/store" -name '*.jstore' -print -quit 2>/dev/null | grep -q .
     echo "[regen] packaging and uploading artifacts..."
     mkdir -p "$WORK/pub"
     bash "$SCRIPT_DIR/package_symbolcache.sh" "$sweepwork/store" "$WORK/pub"
-    rclone copy "$WORK/pub/${STORE_PREFIX}/packages" "${REMOTE}/${PFX}/packages"
+    rclone copy "$WORK/pub/${STORE_PREFIX}/packages" "${REMOTE}/${PFX}/packages" --header-upload "$CC_IMMUTABLE"
     echo "[regen] artifacts uploaded"
 else
     echo "[regen] no new artifacts to upload"
@@ -158,14 +158,14 @@ idxdir="$WORK/idx_staging"
 mkdir -p "$idxdir"
 cp "$WORK/index_new.txt" "$idxdir/index.txt"
 tar -czf "$WORK/index_upload.tar.gz" -C "$idxdir" index.txt
-rclone copyto "$WORK/index_upload.tar.gz" "${REMOTE}/${PFX}/index.tar.gz"
+rclone copyto "$WORK/index_upload.tar.gz" "${REMOTE}/${PFX}/index.tar.gz" --header-upload "$CC_INDEX"
 echo "[regen] index.tar.gz uploaded ($(wc -l < "$WORK/index_new.txt") entries)"
 
 # ---------------------------------------------------------------------------
 # Step 7: Publish tombstones'
 # ---------------------------------------------------------------------------
 
-gzip -c "$WORK/tombstones_new.txt" | rclone rcat "${REMOTE}/${STATE}/tombstones.txt.gz"
+gzip -c "$WORK/tombstones_new.txt" | rclone rcat "${REMOTE}/${STATE}/tombstones.txt.gz" --header-upload "$CC_PRIVATE"
 echo "[regen] tombstones.txt.gz uploaded ($(wc -l < "$WORK/tombstones_new.txt") entries)"
 
 echo "[regen] done"

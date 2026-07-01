@@ -726,7 +726,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
       -- --store ~/jwci-work/store --emit-index /tmp/seed_index.txt
   mkdir -p /tmp/seed/store/v2
   tar -czf /tmp/seed/store/v2/index.tar.gz -C /tmp seed_index.txt --transform 's/seed_index/index/'
-  rclone copy /tmp/seed/store/v2 r2:symbolcache/store/v2 --transfers=32
+  rclone copy   /tmp/seed/store/v2/packages r2:symbolcache/store/v2/packages --transfers=32 \
+        --header-upload "Cache-Control: public, max-age=31536000, immutable"
+  rclone copyto /tmp/seed/store/v2/index.tar.gz r2:symbolcache/store/v2/index.tar.gz \
+        --header-upload "Cache-Control: public, max-age=300"
   ```
 - [ ] **Step 4:** Verify the client end-to-end against the seeded bucket: point a `SymbolServerInstance(symbolcache_upstream="https://<cdn-host>/symbolcache")` at a test project with a couple of General deps, call `getstore(...; download=true)`, and confirm it fetches only indexed packages (watch `@debug`), unpacks, and loads.
 - [ ] **Step 5:** Schedule `regen_symbolcache.sh` (GitHub Actions `schedule` or cron): `MODE=incremental` daily; `MODE=full` monthly or on a Julia-version bump.
