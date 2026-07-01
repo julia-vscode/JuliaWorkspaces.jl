@@ -41,8 +41,9 @@
 - `src/CloudIndex/cache_state.jl` — **modify.** `done_key` + `find_missing(rows, ::AbstractSet)` (stateless resume predicate).
 - `test/test_symbolcache_client.jl` — **new.** Phase 1 tests.
 - `test/test_cloudindex.jl` — **modify.** Phase 2 index tests + done-set tests.
-- `test/test_cache_infra_scripts.jl` — **new.** rclone-gated integration tests for the regen + reconcile scripts (`:local:` remote, stub sweep; skip when rclone absent).
+- `test/test_cache_infra_scripts.jl` — **new.** rclone-gated integration tests for the seed + regen + reconcile scripts (`:local:` remote, stub sweep; skip when rclone absent).
 - `scripts/package_symbolcache.sh` — **new.** Packaging: store → v2 per-package tar.gz (index built by the caller).
+- `scripts/seed_symbolcache.sh` — **new.** One-shot seed of a fresh remote from an existing store: package + derive index from artifacts + upload with Cache-Control.
 - `scripts/regen_symbolcache.sh` — **new.** Stateless incremental/full regeneration driver.
 - `scripts/reconcile_symbolcache.sh` — **new.** Periodic full-reconcile safety net (rebuild index from artifacts; drop stale tombstones; abort rather than wipe on a failed/empty list).
 
@@ -719,17 +720,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 - [ ] **Step 1:** Create the R2 bucket; put a CDN in front; set `Cache-Control: public, max-age=31536000, immutable` on `store/v2/packages/**` and a short TTL (e.g. 300s) on `store/v2/index.tar.gz`.
 - [ ] **Step 2:** Configure `rclone` with an `r2:` remote (account id + token).
-- [ ] **Step 3:** Package the existing full store, build the index, and seed the bucket:
+- [ ] **Step 3:** Seed the bucket from the existing full store (packages + derived index, uploaded with Cache-Control):
   ```bash
-  bash scripts/package_symbolcache.sh ~/jwci-work/store /tmp/seed
-  julia --project scripts/.. -e 'using JuliaWorkspaces; exit(JuliaWorkspaces.CloudIndexApp.cli_main(ARGS))' \
-      -- --store ~/jwci-work/store --emit-index /tmp/seed_index.txt
-  mkdir -p /tmp/seed/store/v2
-  tar -czf /tmp/seed/store/v2/index.tar.gz -C /tmp seed_index.txt --transform 's/seed_index/index/'
-  rclone copy   /tmp/seed/store/v2/packages r2:symbolcache/store/v2/packages --transfers=32 \
-        --header-upload "Cache-Control: public, max-age=31536000, immutable"
-  rclone copyto /tmp/seed/store/v2/index.tar.gz r2:symbolcache/store/v2/index.tar.gz \
-        --header-upload "Cache-Control: public, max-age=300"
+  RCLONE_REMOTE=r2:symbolcache bash scripts/seed_symbolcache.sh ~/jwci-work/store
   ```
 - [ ] **Step 4:** Verify the client end-to-end against the seeded bucket: point a `SymbolServerInstance(symbolcache_upstream="https://<cdn-host>/symbolcache")` at a test project with a couple of General deps, call `getstore(...; download=true)`, and confirm it fetches only indexed packages (watch `@debug`), unpacks, and loads.
 - [ ] **Step 5:** Schedule `regen_symbolcache.sh` (GitHub Actions `schedule` or cron): `MODE=incremental` daily; `MODE=full` monthly or on a Julia-version bump.

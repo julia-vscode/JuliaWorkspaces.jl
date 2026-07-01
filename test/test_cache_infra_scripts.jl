@@ -321,6 +321,78 @@ $json_lines
 end
 
 # ===========================================================================
+# seed_symbolcache.sh tests
+# ===========================================================================
+
+@testitem "cache-infra seed: publishes artifacts + index + tombstones from a store" begin
+    if Sys.which("rclone") === nothing
+        @info "skipping cache-infra integration test: rclone not on PATH"
+        return
+    end
+
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
+    pkg_root = abspath(joinpath(@__DIR__, ".."))
+    scripts  = joinpath(pkg_root, "scripts")
+
+    function read_index_tar(bucket)
+        gz = joinpath(bucket, "store", V, "index.tar.gz")
+        isfile(gz) || return String[]
+        raw = read(`tar -xzO -f $gz index.txt`, String)
+        filter(!isempty, strip.(split(raw, '\n')))
+    end
+
+    function read_tombstones_gz(bucket)
+        gz = joinpath(bucket, "store", V, "_state", "tombstones.txt.gz")
+        isfile(gz) || return String[]
+        raw = read(pipeline(`gzip -dc $gz`), String)
+        filter(!isempty, strip.(split(raw, '\n')))
+    end
+
+    mktempdir() do tmp
+        store   = joinpath(tmp, "store")
+        bucket  = joinpath(tmp, "bucket"); mkpath(bucket)
+        workdir = joinpath(tmp, "work");   mkpath(workdir)
+        remote  = ":local:" * abspath(bucket)
+
+        uuid_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        uuid_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        uuid_c = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+        # Fake store with successes (.jstore) and failure markers (.unavailable).
+        for (initial, name, uuid, stem) in [
+                ("E", "Example", uuid_a, "h1"),
+                ("C", "Crayons", uuid_b, "h2")]
+            d = joinpath(store, initial, name, uuid); mkpath(d)
+            write(joinpath(d, "$stem.jstore"), "x")
+        end
+        # uuid_c/h3: a genuine failure tombstone (no artifact).
+        d_c = joinpath(store, "F", "Foo", uuid_c); mkpath(d_c)
+        write(joinpath(d_c, "h3.unavailable"), "unsatisfiable\n")
+        # uuid_a/h1: stale marker alongside its artifact — must be dropped (disjoint).
+        write(joinpath(store, "E", "Example", uuid_a, "h1.unavailable"), "failed\n")
+
+        cmd = Cmd(`bash $(joinpath(scripts, "seed_symbolcache.sh")) $store`;
+                  env=merge(ENV, Dict("RCLONE_REMOTE" => remote, "WORK" => workdir)))
+        @test success(cmd)
+
+        # Artifacts uploaded at the expected paths
+        @test isfile(joinpath(bucket, "store", V, "packages", "E", "Example", uuid_a, "h1.tar.gz"))
+        @test isfile(joinpath(bucket, "store", V, "packages", "C", "Crayons", uuid_b, "h2.tar.gz"))
+
+        # Index lists both artifact keys
+        index = read_index_tar(bucket)
+        @test "$uuid_a/h1" in index
+        @test "$uuid_b/h2" in index
+
+        # Tombstones carry the genuine failure; the stale marker (has an artifact) is dropped
+        tombs = read_tombstones_gz(bucket)
+        @test "$uuid_c/h3" in tombs
+        @test !("$uuid_a/h1" in tombs)
+    end
+end
+
+# ===========================================================================
 # reconcile_symbolcache.sh tests
 # ===========================================================================
 
