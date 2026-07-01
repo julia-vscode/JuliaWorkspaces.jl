@@ -128,7 +128,9 @@ function download_cache_files(ssi, environment_path, progress_callback)
             # package). If the index can't be fetched, fall back to attempting each.
             index = fetch_availability_index(ssi.symbolcache_upstream)
             if index !== nothing
+                n_before = length(to_download)
                 keep_available!(to_download, manifest, index)
+                @debug "Filtered download set against availability index" available = length(to_download) skipped = n_before - length(to_download)
                 isempty(to_download) && continue
             else
                 @debug "Availability index unavailable; attempting per-package downloads."

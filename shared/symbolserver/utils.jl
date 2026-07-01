@@ -491,7 +491,7 @@ function get_file_from_cloud(manifest, uuid, environment_path, depot_dir, cache_
     download_filepath = joinpath(download_dir, last(paths))
     download_filepath_unavailable = string(first(splitext(download_filepath)), ".unavailable")
 
-    @debug "Downloading cache file for $name."
+    @debug "Downloading cache file for $name." url = link
     if isfile(dest_filepath_unavailable)
         @debug "Cloud was unable to cache $name in the past, we won't try to retrieve it again."
         return false
@@ -528,6 +528,7 @@ function get_file_from_cloud(manifest, uuid, environment_path, depot_dir, cache_
             rethrow()
         end
     end
+    @debug "Retrieved cache file for $name." url = link
 
     pkg_entry = Base.locate_package(Base.PkgId(uuid, name))
     if pkg_entry !== nothing && isfile(pkg_entry)

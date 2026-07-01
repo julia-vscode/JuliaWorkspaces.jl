@@ -30,15 +30,25 @@ end
 # new dependency is needed.
 function fetch_availability_index(upstream::AbstractString)
     url = join([upstream, "store", CACHE_STORE_VERSION, "index.tar.gz"], '/')
+    @debug "Fetching availability index" url
     try
         return mktempdir() do dir
             dest = joinpath(dir, "idx")  # must NOT pre-exist: download_verify_unpack returns false if isdir(dest)
-            Pkg.PlatformEngines.download_verify_unpack(url, nothing, dest) || return nothing
+            if !Pkg.PlatformEngines.download_verify_unpack(url, nothing, dest)
+                @debug "Availability index download failed" url
+                return nothing
+            end
             idx = joinpath(dest, "index.txt")
-            isfile(idx) ? open(parse_availability_index, idx) : nothing
+            if !isfile(idx)
+                @debug "Availability index tarball has no index.txt" url
+                return nothing
+            end
+            keys = open(parse_availability_index, idx)
+            @debug "Fetched availability index" url nkeys = length(keys)
+            return keys
         end
     catch err
-        @debug "Could not fetch availability index" exception = (err, catch_backtrace())
+        @debug "Could not fetch availability index" url exception = (err, catch_backtrace())
         return nothing
     end
 end

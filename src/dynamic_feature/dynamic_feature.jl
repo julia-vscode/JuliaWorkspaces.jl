@@ -475,6 +475,7 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
     end
 
     link = string(upstream_url, "/store/", SymbolServer.CACHE_STORE_VERSION, "/packages/", letter, "/", name, "/", string(uuid), "/", first(splitext(filename)), ".tar.gz")
+    @debug "Downloading package cache from cloud" name = name version = version url = link
 
     pkg_download_dir = joinpath(download_dir, string(name, "_", uuid, "_", version))
 
