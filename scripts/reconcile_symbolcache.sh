@@ -14,6 +14,7 @@
 # No lock object is stored or checked.
 #
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/symbolcache_common.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -21,7 +22,7 @@ set -euo pipefail
 REMOTE="${RCLONE_REMOTE:?RCLONE_REMOTE must be set}"
 WORK="${WORK:-$(mktemp -d /tmp/reconcile_symbolcache.XXXXXX)}"
 
-PFX="store/v2"
+PFX="${STORE_PREFIX}"
 STATE="$PFX/_state"
 
 mkdir -p "$WORK"

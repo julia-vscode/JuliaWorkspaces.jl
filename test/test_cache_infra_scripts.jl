@@ -18,19 +18,22 @@
         return
     end
 
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
+
     # ---- helpers (inline so no @testmodule dependency) --------------------
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts = joinpath(pkg_root, "scripts")
 
     function read_index_tar(bucket)
-        gz = joinpath(bucket, "store", "v2", "index.tar.gz")
+        gz = joinpath(bucket, "store", V, "index.tar.gz")
         isfile(gz) || return String[]
         raw = read(`tar -xzO -f $gz index.txt`, String)
         filter(!isempty, strip.(split(raw, '\n')))
     end
 
     function read_tombstones_gz(bucket)
-        gz = joinpath(bucket, "store", "v2", "_state", "tombstones.txt.gz")
+        gz = joinpath(bucket, "store", V, "_state", "tombstones.txt.gz")
         isfile(gz) || return String[]
         raw = read(pipeline(`gzip -dc $gz`), String)
         filter(!isempty, strip.(split(raw, '\n')))
@@ -84,7 +87,7 @@ $json_lines
         @test success(cmd)
 
         # 1a. artifact present at expected path
-        artifact = joinpath(bucket, "store", "v2", "packages",
+        artifact = joinpath(bucket, "store", V, "packages",
                             "E", "Example", uuid_ok, "h1.tar.gz")
         @test isfile(artifact)
 
@@ -105,11 +108,13 @@ end
         return
     end
 
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
 
     function read_index_tar(bucket)
-        gz = joinpath(bucket, "store", "v2", "index.tar.gz")
+        gz = joinpath(bucket, "store", V, "index.tar.gz")
         isfile(gz) || return String[]
         raw = read(`tar -xzO -f $gz index.txt`, String)
         filter(!isempty, strip.(split(raw, '\n')))
@@ -177,11 +182,13 @@ end
         return
     end
 
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
 
     function read_tombstones_gz(bucket)
-        gz = joinpath(bucket, "store", "v2", "_state", "tombstones.txt.gz")
+        gz = joinpath(bucket, "store", V, "_state", "tombstones.txt.gz")
         isfile(gz) || return String[]
         raw = read(pipeline(`gzip -dc $gz`), String)
         filter(!isempty, strip.(split(raw, '\n')))
@@ -253,11 +260,13 @@ end
         return
     end
 
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
 
     function read_tombstones_gz(bucket)
-        gz = joinpath(bucket, "store", "v2", "_state", "tombstones.txt.gz")
+        gz = joinpath(bucket, "store", V, "_state", "tombstones.txt.gz")
         isfile(gz) || return String[]
         raw = read(pipeline(`gzip -dc $gz`), String)
         filter(!isempty, strip.(split(raw, '\n')))
@@ -321,18 +330,20 @@ end
         return
     end
 
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
 
     function read_index_tar(bucket)
-        gz = joinpath(bucket, "store", "v2", "index.tar.gz")
+        gz = joinpath(bucket, "store", V, "index.tar.gz")
         isfile(gz) || return String[]
         raw = read(`tar -xzO -f $gz index.txt`, String)
         filter(!isempty, strip.(split(raw, '\n')))
     end
 
     function read_tombstones_gz(bucket)
-        gz = joinpath(bucket, "store", "v2", "_state", "tombstones.txt.gz")
+        gz = joinpath(bucket, "store", V, "_state", "tombstones.txt.gz")
         isfile(gz) || return String[]
         raw = read(pipeline(`gzip -dc $gz`), String)
         filter(!isempty, strip.(split(raw, '\n')))
@@ -351,7 +362,7 @@ end
         for (initial, name, uuid, stem) in [
                 ("E", "Example", uuid_a, "h1"),
                 ("C", "Crayons", uuid_b, "h2")]
-            dir = joinpath(bucket, "store", "v2", "packages", initial, name, uuid)
+            dir = joinpath(bucket, "store", V, "packages", initial, name, uuid)
             mkpath(dir)
             placeholder = joinpath(dir, "$stem.jstore")
             write(placeholder, "x")
@@ -362,11 +373,11 @@ end
         # Stale index: lists only uuid_a/h1
         idxdir = joinpath(tmp, "idx_staging"); mkpath(idxdir)
         write(joinpath(idxdir, "index.txt"), "$uuid_a/h1\n")
-        mkpath(joinpath(bucket, "store", "v2"))
-        run(`tar -czf $(joinpath(bucket, "store", "v2", "index.tar.gz")) -C $idxdir index.txt`)
+        mkpath(joinpath(bucket, "store", V))
+        run(`tar -czf $(joinpath(bucket, "store", V, "index.tar.gz")) -C $idxdir index.txt`)
 
         # Tombstones: uuid_a/h1 (stale — artifact exists) + uuid_z/h9 (no artifact)
-        statedir = joinpath(bucket, "store", "v2", "_state"); mkpath(statedir)
+        statedir = joinpath(bucket, "store", V, "_state"); mkpath(statedir)
         run(pipeline(IOBuffer("$uuid_a/h1\n$uuid_z/h9\n"),
                      `gzip -c`,
                      joinpath(statedir, "tombstones.txt.gz")))
@@ -395,6 +406,8 @@ end
         return
     end
 
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
 
@@ -407,7 +420,7 @@ end
         # Seed a non-empty index (no packages/ dir at all — simulates lost packages)
         idxdir = joinpath(tmp, "idx_staging"); mkpath(idxdir)
         write(joinpath(idxdir, "index.txt"), "$uuid_a/h1\nuuid-b/h2\n")
-        idx_path = joinpath(bucket, "store", "v2", "index.tar.gz")
+        idx_path = joinpath(bucket, "store", V, "index.tar.gz")
         mkpath(dirname(idx_path))
         run(`tar -czf $idx_path -C $idxdir index.txt`)
 
@@ -439,11 +452,13 @@ end
         return
     end
 
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
 
     function read_index_tar(bucket)
-        gz = joinpath(bucket, "store", "v2", "index.tar.gz")
+        gz = joinpath(bucket, "store", V, "index.tar.gz")
         isfile(gz) || return String[]
         raw = read(`tar -xzO -f $gz index.txt`, String)
         filter(!isempty, strip.(split(raw, '\n')))
@@ -457,12 +472,12 @@ end
         uuid_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
         # Create an empty packages/ dir (rclone lsf succeeds but finds nothing)
-        mkpath(joinpath(bucket, "store", "v2", "packages"))
+        mkpath(joinpath(bucket, "store", V, "packages"))
 
         # Non-empty existing index
         idxdir = joinpath(tmp, "idx_staging"); mkpath(idxdir)
         write(joinpath(idxdir, "index.txt"), "$uuid_a/h1\n")
-        idx_path = joinpath(bucket, "store", "v2", "index.tar.gz")
+        idx_path = joinpath(bucket, "store", V, "index.tar.gz")
         run(`tar -czf $idx_path -C $idxdir index.txt`)
 
         original_bytes = read(idx_path)
@@ -486,11 +501,13 @@ end
         return
     end
 
+    using JuliaWorkspaces
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
 
     function read_index_tar(bucket)
-        gz = joinpath(bucket, "store", "v2", "index.tar.gz")
+        gz = joinpath(bucket, "store", V, "index.tar.gz")
         isfile(gz) || return String[]
         raw = read(`tar -xzO -f $gz index.txt`, String)
         filter(!isempty, strip.(split(raw, '\n')))
@@ -502,7 +519,7 @@ end
         remote  = ":local:" * abspath(bucket)
 
         # Empty packages/ dir + NO existing index
-        mkpath(joinpath(bucket, "store", "v2", "packages"))
+        mkpath(joinpath(bucket, "store", V, "packages"))
 
         cmd = Cmd(`bash $(joinpath(scripts, "reconcile_symbolcache.sh"))`; env=merge(ENV, Dict(
             "RCLONE_REMOTE" => remote,

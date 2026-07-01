@@ -19,6 +19,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/symbolcache_common.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -29,7 +30,7 @@ WORK="${WORK:-$(mktemp -d /tmp/regen_symbolcache.XXXXXX)}"
 SWEEP_CMD="${SWEEP_CMD:-bash ${SCRIPT_DIR}/run_cloudindex_docker.sh}"
 PKG="$(dirname "$SCRIPT_DIR")"  # package root == scripts/..
 
-PFX="store/v2"
+PFX="${STORE_PREFIX}"
 STATE="$PFX/_state"
 
 mkdir -p "$WORK"
@@ -142,7 +143,7 @@ if find "$sweepwork/store" -name '*.jstore' -print -quit 2>/dev/null | grep -q .
     echo "[regen] packaging and uploading artifacts..."
     mkdir -p "$WORK/pub"
     bash "$SCRIPT_DIR/package_symbolcache.sh" "$sweepwork/store" "$WORK/pub"
-    rclone copy "$WORK/pub/store/v2/packages" "${REMOTE}/${PFX}/packages"
+    rclone copy "$WORK/pub/${STORE_PREFIX}/packages" "${REMOTE}/${PFX}/packages"
     echo "[regen] artifacts uploaded"
 else
     echo "[regen] no new artifacts to upload"

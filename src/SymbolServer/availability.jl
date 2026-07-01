@@ -24,12 +24,12 @@ function keep_available!(to_download, manifest, index::Set{String})
     return to_download
 end
 
-# Network: fetch <upstream>/store/v2/index.tar.gz (a tarball containing index.txt)
+# Network: fetch <upstream>/store/<version>/index.tar.gz (a tarball containing index.txt)
 # and parse it. Returns `nothing` on any failure so callers can fall back to the
 # legacy per-file attempt. Uses the same unpack path as the cache tarballs, so no
 # new dependency is needed.
 function fetch_availability_index(upstream::AbstractString)
-    url = join([upstream, "store", "v2", "index.tar.gz"], '/')
+    url = join([upstream, "store", CACHE_STORE_VERSION, "index.tar.gz"], '/')
     try
         return mktempdir() do dir
             dest = joinpath(dir, "idx")  # must NOT pre-exist: download_verify_unpack returns false if isdir(dest)

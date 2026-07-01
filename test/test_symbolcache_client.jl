@@ -15,10 +15,12 @@ end
 end
 
 @testitem "SymbolCache client: fetch_availability_index loads a real index tarball" begin
+    using JuliaWorkspaces
     using JuliaWorkspaces.SymbolServer: fetch_availability_index
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     mktempdir() do up
-        # lay out <up>/store/v2/index.tar.gz containing index.txt
-        d = mkpath(joinpath(up, "store", "v2"))
+        # lay out <up>/store/<version>/index.tar.gz containing index.txt
+        d = mkpath(joinpath(up, "store", V))
         idxtxt = joinpath(up, "index.txt"); write(idxtxt, "u1/h1\nu2/h2\n")
         run(`tar -czf $(joinpath(d, "index.tar.gz")) -C $up index.txt`)
         got = fetch_availability_index("file://" * up)

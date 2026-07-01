@@ -1,5 +1,10 @@
 using Pkg
 
+# Symbol-cache hosting layout version (the "vN" path element under store/).
+# Bump here when the on-disk/hosted layout changes. Keep in sync with
+# scripts/symbolcache_common.sh (STORE_VERSION) — the shell scripts' copy.
+const CACHE_STORE_VERSION = "v2"
+
 @static if VERSION < v"1.1"
     const PackageEntry = Vector{Dict{String,Any}}
 else
@@ -477,7 +482,7 @@ end
 function get_file_from_cloud(manifest, uuid, environment_path, depot_dir, cache_dir="../cache", download_dir="../downloads/", symbolcache_upstream="https://www.julia-vscode.org/symbolcache")
     paths = get_cache_path(manifest, uuid)
     name = packagename(manifest, uuid)
-    link = string(first(splitext(join([symbolcache_upstream, "store/v2/packages", paths...], '/'))), ".tar.gz")
+    link = string(first(splitext(join([symbolcache_upstream, "store/$(CACHE_STORE_VERSION)/packages", paths...], '/'))), ".tar.gz")
 
     dest_filepath = joinpath(cache_dir, paths...)
     dest_filepath_unavailable = string(first(splitext(dest_filepath)), ".unavailable")
