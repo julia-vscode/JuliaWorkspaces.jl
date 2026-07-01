@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 #
-# Periodic full reconcile for the hosted symbol cache.
-#
-# Purpose: treats the bucket's artifacts as the single source of truth.
-# Rebuilds the published index from the artifacts actually present, and drops
-# any tombstone that now has an artifact.  Never touches artifacts (immutable).
-# No lock required — see spec "Why no lock".
+# Periodic full reconcile: treat the bucket's artifacts as source of truth —
+# rebuild the index from the artifacts present, drop tombstones that now have an
+# artifact. Never mutates artifacts. No lock (single-flight is the scheduler's job).
 #
 # Env vars:
 #   RCLONE_REMOTE  (required) rclone remote + bucket prefix, e.g. "r2:symbolcache"
