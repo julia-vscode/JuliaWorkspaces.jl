@@ -141,7 +141,7 @@ echo "[regen] final tombstone count: $(wc -l < "$WORK/tombstones_new.txt")"
 if find "$sweepwork/store" -name '*.jstore' -print -quit 2>/dev/null | grep -q .; then
     echo "[regen] packaging and uploading artifacts..."
     mkdir -p "$WORK/pub"
-    bash "$SCRIPT_DIR/publish_symbolcache.sh" "$sweepwork/store" "$WORK/pub"
+    bash "$SCRIPT_DIR/package_symbolcache.sh" "$sweepwork/store" "$WORK/pub"
     rclone copy "$WORK/pub/store/v2/packages" "${REMOTE}/${PFX}/packages"
     echo "[regen] artifacts uploaded"
 else

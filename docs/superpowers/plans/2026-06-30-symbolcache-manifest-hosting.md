@@ -42,13 +42,13 @@
 - `test/test_symbolcache_client.jl` — **new.** Phase 1 tests.
 - `test/test_cloudindex.jl` — **modify.** Phase 2 index tests + done-set tests.
 - `test/test_cache_infra_scripts.jl` — **new.** rclone-gated integration tests for the regen + reconcile scripts (`:local:` remote, stub sweep; skip when rclone absent).
-- `scripts/publish_symbolcache.sh` — **new.** Packaging: store → v2 tar.gz + index.
+- `scripts/package_symbolcache.sh` — **new.** Packaging: store → v2 per-package tar.gz (index built by the caller).
 - `scripts/regen_symbolcache.sh` — **new.** Stateless incremental/full regeneration driver.
 - `scripts/reconcile_symbolcache.sh` — **new.** Periodic full-reconcile safety net (rebuild index from artifacts; drop stale tombstones; abort rather than wipe on a failed/empty list).
 
 ## Implementation status (2026-07-01, branch `sp/cache-infra`)
 
-**Done + tested:** Phase 1 (client manifest lookup), Phase 2 (index generation + `--emit-index`), and the Phase-3 *code* — `publish_symbolcache.sh`, `regen_symbolcache.sh`, `reconcile_symbolcache.sh`, the `--done-set` flag + `find_missing` done-set predicate, and committed rclone-gated integration tests (`test/test_cache_infra_scripts.jl`). The bucket lock was dropped (scheduler single-flight + reconcile). Design deviations from the original plan text below: the marker-file resume hack was replaced by `--done-set`; reconcile was added as its own script.
+**Done + tested:** Phase 1 (client manifest lookup), Phase 2 (index generation + `--emit-index`), and the Phase-3 *code* — `package_symbolcache.sh`, `regen_symbolcache.sh`, `reconcile_symbolcache.sh`, the `--done-set` flag + `find_missing` done-set predicate, and committed rclone-gated integration tests (`test/test_cache_infra_scripts.jl`). The bucket lock was dropped (scheduler single-flight + reconcile). Design deviations from the original plan text below: the marker-file resume hack was replaced by `--done-set`; reconcile was added as its own script.
 
 **Not done (infra/ops — need R2 credentials + deployment):** provisioning the bucket + CDN, seeding the initial corpus, scheduling the regen/reconcile jobs (Actions `concurrency:` for single-flight), and end-to-end client verification against the live host. The task steps below that invoke `rclone`/Docker against a real remote are superseded by the committed integration tests for logic coverage; the remaining work is deployment.
 
@@ -509,62 +509,58 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 > These tasks are orchestration, not unit-testable code. Each ends with an integration smoke test against a **local rclone remote** (`rclone` with a `local` backend pointed at a temp dir) so the scripts are exercised without touching real R2. Swap the remote name for the real R2 remote in production.
 
-### Task 6: Package the store into per-package `tar.gz` + index `tar.gz`
+### Task 6: Package the store into per-package `tar.gz` (packaging only)
 
 **Files:**
-- Create: `scripts/publish_symbolcache.sh`
+- Create: `scripts/package_symbolcache.sh`
 
 **Interfaces:**
-- Produces: given `STORE` and `OUT`, writes `OUT/store/v2/packages/<I>/<Name>/<uuid>/<stem>.tar.gz` (each a tarball containing the one `<stem>.jstore`) and `OUT/store/v2/index.tar.gz` (containing `index.txt`).
-- Consumes: `jwcloudindex --emit-index` (Task 5).
+- Produces: given `STORE` and `OUT`, writes `OUT/store/v2/packages/<I>/<Name>/<uuid>/<stem>.tar.gz` (each a tarball containing the one `<stem>.jstore`). Index generation is the caller's responsibility.
+- Packaging only — does not build or emit an index.
 
 - [ ] **Step 1: Write the script**
 
-Create `scripts/publish_symbolcache.sh`:
+Create `scripts/package_symbolcache.sh`:
 
 ```bash
 #!/usr/bin/env bash
-# Package a jwcloudindex store into the v2 hosting layout:
-#   per-package tar.gz artifacts + an index.tar.gz, under OUT/store/v2/.
-# Usage: publish_symbolcache.sh STORE OUT [PKG_DIR]
+# Package a jwcloudindex store into the v2 hosting layout: one tar.gz per .jstore
+# under OUT/store/v2/packages/. Packaging only — index generation is done by the
+# caller via `jwcloudindex --emit-index` (regen builds a union index; the seed
+# builds a full one), so this script does not build or upload an index.
+# Usage: package_symbolcache.sh STORE OUT
 set -euo pipefail
-STORE=${1:?store dir}; OUT=${2:?out dir}; PKG=${3:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
+STORE=${1:?store dir}; STORE=${STORE%/}; OUT=${2:?out dir}
 JOBS=$(nproc)
 PKGS_OUT="$OUT/store/v2/packages"; mkdir -p "$PKGS_OUT"
 
-# 1. One tar.gz per .jstore (tarball contains just the .jstore, gzip).
+# One tar.gz per .jstore (tarball contains just the .jstore, gzip).
 export STORE PKGS_OUT
 find "$STORE" -name '*.jstore' -print0 | xargs -0 -P"$JOBS" -n1 bash -c '
+    set -euo pipefail
     f=$1; rel=${f#"$STORE"/}; dir=$(dirname "$rel"); base=$(basename "$f")
     dest="$PKGS_OUT/$dir"; mkdir -p "$dest"
     tar -czf "$dest/${base%.jstore}.tar.gz" -C "$STORE/$dir" "$base"
 ' _
 
-# 2. index.tar.gz (contains index.txt) via the jwcloudindex CLI.
-tmp=$(mktemp -d)
-julia --project="$PKG" -e 'using JuliaWorkspaces; exit(JuliaWorkspaces.CloudIndexApp.cli_main(ARGS))' \
-    -- --store "$STORE" --emit-index "$tmp/index.txt"
-tar -czf "$OUT/store/v2/index.tar.gz" -C "$tmp" index.txt
-rm -rf "$tmp"
-echo "published $(find "$PKGS_OUT" -name '*.tar.gz' | wc -l) artifacts + index to $OUT/store/v2"
+echo "packaged $(find "$PKGS_OUT" -name '*.tar.gz' | wc -l) artifacts to $OUT/store/v2/packages"
 ```
 
 - [ ] **Step 2: Smoke-test it**
 
 ```bash
 mkdir -p /tmp/pubtest/store/E/Example/uuid-a && echo data > /tmp/pubtest/store/E/Example/uuid-a/h1.jstore
-bash scripts/publish_symbolcache.sh /tmp/pubtest/store /tmp/pubout
+bash scripts/package_symbolcache.sh /tmp/pubtest/store /tmp/pubout
 test -f /tmp/pubout/store/v2/packages/E/Example/uuid-a/h1.tar.gz && echo "artifact OK"
-tar -xzOf /tmp/pubout/store/v2/index.tar.gz index.txt    # expect: uuid-a/h1
 ```
 
-Expected: `artifact OK` and the index prints `uuid-a/h1`.
+Expected: `artifact OK`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add scripts/publish_symbolcache.sh
-git commit -m "feat(cloudindex): publish script — store to v2 tar.gz layout + index
+git add scripts/package_symbolcache.sh
+git commit -m "feat(cloudindex): packaging script — store to v2 tar.gz layout (packaging only)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -575,7 +571,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Create: `scripts/regen_symbolcache.sh`
 
 **Interfaces:**
-- Consumes: `scripts/run_cloudindex_docker.sh` (existing sweep), `scripts/publish_symbolcache.sh` (Task 6), `rclone` configured with a remote (env `RCLONE_REMOTE`, e.g. `r2:symbolcache` or a local test remote).
+- Consumes: `scripts/run_cloudindex_docker.sh` (existing sweep), `scripts/package_symbolcache.sh` (Task 6), `rclone` configured with a remote (env `RCLONE_REMOTE`, e.g. `r2:symbolcache` or a local test remote).
 - Produces: an end-to-end run that downloads state, computes missing, indexes, uploads artifacts + index + tombstones. Single-flight is the scheduler's responsibility (no bucket lock).
 
 - [ ] **Step 1: Write the script**
@@ -685,7 +681,7 @@ open(out,"w").write("\n".join(sorted(new-ok))+"\n")
 PY
 
 # 6. Publish: package the new artifacts, upload additively, refresh index + tombstones.
-bash "$(dirname "$0")/publish_symbolcache.sh" "$REAL_STORE" "$WORK/pub"
+bash "$(dirname "$0")/package_symbolcache.sh" "$REAL_STORE" "$WORK/pub"
 rclone copy "$WORK/pub/store/v2/packages" "$REMOTE/$PFX/packages" --immutable --transfers=32
 rclone copyto "$WORK/pub/store/v2/index.tar.gz" "$REMOTE/$PFX/index.tar.gz"     # short TTL set on the bucket
 gzip -c "$WORK/tombstones.new" | rclone rcat "$REMOTE/$STATE/tombstones.txt.gz"
@@ -723,9 +719,13 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 - [ ] **Step 1:** Create the R2 bucket; put a CDN in front; set `Cache-Control: public, max-age=31536000, immutable` on `store/v2/packages/**` and a short TTL (e.g. 300s) on `store/v2/index.tar.gz`.
 - [ ] **Step 2:** Configure `rclone` with an `r2:` remote (account id + token).
-- [ ] **Step 3:** Package the existing full store and seed the bucket:
+- [ ] **Step 3:** Package the existing full store, build the index, and seed the bucket:
   ```bash
-  bash scripts/publish_symbolcache.sh ~/jwci-work/store /tmp/seed
+  bash scripts/package_symbolcache.sh ~/jwci-work/store /tmp/seed
+  julia --project scripts/.. -e 'using JuliaWorkspaces; exit(JuliaWorkspaces.CloudIndexApp.cli_main(ARGS))' \
+      -- --store ~/jwci-work/store --emit-index /tmp/seed_index.txt
+  mkdir -p /tmp/seed/store/v2
+  tar -czf /tmp/seed/store/v2/index.tar.gz -C /tmp seed_index.txt --transform 's/seed_index/index/'
   rclone copy /tmp/seed/store/v2 r2:symbolcache/store/v2 --transfers=32
   ```
 - [ ] **Step 4:** Verify the client end-to-end against the seeded bucket: point a `SymbolServerInstance(symbolcache_upstream="https://<cdn-host>/symbolcache")` at a test project with a couple of General deps, call `getstore(...; download=true)`, and confirm it fetches only indexed packages (watch `@debug`), unpacks, and loads.
