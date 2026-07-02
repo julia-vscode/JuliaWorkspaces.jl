@@ -435,6 +435,85 @@ end
     read(IOBuffer(vcat(prefix, nested_bytes(100))))   # under MAX_DEPTH, no throw
 end
 
+@testitem "SymbolServer: CacheStore wraps type-confused data in CacheCorruptedError" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read
+
+    prefix = vcat(MagicHeader, StoreVersion)
+
+    # VarRef whose name slot holds a String instead of a Symbol; the strictly
+    # typed constructor throws MethodError, which must surface as corruption
+    io = IOBuffer()
+    Base.write(io, 0x06)                                               # VarRefHeader
+    Base.write(io, 0x01)                                               # parent: nothing
+    Base.write(io, 0x05); Base.write(io, Int(1)); Base.write(io, 0x61) # name: String "a"
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, take!(io))))
+
+    # Char with an out-of-range code point (CodePointError)
+    io = IOBuffer()
+    Base.write(io, 0x03)                                               # CharHeader
+    Base.write(io, typemax(UInt32))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, take!(io))))
+end
+
+@testitem "SymbolServer: CacheStore caps tuple length" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, storeunstore
+    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName
+
+    prefix = vcat(MagicHeader, StoreVersion)
+    # a tuple of n `nothing`s: TupleHeader, length, then n NothingHeader bytes
+    tuple_bytes(n) = vcat(UInt8[0x14], reinterpret(UInt8, [Int(n)]), fill(0x01, n))
+
+    @test read(IOBuffer(vcat(prefix, tuple_bytes(100)))) === ntuple(_ -> nothing, 100)
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, tuple_bytes(10_001))))
+
+    # the writer degrades oversized tuples to `nothing` instead of failing the file
+    @test storeunstore(ntuple(_ -> nothing, 10_001)) === nothing
+    ft = FakeTypeName(VarRef(nothing, :T), Any[ntuple(_ -> nothing, 10_001), 1])
+    back = storeunstore(ft)
+    @test back.parameters[1] === nothing
+    @test back.parameters[2] == 1
+end
+
+@testitem "SymbolServer: CacheStore drops module bindings it cannot serialize" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: storeunstore
+    using JuliaWorkspaces.SymbolServer: ModuleStore, VarRef, FakeTypeName, GenericStore
+
+    cyc = FakeTypeName(VarRef(nothing, :C), Any[])
+    push!(cyc.parameters, cyc)
+    good = GenericStore(VarRef(nothing, :g), nothing, "doc", true)
+    mod = ModuleStore(VarRef(nothing, :M),
+        Dict{Symbol,Any}(:good => good, :bad => cyc, :legit_nothing => nothing),
+        "", true, Symbol[], Symbol[])
+
+    back = storeunstore(mod)
+    @test !haskey(back.vals, :bad)
+    @test back.vals[:good].doc == "doc"
+    # the sentinel is distinct from NothingHeader: real `nothing`s survive
+    @test haskey(back.vals, :legit_nothing)
+    @test back.vals[:legit_nothing] === nothing
+
+    # unserializable value types degrade the binding, not the file
+    mod2 = ModuleStore(VarRef(nothing, :M),
+        Dict{Symbol,Any}(:weird => Ref(1), :good => good), "", true, Symbol[], Symbol[])
+    back2 = storeunstore(mod2)
+    @test !haskey(back2.vals, :weird)
+    @test haskey(back2.vals, :good)
+end
+
+@testitem "SymbolServer: CacheStore rejects truncated sha" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read, write
+    using JuliaWorkspaces.SymbolServer: Package, ModuleStore, VarRef
+
+    mod = ModuleStore(VarRef(nothing, :Foo), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+    pkg = Package("Foo", mod, Base.UUID(UInt128(1)), collect(UInt8, 1:32))
+    io = IOBuffer()
+    write(io, pkg)
+    bytes = take!(io)
+
+    @test read(IOBuffer(bytes)).sha == collect(UInt8, 1:32)
+    @test_throws CacheCorruptedError read(IOBuffer(bytes[1:end-10]))
+end
+
 @testitem "SymbolServer: write_cache uses unique temp names under concurrent same-path writes" begin
     using JuliaWorkspaces.SymbolServer: write_cache, Package, ModuleStore, VarRef
     using JuliaWorkspaces.SymbolServer.CacheStore: read as cache_read

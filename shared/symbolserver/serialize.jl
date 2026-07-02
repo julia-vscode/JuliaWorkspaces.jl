@@ -27,6 +27,9 @@ const FalseHeader = 0x13
 const TupleHeader = 0x14
 const FakeTypeofVarargHeader = 0x15
 const UndefHeader = 0x16
+# marks a value the writer could not serialize (oversized tuple, cycle, foreign
+# type); distinct from NothingHeader so legitimate `nothing`s survive round-trips
+const UnserializableHeader = 0x17
 
 # reserve 0x00-0xfe for type headers and indicate that this file is binary by not starting
 # with ASCII
@@ -50,6 +53,9 @@ function _check_len(io, n)
 end
 
 const MAX_DEPTH = 256
+# legitimate tuples here (type parameters, signatures) are tiny; huge counts
+# are hostile input, and `ntuple` with a large runtime N is pathological
+const MAX_TUPLE_LEN = 10_000
 
 function write(io, x)
     _write_header(io)
@@ -88,6 +94,12 @@ function _write(io, x::Symbol, depth::Int)
     Base.write(io, String(x))
 end
 function _write(io, x::NTuple{N,Any}, depth::Int) where N
+    if N > MAX_TUPLE_LEN
+        # degrade instead of failing the whole file; tuples only ever sit in
+        # Any-typed slots, so this stays readable
+        Base.write(io, UnserializableHeader)
+        return
+    end
     depth > MAX_DEPTH && throw(ArgumentError("serialization depth limit exceeded — possible cycle in $(typeof(x))"))
     depth += 1
     Base.write(io, TupleHeader)
@@ -200,9 +212,21 @@ function _write(io, x::ModuleStore, depth::Int)
     Base.write(io, ModuleStoreHeader)
     _write(io, x.name, depth)
     Base.write(io, length(x.vals))
+    buf = IOBuffer()
     for p in x.vals
         _write(io, p[1], depth)
-        _write(io, p[2], depth)
+        # serialize the value out-of-band so one pathological binding (cycle,
+        # unserializable type) degrades to a sentinel — which the reader drops —
+        # instead of failing the whole cache file
+        try
+            _write(buf, p[2], depth)
+            Base.write(io, take!(buf))
+        catch err
+            take!(buf)
+            (err isa InterruptException || err isa OutOfMemoryError || err isa StackOverflowError) && rethrow()
+            @debug "skipping unserializable module binding" key = p[1] exception = err
+            Base.write(io, UnserializableHeader)
+        end
     end
     _write(io, x.doc, depth)
     _write(io, x.exported, depth)
@@ -237,10 +261,16 @@ function read(io)
         _read_header(io)
         return _read(io)
     catch err
-        if err isa EOFError
+        if err isa CacheCorruptedError || err isa InterruptException || err isa OutOfMemoryError || err isa StackOverflowError
+            rethrow()
+        elseif err isa EOFError
             throw(CacheCorruptedError("unexpected end of stream"))
+        else
+            # crafted tags can type-confuse strictly typed struct fields
+            # (MethodError/TypeError), produce invalid code points, etc. —
+            # all of it means the file is bad, not that the process is
+            throw(CacheCorruptedError("malformed cache data: $(typeof(err))"))
         end
-        rethrow()
     end
 end
 
@@ -304,6 +334,9 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
         end
     elseif t === UndefHeader
         nothing
+    elseif t === UnserializableHeader
+        # placeholder in Any-typed slots (e.g. type parameters)
+        nothing
     elseif t === MethodStoreHeader
         yield()
         name = _read(io, Base.read(io, UInt8), depth)
@@ -357,8 +390,10 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
         sizehint!(vals, n)
         for _ = 1:n
             k = _read(io, Base.read(io, UInt8), depth)
-            v = _read(io, Base.read(io, UInt8), depth)
-            vals[k] = v
+            vt = Base.read(io, UInt8)
+            # drop bindings the writer couldn't serialize
+            vt === UnserializableHeader && continue
+            vals[k] = _read(io, vt, depth)
         end
         doc = _read(io, Base.read(io, UInt8), depth)
         exported = _read(io, Base.read(io, UInt8), depth)
@@ -372,13 +407,16 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
     elseif t === TupleHeader
         N = Base.read(io, Int)
         _check_len(io, N)
+        N > MAX_TUPLE_LEN && throw(CacheCorruptedError("tuple length $N exceeds limit $MAX_TUPLE_LEN"))
         ntuple(i->_read(io, Base.read(io, UInt8), depth), N)
     elseif t === PackageHeader
         yield()
         name = _read(io, Base.read(io, UInt8), depth)
         val = _read(io, Base.read(io, UInt8), depth)
         uuid = Base.UUID(Base.read(io, UInt128))
-        sha = Base.read(io, 32)
+        # Base.read(io, n) returns short on EOF; read! errors instead
+        sha = Vector{UInt8}(undef, 32)
+        read!(io, sha)
         Package(name, val, uuid, all(x == 0x00 for x in sha) ? nothing : sha)
     else
         throw(CacheCorruptedError("unknown type tag: 0x$(string(t, base=16, pad=2))"))
