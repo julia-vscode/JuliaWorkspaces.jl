@@ -1,4 +1,5 @@
 @testitem "Completions: latex completions" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -51,6 +52,7 @@
 end
 
 @testitem "Completions: keyword / snippet completions" begin
+    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, InsertFormats
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -101,6 +103,7 @@ end
 end
 
 @testitem "Completions: getfield completions" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -148,6 +151,7 @@ end
 end
 
 @testitem "Completions: getfield partial completions" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -195,6 +199,7 @@ end
 end
 
 @testitem "Completions: token completions" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -242,6 +247,7 @@ end
 end
 
 @testitem "Completions: scope variable completions" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -290,6 +296,7 @@ end
 end
 
 @testitem "Completions: import completions" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, CompletionResult
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -339,6 +346,8 @@ end
 end
 
 @testitem "Completions: is_completion_match" begin
+    using JuliaWorkspaces: is_completion_match
+
     # Test the exported fuzzy matching util
     @test is_completion_match("rand", "ran")
     @test is_completion_match("Base", "Bas")
@@ -351,6 +360,7 @@ end
 end
 
 @testitem "Completions: empty result for empty file" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, CompletionResult
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -384,6 +394,7 @@ end
 end
 
 @testitem "Completions: completion kinds" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, CompletionKinds
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -435,6 +446,7 @@ end
 end
 
 @testitem "Completions: relative import completions" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -483,6 +495,7 @@ end
 end
 
 @testitem "Completions: standalone file (no project)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
 
     # No Project.toml or Manifest.toml — exercises _stdlib_only_env() path.
@@ -527,6 +540,7 @@ end
 end
 
 @testitem "Completions: package without manifest (pre-DJP)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
 
     # Project.toml present but no Manifest.toml — pre-DJP state.
@@ -578,6 +592,7 @@ end
 end
 
 @testitem "Completions: unresolvable VarRef does not truncate module symbols" begin
+    using JuliaWorkspaces: JuliaWorkspaces, SourceText
     using JuliaWorkspaces.URIs2: @uri_str
     const SS = JuliaWorkspaces.SymbolServer
     const SL = JuliaWorkspaces.StaticLint

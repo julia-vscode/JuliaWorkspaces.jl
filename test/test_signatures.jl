@@ -1,4 +1,5 @@
 @testitem "Signatures: basic function call" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -48,6 +49,7 @@
 end
 
 @testitem "Signatures: struct constructor" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -99,6 +101,7 @@ end
 end
 
 @testitem "Signatures: empty on non-call" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """

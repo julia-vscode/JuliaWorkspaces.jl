@@ -564,6 +564,8 @@ end
 end
 
 @testitem "SymbolServer: corrupt cache file produces CacheCorruptedError" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+
     mktempdir() do store_path
         pkg_dir = joinpath(store_path, "B", "Bogus", "00000000-0000-0000-0000-000000000000")
         mkpath(pkg_dir)
@@ -598,6 +600,8 @@ end
 end
 
 @testitem "SymbolServer: dynamic-feature reader uses the cache layout get_store writes" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+
     uuid = "7876af07-990d-54b4-ab0e-23690620f79a"
     th = "46e44e869b4d90b96bd8ed1fdcf32244fddfb6cc"
 

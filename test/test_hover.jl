@@ -1,4 +1,5 @@
 @testitem "Hover: basic identifiers and nothing cases" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -82,6 +83,7 @@
 end
 
 @testitem "Hover: closer keywords" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -163,6 +165,7 @@ end
 end
 
 @testitem "Hover: docstrings" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -215,6 +218,7 @@ end
 end
 
 @testitem "Hover: struct field position" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -273,6 +277,7 @@ end
 end
 
 @testitem "Hover: qualified function argument position" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -325,6 +330,8 @@ end
 end
 
 @testitem "get_doc_from_word: basic matching" begin
+    using JuliaWorkspaces: JuliaWorkspace, get_doc_from_word
+
     jw = JuliaWorkspace()
 
     # Exact match for a well-known Base symbol
@@ -342,6 +349,7 @@ end
 end
 
 @testitem "Hover: standalone file (no project)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     # No Project.toml or Manifest.toml — just a bare Julia source file.
@@ -396,6 +404,7 @@ end
 end
 
 @testitem "Hover: package without manifest (pre-DJP)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     # Project.toml present but NO Manifest.toml — simulates the window
@@ -447,6 +456,7 @@ end
 end
 
 @testitem "Hover: docs from @doc macro (#1377)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     source = """
@@ -483,6 +493,7 @@ end
 end
 
 @testitem "Hover: struct constructor argument field (#1392)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI
 
     # Hovering an argument of a struct's default constructor names the field.

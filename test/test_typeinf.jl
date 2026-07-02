@@ -71,6 +71,7 @@ end
 
 
 @testitem "loop iterator inference" setup=[shared_static_lint] begin
+    using JuliaWorkspaces: JuliaWorkspaces
     using JuliaWorkspaces.StaticLint: scopeof
 
     cst, meta_dict = parse_and_pass("""
