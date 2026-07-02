@@ -13,12 +13,9 @@
 # ===========================================================================
 
 @testitem "cache-infra regen: full run against empty remote" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
 
     # ---- helpers (inline so no @testmodule dependency) --------------------
@@ -63,7 +60,7 @@ $json_lines
     end
     # -----------------------------------------------------------------------
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         bucket  = joinpath(tmp, "bucket"); mkpath(bucket)
         workdir = joinpath(tmp, "work");   mkpath(workdir)
         stub    = joinpath(tmp, "stub_sweep.sh")
@@ -98,12 +95,9 @@ $json_lines
 end
 
 @testitem "cache-infra regen: incremental run preserves index union" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -138,7 +132,7 @@ $json_lines
         chmod(path, 0o755)
     end
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         bucket = joinpath(tmp, "bucket"); mkpath(bucket)
         stub   = joinpath(tmp, "stub_sweep.sh")
         remote = ":local:" * abspath(bucket)
@@ -168,12 +162,9 @@ $json_lines
 end
 
 @testitem "cache-infra regen: incremental tombstone merge" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -208,7 +199,7 @@ $json_lines
         chmod(path, 0o755)
     end
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         bucket = joinpath(tmp, "bucket"); mkpath(bucket)
         stub   = joinpath(tmp, "stub_sweep.sh")
         remote = ":local:" * abspath(bucket)
@@ -242,12 +233,9 @@ $json_lines
 end
 
 @testitem "cache-infra regen: cancelled status excluded from tombstones" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -282,7 +270,7 @@ $json_lines
         chmod(path, 0o755)
     end
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         bucket  = joinpath(tmp, "bucket"); mkpath(bucket)
         workdir = joinpath(tmp, "work");   mkpath(workdir)
         stub    = joinpath(tmp, "stub_sweep.sh")
@@ -310,12 +298,9 @@ end
 # ===========================================================================
 
 @testitem "cache-infra seed: publishes artifacts + index + tombstones from a store" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -334,7 +319,7 @@ end
         filter(!isempty, strip.(split(raw, '\n')))
     end
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         store   = joinpath(tmp, "store")
         bucket  = joinpath(tmp, "bucket"); mkpath(bucket)
         workdir = joinpath(tmp, "work");   mkpath(workdir)
@@ -381,12 +366,9 @@ end
 # ===========================================================================
 
 @testitem "cache-infra reconcile: index recovery + stale tombstone drop" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -405,7 +387,7 @@ end
         filter(!isempty, strip.(split(raw, '\n')))
     end
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         bucket  = joinpath(tmp, "bucket"); mkpath(bucket)
         workdir = joinpath(tmp, "work");   mkpath(workdir)
         remote  = ":local:" * abspath(bucket)
@@ -454,17 +436,14 @@ end
 end
 
 @testitem "cache-infra reconcile: layer-1 abort on rclone list failure" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         bucket  = joinpath(tmp, "bucket"); mkpath(bucket)
         workdir = joinpath(tmp, "work");   mkpath(workdir)
 
@@ -497,12 +476,9 @@ end
 end
 
 @testitem "cache-infra reconcile: layer-2 abort on empty list with existing index" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -514,7 +490,7 @@ end
         filter(!isempty, strip.(split(raw, '\n')))
     end
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         bucket  = joinpath(tmp, "bucket"); mkpath(bucket)
         workdir = joinpath(tmp, "work");   mkpath(workdir)
         remote  = ":local:" * abspath(bucket)
@@ -543,12 +519,9 @@ end
 end
 
 @testitem "cache-infra reconcile: genuine-empty first run produces 0-entry index" begin
-    if Sys.which("rclone") === nothing
-        @info "skipping cache-infra integration test: rclone not on PATH"
-        return
-    end
-
     using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -560,7 +533,7 @@ end
         filter(!isempty, strip.(split(raw, '\n')))
     end
 
-    mktempdir() do tmp
+    has_rclone && mktempdir() do tmp
         bucket  = joinpath(tmp, "bucket"); mkpath(bucket)
         workdir = joinpath(tmp, "work");   mkpath(workdir)
         remote  = ":local:" * abspath(bucket)
