@@ -65,3 +65,51 @@ git-tree-sha1 = "aabbccdd00000000000000000000000000000002"
         @test first(to_download).first == UUID(u1)
     end
 end
+
+@testitem "SymbolCache client: _download_missing_caches trusts the availability index" begin
+    using JuliaWorkspaces: MissingPackage, _download_missing_caches
+    using JuliaWorkspaces.SymbolServer: write_cache, Package, ModuleStore, VarRef, CACHE_STORE_VERSION
+    using Base: UUID
+
+    V = CACHE_STORE_VERSION
+    mktempdir() do tmp
+        bucket = joinpath(tmp, "bucket")
+        name, uuid, stem, letter = "Foo", "764a87c0-6b3e-53db-9096-fe964310641d", "deadbeef", "F"
+
+        # Server layout: a valid .jstore artifact for Foo + an index listing only Foo.
+        js = joinpath(tmp, "$stem.jstore")
+        mod = ModuleStore(VarRef(nothing, Symbol(name)), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+        write_cache(UUID(uuid), Package(name, mod, UUID(uuid), nothing), js)
+        pkgdir = mkpath(joinpath(bucket, "store", V, "packages", letter, name, uuid))
+        run(`tar -czf $(joinpath(pkgdir, "$stem.tar.gz")) -C $tmp $stem.jstore`)
+
+        idxdir = mkpath(joinpath(tmp, "idx"))
+        write(joinpath(idxdir, "index.txt"), "$uuid/$stem\n")
+        mkpath(joinpath(bucket, "store", V))
+        run(`tar -czf $(joinpath(bucket, "store", V, "index.tar.gz")) -C $idxdir index.txt`)
+
+        upstream = "file://" * bucket
+        store = mkpath(joinpath(tmp, "store"))
+
+        available = MissingPackage((name, UUID(uuid), "1.0.0", stem))
+        # absent from the index — simulates a private / uncached package
+        private = MissingPackage(("Secret", UUID("00000000-0000-0000-0000-0000000000ff"), "2.0.0", "cafef00d"))
+
+        still = _download_missing_caches([available, private], store, upstream)
+
+        # Only the indexed package was fetched, unpacked, and stored.
+        @test isfile(joinpath(store, letter, name, uuid, "$stem.jstore"))
+        # The unlisted package was never requested (no dir for it) and stays missing.
+        @test !ispath(joinpath(store, "S"))
+        @test [p.name for p in still] == ["Secret"]
+    end
+
+    # Index unavailable → no downloads attempted; everything stays missing.
+    mktempdir() do tmp
+        store = mkpath(joinpath(tmp, "store"))
+        pkg = MissingPackage(("Foo", UUID("764a87c0-6b3e-53db-9096-fe964310641d"), "1.0.0", "deadbeef"))
+        still = _download_missing_caches([pkg], store, "file:///no/such/upstream/xyz")
+        @test still == [pkg]
+        @test isempty(readdir(store))
+    end
+end
