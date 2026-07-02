@@ -426,32 +426,6 @@ function _get_missing_packages(project_path::String, store_path::String)
     return missing
 end
 
-const GENERAL_REGISTRY_UUID = UUID("23338594-aafe-5451-b93e-139f81909106")
-
-"""
-    _get_general_registry_packages() -> Dict{UUID, NamedTuple}
-
-Return a dict mapping UUID => (;name) for all packages in the General registry.
-Used to filter out private packages from cloud download requests.
-"""
-function _get_general_registry_packages()
-    dp_before = copy(Base.DEPOT_PATH)
-    try
-        push!(empty!(Base.DEPOT_PATH), joinpath(homedir(), ".julia"))
-        regs = Pkg.Types.Context().registries
-        i = findfirst(r -> r.name == "General" && r.uuid == GENERAL_REGISTRY_UUID, regs)
-        i === nothing && return Dict{UUID,@NamedTuple{name::String}}()
-        return Dict{UUID,@NamedTuple{name::String}}(
-            uuid => (;name=info.name) for (uuid, info) in regs[i].pkgs
-        )
-    catch err
-        @warn "Failed to read General registry" exception=(err, catch_backtrace())
-        return Dict{UUID,@NamedTuple{name::String}}()
-    finally
-        append!(empty!(Base.DEPOT_PATH), dp_before)
-    end
-end
-
 """
     _download_single_cache(pkg, store_path, upstream_url, download_dir) -> Bool
 
@@ -532,26 +506,25 @@ end
 """
     _download_missing_caches(missing_pkgs, store_path, upstream_url; df=nothing) -> Vector{MissingPackage}
 
-Download missing package caches from the cloud. Filters to General registry
-packages only (to avoid leaking private package names via URL requests).
-Returns the list of packages still missing after download.
-If `df` is provided, progress is reported through its callback.
+Download missing package caches from the cloud. Consults the server's
+availability index and only requests packages it advertises as cached; anything
+absent from the index (private, uncached, or tombstoned) is skipped, which also
+keeps private package names off the wire. Returns the list of packages still
+missing after download. If `df` is provided, progress is reported through its
+callback.
 """
 function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_path::String, upstream_url::String; df::Union{Nothing,DynamicFeature}=nothing)
-    general_pkgs = _get_general_registry_packages()
-    if isempty(general_pkgs)
-        @warn "Could not read General registry, skipping cloud downloads"
+    index = SymbolServer.fetch_availability_index(upstream_url)
+    if index === nothing
+        @warn "Could not fetch availability index, skipping cloud downloads"
         return missing_pkgs
     end
 
-    # Filter to General registry packages with tree_hash (no stdlibs, no _jll)
+    # Keep only what the index advertises as cached; a package absent from it is
+    # never requested. Key matches the artifact path: <uuid>/<treehash, + → _>.
     downloadable = filter(missing_pkgs) do pkg
-        pkg.git_tree_sha1 === nothing && return false  # stdlibs
-        endswith(pkg.name, "_jll") && return false     # JLL packages
-        info = get(general_pkgs, pkg.uuid, nothing)
-        info === nothing && return false                # not in General
-        info.name != pkg.name && return false           # UUID/name mismatch
-        return true
+        stem = replace(string(something(pkg.git_tree_sha1, pkg.version)), '+' => '_')
+        SymbolServer.cache_key(pkg.uuid, stem) in index
     end
 
     isempty(downloadable) && return missing_pkgs
