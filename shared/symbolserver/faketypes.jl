@@ -42,6 +42,10 @@ function FakeTypeName(@nospecialize(x))
 end
 
 struct FakeTypeofBottom end
+# stands in for values the cache writer could not serialize (oversized tuples,
+# over-deep/cyclic subtrees)
+struct Unserializable end
+Base.show(io::IO, ::Unserializable) = print(io, "…")
 struct FakeUnion
     a
     b

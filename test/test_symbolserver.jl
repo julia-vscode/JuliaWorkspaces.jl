@@ -412,15 +412,24 @@ end
     @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, UInt8[0x14], reinterpret(UInt8, [huge]))))
 end
 
-@testitem "SymbolServer: CacheStore rejects cyclic data on write" begin
-    using JuliaWorkspaces.SymbolServer.CacheStore: write
-    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName
+@testitem "SymbolServer: CacheStore truncates cyclic/deep data on write" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: storeunstore, MAX_DEPTH
+    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName, Unserializable
 
     name = VarRef(nothing, :A)
     ft = FakeTypeName(name, Any[])
     push!(ft.parameters, ft)        # cycle: ft.parameters[1] === ft
 
-    @test_throws ArgumentError write(IOBuffer(), ft)
+    # the cycle is unrolled up to the depth cutoff, then cut with the sentinel
+    tail, n = let x = storeunstore(ft), k = 0
+        while x isa FakeTypeName
+            x = x.parameters[1]
+            k += 1
+        end
+        x, k
+    end
+    @test tail === Unserializable()
+    @test 0 < n <= MAX_DEPTH
 
     deep = let d = FakeTypeName(name, Any[])
         for _ in 1:300
@@ -428,7 +437,7 @@ end
         end
         d
     end
-    @test_throws ArgumentError write(IOBuffer(), deep)
+    @test storeunstore(deep) isa FakeTypeName
 end
 
 @testitem "SymbolServer: CacheStore rejects deeply nested input on read" begin
@@ -459,6 +468,91 @@ end
     prefix = vcat(MagicHeader, StoreVersion)
     @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, nested_bytes(300))))
     read(IOBuffer(vcat(prefix, nested_bytes(100))))   # under MAX_DEPTH, no throw
+end
+
+@testitem "SymbolServer: CacheStore wraps type-confused data in CacheCorruptedError" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read
+
+    prefix = vcat(MagicHeader, StoreVersion)
+
+    # VarRef whose name slot holds a String instead of a Symbol; the strictly
+    # typed constructor throws MethodError, which must surface as corruption
+    io = IOBuffer()
+    Base.write(io, 0x06)                                               # VarRefHeader
+    Base.write(io, 0x01)                                               # parent: nothing
+    Base.write(io, 0x05); Base.write(io, Int(1)); Base.write(io, 0x61) # name: String "a"
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, take!(io))))
+
+    # Char with an out-of-range code point (CodePointError)
+    io = IOBuffer()
+    Base.write(io, 0x03)                                               # CharHeader
+    Base.write(io, typemax(UInt32))
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, take!(io))))
+end
+
+@testitem "SymbolServer: CacheStore caps tuple length" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, storeunstore
+    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName, Unserializable
+
+    prefix = vcat(MagicHeader, StoreVersion)
+    # a tuple of n `nothing`s: TupleHeader, length, then n NothingHeader bytes
+    tuple_bytes(n) = vcat(UInt8[0x14], reinterpret(UInt8, [Int(n)]), fill(0x01, n))
+
+    @test read(IOBuffer(vcat(prefix, tuple_bytes(100)))) === ntuple(_ -> nothing, 100)
+    @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, tuple_bytes(10_001))))
+
+    # the writer degrades oversized tuples to the sentinel instead of failing the file
+    @test storeunstore(ntuple(_ -> nothing, 10_001)) === Unserializable()
+    ft = FakeTypeName(VarRef(nothing, :T), Any[ntuple(_ -> nothing, 10_001), 1])
+    back = storeunstore(ft)
+    @test back.parameters[1] === Unserializable()
+    @test back.parameters[2] == 1
+    @test sprint(show, back) == "T{…,1}"
+end
+
+@testitem "SymbolServer: _lookup returns nothing for unresolvable type refs" begin
+    using JuliaWorkspaces.SymbolServer: _lookup, ModuleStore, VarRef, FakeTypeName,
+        FakeTypeVar, FakeTypeofBottom, Unserializable
+
+    store = Dict{Symbol,ModuleStore}()
+    core_any = FakeTypeName(VarRef(VarRef(nothing, :Core), :Any), Any[])
+    # field types can be FakeTypeVar (`struct Foo{T}; x::T end`) or the
+    # unserializable sentinel; resolve_getfield feeds them straight to _lookup
+    @test _lookup(FakeTypeVar(:T, FakeTypeofBottom(), core_any), store, true) === nothing
+    @test _lookup(FakeTypeofBottom(), store, true) === nothing
+    @test _lookup(Unserializable(), store, true) === nothing
+end
+
+@testitem "SymbolServer: CacheStore drops module bindings it cannot serialize" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: storeunstore
+    using JuliaWorkspaces.SymbolServer: ModuleStore, VarRef, GenericStore
+
+    good = GenericStore(VarRef(nothing, :g), nothing, "doc", true)
+    # unserializable value types degrade the binding, not the file
+    mod = ModuleStore(VarRef(nothing, :M),
+        Dict{Symbol,Any}(:weird => Ref(1), :good => good, :legit_nothing => nothing),
+        "", true, Symbol[], Symbol[])
+
+    back = storeunstore(mod)
+    @test !haskey(back.vals, :weird)
+    @test back.vals[:good].doc == "doc"
+    # the sentinel is distinct from NothingHeader: real `nothing`s survive
+    @test haskey(back.vals, :legit_nothing)
+    @test back.vals[:legit_nothing] === nothing
+end
+
+@testitem "SymbolServer: CacheStore rejects truncated sha" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, read, write
+    using JuliaWorkspaces.SymbolServer: Package, ModuleStore, VarRef
+
+    mod = ModuleStore(VarRef(nothing, :Foo), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+    pkg = Package("Foo", mod, Base.UUID(UInt128(1)), collect(UInt8, 1:32))
+    io = IOBuffer()
+    write(io, pkg)
+    bytes = take!(io)
+
+    @test read(IOBuffer(bytes)).sha == collect(UInt8, 1:32)
+    @test_throws CacheCorruptedError read(IOBuffer(bytes[1:end-10]))
 end
 
 @testitem "SymbolServer: write_cache uses unique temp names under concurrent same-path writes" begin
@@ -496,6 +590,8 @@ end
 end
 
 @testitem "SymbolServer: corrupt cache file produces CacheCorruptedError" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+
     mktempdir() do store_path
         pkg_dir = joinpath(store_path, "B", "Bogus", "00000000-0000-0000-0000-000000000000")
         mkpath(pkg_dir)
@@ -530,6 +626,8 @@ end
 end
 
 @testitem "SymbolServer: dynamic-feature reader uses the cache layout get_store writes" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+
     uuid = "7876af07-990d-54b4-ab0e-23690620f79a"
     th = "46e44e869b4d90b96bd8ed1fdcf32244fddfb6cc"
 

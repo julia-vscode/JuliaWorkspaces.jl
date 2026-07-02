@@ -1,5 +1,5 @@
 module CacheStore
-using ..SymbolServer: VarRef, FakeTypeName, FakeTypeofBottom, FakeTypeVar, FakeUnion, FakeUnionAll
+using ..SymbolServer: VarRef, FakeTypeName, FakeTypeofBottom, FakeTypeVar, FakeUnion, FakeUnionAll, Unserializable
 using ..SymbolServer: ModuleStore, Package, FunctionStore, MethodStore, DataTypeStore, GenericStore
 @static if !(Vararg isa Type)
     using ..SymbolServer: FakeTypeofVararg
@@ -27,6 +27,7 @@ const FalseHeader = 0x13
 const TupleHeader = 0x14
 const FakeTypeofVarargHeader = 0x15
 const UndefHeader = 0x16
+const UnserializableHeader = 0x17
 
 # reserve 0x00-0xfe for type headers and indicate that this file is binary by not starting
 # with ASCII
@@ -50,6 +51,11 @@ function _check_len(io, n)
 end
 
 const MAX_DEPTH = 256
+const MAX_TUPLE_LEN = 10_000
+# cutoff for degrading over-deep subtrees in Any-typed slots; the margin leaves
+# room for typed substructure below the last Any slot (VarRef chains etc.) so
+# written files always stay within the reader's MAX_DEPTH
+const MAX_ANY_DEPTH = MAX_DEPTH - 64
 
 function write(io, x)
     _write_header(io)
@@ -59,6 +65,16 @@ end
 function _write_header(io)
     Base.write(io, MagicHeader)
     Base.write(io, StoreVersion)
+end
+
+# for values in Any-typed slots, which can absorb the sentinel: cut cycles and
+# over-deep nesting here instead of erroring out of the whole write
+function _write_any(io, x, depth::Int)
+    if depth > MAX_ANY_DEPTH
+        Base.write(io, UnserializableHeader)
+        return
+    end
+    _write(io, x, depth)
 end
 
 function _write(io, x::VarRef, depth::Int)
@@ -88,12 +104,16 @@ function _write(io, x::Symbol, depth::Int)
     Base.write(io, String(x))
 end
 function _write(io, x::NTuple{N,Any}, depth::Int) where N
+    if N > MAX_TUPLE_LEN
+        Base.write(io, UnserializableHeader)
+        return
+    end
     depth > MAX_DEPTH && throw(ArgumentError("serialization depth limit exceeded — possible cycle in $(typeof(x))"))
     depth += 1
     Base.write(io, TupleHeader)
     Base.write(io, N)
     for i = 1:N
-        _write(io, x[i], depth)
+        _write_any(io, x[i], depth)
     end
 end
 function _write(io, x::String, depth::Int)
@@ -114,22 +134,22 @@ function _write(io, x::FakeTypeVar, depth::Int)
     depth += 1
     Base.write(io, FakeTypeVarHeader)
     _write(io, x.name, depth)
-    _write(io, x.lb, depth)
-    _write(io, x.ub, depth)
+    _write_any(io, x.lb, depth)
+    _write_any(io, x.ub, depth)
 end
 function _write(io, x::FakeUnion, depth::Int)
     depth > MAX_DEPTH && throw(ArgumentError("serialization depth limit exceeded — possible cycle in $(typeof(x))"))
     depth += 1
     Base.write(io, FakeUnionHeader)
-    _write(io, x.a, depth)
-    _write(io, x.b, depth)
+    _write_any(io, x.a, depth)
+    _write_any(io, x.b, depth)
 end
 function _write(io, x::FakeUnionAll, depth::Int)
     depth > MAX_DEPTH && throw(ArgumentError("serialization depth limit exceeded — possible cycle in $(typeof(x))"))
     depth += 1
     Base.write(io, FakeUnionAllHeader)
     _write(io, x.var, depth)
-    _write(io, x.body, depth)
+    _write_any(io, x.body, depth)
 end
 
 @static if !(Vararg isa Type)
@@ -137,8 +157,8 @@ end
         depth > MAX_DEPTH && throw(ArgumentError("serialization depth limit exceeded — possible cycle in $(typeof(x))"))
         depth += 1
         Base.write(io, FakeTypeofVarargHeader)
-        isdefined(x, :T) ? _write(io, x.T, depth) : Base.write(io, UndefHeader)
-        isdefined(x, :N) ? _write(io, x.N, depth) : Base.write(io, UndefHeader)
+        isdefined(x, :T) ? _write_any(io, x.T, depth) : Base.write(io, UndefHeader)
+        isdefined(x, :N) ? _write_any(io, x.N, depth) : Base.write(io, UndefHeader)
     end
 end
 
@@ -152,11 +172,11 @@ function _write(io, x::MethodStore, depth::Int)
     Base.write(io, x.line)
     Base.write(io, length(x.sig))
     for p in x.sig
-        _write(io, p[1], depth)
-        _write(io, p[2], depth)
+        _write_any(io, p[1], depth)
+        _write_any(io, p[2], depth)
     end
     _write_vector(io, x.kws, depth)
-    _write(io, x.rt, depth)
+    _write_any(io, x.rt, depth)
 end
 
 function _write(io, x::FunctionStore, depth::Int)
@@ -189,7 +209,7 @@ function _write(io, x::GenericStore, depth::Int)
     depth += 1
     Base.write(io, GenericStoreHeader)
     _write(io, x.name, depth)
-    _write(io, x.typ, depth)
+    _write_any(io, x.typ, depth)
     _write(io, x.doc, depth)
     _write(io, x.exported, depth)
 end
@@ -200,9 +220,21 @@ function _write(io, x::ModuleStore, depth::Int)
     Base.write(io, ModuleStoreHeader)
     _write(io, x.name, depth)
     Base.write(io, length(x.vals))
+    buf = IOBuffer()
     for p in x.vals
         _write(io, p[1], depth)
-        _write(io, p[2], depth)
+        # serialize the value out-of-band so one pathological binding (cycle,
+        # unserializable type) degrades to a sentinel — which the reader drops —
+        # instead of failing the whole cache file
+        try
+            _write_any(buf, p[2], depth)
+            Base.write(io, take!(buf))
+        catch err
+            take!(buf)
+            (err isa InterruptException || err isa OutOfMemoryError || err isa StackOverflowError) && rethrow()
+            @debug "skipping unserializable module binding" key = p[1] exception = err
+            Base.write(io, UnserializableHeader)
+        end
     end
     _write(io, x.doc, depth)
     _write(io, x.exported, depth)
@@ -223,8 +255,11 @@ end
 function _write_vector(io, x, depth::Int)
     Base.write(io, length(x))
     depth += 1
+    # only Any-typed elements may degrade to the sentinel; in typed vectors it
+    # would come back as `nothing` and fail the read
+    elwrite = eltype(x) === Any ? _write_any : _write
     for p in x
-        _write(io, p, depth)
+        elwrite(io, p, depth)
     end
 end
 
@@ -237,10 +272,16 @@ function read(io)
         _read_header(io)
         return _read(io)
     catch err
-        if err isa EOFError
+        if err isa CacheCorruptedError || err isa InterruptException || err isa OutOfMemoryError || err isa StackOverflowError
+            rethrow()
+        elseif err isa EOFError
             throw(CacheCorruptedError("unexpected end of stream"))
+        else
+            # crafted tags can type-confuse strictly typed struct fields
+            # (MethodError/TypeError), produce invalid code points, etc. —
+            # all of it means the file is bad, not that the process is
+            throw(CacheCorruptedError("malformed cache data: $(typeof(err))"))
         end
-        rethrow()
     end
 end
 
@@ -304,6 +345,8 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
         end
     elseif t === UndefHeader
         nothing
+    elseif t === UnserializableHeader
+        Unserializable()
     elseif t === MethodStoreHeader
         yield()
         name = _read(io, Base.read(io, UInt8), depth)
@@ -357,8 +400,10 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
         sizehint!(vals, n)
         for _ = 1:n
             k = _read(io, Base.read(io, UInt8), depth)
-            v = _read(io, Base.read(io, UInt8), depth)
-            vals[k] = v
+            vt = Base.read(io, UInt8)
+            # drop bindings the writer couldn't serialize
+            vt === UnserializableHeader && continue
+            vals[k] = _read(io, vt, depth)
         end
         doc = _read(io, Base.read(io, UInt8), depth)
         exported = _read(io, Base.read(io, UInt8), depth)
@@ -372,13 +417,16 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
     elseif t === TupleHeader
         N = Base.read(io, Int)
         _check_len(io, N)
+        N > MAX_TUPLE_LEN && throw(CacheCorruptedError("tuple length $N exceeds limit $MAX_TUPLE_LEN"))
         ntuple(i->_read(io, Base.read(io, UInt8), depth), N)
     elseif t === PackageHeader
         yield()
         name = _read(io, Base.read(io, UInt8), depth)
         val = _read(io, Base.read(io, UInt8), depth)
         uuid = Base.UUID(Base.read(io, UInt128))
-        sha = Base.read(io, 32)
+        # Base.read(io, n) returns short on EOF; read! errors instead
+        sha = Vector{UInt8}(undef, 32)
+        read!(io, sha)
         Package(name, val, uuid, all(x == 0x00 for x in sha) ? nothing : sha)
     else
         throw(CacheCorruptedError("unknown type tag: 0x$(string(t, base=16, pad=2))"))

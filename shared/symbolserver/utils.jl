@@ -242,6 +242,9 @@ function _doc(binding::Base.Docs.Binding)
     end
 end
 
+# fallback for type refs that can't name a store entry (FakeTypeVar,
+# FakeTypeofBottom, Unserializable, ...)
+_lookup(vr, depot::EnvStore, cont=false) = nothing
 _lookup(vr::FakeUnion, depot::EnvStore, cont=false) = nothing
 _lookup(vr::FakeTypeName, depot::EnvStore, cont=false) = _lookup(vr.name, depot, cont)
 _lookup(vr::FakeUnionAll, depot::EnvStore, cont=false) = _lookup(vr.body, depot, cont)

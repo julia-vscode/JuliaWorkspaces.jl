@@ -1,4 +1,5 @@
 @testitem "Navigation: get_module_at" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_module_at
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -55,6 +56,7 @@
 end
 
 @testitem "Navigation: get_current_block_range" begin
+    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace, add_file!, TextFile, SourceText, get_current_block_range
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -109,6 +111,7 @@ end
 end
 
 @testitem "Navigation: get_selection_ranges" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_selection_ranges
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """

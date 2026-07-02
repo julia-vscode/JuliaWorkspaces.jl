@@ -1,4 +1,5 @@
 @testitem "References: find references basic" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_references
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -49,6 +50,7 @@
 end
 
 @testitem "References: definitions basic" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_definitions
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -98,6 +100,7 @@ end
 end
 
 @testitem "References: rename basic" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_rename_edits
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -148,6 +151,7 @@ end
 end
 
 @testitem "References: highlight basic" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_highlights
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -198,6 +202,7 @@ end
 end
 
 @testitem "References: can_rename basic" begin
+    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace, add_file!, TextFile, SourceText, can_rename
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -249,6 +254,7 @@ end
 end
 
 @testitem "References: empty results on whitespace" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_definitions, get_highlights, get_references
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
