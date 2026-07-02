@@ -388,7 +388,7 @@ end
 
 @testitem "SymbolServer: CacheStore truncates cyclic/deep data on write" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: storeunstore, MAX_DEPTH
-    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName
+    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName, Unserializable
 
     name = VarRef(nothing, :A)
     ft = FakeTypeName(name, Any[])
@@ -402,7 +402,7 @@ end
         end
         x, k
     end
-    @test tail === nothing
+    @test tail === Unserializable()
     @test 0 < n <= MAX_DEPTH
 
     deep = let d = FakeTypeName(name, Any[])
@@ -466,7 +466,7 @@ end
 
 @testitem "SymbolServer: CacheStore caps tuple length" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, storeunstore
-    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName
+    using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName, Unserializable
 
     prefix = vcat(MagicHeader, StoreVersion)
     # a tuple of n `nothing`s: TupleHeader, length, then n NothingHeader bytes
@@ -475,12 +475,26 @@ end
     @test read(IOBuffer(vcat(prefix, tuple_bytes(100)))) === ntuple(_ -> nothing, 100)
     @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, tuple_bytes(10_001))))
 
-    # the writer degrades oversized tuples to `nothing` instead of failing the file
-    @test storeunstore(ntuple(_ -> nothing, 10_001)) === nothing
+    # the writer degrades oversized tuples to the sentinel instead of failing the file
+    @test storeunstore(ntuple(_ -> nothing, 10_001)) === Unserializable()
     ft = FakeTypeName(VarRef(nothing, :T), Any[ntuple(_ -> nothing, 10_001), 1])
     back = storeunstore(ft)
-    @test back.parameters[1] === nothing
+    @test back.parameters[1] === Unserializable()
     @test back.parameters[2] == 1
+    @test sprint(show, back) == "T{…,1}"
+end
+
+@testitem "SymbolServer: _lookup returns nothing for unresolvable type refs" begin
+    using JuliaWorkspaces.SymbolServer: _lookup, ModuleStore, VarRef, FakeTypeName,
+        FakeTypeVar, FakeTypeofBottom, Unserializable
+
+    store = Dict{Symbol,ModuleStore}()
+    core_any = FakeTypeName(VarRef(VarRef(nothing, :Core), :Any), Any[])
+    # field types can be FakeTypeVar (`struct Foo{T}; x::T end`) or the
+    # unserializable sentinel; resolve_getfield feeds them straight to _lookup
+    @test _lookup(FakeTypeVar(:T, FakeTypeofBottom(), core_any), store, true) === nothing
+    @test _lookup(FakeTypeofBottom(), store, true) === nothing
+    @test _lookup(Unserializable(), store, true) === nothing
 end
 
 @testitem "SymbolServer: CacheStore drops module bindings it cannot serialize" begin

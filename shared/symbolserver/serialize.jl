@@ -1,5 +1,5 @@
 module CacheStore
-using ..SymbolServer: VarRef, FakeTypeName, FakeTypeofBottom, FakeTypeVar, FakeUnion, FakeUnionAll
+using ..SymbolServer: VarRef, FakeTypeName, FakeTypeofBottom, FakeTypeVar, FakeUnion, FakeUnionAll, Unserializable
 using ..SymbolServer: ModuleStore, Package, FunctionStore, MethodStore, DataTypeStore, GenericStore
 @static if !(Vararg isa Type)
     using ..SymbolServer: FakeTypeofVararg
@@ -346,8 +346,7 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
     elseif t === UndefHeader
         nothing
     elseif t === UnserializableHeader
-        # placeholder in Any-typed slots (e.g. type parameters)
-        nothing
+        Unserializable()
     elseif t === MethodStoreHeader
         yield()
         name = _read(io, Base.read(io, UInt8), depth)
