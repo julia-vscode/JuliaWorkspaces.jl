@@ -290,7 +290,10 @@ function cache_methods(@nospecialize(f), name, env, get_return_type; min_world::
         end
     end
 
-    func_vr = VarRef(VarRef(parentmodule(f)), name)
+    # non-Function callables (e.g. SymbolicUtils.BasicSymbolic, #319) have no
+    # `parentmodule` method; fall back to the type's module
+    fmod = f isa Union{Module,Function,Type} ? parentmodule(f) : parentmodule(typeof(f))
+    func_vr = VarRef(VarRef(fmod), name)
     for m in ms
         mvr = VarRef(m[1])
         # `cont=true` follows VarRef chains to the actual ModuleStore: a module's
