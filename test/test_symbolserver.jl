@@ -194,6 +194,32 @@ end
     @test sigh[2].second == FakeTypeName(Vararg{Int,2})
 end
 
+@testitem "SymbolServer: #319 cache_methods handles non-Function callables" begin
+    using JuliaWorkspaces.SymbolServer: cache_methods, EnvStore, ModuleStore, VarRef, FunctionStore
+
+    # A callable struct instance (e.g. SymbolicUtils.BasicSymbolic reaching
+    # cache_new_methods! while indexing AbstractAlgebra) has no
+    # `parentmodule(::Callable)` method and used to crash cache_methods.
+    fakemod = Module(:_TestPkgCallable)
+    Core.eval(fakemod, quote
+        struct Callable end
+        (::Callable)(x::Number) = x + 1
+    end)
+    f = Core.eval(fakemod, :(Callable()))
+
+    env = EnvStore()
+    name = nameof(fakemod)
+    env[name] = ModuleStore(VarRef(fakemod), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+
+    ms = cache_methods(f, :callable, env, false)   # must not throw
+    @test length(ms) == 1
+    @test haskey(env[name], :callable)
+    @test env[name][:callable] isa FunctionStore
+    @test length(env[name][:callable].methods) == 1
+    # extends resolves to the type's module
+    @test env[name][:callable].extends.parent.name == name
+end
+
 @testitem "SymbolServer: cache_methods min_world filter skips pre-existing methods" begin
     using JuliaWorkspaces.SymbolServer: cache_methods, EnvStore, ModuleStore, VarRef,
                                         FunctionStore, method_world
