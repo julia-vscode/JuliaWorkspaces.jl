@@ -27,8 +27,6 @@ const FalseHeader = 0x13
 const TupleHeader = 0x14
 const FakeTypeofVarargHeader = 0x15
 const UndefHeader = 0x16
-# marks a value the writer could not serialize (oversized tuple, cycle, foreign
-# type); distinct from NothingHeader so legitimate `nothing`s survive round-trips
 const UnserializableHeader = 0x17
 
 # reserve 0x00-0xfe for type headers and indicate that this file is binary by not starting
@@ -53,9 +51,11 @@ function _check_len(io, n)
 end
 
 const MAX_DEPTH = 256
-# legitimate tuples here (type parameters, signatures) are tiny; huge counts
-# are hostile input, and `ntuple` with a large runtime N is pathological
 const MAX_TUPLE_LEN = 10_000
+# cutoff for degrading over-deep subtrees in Any-typed slots; the margin leaves
+# room for typed substructure below the last Any slot (VarRef chains etc.) so
+# written files always stay within the reader's MAX_DEPTH
+const MAX_ANY_DEPTH = MAX_DEPTH - 64
 
 function write(io, x)
     _write_header(io)
@@ -65,6 +65,16 @@ end
 function _write_header(io)
     Base.write(io, MagicHeader)
     Base.write(io, StoreVersion)
+end
+
+# for values in Any-typed slots, which can absorb the sentinel: cut cycles and
+# over-deep nesting here instead of erroring out of the whole write
+function _write_any(io, x, depth::Int)
+    if depth > MAX_ANY_DEPTH
+        Base.write(io, UnserializableHeader)
+        return
+    end
+    _write(io, x, depth)
 end
 
 function _write(io, x::VarRef, depth::Int)
@@ -95,8 +105,6 @@ function _write(io, x::Symbol, depth::Int)
 end
 function _write(io, x::NTuple{N,Any}, depth::Int) where N
     if N > MAX_TUPLE_LEN
-        # degrade instead of failing the whole file; tuples only ever sit in
-        # Any-typed slots, so this stays readable
         Base.write(io, UnserializableHeader)
         return
     end
@@ -105,7 +113,7 @@ function _write(io, x::NTuple{N,Any}, depth::Int) where N
     Base.write(io, TupleHeader)
     Base.write(io, N)
     for i = 1:N
-        _write(io, x[i], depth)
+        _write_any(io, x[i], depth)
     end
 end
 function _write(io, x::String, depth::Int)
@@ -126,22 +134,22 @@ function _write(io, x::FakeTypeVar, depth::Int)
     depth += 1
     Base.write(io, FakeTypeVarHeader)
     _write(io, x.name, depth)
-    _write(io, x.lb, depth)
-    _write(io, x.ub, depth)
+    _write_any(io, x.lb, depth)
+    _write_any(io, x.ub, depth)
 end
 function _write(io, x::FakeUnion, depth::Int)
     depth > MAX_DEPTH && throw(ArgumentError("serialization depth limit exceeded — possible cycle in $(typeof(x))"))
     depth += 1
     Base.write(io, FakeUnionHeader)
-    _write(io, x.a, depth)
-    _write(io, x.b, depth)
+    _write_any(io, x.a, depth)
+    _write_any(io, x.b, depth)
 end
 function _write(io, x::FakeUnionAll, depth::Int)
     depth > MAX_DEPTH && throw(ArgumentError("serialization depth limit exceeded — possible cycle in $(typeof(x))"))
     depth += 1
     Base.write(io, FakeUnionAllHeader)
     _write(io, x.var, depth)
-    _write(io, x.body, depth)
+    _write_any(io, x.body, depth)
 end
 
 @static if !(Vararg isa Type)
@@ -149,8 +157,8 @@ end
         depth > MAX_DEPTH && throw(ArgumentError("serialization depth limit exceeded — possible cycle in $(typeof(x))"))
         depth += 1
         Base.write(io, FakeTypeofVarargHeader)
-        isdefined(x, :T) ? _write(io, x.T, depth) : Base.write(io, UndefHeader)
-        isdefined(x, :N) ? _write(io, x.N, depth) : Base.write(io, UndefHeader)
+        isdefined(x, :T) ? _write_any(io, x.T, depth) : Base.write(io, UndefHeader)
+        isdefined(x, :N) ? _write_any(io, x.N, depth) : Base.write(io, UndefHeader)
     end
 end
 
@@ -164,11 +172,11 @@ function _write(io, x::MethodStore, depth::Int)
     Base.write(io, x.line)
     Base.write(io, length(x.sig))
     for p in x.sig
-        _write(io, p[1], depth)
-        _write(io, p[2], depth)
+        _write_any(io, p[1], depth)
+        _write_any(io, p[2], depth)
     end
     _write_vector(io, x.kws, depth)
-    _write(io, x.rt, depth)
+    _write_any(io, x.rt, depth)
 end
 
 function _write(io, x::FunctionStore, depth::Int)
@@ -201,7 +209,7 @@ function _write(io, x::GenericStore, depth::Int)
     depth += 1
     Base.write(io, GenericStoreHeader)
     _write(io, x.name, depth)
-    _write(io, x.typ, depth)
+    _write_any(io, x.typ, depth)
     _write(io, x.doc, depth)
     _write(io, x.exported, depth)
 end
@@ -219,7 +227,7 @@ function _write(io, x::ModuleStore, depth::Int)
         # unserializable type) degrades to a sentinel — which the reader drops —
         # instead of failing the whole cache file
         try
-            _write(buf, p[2], depth)
+            _write_any(buf, p[2], depth)
             Base.write(io, take!(buf))
         catch err
             take!(buf)
@@ -247,8 +255,11 @@ end
 function _write_vector(io, x, depth::Int)
     Base.write(io, length(x))
     depth += 1
+    # only Any-typed elements may degrade to the sentinel; in typed vectors it
+    # would come back as `nothing` and fail the read
+    elwrite = eltype(x) === Any ? _write_any : _write
     for p in x
-        _write(io, p, depth)
+        elwrite(io, p, depth)
     end
 end
 

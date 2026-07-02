@@ -386,15 +386,24 @@ end
     @test_throws CacheCorruptedError read(IOBuffer(vcat(prefix, UInt8[0x14], reinterpret(UInt8, [huge]))))
 end
 
-@testitem "SymbolServer: CacheStore rejects cyclic data on write" begin
-    using JuliaWorkspaces.SymbolServer.CacheStore: write
+@testitem "SymbolServer: CacheStore truncates cyclic/deep data on write" begin
+    using JuliaWorkspaces.SymbolServer.CacheStore: storeunstore, MAX_DEPTH
     using JuliaWorkspaces.SymbolServer: VarRef, FakeTypeName
 
     name = VarRef(nothing, :A)
     ft = FakeTypeName(name, Any[])
     push!(ft.parameters, ft)        # cycle: ft.parameters[1] === ft
 
-    @test_throws ArgumentError write(IOBuffer(), ft)
+    # the cycle is unrolled up to the depth cutoff, then cut with the sentinel
+    tail, n = let x = storeunstore(ft), k = 0
+        while x isa FakeTypeName
+            x = x.parameters[1]
+            k += 1
+        end
+        x, k
+    end
+    @test tail === nothing
+    @test 0 < n <= MAX_DEPTH
 
     deep = let d = FakeTypeName(name, Any[])
         for _ in 1:300
@@ -402,7 +411,7 @@ end
         end
         d
     end
-    @test_throws ArgumentError write(IOBuffer(), deep)
+    @test storeunstore(deep) isa FakeTypeName
 end
 
 @testitem "SymbolServer: CacheStore rejects deeply nested input on read" begin
@@ -476,28 +485,20 @@ end
 
 @testitem "SymbolServer: CacheStore drops module bindings it cannot serialize" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: storeunstore
-    using JuliaWorkspaces.SymbolServer: ModuleStore, VarRef, FakeTypeName, GenericStore
+    using JuliaWorkspaces.SymbolServer: ModuleStore, VarRef, GenericStore
 
-    cyc = FakeTypeName(VarRef(nothing, :C), Any[])
-    push!(cyc.parameters, cyc)
     good = GenericStore(VarRef(nothing, :g), nothing, "doc", true)
+    # unserializable value types degrade the binding, not the file
     mod = ModuleStore(VarRef(nothing, :M),
-        Dict{Symbol,Any}(:good => good, :bad => cyc, :legit_nothing => nothing),
+        Dict{Symbol,Any}(:weird => Ref(1), :good => good, :legit_nothing => nothing),
         "", true, Symbol[], Symbol[])
 
     back = storeunstore(mod)
-    @test !haskey(back.vals, :bad)
+    @test !haskey(back.vals, :weird)
     @test back.vals[:good].doc == "doc"
     # the sentinel is distinct from NothingHeader: real `nothing`s survive
     @test haskey(back.vals, :legit_nothing)
     @test back.vals[:legit_nothing] === nothing
-
-    # unserializable value types degrade the binding, not the file
-    mod2 = ModuleStore(VarRef(nothing, :M),
-        Dict{Symbol,Any}(:weird => Ref(1), :good => good), "", true, Symbol[], Symbol[])
-    back2 = storeunstore(mod2)
-    @test !haskey(back2.vals, :weird)
-    @test haskey(back2.vals, :good)
 end
 
 @testitem "SymbolServer: CacheStore rejects truncated sha" begin
