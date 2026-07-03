@@ -72,6 +72,7 @@ Salsa.@derived function derived_environment(rt, uri)
     end
 
     for (k,v) in project.stdlib_packages
+        v.version === nothing && continue
         x = input_package_metadata(rt, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), nothing)
         if x!==nothing
             push!(metadata_packages, x)

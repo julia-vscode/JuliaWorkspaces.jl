@@ -102,6 +102,51 @@ end
     @test isempty(syntax_diags)
 end
 
+@testitem "Diagnostics: stdlib without version in manifest no crash" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "StdlibVerTest"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff"
+    version = "0.1.0"
+
+    [deps]
+    SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+    """
+
+    # Stdlib entries in real manifests often have no `version` field.
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [[deps.SHA]]
+    uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+    """
+
+    source = """
+    module StdlibVerTest
+
+    using SHA
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///stdlibvertest/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///stdlibvertest/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///stdlibvertest/src/StdlibVerTest.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///stdlibvertest/src/StdlibVerTest.jl")
+
+    # Should not throw (previously crashed with a MethodError from
+    # parse(VersionNumber, nothing) in derived_environment)
+    diags = get_diagnostic(jw, uri)
+
+    syntax_diags = filter(d -> d.source == "JuliaSyntax.jl", diags)
+    @test isempty(syntax_diags)
+end
+
 # ──────────────────────────────────────────────────────────────────────
 # Config validation tests
 # ──────────────────────────────────────────────────────────────────────
