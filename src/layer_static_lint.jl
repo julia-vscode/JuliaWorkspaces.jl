@@ -166,62 +166,50 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     return (meta_dict=meta_dict, workspace_packages=workspace_packages)
 end
 
-Salsa.@derived function derived_static_lint_all_diagnostics(rt)
-    @debug "derived_static_lint_all_diagnostics"
+"""
+    derived_static_lint_diagnostics_for_root(rt, root)
 
-    # We use a Set to deduplicate diagnostics, as the same diagnostic
-    # can be produced from multiple roots due to includes
+Static-lint diagnostics for every file in `root`'s include closure, keyed by
+file URI. Keyed per root so an edit only recomputes diagnostics for the roots
+whose closure contains the edited file.
+"""
+Salsa.@derived function derived_static_lint_diagnostics_for_root(rt, root)
+    @debug "derived_static_lint_diagnostics_for_root" root=root
+
     res = Dict{URI,Set{Diagnostic}}()
 
-    roots = derived_roots(rt)
-    for root in roots
-        project_uri = derived_project_uri_for_root(rt, root)
-        @debug "Workspace root" root=root project=project_uri
-    end
+    project_uri = derived_project_uri_for_root(rt, root)
+    project_uri === nothing && return res
 
-    for root in roots
-        project_uri = derived_project_uri_for_root(rt, root)
-        project_uri === nothing && continue
+    lint_result = derived_static_lint_meta_for_root(rt, root)
+    meta_dict = lint_result.meta_dict
+    workspace_packages = lint_result.workspace_packages
+    env = derived_environment(rt, project_uri)
 
-        lint_result = derived_static_lint_meta_for_root(rt, root)
-        meta_dict = lint_result.meta_dict
-        workspace_packages = lint_result.workspace_packages
-        env = derived_environment(rt, project_uri)
+    for uri in derived_include_closure(rt, root)
+        current_res = get!(res, uri, Set{Diagnostic}())
 
-        uris_to_check = Set{URI}([root])
-        while !isempty(uris_to_check)
-            uri = first(uris_to_check)
-            delete!(uris_to_check, uri)
+        cst = derived_julia_legacy_syntax_tree(rt, uri)
+        lint_config = derived_lint_configuration(rt, uri)
+        missingrefs = _missingrefs_from_config(lint_config)
+        errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
 
-            included_uris = derived_includes(rt, uri)
-            for included_uri in included_uris
-                push!(uris_to_check, included_uri)
-            end
-
-            current_res = get!(res, uri, Set{Diagnostic}())
-
-            cst = derived_julia_legacy_syntax_tree(rt, uri)
-            lint_config = derived_lint_configuration(rt, uri)
-            missingrefs = _missingrefs_from_config(lint_config)
-            errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
-
-            for err in errs
-                rng = err[1]+1:err[1]+err[2].span+1
-                if StaticLint.headof(err[2]) === :errortoken
-                    # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
-                elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
-                    push!(current_res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
-                elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
-                    code = StaticLint.errorof(err[2], meta_dict)
-                    description = get(StaticLint.LintCodeDescriptions, code, "")
-                    severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
-                        :hint, Symbol[:unnecessary]
-                    else
-                        :information, Symbol[]
-                    end
-                    code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
-                    push!(current_res, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
+        for err in errs
+            rng = err[1]+1:err[1]+err[2].span+1
+            if StaticLint.headof(err[2]) === :errortoken
+                # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
+            elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
+                push!(current_res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
+            elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
+                code = StaticLint.errorof(err[2], meta_dict)
+                description = get(StaticLint.LintCodeDescriptions, code, "")
+                severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
+                    :hint, Symbol[:unnecessary]
+                else
+                    :information, Symbol[]
                 end
+                code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
+                push!(current_res, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
             end
         end
     end
@@ -230,9 +218,17 @@ Salsa.@derived function derived_static_lint_all_diagnostics(rt)
 end
 
 Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
-    all_diags = derived_static_lint_all_diagnostics(rt)
+    # The same diagnostic can be produced from multiple roots due to includes;
+    # the Set deduplicates across roots.
+    res = Set{Diagnostic}()
 
-    return get(all_diags, uri, Set{Diagnostic}())
+    for root in derived_roots_for_uri(rt, uri)
+        root_diags = derived_static_lint_diagnostics_for_root(rt, root)
+        uri_diags = get(root_diags, uri, nothing)
+        uri_diags === nothing || union!(res, uri_diags)
+    end
+
+    return res
 end
 
 # ───────────────────────────────────────────────────────────────────

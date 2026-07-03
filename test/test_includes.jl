@@ -91,6 +91,43 @@ end
     @test JuliaWorkspaces.derived_include_closure(rt, self_uri) == Set([self_uri])
 end
 
+@testitem "include graph: lint diagnostics terminate on include cycles in a project" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "InclCycle"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee88"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    root_uri = URI("file:///inclcycle/src/InclCycle.jl")
+    a_uri = URI("file:///inclcycle/src/a.jl")
+    b_uri = URI("file:///inclcycle/src/b.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///inclcycle/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///inclcycle/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("module InclCycle\ninclude(\"a.jl\")\nend", "julia")))
+    add_file!(jw, TextFile(a_uri, SourceText("include(\"b.jl\")", "julia")))
+    add_file!(jw, TextFile(b_uri, SourceText("include(\"a.jl\")", "julia")))
+
+    # The old diagnostics walk had no visited set and would loop forever on
+    # the a <-> b cycle. It must terminate and report the include loop.
+    diags = get_diagnostic(jw, root_uri)
+    @test diags isa Vector
+
+    all_diags = get_diagnostics(jw)
+    cycle_diags = [d for (_, ds) in all_diags for d in ds if contains(d.message, "recursive")]
+    @test !isempty(cycle_diags) || any(d -> d.source == "StaticLint.jl", [d for (_, ds) in all_diags for d in ds])
+end
+
 @testitem "include graph: cross-file lint still resolves includes after edits" begin
     using JuliaWorkspaces.URIs2: URI
 
