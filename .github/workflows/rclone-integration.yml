@@ -1,0 +1,32 @@
+name: Cache-infra integration (rclone)
+
+# The cache-infra scripts (regen/reconcile/seed) are Unix shell + rclone, so
+# their integration tests only run on Linux with rclone installed. The main
+# Julia CI matrix has no rclone, so those items skip there; this workflow gives
+# them real coverage. JW_TEST_FILTER restricts the run to just those items.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  rclone-tests:
+    name: cache-infra integration (ubuntu, rclone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Install rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone
+          rclone version
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        env:
+          JW_TEST_FILTER: cache-infra

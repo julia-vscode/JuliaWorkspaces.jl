@@ -594,3 +594,100 @@ end
         @test count(!isempty, readlines(outfile)) == 1
     end
 end
+
+@testitem "CloudIndex: --emit-index writes the index and exits 0" begin
+    using JuliaWorkspaces.CloudIndexApp: cli_main
+    mktempdir() do root
+        store = joinpath(root, "store")
+        mk(p) = (mkpath(dirname(p)); write(p, "x"))
+        mk(joinpath(store, "E", "Example", "uuid-a", "h1.jstore"))
+        out = joinpath(root, "index.txt")
+        rc = cli_main(["--store", store, "--emit-index", out])
+        @test rc == 0
+        @test read(out, String) == "uuid-a/h1\n"
+    end
+end
+
+@testitem "CloudIndex: find_missing(rows, done-set) filters by uuid/treehash key" begin
+    using JuliaWorkspaces.CloudIndexApp: PkgVersion, find_missing, done_key
+    u = Base.UUID("22222222-2222-2222-2222-222222222222")
+    rows = [PkgVersion("A", u, v"1.0.0", "h1", false, nothing),
+            PkgVersion("B", u, v"1.0.0", "h2", false, nothing)]
+    done = Set(["$(u)/h1"])
+    left = find_missing(rows, done)
+    @test length(left) == 1 && left[1].tree_hash == "h2"
+    @test done_key(rows[1]) == "$(u)/h1"
+
+    # '+' in tree_hash must map to '_' in done_key
+    pv_plus = PkgVersion("C", u, v"1.0.0", "a+b", false, nothing)
+    @test endswith(done_key(pv_plus), "a_b")
+end
+
+@testitem "CloudIndex done-set: _load_done strips blanks and whitespace" begin
+    using JuliaWorkspaces.CloudIndexApp: _load_done
+    mktempdir() do dir
+        f = joinpath(dir, "done.txt")
+        write(f, "uuid-a/h1\n  uuid-b/h2  \n\n  \nuuid-c/h3\n")
+        s = _load_done(f)
+        @test s == Set(["uuid-a/h1", "uuid-b/h2", "uuid-c/h3"])
+        @test length(s) == 3   # blank lines stripped
+    end
+end
+
+@testitem "CloudIndex done-set: run_index honors opts.done (skips A, runs B; both covered → empty)" begin
+    using JuliaWorkspaces.CloudIndexApp: PkgVersion, IndexOpts, run_index, done_key, cache_relpath
+
+    u = Base.UUID("22222222-2222-2222-2222-222222222222")
+    pvA = PkgVersion("PkgA", u, v"1.0.0", "hAAA", false, nothing)
+    pvB = PkgVersion("PkgB", Base.UUID("33333333-3333-3333-3333-333333333333"),
+                     v"1.0.0", "hBBB", false, nothing)
+
+    mktempdir() do root
+        store  = joinpath(root, "store")
+        work   = joinpath(root, "work")
+        depot  = joinpath(root, "depot")
+        jwfake = joinpath(root, "jw", "CloudIndex"); mkpath(jwfake); mkpath(store)
+
+        # Stub worker: writes the expected .jstore for any version it is called with.
+        write(joinpath(jwfake, "worker.jl"), raw"""
+        jwroot, store, uuid, name, version, th = ARGS
+        rp = joinpath(store, uppercase(name[1:1]), name, uuid, th * ".jstore")
+        mkpath(dirname(rp)); write(rp, "indexed")
+        exit(0)
+        """)
+
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        base_opts = (store=store, depot=depot, workdir=work,
+                     jwroot=joinpath(root, "jw"), jobs=2, timeout=30.0,
+                     resume=true, progress=false, julia_exe=jl)
+
+        # Case 1: done covers A → only B is run, A's .jstore must NOT exist.
+        done1 = Set([done_key(pvA)])
+        r1 = run_index([pvA, pvB], IndexOpts(; base_opts..., done=done1))
+        @test length(r1) == 1
+        @test r1[1].pv.name == "PkgB"
+        @test !isfile(joinpath(store, cache_relpath(pvA.name, pvA.uuid, pvA.tree_hash)...))
+
+        # Case 2: done covers both → nothing launched, empty result.
+        done2 = Set([done_key(pvA), done_key(pvB)])
+        r2 = run_index([pvA, pvB], IndexOpts(; base_opts..., done=done2))
+        @test isempty(r2)
+    end
+end
+
+@testitem "CloudIndex: build_index lists one <uuid>/<stem> per .jstore" begin
+    using JuliaWorkspaces.CloudIndexApp: build_index, write_index
+    mktempdir() do store
+        mk(p) = (mkpath(dirname(p)); write(p, "x"))
+        mk(joinpath(store, "E", "Example", "uuid-a", "h1.jstore"))
+        mk(joinpath(store, "C", "Crayons", "uuid-b", "h2.jstore"))
+        mk(joinpath(store, "C", "Crayons", "uuid-b", "h2.unavailable"))  # tombstone: ignored
+        mk(joinpath(store, "C", "Crayons", "uuid-b", "h3.jstore.tmp"))   # not a .jstore: ignored
+
+        idx = build_index(store)
+        @test idx == ["uuid-a/h1", "uuid-b/h2"]      # sorted, unique, .jstore only
+
+        io = IOBuffer(); write_index(store, io)
+        @test String(take!(io)) == "uuid-a/h1\nuuid-b/h2\n"
+    end
+end
