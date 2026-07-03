@@ -49,6 +49,33 @@ Salsa.@derived function derived_all_julia_files(rt)
 end
 
 """
+    derived_include_closure(rt, uri)
+
+The transitive include closure of `uri` (including `uri` itself): every file
+reachable from `uri` through `include(...)` edges. This is the set of files a
+semantic pass starting at `uri` can traverse.
+"""
+Salsa.@derived function derived_include_closure(rt, uri)
+    uri2included = derived_uri2included(rt)
+
+    closure = Set{URI}([uri])
+    queue = URI[uri]
+    while !isempty(queue)
+        current = popfirst!(queue)
+        for included in get(uri2included, current, _EMPTY_URI_SET)
+            if !(included in closure)
+                push!(closure, included)
+                push!(queue, included)
+            end
+        end
+    end
+
+    return closure
+end
+
+const _EMPTY_URI_SET = Set{URI}()
+
+"""
     derived_indirect_files(rt)
 
 Return the set of URIs in the include graph that are *not* regular workspace

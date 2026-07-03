@@ -45,10 +45,10 @@ Salsa.@derived function derived_deved_package_meta(rt, pkg_entry_uri, project_ur
 
     env = derived_environment(rt, project_uri)
 
-    # Build meta_dict scoped to all workspace files (needed for cross-file include resolution)
+    # Build meta_dict scoped to the entry file's include closure — the files the
+    # semantic pass can actually traverse.
     meta_dict = Dict{UInt64,StaticLint.Meta}()
-    julia_files = derived_all_julia_files(rt)
-    for uri in julia_files
+    for uri in derived_include_closure(rt, pkg_entry_uri)
         cst = derived_julia_legacy_syntax_tree(rt, uri)
         StaticLint.ensuremeta(cst, meta_dict)
     end
@@ -71,10 +71,14 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
 
     meta_dict = Dict{UInt64,StaticLint.Meta}()
 
-    julia_files = derived_all_julia_files(rt)
+    # Scope all per-file work to the root's include closure: those are the files
+    # the semantic pass can traverse and the only ones whose meta is ever read
+    # for this root (the diagnostics pass walks the same closure). This keeps
+    # edits outside the closure from invalidating this root's lint state.
+    closure = derived_include_closure(rt, uri)
 
-    for uri in julia_files
-        cst = derived_julia_legacy_syntax_tree(rt, uri)
+    for closure_uri in closure
+        cst = derived_julia_legacy_syntax_tree(rt, closure_uri)
         StaticLint.ensuremeta(cst, meta_dict)
     end
 
@@ -146,7 +150,7 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
 
     StaticLint.semantic_pass(uri, cst, env, meta_dict, rt; workspace_packages, test_setups, self_package_name)
 
-    for file in julia_files
+    for file in closure
         cst2 = derived_julia_legacy_syntax_tree(rt, file)
 
         lint_config = derived_lint_configuration(rt, file)

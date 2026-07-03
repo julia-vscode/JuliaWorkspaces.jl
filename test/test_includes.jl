@@ -68,6 +68,29 @@ end
     @test JuliaWorkspaces.derived_roots_for_uri(rt, b_uri) == Set([root_uri])
 end
 
+@testitem "include graph: closure of a root" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///inclclosure/src/Pkg.jl")
+    a_uri = URI("file:///inclclosure/src/a.jl")
+    b_uri = URI("file:///inclclosure/src/b.jl")
+    other_uri = URI("file:///inclclosure/src/other.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\ninclude(\"a.jl\")\nend", "julia")))
+    add_file!(jw, TextFile(a_uri, SourceText("include(\"b.jl\")", "julia")))
+    add_file!(jw, TextFile(b_uri, SourceText("g() = 2", "julia")))
+    add_file!(jw, TextFile(other_uri, SourceText("h() = 3", "julia")))
+
+    rt = jw.runtime
+    @test JuliaWorkspaces.derived_include_closure(rt, root_uri) == Set([root_uri, a_uri, b_uri])
+    @test JuliaWorkspaces.derived_include_closure(rt, other_uri) == Set([other_uri])
+    # Self-includes must terminate.
+    self_uri = URI("file:///inclclosure/src/selfinc.jl")
+    add_file!(jw, TextFile(self_uri, SourceText("include(\"selfinc.jl\")", "julia")))
+    @test JuliaWorkspaces.derived_include_closure(rt, self_uri) == Set([self_uri])
+end
+
 @testitem "include graph: cross-file lint still resolves includes after edits" begin
     using JuliaWorkspaces.URIs2: URI
 
