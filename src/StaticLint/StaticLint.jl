@@ -229,7 +229,11 @@ end
 
 Performs a semantic pass across a project from the entry point `file`. A first pass traverses the top-level scope after which secondary passes handle delayed scopes (e.g. functions). These secondary passes can be, optionally, very light and only seek to resovle references (e.g. link symbols to bindings). This can be done by supplying a list of expressions on which the full secondary pass should be made (`modified_expr`), all others will receive the light-touch version.
 """
-function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing)
+function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing)
+    # Traversal-local include resolution: maps objectids of include-call EXPRs to
+    # their target URIs. Built per entered file (here for the entry file, in
+    # `followinclude` for included files) so no objectid escapes this pass.
+    include_dict = collect_include_map(cst, URIs2.uri2filepath(uri))
     setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
     state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, 0, meta_dict, include_dict, rt)
     process_EXPR(cst, state)
@@ -388,6 +392,7 @@ function followinclude(x, state::Toplevel)
         push!(state.all_included_files, state.uri)
     #     root_dict[state.file] = root_dict[oldfile]
         cst_new_file = derived_julia_legacy_syntax_tree(rt, target_uri)
+        merge!(include_dict, collect_include_map(cst_new_file, URIs2.uri2filepath(target_uri)))
         setscope!(cst_new_file, nothing, meta_dict)
         process_EXPR(cst_new_file, state)
         state.uri = old_uri

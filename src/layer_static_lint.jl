@@ -44,7 +44,6 @@ Salsa.@derived function derived_deved_package_meta(rt, pkg_entry_uri, project_ur
     @debug "derived_deved_package_meta" pkg_entry_uri=pkg_entry_uri project_uri=project_uri
 
     env = derived_environment(rt, project_uri)
-    include_dict = derived_include_dict(rt)
 
     # Build meta_dict scoped to all workspace files (needed for cross-file include resolution)
     meta_dict = Dict{UInt64,StaticLint.Meta}()
@@ -56,7 +55,7 @@ Salsa.@derived function derived_deved_package_meta(rt, pkg_entry_uri, project_ur
 
     cst = derived_julia_legacy_syntax_tree(rt, pkg_entry_uri)
 
-    StaticLint.semantic_pass(pkg_entry_uri, cst, env, meta_dict, include_dict, rt)
+    StaticLint.semantic_pass(pkg_entry_uri, cst, env, meta_dict, rt)
 
     # Extract the package name from the URI (src/PackageName.jl -> PackageName)
     pkg_filename = basename(uri2filepath(pkg_entry_uri))
@@ -71,7 +70,6 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     @debug "derived_static_lint_meta_for_root" uri=uri
 
     meta_dict = Dict{UInt64,StaticLint.Meta}()
-    include_dict = derived_include_dict(rt)
 
     julia_files = derived_all_julia_files(rt)
 
@@ -146,7 +144,7 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         end
     end
 
-    StaticLint.semantic_pass(uri, cst, env, meta_dict, include_dict, rt; workspace_packages, test_setups, self_package_name)
+    StaticLint.semantic_pass(uri, cst, env, meta_dict, rt; workspace_packages, test_setups, self_package_name)
 
     for file in julia_files
         cst2 = derived_julia_legacy_syntax_tree(rt, file)
