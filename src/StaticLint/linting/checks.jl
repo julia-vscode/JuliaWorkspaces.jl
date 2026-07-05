@@ -821,8 +821,10 @@ function resolve_remaining_getfields!(x::EXPR, env, workspace_packages, meta_dic
     if isquoted
         try_resolve_getfield_ref!(x, env, workspace_packages, meta_dict)
     end
-    for i in 1:length(x)
-        resolve_remaining_getfields!(x[i], env, workspace_packages, meta_dict, isquoted)
+    if x.args !== nothing
+        for a in x.args
+            resolve_remaining_getfields!(a, env, workspace_packages, meta_dict, isquoted)
+        end
     end
     return x
 end
