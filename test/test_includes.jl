@@ -288,3 +288,32 @@ end
     diags = get_diagnostic(jw, shared_uri)
     @test count(d -> contains(d.message, "Missing reference: undefined_symbol"), diags) == 1
 end
+
+@testitem "include closure: content-stable presence predicate" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///inclpresence/src/Pkg.jl")
+    a_uri = URI("file:///inclpresence/src/a.jl")
+    missing_uri = URI("file:///inclpresence/src/missing.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\ninclude(\"a.jl\")\ninclude(\"missing.jl\")\nend", "julia")))
+    add_file!(jw, TextFile(a_uri, SourceText("f() = 1", "julia")))
+
+    rt = jw.runtime
+
+    # Present target reports content; unresolved/absent target does not.
+    @test JuliaWorkspaces.derived_has_content(rt, a_uri) == true
+    @test JuliaWorkspaces.derived_has_content(rt, missing_uri) == false
+
+    # The closure includes the present target and excludes the missing one.
+    closure_before = JuliaWorkspaces.derived_include_closure(rt, root_uri)
+    @test closure_before == Set([root_uri, a_uri])
+    @test !(missing_uri in closure_before)
+
+    # A content-only edit to an in-closure file leaves the closure value and the
+    # presence predicate unchanged (Salsa back-dates them, sparing consumers).
+    JuliaWorkspaces.update_file!(jw, TextFile(a_uri, SourceText("f() = 1\n# edited", "julia")))
+    @test JuliaWorkspaces.derived_has_content(rt, a_uri) == true
+    @test isequal(JuliaWorkspaces.derived_include_closure(rt, root_uri), closure_before)
+end

@@ -50,8 +50,7 @@ Salsa.@derived function derived_all_julia_files(rt)
         included_files = derived_includes(rt, uri)
 
         for included_file in included_files
-            tf = derived_text_file_content(rt, included_file)
-            if tf === nothing
+            if !derived_has_content(rt, included_file)
                 continue
             end
             if !(included_file in all_files) && !(included_file in files_to_check)
@@ -88,7 +87,7 @@ Salsa.@derived function derived_include_closure(rt, uri)
 
         for included in derived_includes(rt, current)
             included in closure && continue
-            derived_text_file_content(rt, included) === nothing && continue
+            derived_has_content(rt, included) || continue
             push!(closure, included)
             push!(queue, included)
         end

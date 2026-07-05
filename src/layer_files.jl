@@ -33,3 +33,18 @@ Salsa.@derived function derived_text_file_content(rt, uri)
         return input_indirect_text_file(rt, uri)
     end
 end
+
+"""
+    derived_has_content(rt, uri)
+
+Return whether `uri` has text content available (either a regular workspace file
+or a lazily-loaded indirect include target). Unlike `derived_text_file_content`,
+this returns a value-stable `Bool`: it re-executes when the file's content
+changes but the result only flips when the file appears or disappears, so
+Salsa's early-exit shields dependents (e.g. `derived_include_closure`) from
+ordinary content edits. Prefer this over `derived_text_file_content(...) !==
+nothing` wherever only *presence* matters.
+"""
+Salsa.@derived function derived_has_content(rt, uri)
+    return derived_text_file_content(rt, uri) !== nothing
+end
