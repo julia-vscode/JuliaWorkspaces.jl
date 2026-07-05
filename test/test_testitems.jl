@@ -233,7 +233,7 @@ end
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
     using JuliaWorkspaces.URIs2: filepath2uri
 
-    pkg_dir = joinpath(@__DIR__, "data", "TestPackageTestItems")
+    pkg_dir = joinpath(@__DIR__, "..", "testdata", "TestPackageTestItems")
     src_file = joinpath(pkg_dir, "src", "testitem_all_parts.jl")
     content = read(src_file, String)
     uri = filepath2uri(src_file)
@@ -262,7 +262,7 @@ end
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
     using JuliaWorkspaces.URIs2: filepath2uri
 
-    src_file = joinpath(@__DIR__, "data", "not_a_package", "testitem_outside_pkg.jl")
+    src_file = joinpath(@__DIR__, "..", "testdata", "not_a_package", "testitem_outside_pkg.jl")
     content = read(src_file, String)
     uri = filepath2uri(src_file)
 
@@ -284,7 +284,7 @@ end
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
     using JuliaWorkspaces.URIs2: filepath2uri
 
-    src_file = joinpath(@__DIR__, "data", "not_a_package", "testmodule_outside_pkg.jl")
+    src_file = joinpath(@__DIR__, "..", "testdata", "not_a_package", "testmodule_outside_pkg.jl")
     content = read(src_file, String)
     uri = filepath2uri(src_file)
 
@@ -388,7 +388,7 @@ end
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
     using JuliaWorkspaces.URIs2: filepath2uri
 
-    pkg_dir = joinpath(@__DIR__, "data", "TestPackageTestItems")
+    pkg_dir = joinpath(@__DIR__, "..", "testdata", "TestPackageTestItems")
     src_file = joinpath(pkg_dir, "src", "testmodule_all_correct.jl")
     content = read(src_file, String)
     uri = filepath2uri(src_file)
@@ -415,7 +415,7 @@ end
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
     using JuliaWorkspaces.URIs2: filepath2uri
 
-    pkg_dir = joinpath(@__DIR__, "data", "TestPackageTestItems")
+    pkg_dir = joinpath(@__DIR__, "..", "testdata", "TestPackageTestItems")
     src_file = joinpath(pkg_dir, "src", "testsnippet_all_correct.jl")
     content = read(src_file, String)
     uri = filepath2uri(src_file)
@@ -471,7 +471,7 @@ end
     using JuliaWorkspaces: JuliaWorkspace
     using JuliaWorkspaces.URIs2: filepath2uri
 
-    pkg_dir = joinpath(@__DIR__, "data", "TestPackageTestItems")
+    pkg_dir = joinpath(@__DIR__, "..", "testdata", "TestPackageTestItems")
     src_file = joinpath(pkg_dir, "src", "module_behind_docstring.jl")
     content = read(src_file, String)
     uri = filepath2uri(src_file)
