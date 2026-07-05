@@ -63,6 +63,39 @@ Salsa.@derived function derived_all_julia_files(rt)
     return all_files
 end
 
+"""
+    derived_include_closure(rt, uri)
+
+The transitive include closure of `uri` (including `uri` itself): every file
+reachable from `uri` through `include(...)` edges whose content is available.
+This is the set of files a semantic pass starting at `uri` can traverse, and the
+only files whose lint state a root rooted at `uri` ever depends on.
+
+Built by BFS over the per-file, value-stable `derived_includes`, so it depends
+only on the include structure of files *within* the closure — an edit to a file
+outside the closure never invalidates it. Files without content (unresolved or
+missing include targets) are skipped, matching `derived_all_julia_files`. The
+visited set makes self- and cyclic includes terminate.
+"""
+Salsa.@derived function derived_include_closure(rt, uri)
+    @debug "derived_include_closure" uri=uri
+
+    closure = Set{URI}([uri])
+    queue = URI[uri]
+
+    while !isempty(queue)
+        current = popfirst!(queue)
+
+        for included in derived_includes(rt, current)
+            included in closure && continue
+            derived_text_file_content(rt, included) === nothing && continue
+            push!(closure, included)
+            push!(queue, included)
+        end
+    end
+
+    return closure
+end
 
 """
     derived_indirect_files(rt)

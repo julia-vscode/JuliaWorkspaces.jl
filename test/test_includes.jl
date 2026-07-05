@@ -187,3 +187,104 @@ end
     @test JuliaWorkspaces.derived_includes(rt, self_uri) == Set([self_uri])
     @test get_diagnostic(jw, self_uri) isa Vector
 end
+
+@testitem "include closure: transitive members and out-of-closure exclusion" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///inclclosure/src/Pkg.jl")
+    a_uri = URI("file:///inclclosure/src/a.jl")
+    b_uri = URI("file:///inclclosure/src/b.jl")
+    other_uri = URI("file:///inclclosure/src/other.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\ninclude(\"a.jl\")\nend", "julia")))
+    add_file!(jw, TextFile(a_uri, SourceText("include(\"b.jl\")", "julia")))
+    add_file!(jw, TextFile(b_uri, SourceText("g() = 2", "julia")))
+    add_file!(jw, TextFile(other_uri, SourceText("h() = 3", "julia")))
+
+    rt = jw.runtime
+    # The closure spans the transitive include tree, and excludes unrelated files.
+    @test JuliaWorkspaces.derived_include_closure(rt, root_uri) == Set([root_uri, a_uri, b_uri])
+    @test !(other_uri in JuliaWorkspaces.derived_include_closure(rt, root_uri))
+    @test JuliaWorkspaces.derived_include_closure(rt, other_uri) == Set([other_uri])
+
+    # A self-include must terminate.
+    self_uri = URI("file:///inclclosure/src/selfinc.jl")
+    add_file!(jw, TextFile(self_uri, SourceText("include(\"selfinc.jl\")", "julia")))
+    @test JuliaWorkspaces.derived_include_closure(rt, self_uri) == Set([self_uri])
+end
+
+@testitem "diagnostics: include cycle inside a project terminates and is reported" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "InclCycle"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee88"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    root_uri = URI("file:///inclcycleproj/src/InclCycle.jl")
+    a_uri = URI("file:///inclcycleproj/src/a.jl")
+    b_uri = URI("file:///inclcycleproj/src/b.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///inclcycleproj/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///inclcycleproj/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("module InclCycle\ninclude(\"a.jl\")\nend", "julia")))
+    add_file!(jw, TextFile(a_uri, SourceText("include(\"b.jl\")", "julia")))
+    add_file!(jw, TextFile(b_uri, SourceText("include(\"a.jl\")", "julia")))
+
+    # With the old global diagnostics walk (no visited set) this looped forever
+    # for a project root. It must terminate and report the recursive include.
+    diags = get_diagnostic(jw, root_uri)
+    @test diags isa Vector
+
+    all_diags = get_diagnostics(jw)
+    @test all_diags isa AbstractDict
+    @test any(d -> contains(d.message, "Circular"), [d for (_, ds) in all_diags for d in ds])
+end
+
+@testitem "diagnostics: shared included file is deduplicated across roots" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "InclShared"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee99"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    a_uri = URI("file:///inclshared/src/a.jl")
+    b_uri = URI("file:///inclshared/src/b.jl")
+    shared_uri = URI("file:///inclshared/src/shared.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///inclshared/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///inclshared/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    # Two independent roots both include the same file.
+    add_file!(jw, TextFile(a_uri, SourceText("include(\"shared.jl\")", "julia")))
+    add_file!(jw, TextFile(b_uri, SourceText("include(\"shared.jl\")", "julia")))
+    add_file!(jw, TextFile(shared_uri, SourceText("foo() = undefined_symbol", "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    rt = jw.runtime
+    # shared.jl is reached from both roots.
+    @test JuliaWorkspaces.derived_roots_for_uri(rt, shared_uri) == Set([a_uri, b_uri])
+
+    # The missing-reference diagnostic must appear exactly once despite two roots.
+    diags = get_diagnostic(jw, shared_uri)
+    @test count(d -> contains(d.message, "Missing reference: undefined_symbol"), diags) == 1
+end
