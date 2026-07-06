@@ -105,6 +105,16 @@ end
         "global x = 1",
         "local x = 1",
         "mutable struct A\n    const x::Int\nend",
+        # `;` width folds onto the rightmost leaf (often trivia) of the
+        # preceding sibling, not its last positional arg
+        "f(g(a; b=1); c=2)",
+        "f(a, g(b; c=1); d=2)",
+        "f((a); b=1)",
+        "f([a]; b=1)",
+        "f(a[1]; b=1)",
+        # explicit begin-block bodies are not wrapped a second time
+        "x -> begin x end",
+        "f() = begin x end",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end

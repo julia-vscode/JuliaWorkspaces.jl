@@ -2,15 +2,25 @@ mutable struct Cursor
     leaves::Vector{Leaf}
     i::Int
     src::String
+    # EXPR built for each consumed leaf (last leaf only for merged quotes);
+    # lets forms locate the rightmost leaf of an already-assembled sibling.
+    terminals::Vector{Union{Nothing,EXPR}}
+    # leaf range consumed by each kid of the node currently in assemble_form
+    kid_ranges::Vector{UnitRange{Int}}
 end
+
+Cursor(leaves::Vector{Leaf}, i::Int, src::String) =
+    Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[])
 
 const UNHANDLED_KINDS = Set{Kind}()
 
 function assemble(node::GreenNode, cur::Cursor)::EXPR
     if !haschildren(node)
         leaf = cur.leaves[cur.i]
+        ex = terminal_expr(leaf, cur.src)
+        cur.terminals[cur.i] = ex
         cur.i += 1
-        return terminal_expr(leaf, cur.src)
+        return ex
     end
     k0 = kind(node)
     if k0 == K"string" || k0 == K"char"
@@ -18,17 +28,22 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         # the green tree, but CSTParser sees one STRING/CHAR token; consume
         # the whole run via the cursor instead of descending into children.
         expr, next_i = merge_quoted(cur.leaves, cur.i, cur.src)
+        cur.terminals[next_i - 1] = expr
         cur.i = next_i
         return expr
     end
     first_i = cur.i
     kids = EXPR[]
     kkinds = Kind[]
+    ranges = UnitRange{Int}[]
     for c in children(node)
         is_ws_trivia(kind(c)) && continue
+        s = cur.i
         push!(kids, assemble(c, cur))
         push!(kkinds, kind(c))
+        push!(ranges, s:cur.i-1)
     end
+    cur.kid_ranges = ranges   # inner assemble calls are done; safe to publish
     ex = assemble_form(kind(node), node, kids, kkinds, cur)
     # Spans from absolute leaf positions: independent of per-form layout.
     if cur.i > first_i
