@@ -3,16 +3,19 @@
 # triple JuliaSyntax emits for these is merged before terminal_expr ever sees
 # the content leaf in isolation (see merge_quoted below).
 const TERMINAL_HEADS = Dict{Kind,Symbol}(
-    K"Identifier" => :IDENTIFIER,
-    K"Integer"    => :INTEGER,
-    K"Float"      => :FLOAT,
-    K"HexInt"     => :HEXINT,
-    K"BinInt"     => :BININT,
-    K"OctInt"     => :OCTINT,
-    K"Char"       => :CHAR,
-    K"String"     => :STRING,
-    K"true"       => :TRUE,
-    K"false"      => :FALSE,
+    K"Identifier"      => :IDENTIFIER,
+    K"MacroName"       => :IDENTIFIER,
+    K"StringMacroName" => :IDENTIFIER,
+    K"CmdMacroName"    => :IDENTIFIER,
+    K"Integer"         => :INTEGER,
+    K"Float"           => :FLOAT,
+    K"HexInt"          => :HEXINT,
+    K"BinInt"          => :BININT,
+    K"OctInt"          => :OCTINT,
+    K"Char"            => :CHAR,
+    K"String"          => :STRING,
+    K"true"            => :TRUE,
+    K"false"           => :FALSE,
 )
 
 token_text(leaf::Leaf, source::String) = source[leaf.pos:prevind(source, leaf.pos + leaf.span)]
@@ -28,6 +31,11 @@ function terminal_expr(leaf::Leaf, source::String)
         return EXPR(Symbol(uppercase(string(k))), leaf.fullspan, leaf.span, token_text(leaf, source))
     elseif haskey(TERMINAL_HEADS, k)
         return EXPR(TERMINAL_HEADS[k], leaf.fullspan, leaf.span, token_text(leaf, source))
+    elseif JuliaSyntax.is_error(k)
+        # Zero-width diagnostic marker for a missing/unexpected token in
+        # broken code; mirrors CSTParser's errortoken so recovery keeps spans
+        # consistent instead of crashing the whole corpus file.
+        return EXPR(:errortoken, leaf.fullspan, leaf.span, token_text(leaf, source))
     else
         return EXPR(punctuation_head(k), leaf.fullspan, leaf.span, token_text(leaf, source))
     end

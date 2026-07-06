@@ -29,3 +29,25 @@ trees_equal(a::EXPR, b::EXPR) = first_tree_diff(a, b) === nothing
 
 # Compare converter output against CSTParser for the same source.
 oracle_diff(src::AbstractString) = first_tree_diff(build_cst(src), CSTParser.parse(src, true))
+
+# EXPR span bookkeeping invariants; layout-independent sanity for broken code
+# where no oracle equality is possible.
+function check_spans(x::EXPR; path::String="□")
+    x.span <= x.fullspan || return "$path: span $(x.span) > fullspan $(x.fullspan)"
+    x.args === nothing && return nothing
+    childsum = sum(c -> c.fullspan, x.args; init=0) +
+               (x.trivia === nothing ? 0 : sum(c -> c.fullspan, x.trivia; init=0)) +
+               (x.head isa EXPR ? x.head.fullspan : 0)
+    childsum == x.fullspan || return "$path: children sum $childsum != fullspan $(x.fullspan)"
+    for (i, c) in enumerate(x.args)
+        d = check_spans(c; path="$path.args[$i]")
+        d === nothing || return d
+    end
+    if x.trivia !== nothing
+        for (i, c) in enumerate(x.trivia)
+            d = check_spans(c; path="$path.trivia[$i]")
+            d === nothing || return d
+        end
+    end
+    return nothing
+end

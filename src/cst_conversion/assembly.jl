@@ -49,7 +49,7 @@ function generic_form(k::Kind, kids::Vector{EXPR}, kkinds::Vector{Kind})
     trivia = EXPR[]
     for (ex, ck) in zip(kids, kkinds)
         if JuliaSyntax.is_keyword(ck) || ex.head in (:LPAREN, :RPAREN, :COMMA,
-            :LBRACE, :RBRACE, :LSQUARE, :RSQUARE, :SEMICOLON, :AT_SIGN, :DOT)
+            :LBRACE, :RBRACE, :LSQUARE, :RSQUARE, :SEMICOLON, :ATSIGN, :DOT)
             push!(trivia, ex)
         else
             push!(args, ex)

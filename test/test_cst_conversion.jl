@@ -80,3 +80,22 @@ end
         @test CSTConversion.oracle_diff(src) === nothing
     end
 end
+
+@testitem "cst-conv: span invariants and corpus smoke" begin
+    using JuliaWorkspaces: CSTConversion
+    include(joinpath(@__DIR__, "cst_corpus.jl"))
+
+    # invariants hold on converter output for valid and broken code
+    for src in ["f(x) = x + 1", "function f(", "a +", ""]
+        ex = CSTConversion.build_cst(src)
+        @test ex.fullspan == sizeof(src)
+        @test CSTConversion.check_spans(ex) === nothing
+    end
+
+    # corpus runner runs end to end on this package's own test file
+    report = joinpath(mktempdir(), "report.md")
+    stats = CSTCorpus.run_corpus([@__FILE__]; report_path=report)
+    @test stats.total == 1
+    @test stats.errored == 0
+    @test isfile(report)
+end
