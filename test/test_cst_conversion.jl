@@ -60,3 +60,23 @@ end
         @test CSTConversion.oracle_diff(src) === nothing
     end
 end
+
+@testitem "cst-conv: core forms via oracle" begin
+    using JuliaWorkspaces: CSTConversion
+    for src in [
+        "a = 1",                 # binary syntax: op is the EXPR head
+        "a + b",                 # infix call: op moves to args[1]
+        "a + b + c",             # chained infix
+        "a * b",
+        "a == b",
+        "(a)",                   # brackets with paren trivia
+        "begin\na\nend",         # block with keyword trivia
+        "a\nb\nc",               # multi-expression file
+        "a; b",
+        "f(x)",                  # prefix call
+        "f()",
+        "f(x, y)",               # comma trivia
+    ]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end

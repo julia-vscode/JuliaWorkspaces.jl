@@ -1,0 +1,59 @@
+mutable struct Cursor
+    leaves::Vector{Leaf}
+    i::Int
+    src::String
+end
+
+const UNHANDLED_KINDS = Set{Kind}()
+
+function assemble(node::GreenNode, cur::Cursor)::EXPR
+    if !haschildren(node)
+        leaf = cur.leaves[cur.i]
+        cur.i += 1
+        return terminal_expr(leaf, cur.src)
+    end
+    k0 = kind(node)
+    if k0 == K"string" || k0 == K"char"
+        # Quoted literals are open-quote/content/close-quote leaf triples in
+        # the green tree, but CSTParser sees one STRING/CHAR token; consume
+        # the whole run via the cursor instead of descending into children.
+        expr, next_i = merge_quoted(cur.leaves, cur.i, cur.src)
+        cur.i = next_i
+        return expr
+    end
+    first_i = cur.i
+    kids = EXPR[]
+    kkinds = Kind[]
+    for c in children(node)
+        is_ws_trivia(kind(c)) && continue
+        push!(kids, assemble(c, cur))
+        push!(kkinds, kind(c))
+    end
+    ex = assemble_form(kind(node), node, kids, kkinds, cur)
+    # Spans from absolute leaf positions: independent of per-form layout.
+    if cur.i > first_i
+        first_leaf = cur.leaves[first_i]
+        last_leaf = cur.leaves[cur.i - 1]
+        ex.fullspan = (last_leaf.pos + last_leaf.fullspan) - first_leaf.pos
+        ex.span = (last_leaf.pos + last_leaf.span) - first_leaf.pos
+    end
+    return ex
+end
+
+# Fallback: args = non-token children in source order, tokens into trivia.
+# Wrong layout for anything CSTParser consumers pattern-match, but keeps the
+# corpus runner alive and counts what still needs a real rule.
+function generic_form(k::Kind, kids::Vector{EXPR}, kkinds::Vector{Kind})
+    push!(UNHANDLED_KINDS, k)
+    args = EXPR[]
+    trivia = EXPR[]
+    for (ex, ck) in zip(kids, kkinds)
+        if JuliaSyntax.is_keyword(ck) || ex.head in (:LPAREN, :RPAREN, :COMMA,
+            :LBRACE, :RBRACE, :LSQUARE, :RSQUARE, :SEMICOLON, :AT_SIGN, :DOT)
+            push!(trivia, ex)
+        else
+            push!(args, ex)
+        end
+    end
+    EXPR(Symbol(lowercase(string(k))), args, trivia, 0, 0)
+end

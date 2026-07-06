@@ -42,6 +42,7 @@ const PUNCTUATION_HEADS = Dict{Kind,Symbol}(
     K"{" => :LBRACE,   K"}" => :RBRACE,
     K"," => :COMMA,
     K"@" => :ATSIGN,   K"." => :DOT,
+    K";" => :SEMICOLON,
 )
 punctuation_head(k::Kind) = PUNCTUATION_HEADS[k]
 
@@ -73,22 +74,4 @@ function merge_quoted(leaves::Vector{Leaf}, i::Int, source::String)
         val = source[open.pos:prevind(source, close.pos + close.span)]
         return EXPR(:CHAR, fullspan, span, val), j + 1
     end
-end
-
-# Converts a flat leaf run into EXPRs, merging quote-delimited literals.
-function terminal_exprs(leaves::Vector{Leaf}, source::String)
-    exprs = EXPR[]
-    i = 1
-    n = length(leaves)
-    while i <= n
-        leaf = leaves[i]
-        if leaf.kind == K"\"" || leaf.kind == K"'"
-            expr, i = merge_quoted(leaves, i, source)
-            push!(exprs, expr)
-        else
-            push!(exprs, terminal_expr(leaf, source))
-            i += 1
-        end
-    end
-    return exprs
 end
