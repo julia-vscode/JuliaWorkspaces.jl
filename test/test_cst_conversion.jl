@@ -55,7 +55,8 @@ end
 @testitem "cst-conv: terminals via oracle" begin
     using JuliaWorkspaces: CSTConversion
     for src in ["x", "1", "1.5", "0x1f", "0b101", "0o17", "true", "false",
-                "'a'", "\"str\"", "x ", "  x", "# only a comment", ""]
+                "'a'", "\"str\"", "\"a\\nb\"", "\"\\t\"", "\"\\\\\"", "\"\\\"\"",
+                "x ", "  x", "# only a comment", ""]
         @test CSTConversion.oracle_diff(src) === nothing
     end
 end

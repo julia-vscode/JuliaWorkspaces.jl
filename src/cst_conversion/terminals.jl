@@ -62,8 +62,13 @@ function merge_quoted(leaves::Vector{Leaf}, i::Int, source::String)
     fullspan = close.pos - open.pos + close.fullspan
     span = close.pos - open.pos + close.span
     if open.kind == K"\""
-        val = content === nothing ? "" : token_text(content, source)
-        return EXPR(:STRING, fullspan, span, val), j + 1
+        # CSTParser stores unescaped content (parse_string_or_cmd runs
+        # _rm_escaped_newlines + _unescape_string_expr); reuse its routines.
+        expr = EXPR(:STRING, fullspan, span,
+                    content === nothing ? "" : token_text(content, source))
+        CSTParser._rm_escaped_newlines(expr)
+        CSTParser._unescape_string_expr(expr)
+        return expr, j + 1
     else # K"'"
         val = source[open.pos:prevind(source, close.pos + close.span)]
         return EXPR(:CHAR, fullspan, span, val), j + 1
