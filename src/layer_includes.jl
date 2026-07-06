@@ -1,57 +1,99 @@
-Salsa.@derived function derived_all_includes(rt)
-    @debug "derived_all_includes"
+"""
+    derived_file_include_data(rt, uri)
 
+Single fused include analysis for one file, memoised per URI. Runs one CST walk
+that produces all three include products at once:
+
+  - `edges` — the file's resolved include-graph edges,
+  - `include_dict` — `objectid`→target map for the semantic pass, and
+  - `records` — `(offset, span, target)` tuples for include diagnostics.
+
+The three are exposed through the thin selectors below. Keeping the selectors
+separate is what preserves Salsa's early-exit: `include_dict` churns on every
+reparse (objectids are fresh), but `derived_includes` /
+`derived_file_include_records` back-date whenever the edges/records compare equal.
+"""
+Salsa.@derived function derived_file_include_data(rt, uri)
+    @debug "derived_file_include_data" uri=uri
+
+    tf = derived_text_file_content(rt, uri)
+    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing}}[])
+
+    cst = derived_julia_legacy_syntax_tree(rt, uri)
+
+    # `file_path` may be `nothing` (an unsaved buffer): absolute include paths
+    # still resolve, relative ones come back as `nothing` targets.
+    file_path = uri2filepath(uri)
+
+    return StaticLint.collect_include_analysis(cst, file_path)
+end
+
+Salsa.@derived function derived_includes(rt, uri)
+    return derived_file_include_data(rt, uri).edges
+end
+
+Salsa.@derived function derived_include_dict(rt, uri)
+    return derived_file_include_data(rt, uri).include_dict
+end
+
+Salsa.@derived function derived_all_julia_files(rt)
     files_to_check = copy(derived_julia_files(rt))
-    uri2included = Dict{URI,Set{URI}}()
 
-    include_dict = Dict{UInt64, URI}()
+    all_files = Set{URI}()
 
     while !isempty(files_to_check)
         uri = first(files_to_check)
         delete!(files_to_check, uri)
-        uri2included[uri] = Set{URI}()
+        
+        push!(all_files, uri)
 
-        cst = derived_julia_legacy_syntax_tree(rt, uri)
-        state = StaticLint.IncludeOnly(uri, include_dict, rt)
-        StaticLint.process_EXPR(cst, state)
+        included_files = derived_includes(rt, uri)
 
-        for included_file in state.included_files
-            tf = derived_text_file_content(rt, included_file)
-            if tf === nothing
+        for included_file in included_files
+            if !derived_has_content(rt, included_file)
                 continue
             end
-            if !haskey(uri2included, included_file) && !(included_file in files_to_check)
+            if !(included_file in all_files) && !(included_file in files_to_check)
                 push!(files_to_check, included_file)
             end
-            push!(uri2included[uri], included_file)
         end
-    end
-
-    return uri2included, include_dict
-end
-
-Salsa.@derived function derived_includes(rt, uri)
-    uri2includ, _ = derived_all_includes(rt)
-
-    return uri2includ[uri]
-end
-
-Salsa.@derived function derived_all_julia_files(rt)
-    uri2included, _ = derived_all_includes(rt)
-
-    all_files = Set{URI}()
-
-    for (uri, included) in uri2included
-        push!(all_files, uri)
     end
 
     return all_files
 end
 
-Salsa.@derived function derived_include_dict(rt)
-    _, include_dict = derived_all_includes(rt)
+"""
+    derived_include_closure(rt, uri)
 
-    return include_dict
+The transitive include closure of `uri` (including `uri` itself): every file
+reachable from `uri` through `include(...)` edges whose content is available.
+This is the set of files a semantic pass starting at `uri` can traverse, and the
+only files whose lint state a root rooted at `uri` ever depends on.
+
+Built by BFS over the per-file, value-stable `derived_includes`, so it depends
+only on the include structure of files *within* the closure — an edit to a file
+outside the closure never invalidates it. Files without content (unresolved or
+missing include targets) are skipped, matching `derived_all_julia_files`. The
+visited set makes self- and cyclic includes terminate.
+"""
+Salsa.@derived function derived_include_closure(rt, uri)
+    @debug "derived_include_closure" uri=uri
+
+    closure = Set{URI}([uri])
+    queue = URI[uri]
+
+    while !isempty(queue)
+        current = popfirst!(queue)
+
+        for included in derived_includes(rt, current)
+            included in closure && continue
+            derived_has_content(rt, included) || continue
+            push!(closure, included)
+            push!(queue, included)
+        end
+    end
+
+    return closure
 end
 
 """
@@ -62,9 +104,9 @@ files — i.e. files reached only via `include(...)` traversal whose content was
 loaded through the lazy `input_indirect_text_file` input.
 """
 Salsa.@derived function derived_indirect_files(rt)
-    uri2included, _ = derived_all_includes(rt)
+    all_files = derived_all_julia_files(rt)
 
-    return Set{URI}(uri for uri in keys(uri2included) if !derived_has_file(rt, uri))
+    return Set{URI}(uri for uri in all_files if !derived_has_file(rt, uri))
 end
 
 Salsa.@derived function derived_is_indirect_file(rt, uri)
@@ -74,17 +116,17 @@ end
 Salsa.@derived function derived_roots(rt)
     @debug "derived_roots"
 
-    uri2included, include_dict = derived_all_includes(rt)
+    all_files = derived_all_julia_files(rt)
 
     all_files_included_somewhere = Set{URI}()
 
-    for uri in keys(uri2included)
-        for included_uri in uri2included[uri]
+    for uri in all_files
+        for included_uri in derived_includes(rt, uri)
             push!(all_files_included_somewhere, included_uri)
         end
     end
 
-    roots = setdiff(keys(uri2included), all_files_included_somewhere)
+    roots = setdiff(all_files, all_files_included_somewhere)
 
     return roots
 end
@@ -98,7 +140,6 @@ If `uri` is itself a root, it will be included in the result.
 Salsa.@derived function derived_roots_for_uri(rt, uri)
     @debug "derived_roots_for_uri" uri=uri
 
-    uri2included, _ = derived_all_includes(rt)
     roots = derived_roots(rt)
 
     result = Set{URI}()
@@ -117,8 +158,7 @@ Salsa.@derived function derived_roots_for_uri(rt, uri)
             current = popfirst!(queue)
             current in visited && continue
             push!(visited, current)
-            if haskey(uri2included, current)
-                for inc in uri2included[current]
+                for inc in derived_includes(rt, current)
                     if inc == uri
                         found = true
                         break
@@ -127,7 +167,6 @@ Salsa.@derived function derived_roots_for_uri(rt, uri)
                         push!(queue, inc)
                     end
                 end
-            end
         end
 
         if found
@@ -169,17 +208,7 @@ in source order, which the include-graph diagnostics rely on to flag the
 *repeated* `include` rather than the first one.
 """
 Salsa.@derived function derived_file_include_records(rt, uri)
-    @debug "derived_file_include_records" uri=uri
-
-    tf = derived_text_file_content(rt, uri)
-    tf === nothing && return Tuple{Int,Int,Union{URI,Nothing}}[]
-
-    file_path = uri2filepath(uri)
-    file_path === nothing && return Tuple{Int,Int,Union{URI,Nothing}}[]
-
-    cst = derived_julia_legacy_syntax_tree(rt, uri)
-
-    return StaticLint.collect_include_calls(cst, file_path)
+    return derived_file_include_data(rt, uri).records
 end
 
 function _include_diagnostic(offset, span, code)

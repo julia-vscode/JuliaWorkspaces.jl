@@ -2,6 +2,7 @@ module StaticLint
 
 import ..derived_has_file
 import ..derived_julia_legacy_syntax_tree
+import ..derived_include_dict
 
 function hasfile end
 
@@ -104,14 +105,13 @@ mutable struct Toplevel{RT} <: TraverseState
     self_package_name::Union{Nothing,String}
     flags::Int
     meta_dict::Dict{UInt64,Meta}
-    include_dict::Dict{UInt64,URI}
     runtime::RT
 end
 
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
-Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, include_dict, runtime) =
-    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, 0, meta_dict, include_dict, runtime)
+Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, runtime) =
+    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, 0, meta_dict, runtime)
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -229,9 +229,9 @@ end
 
 Performs a semantic pass across a project from the entry point `file`. A first pass traverses the top-level scope after which secondary passes handle delayed scopes (e.g. functions). These secondary passes can be, optionally, very light and only seek to resovle references (e.g. link symbols to bindings). This can be done by supplying a list of expressions on which the full secondary pass should be made (`modified_expr`), all others will receive the light-touch version.
 """
-function semantic_pass(uri, cst, env, meta_dict, include_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing)
+function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing)
     setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
-    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, 0, meta_dict, include_dict, rt)
+    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, 0, meta_dict, rt)
     process_EXPR(cst, state)
     unique!(state.delayed)
     for x in state.delayed
@@ -290,7 +290,7 @@ If this is successful it traverses the code associated with the loaded file.
 function followinclude(x, state::Toplevel)
     meta_dict = state.meta_dict
     rt = state.runtime
-    include_dict = state.include_dict
+    include_dict = derived_include_dict(state.runtime, state.uri)
 
     if !haskey(include_dict, objectid(x))
         return

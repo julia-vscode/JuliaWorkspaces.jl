@@ -24,10 +24,10 @@ include("sourcetext.jl")
 include("inputs.jl")
 include("layer_files.jl")
 include("layer_syntax_trees.jl")
+include("layer_includes.jl")
 
 include("StaticLint/StaticLint.jl")
 
-include("layer_includes.jl")
 include("layer_static_lint.jl")
 include("layer_projects.jl")
 include("layer_environment.jl")
