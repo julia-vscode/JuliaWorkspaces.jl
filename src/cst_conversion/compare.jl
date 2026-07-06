@@ -39,6 +39,10 @@ function check_spans(x::EXPR; path::String="□")
                (x.trivia === nothing ? 0 : sum(c -> c.fullspan, x.trivia; init=0)) +
                (x.head isa EXPR ? x.head.fullspan : 0)
     childsum == x.fullspan || return "$path: children sum $childsum != fullspan $(x.fullspan)"
+    if x.head isa EXPR
+        d = check_spans(x.head; path="$path.head")
+        d === nothing || return d
+    end
     for (i, c) in enumerate(x.args)
         d = check_spans(c; path="$path.args[$i]")
         d === nothing || return d

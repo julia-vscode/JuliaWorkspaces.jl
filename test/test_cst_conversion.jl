@@ -81,6 +81,35 @@ end
     end
 end
 
+@testitem "cst-conv: definitions via oracle" begin
+    using JuliaWorkspaces: CSTConversion
+    for src in [
+        "function f() end",
+        "function f(x, y=1; z) x end",
+        "function f(x::Int)::Int x end",
+        "f(x) = x",
+        "x -> x + 1",
+        "function (x) x end",
+        "struct A end",
+        "struct A{T} <: B\n    x::T\nend",
+        "mutable struct A x end",
+        "abstract type A end",
+        "abstract type A{T} <: B end",
+        "primitive type A 8 end",
+        "macro m(x) x end",
+        "module A\nf() = 1\nend",
+        "baremodule A end",
+        "f(x::T) where T = x",
+        "f(x::T) where {T <: Number} = x",
+        "const x = 1",
+        "global x = 1",
+        "local x = 1",
+        "mutable struct A\n    const x::Int\nend",
+    ]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end
+
 @testitem "cst-conv: span invariants and corpus smoke" begin
     using JuliaWorkspaces: CSTConversion
     include(joinpath(@__DIR__, "cst_corpus.jl"))
