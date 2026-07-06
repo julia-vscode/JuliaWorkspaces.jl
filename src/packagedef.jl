@@ -23,6 +23,7 @@ include("types.jl")
 include("sourcetext.jl")
 include("inputs.jl")
 include("layer_files.jl")
+include("cst_conversion/CSTConversion.jl")
 include("layer_syntax_trees.jl")
 include("layer_includes.jl")
 
