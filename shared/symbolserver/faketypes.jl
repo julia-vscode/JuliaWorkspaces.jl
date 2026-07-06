@@ -21,11 +21,12 @@ end
 # signatures whose `where`-bounded `Union`s reach tens of thousands of nodes —
 # which unbounded would produce multi-gigabyte caches that exhaust memory on
 # read. To prevent that, `budget` caps how many `DataType`s are expanded while
-# building one type: once it is spent the remaining parameters are dropped,
-# keeping only their names. The limit sits far above any ordinary type, so only
-# these outliers are truncated; the serializer's own MAX_DEPTH guard is a
-# separate cycle check, not a size bound.
-const MAX_EXPANDED_TYPES = 128
+# building one type: once it is spent, a type keeps only its name and a single
+# `Unserializable` parameter marking the aborted expansion (displayed as `…`,
+# same sentinel the cache writer uses). The limit sits far above any ordinary
+# type, so only these outliers are truncated; the serializer's own MAX_DEPTH
+# guard is a separate cycle check, not a size bound.
+const MAX_EXPANDED_TYPES = 256
 
 mutable struct ExpandBudget
     remaining::Int
@@ -39,11 +40,15 @@ function FakeTypeName(@nospecialize(x), budget::ExpandBudget=ExpandBudget())
     if x isa DataType
         xname = x.name
         ft = FakeTypeName(VarRef(VarRef(xname.module), xname.name), [])
-        if budget.remaining > 0
+        if isempty(x.parameters)
+            # leaf type, nothing to expand
+        elseif budget.remaining > 0
             budget.remaining -= 1
             for p in x.parameters
                 push!(ft.parameters, _parameter(p, budget))
             end
+        else
+            push!(ft.parameters, Unserializable())
         end
         ft
     elseif x isa Union

@@ -87,6 +87,9 @@ end
 function _write(io, x::Nothing, depth::Int)
     Base.write(io, NothingHeader)
 end
+function _write(io, x::Unserializable, depth::Int)
+    Base.write(io, UnserializableHeader)
+end
 function _write(io, x::Char, depth::Int)
     Base.write(io, CharHeader)
     Base.write(io, UInt32(x))
