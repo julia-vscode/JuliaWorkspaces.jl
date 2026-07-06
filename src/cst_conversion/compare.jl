@@ -26,3 +26,6 @@ function first_tree_diff(a::EXPR, b::EXPR; path::String="□")
 end
 
 trees_equal(a::EXPR, b::EXPR) = first_tree_diff(a, b) === nothing
+
+# Compare converter output against CSTParser for the same source.
+oracle_diff(src::AbstractString) = first_tree_diff(build_cst(src), CSTParser.parse(src, true))
