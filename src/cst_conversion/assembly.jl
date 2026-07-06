@@ -7,10 +7,13 @@ mutable struct Cursor
     terminals::Vector{Union{Nothing,EXPR}}
     # leaf range consumed by each kid of the node currently in assemble_form
     kid_ranges::Vector{UnitRange{Int}}
+    # width the current form excluded from its own leading edge (folded onto
+    # a preceding leaf instead); assemble subtracts it from the node's spans
+    trim::Int
 end
 
 Cursor(leaves::Vector{Leaf}, i::Int, src::String) =
-    Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[])
+    Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[], 0)
 
 const UNHANDLED_KINDS = Set{Kind}()
 
@@ -51,6 +54,11 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         last_leaf = cur.leaves[cur.i - 1]
         ex.fullspan = (last_leaf.pos + last_leaf.fullspan) - first_leaf.pos
         ex.span = (last_leaf.pos + last_leaf.span) - first_leaf.pos
+    end
+    if cur.trim != 0
+        ex.fullspan -= cur.trim
+        ex.span = max(ex.span - cur.trim, 0)
+        cur.trim = 0
     end
     return ex
 end

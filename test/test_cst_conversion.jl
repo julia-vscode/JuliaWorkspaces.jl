@@ -115,6 +115,13 @@ end
         # explicit begin-block bodies are not wrapped a second time
         "x -> begin x end",
         "f() = begin x end",
+        # sibling `;` groups nest recursively; empty groups get nothing trivia
+        "f(a; b; c)",
+        "f(;)",
+        "f(x;)",
+        # toplevel `;` width lands on the preceding statement's rightmost leaf
+        "f(); b",
+        "g(); h()",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
@@ -131,10 +138,27 @@ end
         @test CSTConversion.check_spans(ex) === nothing
     end
 
+    # `;` width must land somewhere even under parent forms whose oracle
+    # layout isn't implemented yet — sums have to stay balanced regardless
+    for src in ["(; a=1)", "f.(x; y=1)", "@m(x; y=1)", "T{a; b}"]
+        @test CSTConversion.check_spans(CSTConversion.build_cst(src)) === nothing
+    end
+
     # corpus runner runs end to end on this package's own test file
     report = joinpath(mktempdir(), "report.md")
     stats = CSTCorpus.run_corpus([@__FILE__]; report_path=report)
     @test stats.total == 1
     @test stats.errored == 0
     @test isfile(report)
+
+    # invariant sweep: every src/ file the converter can parse must satisfy
+    # check_spans, whatever its oracle-diff status
+    for f in CSTCorpus.julia_files(normpath(joinpath(@__DIR__, "..", "src")))
+        ex = try
+            CSTConversion.build_cst(read(f, String))
+        catch
+            continue   # converter errors are tracked by the corpus report
+        end
+        @test (f, CSTConversion.check_spans(ex)) == (f, nothing)
+    end
 end

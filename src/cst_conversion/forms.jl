@@ -3,39 +3,51 @@
 # (same leaf spans, just relabeled) into CSTParser's kw shape.
 to_kw(ex::EXPR) = EXPR(:kw, ex.args, EXPR[ex.head], ex.fullspan, ex.span)
 
-# The oracle excludes a parameters group's leading `;` (plus its trailing
-# whitespace) from the parameters node entirely: the width folds onto the
-# rightmost LEAF before the `;` in source — often a closing paren/bracket
-# living in trivia, so walking args can't find it — and onto every ancestor
-# of that leaf up to (and including) the preceding sibling's root. The leaf
-# is located by position via the cursor's terminals map; the ancestors via
-# its parent chain, which ends exactly at the sibling root because the
-# enclosing node isn't constructed yet. Only fullspans grow, never spans.
-function fold_params_semi!(params::EXPR, kid_idx::Int, cur::Cursor)
-    semi_i = first(cur.kid_ranges[kid_idx])
-    semi_i > 1 || return
-    semi = cur.leaves[semi_i]
-    semi.kind == K";" || return
-    node = cur.terminals[semi_i - 1]
-    node === nothing && return
+# Fold `width` onto the leaf at absolute leaf index `i` — often a trivia
+# token like a closing paren/bracket, so args-walking can't find it — and
+# onto every ancestor of that leaf via the parent chain, which ends exactly
+# at the leaf's currently-unattached subtree root (enclosing nodes are not
+# constructed yet). Only fullspans grow, never spans. Returns false when no
+# EXPR exists for that leaf.
+function widen_at_leaf!(cur::Cursor, i::Int, width::Int)
+    node = i >= 1 ? cur.terminals[i] : nothing
+    node === nothing && return false
     while node !== nothing
-        node.fullspan += semi.fullspan
+        node.fullspan += width
         node = node.parent
     end
-    params.fullspan -= semi.fullspan
-    params.span -= semi.fullspan
+    return true
+end
+
+# Sibling `;` groups nest recursively: for `f(a; b; c)` the oracle stores
+# the c-group inside the b-group at args[1]. Spans follow CSTParser's
+# update_span convention — span measured to the last STORED arg, which
+# after the relocation is not the source-last child.
+function merge_params!(groups::Vector{EXPR})
+    for i in length(groups)-1:-1:1
+        outer, inner = groups[i], groups[i+1]
+        insert!(outer.args, 1, inner)
+        CSTParser.setparent!(inner, outer)
+        outer.fullspan += inner.fullspan
+        lastarg = outer.args[end]
+        outer.span = outer.fullspan - (lastarg.fullspan - lastarg.span)
+    end
+    return groups[1]
 end
 
 function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vector{Kind}, cur::Cursor)::EXPR
     if k == K"toplevel"
         # Both the file root and semicolon-joined statement sequences share
         # this kind (build_cst renames the root's head to :file afterward).
-        # Bare `;` separators are dropped entirely; their width is folded
-        # into the preceding statement's fullspan, oracle-style.
+        # Bare `;` separators are dropped entirely; their width folds onto
+        # the rightmost leaf of the preceding statement (and that leaf's
+        # ancestors), oracle-style.
         args = EXPR[]
-        for (ex, ck) in zip(kids, kkinds)
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ck == K";"
-                isempty(args) || (args[end].fullspan += ex.fullspan)
+                semi_i = first(cur.kid_ranges[j])
+                widen_at_leaf!(cur, semi_i - 1, ex.fullspan) ||
+                    (isempty(args) || (args[end].fullspan += ex.fullspan))
             else
                 push!(args, ex)
             end
@@ -61,31 +73,36 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # right after the callee; `a=b` positional args become `:kw`.
         args = EXPR[]
         trivia = EXPR[]
-        params = nothing
-        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+        groups = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
             if ck == K"(" || ck == K")" || ck == K","
                 push!(trivia, ex)
             elseif ck == K"parameters"
-                fold_params_semi!(ex, j, cur)
-                params = ex
+                push!(groups, ex)
             elseif ck == K"="
                 push!(args, to_kw(ex))
             else
                 push!(args, ex)
             end
         end
-        params === nothing || insert!(args, 2, params)
+        isempty(groups) || insert!(args, 2, merge_params!(groups))
         return EXPR(:call, args, trivia, 0, 0)
     elseif k == K"parameters"
         # `; z, w=1` after a call's semicolon → (:parameters, [z, kw(w=1)], trivia=[,]).
-        # The leading `;` is dropped entirely (not even trivia); its width
-        # is folded onto the preceding leaf by the K"call" branch via
-        # fold_params_semi!, the only place that leaf is reachable.
+        # The `;` is dropped entirely (not even trivia); its width folds
+        # onto the leaf preceding it, whichever parent the group sits under,
+        # and the leading `;`'s width is trimmed from this node's own spans.
+        # An all-empty group (`f(;)`) has trivia === nothing, not EXPR[].
         args = EXPR[]
         trivia = EXPR[]
-        for (ex, ck) in zip(kids, kkinds)
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ck == K";"
-                continue
+                semi_i = first(cur.kid_ranges[j])
+                if widen_at_leaf!(cur, semi_i - 1, ex.fullspan)
+                    j == 1 && (cur.trim += ex.fullspan)
+                else
+                    push!(trivia, ex)   # nothing precedes; keep sums balanced
+                end
             elseif ck == K","
                 push!(trivia, ex)
             elseif ck == K"="
@@ -94,7 +111,8 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(args, ex)
             end
         end
-        return EXPR(:parameters, args, trivia, 0, 0)
+        return EXPR(:parameters, args,
+                    isempty(args) && isempty(trivia) ? nothing : trivia, 0, 0)
     elseif (k == K"=" || k == K"->") && length(kids) == 3
         # binary syntax: operator EXPR becomes the head. Short-form function
         # defs (`f(x) = ...`, `f(x::T) where T = ...`) and `->` bodies wrap
