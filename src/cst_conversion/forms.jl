@@ -14,11 +14,13 @@ function widen_at_leaf!(cur::Cursor, i::Int, width::Int)
     node === nothing && return false
     while node !== nothing
         # A node whose LAST arg is a zero-width marker (e.g. a bare `@m`
-        # macrocall's NOTHING) measures span to fullspan; a `;` folded onto
-        # it extends span too. Every other node keeps the `;` as excluded
-        # trailing width (span measures to the last real leaf/arg).
+        # macrocall's NOTHING) AND which has no trailing trivia measures span
+        # to fullspan; a `;` folded onto it extends span too. A node ending in
+        # trailing trivia (e.g. a `try ... end`, span measured to END) keeps
+        # the `;` as excluded trailing width even with an empty last arg.
         grow = node.args !== nothing && !isempty(node.args) &&
-               node.args[end].fullspan == 0 && node.span == node.fullspan
+               node.args[end].fullspan == 0 && node.span == node.fullspan &&
+               (node.trivia === nothing || isempty(node.trivia))
         node.fullspan += width
         grow && (node.span += width)
         node = node.parent
@@ -1282,6 +1284,9 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 name = ex
             end
         end
+        # A var"..." module name keeps trivia = EXPR[] (oracle-pinned; a
+        # standalone var"..." value keeps nothing).
+        name.head === :NONSTDIDENTIFIER && (name.trivia = EXPR[])
         marker = EXPR(is_bare ? :FALSE : :TRUE, 0, 0, nothing)
         return EXPR(:module, EXPR[marker, name, body], trivia, 0, 0)
     elseif k == K"const" || k == K"global" || k == K"local"

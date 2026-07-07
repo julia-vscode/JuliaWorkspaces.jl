@@ -497,6 +497,11 @@ end
         "(f(x)) = y",
         "(f(x) where T) = y",
         "(x) = y",
+        # var\"...\" as a module name keeps EXPR[] trivia
+        "module var\"#I\"\nend",
+        # one-line `try; ...; end;` in a quote: the trailing `;` after END is
+        # excluded from the try's span (END-terminated)
+        "quote try; f(); catch; false; finally; end; end",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
