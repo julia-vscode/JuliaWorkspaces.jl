@@ -128,6 +128,12 @@ input):
   stack (e.g. parsing on a dedicated task with an enlarged stack) or an
   upstream JuliaSyntax fix before the flip. Resolution: converter cannot shim
   it; flag for Task 12.
+  (Task-11.5 re-check under the vendored 1.0.2 fork: `parse!` STILL
+  overflows at the default task stack — the fork does not change this. On
+  an enlarged-stack task (`Task(f, 512*1024*1024)`) the file both parses
+  AND converts to full oracle equality (`first_tree_diff === nothing`), so
+  no tree-shape issue hides behind the overflow; an enlarged-stack parse
+  task is a verified-workable Task 12 integration fix. Entry stays open.)
 
 - **One genuinely context-dependent case** — `StaticArrays/test/broadcast.jl`
   (an `::`/`==` binding inside a macro arg that diverges only in the full
@@ -141,3 +147,22 @@ input):
   propagating through a nesting macrocall, `x = @eval M.@m(a)`], and
   `CodeTracking/test/script.jl` reduced to the statement-group split logged
   above.)
+  (Task-11.5 update: under JuliaSyntax 1.x this is no longer
+  context-dependent — it reduces to `@test @inferred(f(x))   ::T == y`
+  (whitespace before the `::`). CSTParser splits the space-separated
+  `::T == y` off as a SECOND macro arg (a prefix-`::` expression), while
+  JuliaSyntax binds the `::` to the preceding macrocall result —
+  and `Meta.parse` agrees with JuliaSyntax, so CSTParser deviates from
+  real Julia here. Genuine parser disagreement; accept drift. Without the
+  whitespace the two parsers agree and the converter matches.)
+
+## Task 11.5 (retarget to JuliaSyntax 1.x)
+
+All Task-10 entries above were re-verified under the vendored JuliaSyntax
+1.0.2 fork with the vendored CSTParser 3.5.1-DEV oracle; every reduction
+still reproduces (some corpus diff signatures shifted — e.g. the
+catch-after-finally file now surfaces as `IDENTIFIER vs FALSE` because 1.x
+emits a `Placeholder` catch-var where CSTParser errortokens the stray
+`catch` — but the root causes are unchanged). No entry dissolved; no new
+divergence was introduced by the retarget. Depot corpus: 1154/1161, the
+same six accepted-drift files plus the StackOverflow file as before.
