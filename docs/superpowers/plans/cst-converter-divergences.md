@@ -52,3 +52,42 @@ input):
   still reports `args length 1 vs 2`. This input never occurs in real
   code (a source file cannot meaningfully start with `;`); zero corpus files
   hit it. Resolution: accept drift — downstream never sees leading-`;` files.
+
+- **Suffixed comparison operators in a chain** (e.g. `a ==ᵥ b == c`) — a
+  genuine parser disagreement. JuliaSyntax classifies the suffixed `==ᵥ` as
+  comparison-precedence and emits ONE flat `K"comparison"` node
+  (`comparison[a, ==ᵥ, b, ==, c]`), whereas CSTParser does not recognise the
+  suffixed operator as comparison-class and parses right-to-left into nested
+  binary `:call`s (`(==)((==ᵥ)(a,b), c)`). Reproducing CSTParser's shape would
+  require re-deriving its operator-precedence table for arbitrary suffixed
+  unicode operators — information absent from the green tree. 1 corpus file
+  (`BlockArrays/test/test_blockindices.jl`). `check_spans` passes.
+  Resolution: accept drift.
+
+- **CSTParser is stricter than JuliaSyntax on a few malformed/edge inputs and
+  emits `:errortoken`/`:error` where JuliaSyntax accepts (or vice versa).**
+  These are inputs no valid program contains; the converter follows
+  JuliaSyntax (it has no error node to mirror). Confirmed cases, all
+  `check_spans`-clean, each in 1 corpus test file:
+  - `@async try … finally … catch e … end` — a `finally` clause BEFORE
+    `catch` (invalid order). CSTParser wraps the stray `catch` in an
+    `:errortoken`; JuliaSyntax parses the clauses in the given order.
+    (`JSONRPC/test/test_json_serialization.jl`)
+  - `@SVector[…]'` — postfix adjoint applied to a `[...]`-macrocall. CSTParser
+    wraps the whole thing in an `:errortoken`; JuliaSyntax produces the plain
+    adjoint call. (`StaticArrays/test/linalg.jl`)
+  - `\b` as a bare expression — an invalid use of `\`. CSTParser emits an
+    `:errortoken`; JuliaSyntax makes a `:call`.
+    (`BlockBandedMatrices/examples/finitedifference_2d.jl`)
+  Resolution: accept drift.
+
+- **Deep context-dependent span/arg discrepancies** (3 corpus files:
+  `StaticArrays/src/blas.jl` — `@eval`-block RHS inside a nested cartesian
+  `for (a,b) in …, (c,d) in …`; `StaticArrays/test/broadcast.jl` — a nested
+  `@testset`/`@test`/`@inferred`/`SA[…]` stack; `CodeTracking/test/script.jl`
+  — a file-level statement count off by one around a `'\n'` char literal + `;`).
+  Each fails only when embedded in its full surrounding context; every minimal
+  extraction of the construct converts identically to the oracle, and all
+  three are `check_spans`-clean. Not reduced to a fixable rule within this
+  task's budget; documented as remaining loop state rather than a claimed
+  divergence.
