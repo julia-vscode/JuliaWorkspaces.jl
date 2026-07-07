@@ -655,6 +655,15 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 call_ex = ex
             end
         end
+        # `f(x) do; body end` (no params): the empty-params tuple carries a
+        # lone `;` — CSTParser folds that onto the DO keyword and leaves an
+        # empty tuple.
+        if tuple_ex.args !== nothing && length(tuple_ex.args) == 1 &&
+           tuple_ex.args[1].head === :SEMICOLON
+            semi = tuple_ex.args[1]
+            trivia[1].fullspan += semi.fullspan   # DO keyword is trivia[1]
+            tuple_ex = EXPR(:tuple, EXPR[], EXPR[], 0, 0)
+        end
         fullspan = tuple_ex.fullspan + block_ex.fullspan
         span = fullspan - (block_ex.fullspan - block_ex.span)
         op = EXPR(:OPERATOR, 0, 0, "->")

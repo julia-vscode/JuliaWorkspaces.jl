@@ -482,6 +482,10 @@ end
         "[1 2; 3]",
         "Float64[1 2; 3]",
         "T[1 2; 3]",
+        # do-block with no params: the `;` folds onto the DO keyword
+        "f(x) do; y end",
+        "f(x) do; end",
+        "f(a) do; g(b) do; z end end",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
