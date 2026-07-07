@@ -1322,7 +1322,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             inner = args[1]
             gkw = trivia[1]
             mfs = gkw.fullspan + sum(a -> a.fullspan, inner.args; init=0)
-            modifier = EXPR(sym, inner.args, EXPR[gkw], mfs, mfs)
+            # span measured to the last inner arg (e.g. `= if … end` excludes
+            # its own trailing).
+            la = inner.args[end]
+            modifier = EXPR(sym, inner.args, EXPR[gkw], mfs, mfs - (la.fullspan - la.span))
             return EXPR(:const, EXPR[modifier], inner.trivia, 0, 0)
         end
         return EXPR(sym, args, trivia, 0, 0)

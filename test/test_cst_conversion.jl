@@ -510,6 +510,9 @@ end
         "try\nx\ncatch\ny\nelse\nz\nend",
         "try\nf()\ncatch\nfinally\nend",
         "try\nf()\ncatch E\nfinally\nend",
+        # global-const with a multi-line RHS: span measured to the last arg
+        "global const x = if a\nb\nend",
+        "const global pkgio = verbose ? y : z",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
