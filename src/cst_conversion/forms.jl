@@ -134,7 +134,9 @@ function collect_arglist(kids::Vector{EXPR}, kkinds::Vector{Kind}, open::Kind, c
             push!(trivia, ex)
         elseif ck == K"parameters"
             push!(groups, ex)
-        elseif ck == K"=" && kw
+        elseif ck == K"=" && kw && ex.head isa EXPR && ex.head.val == "="
+            # only a plain `=` kwarg converts to :kw; a dotted `.=` broadcast
+            # assignment (same green kind K"=") stays operator-headed.
             push!(args, to_kw(ex))
         else
             push!(args, ex)

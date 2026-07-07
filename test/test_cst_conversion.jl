@@ -486,6 +486,10 @@ end
         "f(x) do; y end",
         "f(x) do; end",
         "f(a) do; g(b) do; z end end",
+        # a dotted `.=` broadcast as a call arg stays operator-headed (not :kw)
+        "f(x .= y)",
+        "Matrix(C .= 2.0 .* A) ≈ B ≈ D",
+        "@m(a .= b)",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
