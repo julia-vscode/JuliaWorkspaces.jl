@@ -592,6 +592,16 @@ end
         "a ? b",
         "[1, 2",
         "module A function g() end",
+        # truncated triple-quoted docstrings: error kids inside a K"string"
+        # node must extend the content run, not double as close quotes
+        # (overlapping-chunk childsum bug found by a depot prefix sweep)
+        "\"\"\"\n\\",
+        "\"\"\"",
+        "\"\"\"\n    doc\n\n```julia\nf(\"# x\\\"",
+        "\"\"\"\n```\n\\\"",
+        # bare quote leaf under an error node (no wrapping string node)
+        "= \"",
+        "= \"abc",
     ]
         ex = CSTConversion.build_cst(src)
         @test ex isa CSTParser.EXPR

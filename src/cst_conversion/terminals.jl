@@ -66,9 +66,11 @@ function terminal_expr(leaf::Leaf, source::String)
     end
 end
 
-# Mirrors tokenkindtoheadmap's punctuation entries; extend as kinds show up
-# in oracle diffs (unmapped kinds fail loudly with a KeyError, which is wanted
-# during burn-down — the corpus runner catches and reports it).
+# Mirrors tokenkindtoheadmap's punctuation entries. Unmapped kinds map to
+# :errortoken instead of a KeyError: with full oracle parity on valid code
+# the only unmapped leaves left are recovery shapes (e.g. a bare quote leaf
+# under an error node for `x = "`), and a wrong head there still shows up
+# loudly in oracle diffs while a throw would kill the whole file.
 const PUNCTUATION_HEADS = Dict{Kind,Symbol}(
     K"(" => :LPAREN,   K")" => :RPAREN,
     K"[" => :LSQUARE,  K"]" => :RSQUARE,
@@ -77,7 +79,7 @@ const PUNCTUATION_HEADS = Dict{Kind,Symbol}(
     K"@" => :ATSIGN,   K"." => :DOT,
     K";" => :SEMICOLON,
 )
-punctuation_head(k::Kind) = PUNCTUATION_HEADS[k]
+punctuation_head(k::Kind) = get(PUNCTUATION_HEADS, k, :errortoken)
 
 # JuliaSyntax splits quoted literals into open-quote/content/close-quote
 # leaves; CSTParser sees them as one STRING or CHAR token. Merges a run of
@@ -317,6 +319,7 @@ function collect_quoted_pieces(node::GreenNode, cur::Cursor, iscmd::Bool)
     have_run = false
     run_start = 0
     close_leaf = open_leaf
+    saw_close = false
     n = length(kids)
     j = 2
     while j <= n
@@ -326,6 +329,19 @@ function collect_quoted_pieces(node::GreenNode, cur::Cursor, iscmd::Bool)
             leaf = cur.leaves[cur.i]
             have_run || (run_start = leaf.pos; have_run = true)
             cur.i += 1
+            j += 1
+        elseif JuliaSyntax.is_error(k)
+            # Error kids inside a broken string (invalid escape, the
+            # zero-width missing-close marker, a recovery-wrapped region)
+            # are literal content bytes — extend the run instead of falling
+            # into the close-quote branch below, which emits overlapping
+            # chunks when visited more than once.
+            nl = leaf_count(c)
+            if nl > 0
+                leaf = cur.leaves[cur.i]
+                have_run || (run_start = leaf.pos; have_run = true)
+                cur.i += nl
+            end
             j += 1
         elseif k == K"$"
             leaf = cur.leaves[cur.i]
@@ -342,6 +358,7 @@ function collect_quoted_pieces(node::GreenNode, cur::Cursor, iscmd::Bool)
                 # `leaf` (the `$` itself) becomes the effective close, since
                 # cur.i has already advanced past it and nothing follows.
                 close_leaf = leaf
+                saw_close = true
                 push!(pieces, (:interp, EXPR(:errortoken, 0, 0, nothing), trivia_here))
                 break
             end
@@ -370,11 +387,22 @@ function collect_quoted_pieces(node::GreenNode, cur::Cursor, iscmd::Bool)
             j += 1
         else
             close_leaf = cur.leaves[cur.i]
+            saw_close = true
             chunk_start = have_run ? run_start : close_leaf.pos
             push!(pieces, (:lit, chunk_start, close_leaf.pos - 1))
+            have_run = false
             cur.i += 1
             j += 1
         end
+    end
+    if !saw_close
+        # Truncated literal at EOF: no closing-quote leaf exists. Synthesize
+        # a zero-width close at the node's end so the edge-fold arithmetic
+        # (and the node's own span) stays correct, and emit any pending run.
+        last_leaf = cur.leaves[cur.i - 1]
+        endpos = last_leaf.pos + last_leaf.fullspan
+        close_leaf = Leaf(open_leaf.kind, endpos, 0, 0)
+        push!(pieces, (:lit, have_run ? run_start : endpos, endpos - 1))
     end
     if iscmd
         @assert length(pieces) == 1 && pieces[1][1] == :lit

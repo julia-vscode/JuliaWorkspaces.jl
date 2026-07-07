@@ -37,9 +37,13 @@ const UNHANDLED_KINDS = Set{Kind}()
 # — silently dropping that kid's width from the node's own children instead
 # of just losing the kid itself. Mirrors check_spans' own childsum rule; when
 # it would report a shortfall, pad it with a zero-content filler so spans
-# stay tiled instead of desyncing. Never fires for valid code (childsum
-# always matches there) or for genuinely childless nodes (matrix cells).
-function patch_dropped_width!(ex::EXPR)
+# stay tiled instead of desyncing. Gated on the green subtree actually
+# containing an error node, so a childsum bug on VALID code still surfaces
+# via check_spans instead of being silently padded over; the subtree-walking
+# gate only runs when a gap exists, which never happens on valid code, so
+# the non-error path pays nothing. Skips genuinely childless nodes (matrix
+# cells), same rule as check_spans itself.
+function patch_dropped_width!(ex::EXPR, node::GreenNode)
     ex.args === nothing && return ex
     has_children = !isempty(ex.args) ||
                    (ex.trivia !== nothing && !isempty(ex.trivia)) ||
@@ -49,12 +53,18 @@ function patch_dropped_width!(ex::EXPR)
                (ex.trivia === nothing ? 0 : sum(c -> c.fullspan, ex.trivia; init=0)) +
                (ex.head isa EXPR ? ex.head.fullspan : 0)
     gap = ex.fullspan - childsum
-    if gap > 0
+    if gap > 0 && has_error_descendant(node)
         filler = EXPR(:errortoken, gap, 0, nothing)
         push!(ex.args, filler)
         CSTParser.setparent!(filler, ex)
     end
     return ex
+end
+
+function has_error_descendant(node::GreenNode)
+    JuliaSyntax.is_error(kind(node)) && return true
+    haschildren(node) || return false
+    return any(has_error_descendant, children(node))
 end
 
 function assemble(node::GreenNode, cur::Cursor)::EXPR
@@ -86,7 +96,7 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         # trailing chunk for interpolated strings, the whole literal
         # otherwise) so a `;`-fold widens the right node.
         expr = assemble_quoted(node, cur, k0 == K"cmdstring")
-        return patch_dropped_width!(expr)
+        return patch_dropped_width!(expr, node)
     end
     first_i = cur.i
     kids = EXPR[]
@@ -118,7 +128,7 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         ex.span = min(ex.span + cur.grow_span, ex.fullspan)
         cur.grow_span = 0
     end
-    patch_dropped_width!(ex)
+    patch_dropped_width!(ex, node)
     return ex
 end
 
