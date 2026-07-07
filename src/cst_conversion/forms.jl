@@ -20,7 +20,8 @@ function widen_at_leaf!(cur::Cursor, i::Int, width::Int)
         # the `;` as excluded trailing width even with an empty last arg.
         grow = node.args !== nothing && !isempty(node.args) &&
                node.args[end].fullspan == 0 && node.span == node.fullspan &&
-               (node.trivia === nothing || isempty(node.trivia))
+               (node.trivia === nothing || isempty(node.trivia) ||
+                !(node.trivia[end].head in (:END, :RPAREN, :RSQUARE, :RBRACE)))
         node.fullspan += width
         grow && (node.span += width)
         node = node.parent
@@ -1215,7 +1216,16 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                     # node's leaf-range-computed last leaf — its own (never
                     # folded-away) span still inflates the auto span calc;
                     # exclude just that span-only, fullspan stays correct.
-                    j == length(kids) && (cur.trim_span += ex.span)
+                    # ...unless the preceding arg absorbed the `;` into its own
+                    # SPAN (a bare `return`, span == fullspan): then the block
+                    # measures to that full span (grow, don't trim).
+                    if j == length(kids) && !isempty(args)
+                        if args[end].span != args[end].fullspan
+                            cur.trim_span += ex.span
+                        else
+                            grow_span_to_last_arg!(cur, args)
+                        end
+                    end
                 else
                     isempty(args) || (args[end].fullspan += ex.fullspan)
                 end

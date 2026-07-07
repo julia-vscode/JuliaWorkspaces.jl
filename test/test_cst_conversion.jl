@@ -513,6 +513,9 @@ end
         # global-const with a multi-line RHS: span measured to the last arg
         "global const x = if a\nb\nend",
         "const global pkgio = verbose ? y : z",
+        # inherited deferred: bare return + explicit `;` in begin/do blocks
+        "begin return; end",
+        "f(x) do y; return; end",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
