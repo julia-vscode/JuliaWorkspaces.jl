@@ -19,11 +19,27 @@ function widen_at_leaf!(cur::Cursor, i::Int, width::Int)
     return true
 end
 
+# Fold a dropped `;`'s width onto the last REAL leaf before it. Consecutive
+# separators (`a;; b`) must skip already-dropped `;` leaves — their EXPRs
+# live in neither args nor trivia, so widening one loses the width.
+function fold_semi!(cur::Cursor, semi_i::Int, width::Int)
+    i = semi_i - 1
+    while i >= 1 && cur.leaves[i].kind == K";"
+        i -= 1
+    end
+    return widen_at_leaf!(cur, i, width)
+end
+
 # Sibling `;` groups nest recursively: for `f(a; b; c)` the oracle stores
 # the c-group inside the b-group at args[1]. Spans follow CSTParser's
 # update_span convention — span measured to the last STORED arg, which
-# after the relocation is not the source-last child.
+# after the relocation is not the source-last child. Zero-width empty
+# groups (a bare extra `;`, e.g. `f(a;;b)`) collapse away entirely; only
+# an all-empty run (`f(;;)`) keeps a single empty group.
 function merge_params!(groups::Vector{EXPR})
+    real = filter(g -> !isempty(g.args) || g.fullspan != 0, groups)
+    isempty(real) && return groups[1]
+    groups = real
     for i in length(groups)-1:-1:1
         outer, inner = groups[i], groups[i+1]
         insert!(outer.args, 1, inner)
@@ -67,7 +83,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ck == K";"
                 semi_i = first(cur.kid_ranges[j])
-                widen_at_leaf!(cur, semi_i - 1, ex.fullspan) ||
+                fold_semi!(cur, semi_i, ex.fullspan) ||
                     (isempty(args) || (args[end].fullspan += ex.fullspan))
             else
                 push!(args, ex)
@@ -193,7 +209,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ck == K";"
                 semi_i = first(cur.kid_ranges[j])
-                if widen_at_leaf!(cur, semi_i - 1, ex.fullspan)
+                if fold_semi!(cur, semi_i, ex.fullspan)
                     j == 1 && (cur.trim += ex.fullspan)
                 else
                     push!(trivia, ex)   # nothing precedes; keep sums balanced
@@ -249,7 +265,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(trivia, ex)
             elseif ck == K";"
                 semi_i = first(cur.kid_ranges[j])
-                if widen_at_leaf!(cur, semi_i - 1, ex.fullspan)
+                if fold_semi!(cur, semi_i, ex.fullspan)
                     # A leading `;` (e.g. a do-block's params/body separator)
                     # widens a leaf OUTSIDE this block; exclude that width
                     # from the block's own leaf-range-computed span too.

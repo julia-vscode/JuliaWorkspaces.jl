@@ -158,6 +158,15 @@ end
         "T{a; b}",
         "f(a; b...)",
         "f(::Int)",
+        # consecutive `;`: widths of ALL adjacent separators fold onto the
+        # last real preceding leaf (BEGIN itself when nothing else precedes)
+        "begin a;; b end",
+        "begin ;; end",
+        "a;; b",
+        # bare extra `;` in an arg list: the empty group collapses away
+        # (a single empty group survives only when all groups are empty)
+        "f(a;;b)",
+        "f(;;)",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
