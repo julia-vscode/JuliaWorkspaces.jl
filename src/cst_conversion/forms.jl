@@ -346,7 +346,9 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             fs = sum(a -> a.fullspan, blk.args; init=0)
             sp = isempty(blk.args) ? 0 : fs - (blk.args[end].fullspan - blk.args[end].span)
             inner = EXPR(:block, blk.args, nothing, fs, sp)
-            return EXPR(:quote, EXPR[inner], EXPR[qkw, ekw], 0, 0)
+            # qkw/ekw can be absent for malformed input; filter out nothings.
+            qtriv = EXPR[t for t in (qkw, ekw) if t !== nothing]
+            return EXPR(:quote, EXPR[inner], qtriv, 0, 0)
         end
         if kkinds[1] == K"@"
             atex, nameex = kids
@@ -912,14 +914,19 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 try_block = ex
             end
         end
-        # An empty catch body followed by an else clause is a degenerate
-        # block in CSTParser (args = nothing, val = "").
-        if has_catch && has_else && catch_block !== nothing &&
-           (catch_block.args === nothing || isempty(catch_block.args)) &&
-           catch_block.fullspan == 0
-            catch_block.args = nothing
-            catch_block.trivia = nothing
-            catch_block.val = ""
+        # An empty catch body followed by a finally/else clause is degenerate
+        # in CSTParser: a FALSE marker before `finally`, an args=nothing
+        # `:block` (val "") before `else`.
+        if has_catch && catch_block !== nothing && catch_block.fullspan == 0 &&
+           (catch_block.args === nothing || isempty(catch_block.args))
+            if has_else
+                catch_block.args = nothing
+                catch_block.trivia = nothing
+                catch_block.val = ""
+            elseif has_finally && catch_var !== nothing && catch_var.head === :FALSE
+                # only a var-less empty catch collapses to FALSE before finally
+                catch_block = false_arg()
+            end
         end
         raw = [(catch_var, has_catch), (catch_block, has_catch),
                (finally_block, has_finally), (else_block, has_else)]
