@@ -71,6 +71,22 @@ function trim_span_to_last_arg!(cur::Cursor, args::Vector{EXPR})
     cur.trim_span += (a.fullspan - a.span) - (last_leaf.fullspan - last_leaf.span)
 end
 
+# Symmetric counterpart of trim_span_to_last_arg! for the grow direction:
+# CSTParser measures a keyword-trivia-less node's span to its last stored
+# arg, so when that arg's trailing exclusion is SMALLER than the raw last
+# leaf's (only known case: a bare `return`, whose span was grown to its
+# fullspan), the node's span must grow by the difference. delta can never
+# be negative here (an arg's trailing can only shrink relative to its own
+# raw leaves, never grow).
+function grow_span_to_last_arg!(cur::Cursor, args::Vector{EXPR})
+    isempty(args) && return
+    last_leaf = cur.leaves[cur.i-1]
+    a = args[end]
+    delta = (last_leaf.fullspan - last_leaf.span) - (a.fullspan - a.span)
+    delta > 0 && (cur.grow_span += delta)
+    return
+end
+
 # Sum of the OWN spans of a maximal trailing run of `;`-kind kids (e.g. the
 # double `;;` promoting to the next ncat dimension) — every one of them
 # folds away via fold_semi!, but assemble()'s automatic span calc still
@@ -329,11 +345,18 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         end
         return EXPR(k == K"if" ? :if : :elseif, args, trivia, 0, 0)
     elseif k == K"?"
-        # ternary a ? b : c → (:if, [a, b, c], trivia=[?, :]) — reuses if's head.
+        # ternary a ? b : c → (:if, [a, b, c], trivia=[?, :]) — reuses if's
+        # head. Same kind-reuse trap as if/elseif: a NESTED ternary is a
+        # composite K"?" kid, so only genuine leaves (`args === nothing`)
+        # may be filed into trivia.
         trivia = EXPR[]
         args = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
-            (ck == K"?" || ck == K":") ? push!(trivia, ex) : push!(args, ex)
+            if ex.args === nothing && (ck == K"?" || ck == K":")
+                push!(trivia, ex)
+            else
+                push!(args, ex)
+            end
         end
         return EXPR(:if, args, trivia, 0, 0)
     elseif (k == K"break" || k == K"continue") && length(kids) == 1
@@ -342,13 +365,20 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         return kids[1]
     elseif k == K"return"
         # `return` (no value) gets a synthetic zero-width NOTHING arg; `return
-        # x` already has a real value kid, no synthesis needed.
+        # x` already has a real value kid, no synthesis needed. With the
+        # NOTHING arg stored last, CSTParser measures span = fullspan (zero
+        # trailing exclusion), so the keyword's trailing trivia must be
+        # grown back into the span (the auto leaf-range calc excludes it).
         trivia = EXPR[]
         args = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
             ck == K"return" ? push!(trivia, ex) : push!(args, ex)
         end
-        isempty(args) && push!(args, EXPR(:NOTHING, 0, 0, ""))
+        if isempty(args)
+            push!(args, EXPR(:NOTHING, 0, 0, ""))
+            kw = trivia[1]
+            cur.grow_span += kw.fullspan - kw.span
+        end
         return EXPR(:return, args, trivia, 0, 0)
     elseif k == K"catch"
         # Flattened into try's own args/trivia by the K"try" branch below;
@@ -484,27 +514,46 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # multi-spec cartesian_iterator FLATTENS its args/trivia directly
         # into generator's own (unlike `for`, which keeps it as a nested
         # :block) — confirmed via dump: comma lands in generator's trivia.
-        trivia = EXPR[]
-        expr = spec = nothing
-        speck = K"None"
-        for (ex, ck) in zip(kids, kkinds)
-            if ck == K"for"
-                push!(trivia, ex)
-            elseif expr === nothing
-                expr = ex
+        # Multiple `for` clauses (`[x for a in as for b in bs]`) are ONE
+        # flat green node, but the oracle nests them INVERTED — innermost
+        # generator holds the body + LAST clause, each enclosing level adds
+        # the next-earlier clause, and every multi-clause generator gets a
+        # :flatten wrapper (child levels included, the innermost single-
+        # clause one excluded). Nested levels are discontiguous in source,
+        # so their spans are hand-built from child fullspan sums.
+        body = kids[1]
+        groups = Tuple{EXPR,EXPR,Kind}[]   # (for_kw, spec, spec_kind)
+        j = 2
+        while j <= length(kids)
+            push!(groups, (kids[j], kids[j+1], kkinds[j+1]))
+            j += 2
+        end
+        function gen_level(child::EXPR, kw::EXPR, spec::EXPR, sk::Kind)
+            args = EXPR[child]
+            trivia = EXPR[kw]
+            if sk == K"cartesian_iterator"
+                append!(args, spec.args)
+                append!(trivia, spec.trivia)
             else
-                spec, speck = ex, ck
+                push!(args, spec)
             end
+            fs = child.fullspan + kw.fullspan + spec.fullspan
+            return EXPR(:generator, args, trivia, fs,
+                        fs - (args[end].fullspan - args[end].span)), args
         end
-        args = EXPR[expr]
-        if speck == K"cartesian_iterator"
-            append!(args, spec.args)
-            append!(trivia, spec.trivia)
-        else
-            push!(args, spec)
+        if length(groups) == 1
+            gen, args = gen_level(body, groups[1]...)
+            trim_span_to_last_arg!(cur, args)
+            return EXPR(:generator, gen.args, gen.trivia, 0, 0)
         end
-        trim_span_to_last_arg!(cur, args)
-        return EXPR(:generator, args, trivia, 0, 0)
+        gen, _ = gen_level(body, groups[end]...)
+        for gi in length(groups)-1:-1:1
+            child = gi == length(groups) - 1 ? gen :
+                    EXPR(:flatten, EXPR[gen], nothing, gen.fullspan, gen.span)
+            gen, _ = gen_level(child, groups[gi]...)
+        end
+        trim_span_to_last_arg!(cur, EXPR[gen])
+        return EXPR(:flatten, EXPR[gen], nothing, 0, 0)
     elseif k == K"filter"
         # `... if cond` clause → (:filter, [cond, spec], trivia=[if]) — args
         # order is COND-then-SPEC, reversed from source order (spec if cond),
@@ -678,6 +727,11 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(args, ex)
             end
         end
+        # A trivia-less block's span is measured to its last stored arg;
+        # grow when that arg's trailing exclusion shrank (bare `return`).
+        # Skip when the last kid was a dropped `;` (trim_span owns that).
+        isempty(trivia) && !isempty(args) && kkinds[end] != K";" &&
+            grow_span_to_last_arg!(cur, args)
         return EXPR(:block, args, isempty(trivia) ? nothing : trivia, 0, 0)
     elseif k == K"parens"
         trivia = EXPR[kids[1], kids[end]]

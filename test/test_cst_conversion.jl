@@ -214,6 +214,21 @@ end
         # inherited concerns: paren-block and trailing-`;` vcat
         "(a; b)",
         "[a;]",
+        # nested ternary: K"?" reuses the kind for the nested composite node
+        # (same trap as if/elseif), which must stay in args, not trivia
+        "a ? b : c ? d : e",
+        "a ? b ? c : d : e",
+        # bare `return` span extends over the keyword's trailing trivia
+        # (span = fullspan via the synthetic NOTHING arg), incl. the
+        # enclosing trivia-less block measured to it
+        "function f()\n    return\nend",
+        "while c\n    return\nend",
+        "function f()\n    return\n    g()\nend",
+        # multi-`for` generators nest inverted under :flatten wrappers
+        "[x for x in xs for y in x]",
+        "[x for a in as for b in bs for c in cs]",
+        "(x for a in as for b in bs)",
+        "[x for a in as, b in bs for c in cs]",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
@@ -233,6 +248,12 @@ end
     # `;` width must land somewhere even under parent forms whose oracle
     # layout isn't implemented yet — sums have to stay balanced regardless
     for src in ["(; a=1)", "f.(x; y=1)", "@m(x; y=1)", "T{a; b}"]
+        @test CSTConversion.check_spans(CSTConversion.build_cst(src)) === nothing
+    end
+
+    # matrix literals: bare cells carry empty (not nothing) args/trivia with
+    # real width — check_spans must not demand a childsum there
+    for src in ["[1 2; 3 4]", "[1; 2;; 3; 4]"]
         @test CSTConversion.check_spans(CSTConversion.build_cst(src)) === nothing
     end
 

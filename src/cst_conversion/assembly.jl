@@ -17,10 +17,17 @@ mutable struct Cursor
     # node's span even though the separator was folded away entirely; its
     # fullspan is already correctly included via the raw leaf range).
     trim_span::Int
+    # extra width to ADD to span ONLY (never past fullspan) — trim_span's
+    # symmetric counterpart, for forms whose oracle span extends past the
+    # last real leaf's own span. Only known case: bare `return`, whose
+    # synthetic zero-width NOTHING arg makes CSTParser measure span all the
+    # way to fullspan, covering the keyword's trailing trivia. Same
+    # lifecycle as trim/trim_span: set by a form, applied+reset by assemble.
+    grow_span::Int
 end
 
 Cursor(leaves::Vector{Leaf}, i::Int, src::String) =
-    Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[], 0, 0)
+    Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[], 0, 0, 0)
 
 const UNHANDLED_KINDS = Set{Kind}()
 
@@ -67,6 +74,10 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         ex.span = max(ex.span - cur.trim - cur.trim_span, 0)
         cur.trim = 0
         cur.trim_span = 0
+    end
+    if cur.grow_span != 0
+        ex.span = min(ex.span + cur.grow_span, ex.fullspan)
+        cur.grow_span = 0
     end
     return ex
 end

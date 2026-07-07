@@ -35,6 +35,13 @@ oracle_diff(src::AbstractString) = first_tree_diff(build_cst(src), CSTParser.par
 function check_spans(x::EXPR; path::String="□")
     x.span <= x.fullspan || return "$path: span $(x.span) > fullspan $(x.fullspan)"
     x.args === nothing && return nothing
+    # The childsum invariant is only meaningful when children exist: terminal
+    # nodes carrying empty (not nothing) args/trivia — CSTParser's bare
+    # matrix cells — have real width but nothing to sum against it.
+    has_children = !isempty(x.args) ||
+                   (x.trivia !== nothing && !isempty(x.trivia)) ||
+                   x.head isa EXPR
+    has_children || return nothing
     childsum = sum(c -> c.fullspan, x.args; init=0) +
                (x.trivia === nothing ? 0 : sum(c -> c.fullspan, x.trivia; init=0)) +
                (x.head isa EXPR ? x.head.fullspan : 0)
