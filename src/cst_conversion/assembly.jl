@@ -8,12 +8,19 @@ mutable struct Cursor
     # leaf range consumed by each kid of the node currently in assemble_form
     kid_ranges::Vector{UnitRange{Int}}
     # width the current form excluded from its own leading edge (folded onto
-    # a preceding leaf instead); assemble subtracts it from the node's spans
+    # a preceding leaf instead); assemble subtracts it from fullspan AND span
+    # (a leading exclusion shifts both boundaries by the same amount).
     trim::Int
+    # extra width to exclude from span ONLY, beyond `trim` — needed when a
+    # dropped separator is the LAST leaf this node consumed (its own
+    # meaningful width, `leaf.span`, would otherwise still count toward the
+    # node's span even though the separator was folded away entirely; its
+    # fullspan is already correctly included via the raw leaf range).
+    trim_span::Int
 end
 
 Cursor(leaves::Vector{Leaf}, i::Int, src::String) =
-    Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[], 0)
+    Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[], 0, 0)
 
 const UNHANDLED_KINDS = Set{Kind}()
 
@@ -55,10 +62,11 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         ex.fullspan = (last_leaf.pos + last_leaf.fullspan) - first_leaf.pos
         ex.span = (last_leaf.pos + last_leaf.span) - first_leaf.pos
     end
-    if cur.trim != 0
+    if cur.trim != 0 || cur.trim_span != 0
         ex.fullspan -= cur.trim
-        ex.span = max(ex.span - cur.trim, 0)
+        ex.span = max(ex.span - cur.trim - cur.trim_span, 0)
         cur.trim = 0
+        cur.trim_span = 0
     end
     return ex
 end

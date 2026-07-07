@@ -127,6 +127,42 @@ end
     end
 end
 
+@testitem "cst-conv: call syntax via oracle" begin
+    using JuliaWorkspaces: CSTConversion
+    for src in [
+        "f(x; y=1)",             # parameters node
+        "f(x, y=1; z=2, w)",
+        "f(x...)",
+        "f(; x)",
+        "f.(x)",                 # dotcall
+        "a.b",                   # getfield with quotenode
+        "a.b.c",
+        "a.:b",
+        "A{T}",                  # curly
+        "A{T} where T",
+        "a[1]",                  # ref
+        "a[1, 2]",
+        "a[end]",
+        "@m x y",                # macrocall
+        "@m(x)",
+        "m\"str\"",              # string macro
+        "f(x) do y\n    y\nend", # do
+        "g(f, xs) do y; y; end",
+        "x |> f",
+        "a ∘ b",
+        "f(g(x))",
+        "(f)(x)",
+        # inherited from Task 6 concerns: parameters under non-call parents
+        "f.(x; y=1)",
+        "@m(x; y=1)",
+        "T{a; b}",
+        "f(a; b...)",
+        "f(::Int)",
+    ]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end
+
 @testitem "cst-conv: span invariants and corpus smoke" begin
     using JuliaWorkspaces: CSTConversion
     include(joinpath(@__DIR__, "cst_corpus.jl"))

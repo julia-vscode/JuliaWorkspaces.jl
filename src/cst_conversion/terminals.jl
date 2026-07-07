@@ -5,8 +5,6 @@
 const TERMINAL_HEADS = Dict{Kind,Symbol}(
     K"Identifier"      => :IDENTIFIER,
     K"MacroName"       => :IDENTIFIER,
-    K"StringMacroName" => :IDENTIFIER,
-    K"CmdMacroName"    => :IDENTIFIER,
     K"Integer"         => :INTEGER,
     K"Float"           => :FLOAT,
     K"HexInt"          => :HEXINT,
@@ -25,7 +23,17 @@ token_text(leaf::Leaf, source::String) = source[leaf.pos:prevind(source, leaf.po
 # not nothing.
 function terminal_expr(leaf::Leaf, source::String)
     k = leaf.kind
-    if JuliaSyntax.is_operator(k)
+    if k == K"Identifier" && token_text(leaf, source) == "end"
+        # "end" is only ever an Identifier-kinded leaf inside index/range
+        # context (`a[end]`) — real block-closing `end` is its own keyword
+        # kind. CSTParser treats both spellings as the same END literal.
+        return EXPR(:END, leaf.fullspan, leaf.span, "end")
+    elseif k == K"StringMacroName" || k == K"CmdMacroName"
+        # `m"str"`/`c\`cmd\`` desugar to calling `@m_str`/`@c_cmd`; the
+        # green leaf only carries the bare name, oracle wants the mangled one.
+        suffix = k == K"StringMacroName" ? "_str" : "_cmd"
+        return EXPR(:IDENTIFIER, leaf.fullspan, leaf.span, "@" * token_text(leaf, source) * suffix)
+    elseif JuliaSyntax.is_operator(k)
         return EXPR(:OPERATOR, leaf.fullspan, leaf.span, token_text(leaf, source))
     elseif JuliaSyntax.is_keyword(k)
         return EXPR(Symbol(uppercase(string(k))), leaf.fullspan, leaf.span, token_text(leaf, source))
