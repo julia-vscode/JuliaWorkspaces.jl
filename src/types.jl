@@ -458,7 +458,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
             # gating (in derived_file_env_ready) prevents env-dependent
             # diagnostics for other projects from being flushed prematurely
             # while their own DJPs are still pending.
-            push!(ready_envs, WatchEnvironmentKey(msg.project_path, msg.content_hash))
+            push!(ready_envs, msg.key)
             envs_dirty = true
             any_env_ready = true
 
@@ -473,7 +473,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
             _load_package_caches_for_project!(jw, msg.test_project_uri)
             test_proj = derived_project(jw.runtime, msg.test_project_uri)
             test_proj_hash = test_proj === nothing ? UInt64(0) : test_proj.content_hash
-            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.test_project_uri), test_proj_hash))
+            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.test_project_uri), test_proj_hash, derived_project_imported_packages(jw.runtime, msg.test_project_uri)))
             envs_dirty = true
             any_env_ready = true
 
@@ -486,7 +486,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
             _load_package_caches_for_project!(jw, msg.project_uri)
             standalone_proj = derived_project(jw.runtime, msg.project_uri)
             standalone_proj_hash = standalone_proj === nothing ? UInt64(0) : standalone_proj.content_hash
-            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), standalone_proj_hash))
+            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), standalone_proj_hash, derived_project_imported_packages(jw.runtime, msg.project_uri)))
             envs_dirty = true
             any_env_ready = true
         else

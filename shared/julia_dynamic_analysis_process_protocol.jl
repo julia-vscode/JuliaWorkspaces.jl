@@ -9,6 +9,7 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     projectPath::String
     package::Union{Nothing,String}
     storePath::String
+    usedPackages::Union{Nothing,Vector{String}}
 end
 
 @dict_readable struct CreateStandaloneProjectParams <: JSONRPC.Outbound

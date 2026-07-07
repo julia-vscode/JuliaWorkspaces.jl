@@ -19,7 +19,7 @@ end
 Whether the environment for `project_uri` (at `content_hash`) has been indexed.
 """
 Salsa.@derived function derived_project_environment_ready(rt, project_uri, content_hash::UInt64)
-    key = WatchEnvironmentKey(uri2filepath(project_uri), content_hash)
+    key = WatchEnvironmentKey(uri2filepath(project_uri), content_hash, derived_project_imported_packages(rt, project_uri))
     return key in input_ready_project_environments(rt)
 end
 
@@ -294,6 +294,96 @@ function _file_has_testitems(rt, uri)
     end
 end
 
+# ─── Workspace-imported package extraction ───────────────────────────────────
+#
+# The dynamic indexer only needs to load the packages the workspace's own source
+# actually `using`/`import`s (plus in-workspace deved packages, which the child
+# always indexes). These helpers pull the top-level package names out of the
+# parsed source so the set can be attached to the environment DJP key and
+# forwarded to the child.
+
+# The package/module named by a single import path (`Foo` in `import Foo`,
+# `Foo.Bar`, or `Foo as F`). Relative imports (`using .Local`) reference an
+# in-package module rather than an environment package, so they yield `nothing`.
+function _import_path_package(path)
+    path isa CSTParser.EXPR || return nothing
+    if CSTParser.headof(path) === :as
+        return isempty(path.args) ? nothing : _import_path_package(path.args[1])
+    end
+    CSTParser.isidentifier(path) && return CSTParser.valof(path)
+    (isnothing(path.args) || isempty(path.args)) && return nothing
+    first_arg = path.args[1]
+    # Leading dot ⇒ relative import.
+    if CSTParser.isoperator(first_arg) && CSTParser.valof(first_arg) == "."
+        return nothing
+    end
+    CSTParser.isidentifier(first_arg) ? CSTParser.valof(first_arg) : nothing
+end
+
+# Walk an EXPR tree collecting the top-level package names from every `using`
+# and `import` statement (including those nested inside modules or blocks).
+function _collect_imported_packages!(names::Set{String}, x)
+    x isa CSTParser.EXPR || return names
+    h = CSTParser.headof(x)
+    if h in (:using, :import)
+        if !isempty(x.args)
+            a1 = x.args[1]
+            if a1 isa CSTParser.EXPR && CSTParser.isoperator(CSTParser.headof(a1)) && CSTParser.valof(CSTParser.headof(a1)) == ":"
+                # `using A: x, y` — only `A` names a package.
+                pkg = isempty(a1.args) ? nothing : _import_path_package(a1.args[1])
+                !isnothing(pkg) && push!(names, pkg)
+            else
+                for path in x.args
+                    pkg = _import_path_package(path)
+                    !isnothing(pkg) && push!(names, pkg)
+                end
+            end
+        end
+    elseif !isnothing(x.args)
+        for a in x.args
+            _collect_imported_packages!(names, a)
+        end
+    end
+    return names
+end
+
+"""
+    derived_file_imported_packages(rt, uri) -> Vector{String}
+
+The sorted set of top-level package names `using`/`import`ed by `uri`'s source.
+"""
+Salsa.@derived function derived_file_imported_packages(rt, uri)
+    cst = derived_julia_legacy_syntax_tree(rt, uri)
+    names = _collect_imported_packages!(Set{String}(), cst)
+    return sort!(collect(names))
+end
+
+# Group every workspace Julia file's imported packages by the project that
+# resolves that file, so each project's environment DJP can be given exactly the
+# packages its files reference.
+Salsa.@derived function derived_all_project_imported_packages(rt)
+    @debug "derived_all_project_imported_packages"
+
+    by_project = Dict{URI,Set{String}}()
+    for uri in derived_all_julia_files(rt)
+        project_uri = derived_project_uri_for_root(rt, uri)
+        isnothing(project_uri) && continue
+        union!(get!(by_project, project_uri, Set{String}()), derived_file_imported_packages(rt, uri))
+    end
+
+    return Dict{URI,Vector{String}}(k => sort!(collect(v)) for (k, v) in by_project)
+end
+
+"""
+    derived_project_imported_packages(rt, project_uri) -> Vector{String}
+
+The sorted set of top-level package names the workspace's own source
+`using`/`import`s within `project_uri`'s environment.
+"""
+Salsa.@derived function derived_project_imported_packages(rt, project_uri)
+    return get(derived_all_project_imported_packages(rt), project_uri, String[])
+end
+
 Salsa.@derived function derived_required_dynamic_projects(rt)
     @debug "derived_required_dynamic_projects"
 
@@ -306,6 +396,7 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
         push!(required, WatchEnvironmentKey(
             uri2filepath(project_uri),
             project.content_hash,
+            derived_project_imported_packages(rt, project_uri),
         ))
     end
 

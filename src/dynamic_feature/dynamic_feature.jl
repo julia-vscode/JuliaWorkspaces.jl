@@ -51,13 +51,18 @@ mutable struct DynamicJuliaProcess
 end
 
 function index_project(djp::DynamicJuliaProcess, store_path::String)
+    # For a watch-environment process the key carries the workspace's imported
+    # package set, so the child only loads those (plus deved packages). For a
+    # test-environment process there is no such set, so `nothing` = index all.
+    used_packages = djp.key isa WatchEnvironmentKey ? djp.key.imported_packages : nothing
     JSONRPC.send(
         djp.endpoint,
         JuliaDynamicAnalysisProtocol.index_project_request_type,
         JuliaDynamicAnalysisProtocol.IndexProjectParams(
             djp.project_path,
             djp.package,
-            store_path
+            store_path,
+            used_packages
         )
     )
 end
@@ -357,14 +362,49 @@ end
 
 const MissingPackage = @NamedTuple{name::String, uuid::UUID, version::String, git_tree_sha1::Union{String,Nothing}}
 
+# Names of every manifest package reachable from `roots` by following `deps`
+# edges (roots included). `manifest_deps` is keyed by package name, and each
+# entry's dependencies are listed either as an array of names or a name⇒uuid
+# table. Used to restrict the missing-cache check to the packages the child will
+# actually load (the closure of the workspace's imported and deved packages).
+function _packages_reachable_from(manifest_deps, roots)
+    reachable = Set{String}()
+    stack = collect(String, roots)
+    while !isempty(stack)
+        name = pop!(stack)
+        name in reachable && continue
+        push!(reachable, name)
+        v_entry = get(manifest_deps, name, nothing)
+        (v_entry isa Vector && length(v_entry) == 1 && v_entry[1] isa Dict) || continue
+        d = get(v_entry[1], "deps", nothing)
+        depnames = if d isa Vector
+            String[x for x in d if x isa AbstractString]
+        elseif d isa Dict
+            collect(keys(d))
+        else
+            String[]
+        end
+        for dn in depnames
+            dn in reachable || push!(stack, dn)
+        end
+    end
+    return reachable
+end
+
 """
-    _get_missing_packages(project_path, store_path) -> Vector{MissingPackage}
+    _get_missing_packages(project_path, store_path, imported_packages=nothing) -> Vector{MissingPackage}
 
 Parse the Manifest.toml at `project_path` and return a list of regular and stdlib
 packages whose .jstore cache files do not yet exist on disk. Deved packages are
 skipped entirely (they have no git_tree_sha1 and are handled by StaticLint).
+
+When `imported_packages` is given, only packages in the dependency closure of the
+workspace's imported and deved packages are considered — i.e. exactly the set the
+child indexer will load. This prevents a never-loaded dependency from being
+reported "missing" forever, which would otherwise spawn an indexing child every
+session that could never satisfy it. `nothing` considers the whole manifest.
 """
-function _get_missing_packages(project_path::String, store_path::String)
+function _get_missing_packages(project_path::String, store_path::String, imported_packages=nothing)
     manifest_path = joinpath(project_path, "Manifest.toml")
     isfile(manifest_path) || return MissingPackage[]
 
@@ -386,6 +426,20 @@ function _get_missing_packages(project_path::String, store_path::String)
         return MissingPackage[]
     end
 
+    # Restrict to the packages the child will actually load: the dependency
+    # closure of the workspace's imported packages plus all deved packages
+    # (which the child always loads). `nothing` means "consider everything".
+    allowed = if isnothing(imported_packages)
+        nothing
+    else
+        deved_names = Set{String}(
+            k for (k, v) in pairs(manifest_deps)
+            if v isa Vector && length(v) == 1 && v[1] isa Dict && haskey(v[1], "path")
+        )
+        roots = union(Set{String}(imported_packages), deved_names)
+        _packages_reachable_from(manifest_deps, roots)
+    end
+
     missing = MissingPackage[]
 
     for (k_entry, v_entry) in pairs(manifest_deps)
@@ -393,6 +447,9 @@ function _get_missing_packages(project_path::String, store_path::String)
         length(v_entry) == 1 || continue
         v_entry[1] isa Dict || continue
         entry = v_entry[1]
+
+        # Skip packages the workspace never loads.
+        allowed === nothing || k_entry in allowed || continue
 
         # Skip deved packages (have "path" key)
         haskey(entry, "path") && continue
@@ -623,7 +680,7 @@ end
 # ─── Work messages ──────────────────────────────────────────────────────────
 
 function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
-    key = WatchEnvironmentKey(msg.project_path, msg.content_hash)
+    key = WatchEnvironmentKey(msg.project_path, msg.content_hash, msg.imported_packages)
     push!(df.inflight, key)
 
     if key in df.failed_projects
@@ -638,8 +695,9 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
     # `EnvironmentPrepDoneMsg`, so all state mutation stays on the reactor.
     project_path = msg.project_path
     content_hash = msg.content_hash
+    imported_packages = msg.imported_packages
     Threads.@async try
-        missing_pkgs = _get_missing_packages(project_path, df.store_path)
+        missing_pkgs = _get_missing_packages(project_path, df.store_path, imported_packages)
 
         if !isempty(missing_pkgs) && df.download_enabled
             @info "Downloading missing package caches" count=length(missing_pkgs)
@@ -647,7 +705,7 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
             missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url; df=df)
         end
 
-        put!(df.in_channel, EnvironmentPrepDoneMsg(project_path, content_hash, !isempty(missing_pkgs)))
+        put!(df.in_channel, EnvironmentPrepDoneMsg(project_path, content_hash, imported_packages, !isempty(missing_pkgs)))
     catch err
         @error "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
@@ -657,13 +715,13 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
 end
 
 function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
-    key = WatchEnvironmentKey(msg.project_path, msg.content_hash)
+    key = WatchEnvironmentKey(msg.project_path, msg.content_hash, msg.imported_packages)
     df.progress_state.current_sub_progress = 0.5
 
     if !msg.still_missing
         @info "All package caches available, skipping DJP" project_path=msg.project_path
         _report_progress(df, "All caches available for $(basename(msg.project_path))")
-        put!(df.out_channel, EnvironmentReadyResult(msg.project_path, msg.content_hash))
+        put!(df.out_channel, EnvironmentReadyResult(key))
         push!(df.done, key)
         _complete_work_item!(df, key)
     elseif df.djp_mode != DynamicOff
@@ -674,7 +732,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         _launch_process!(df, djp)
     else
         @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=msg.project_path
-        put!(df.out_channel, EnvironmentReadyResult(msg.project_path, msg.content_hash))
+        put!(df.out_channel, EnvironmentReadyResult(key))
         push!(df.done, key)
         _complete_work_item!(df, key)
     end
@@ -766,7 +824,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     end
 
     if key isa WatchEnvironmentKey
-        put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
+        put!(df.out_channel, EnvironmentReadyResult(key))
     elseif key isa WatchTestEnvironmentKey
         test_project_uri = filepath2uri(msg.result_dir)
         put!(df.out_channel, TestEnvironmentReadyResult(filepath2uri(key.project_path), key.package_name, test_project_uri, key.content_hash))
@@ -899,7 +957,7 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
         _report_progress(df, "Preparing to index...")
 
         if key isa WatchEnvironmentKey
-            handle!(df, WatchEnvironmentMsg(key.project_path, key.content_hash))
+            handle!(df, WatchEnvironmentMsg(key.project_path, key.content_hash, key.imported_packages))
         elseif key isa WatchTestEnvironmentKey
             handle!(df, WatchTestEnvironmentMsg(key.project_path, key.package_name, key.content_hash))
         elseif key isa CreateStandaloneProjectKey

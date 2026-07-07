@@ -337,6 +337,38 @@ end
     end
 end
 
+@testitem "SymbolServer: workspace import extraction" begin
+    using JuliaWorkspaces: JuliaWorkspace, derived_file_imported_packages
+    using JuliaWorkspaces.URIs2: @uri_str
+
+    uri = uri"file:///Foo.jl"
+    content = """
+    module Foo
+    using Pkg
+    using LinearAlgebra, Statistics
+    import JSON
+    import CSV as C
+    using DataFrames: DataFrame, groupby
+    using .Internal
+    import ..Sibling
+    using Base.Threads
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
+
+    # Every top-level package is captured (with alias and `A: x` forms), while
+    # relative imports (`.Internal`, `..Sibling`) are excluded.
+    @test derived_file_imported_packages(jw.runtime, uri) ==
+        ["Base", "CSV", "DataFrames", "JSON", "LinearAlgebra", "Pkg", "Statistics"]
+
+    # A file with no imports yields an empty set.
+    empty_uri = uri"file:///Bar.jl"
+    add_file!(jw, TextFile(empty_uri, SourceText("f(x) = x + 1\n", "julia")))
+    @test isempty(derived_file_imported_packages(jw.runtime, empty_uri))
+end
+
 @testitem "SymbolServer: #1395 DataTypeStore field types are serializable and aligned" begin
     using JuliaWorkspaces.SymbolServer: DataTypeStore, FakeTypeName, MethodStore
     using JuliaWorkspaces.SymbolServer.CacheStore: write, read
@@ -659,6 +691,50 @@ end
         mkpath(dirname(old_path))
         write(old_path, "x")
         @test any(m -> m.name == "Example", JuliaWorkspaces._get_missing_packages(proj, store))
+    end
+end
+
+@testitem "SymbolServer: missing-package check is scoped to imported closure" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+
+    mktempdir() do root
+        proj = joinpath(root, "proj")
+        store = joinpath(root, "store")
+        mkpath(proj)
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "1.11.0"
+        manifest_format = "2.0"
+
+        [[deps.Example]]
+        uuid = "7876af07-990d-54b4-ab0e-23690620f79a"
+        version = "0.5.3"
+        git-tree-sha1 = "46e44e869b4d90b96bd8ed1fdcf32244fddfb6cc"
+        deps = ["Dep"]
+
+        [[deps.Dep]]
+        uuid = "11111111-1111-1111-1111-111111111111"
+        version = "1.0.0"
+        git-tree-sha1 = "1111111111111111111111111111111111111111"
+
+        [[deps.Unused]]
+        uuid = "22222222-2222-2222-2222-222222222222"
+        version = "2.0.0"
+        git-tree-sha1 = "2222222222222222222222222222222222222222"
+        """)
+
+        names(pkgs) = Set(m.name for m in pkgs)
+
+        # No filter ⇒ every uncached manifest package is missing.
+        @test names(JuliaWorkspaces._get_missing_packages(proj, store)) ==
+            Set(["Example", "Dep", "Unused"])
+
+        # Importing Example pulls in its transitive dep, but never the unrelated
+        # Unused package.
+        @test names(JuliaWorkspaces._get_missing_packages(proj, store, ["Example"])) ==
+            Set(["Example", "Dep"])
+
+        # Importing nothing (and no deved packages) ⇒ nothing to index.
+        @test isempty(JuliaWorkspaces._get_missing_packages(proj, store, String[]))
     end
 end
 

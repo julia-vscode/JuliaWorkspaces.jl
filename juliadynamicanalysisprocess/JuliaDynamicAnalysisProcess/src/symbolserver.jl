@@ -25,7 +25,7 @@ else
     is_stdlib(uuid::UUID) = uuid in keys(ctx.stdlibs)
 end
 
-function get_store(store_path::String, progress_callback)
+function get_store(store_path::String, progress_callback; used_packages=nothing)
     loading_bay = Module(:LoadingBay)
 
     ctx = try
@@ -34,7 +34,7 @@ function get_store(store_path::String, progress_callback)
         @info "Package environment can't be read."
         exit()
     end
-    
+
     server = Server(store_path, ctx, Dict{UUID,Package}())
 
     written_caches = String[] # List of caches that have already been written
@@ -52,6 +52,19 @@ function get_store(store_path::String, progress_callback)
             @info "$pk_name not in manifest, skipping."
             continue
         end
+
+        # Only load registry packages the workspace actually `using`/`import`s.
+        # `used_packages === nothing` means "index everything" (the default used
+        # by the cloud indexer and standalone-project indexing). In-workspace
+        # `develop`ed packages are always indexed, so a package's own symbols and
+        # those of workspace deps are never dropped. Dependencies of an imported
+        # package are still cached: importing it loads them, and the whole-process
+        # `getenvtree`/`symbols` walk below picks them up.
+        if !isnothing(used_packages) && pk_name ∉ used_packages && !is_package_deved(manifest(ctx), uuid)
+            @debug "$pk_name ($uuid) not imported by the workspace, skipping load."
+            continue
+        end
+
         pe = frommanifest(manifest(ctx), uuid)
         cache_path = joinpath(server.storedir, SymbolServer.get_cache_path(manifest(ctx), uuid)...)
 

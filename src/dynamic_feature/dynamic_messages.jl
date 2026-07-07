@@ -14,9 +14,15 @@
 # `@auto_hash_equals` gives them value-based `==`/`hash` (the default for plain
 # structs compares `String` fields by identity, which is unsafe for use as
 # `Set`/`Dict` keys).
+# `imported_packages` is the sorted set of top-level package names the
+# workspace's own source `using`/`import`s within this project. It is part of
+# the key's identity so that a change to which packages are used (re)triggers
+# indexing via the normal reconcile diff, and it is forwarded to the child so it
+# only loads packages the workspace actually references.
 @auto_hash_equals struct WatchEnvironmentKey
     project_path::String
     content_hash::UInt64
+    imported_packages::Vector{String}
 end
 
 @auto_hash_equals struct WatchTestEnvironmentKey
@@ -51,6 +57,7 @@ abstract type DynamicReactorMessage end
 struct WatchEnvironmentMsg <: DynamicReactorMessage
     project_path::String
     content_hash::UInt64
+    imported_packages::Vector{String}
 end
 
 """Request to index/watch the test environment of a project + package."""
@@ -92,6 +99,7 @@ once the (potentially slow) missing-package check + cloud download finished.
 struct EnvironmentPrepDoneMsg <: DynamicReactorMessage
     project_path::String
     content_hash::UInt64
+    imported_packages::Vector{String}
     still_missing::Bool
 end
 
@@ -140,8 +148,7 @@ end
 
 """The environment for a project has been fully processed."""
 struct EnvironmentReadyResult <: DynamicResultMessage
-    project_path::String
-    content_hash::UInt64
+    key::WatchEnvironmentKey
 end
 
 """The test environment for a project + package is ready."""

@@ -16,7 +16,7 @@ function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProject
         TestEnv.activate(params.package);
     end
 
-    SymbolServer.get_store(params.storePath, nothing)
+    SymbolServer.get_store(params.storePath, nothing; used_packages=params.usedPackages)
 
     return dirname(Base.active_project())
 end
