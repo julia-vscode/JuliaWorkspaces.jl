@@ -680,7 +680,7 @@ end
 # ─── Work messages ──────────────────────────────────────────────────────────
 
 function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
-    key = WatchEnvironmentKey(msg.project_path, msg.content_hash, msg.imported_packages)
+    key = msg.key
     push!(df.inflight, key)
 
     if key in df.failed_projects
@@ -693,9 +693,8 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
     # Offload the (potentially slow) missing-package check + cloud download to a
     # task so the reactor stays responsive. The result is fed back as an
     # `EnvironmentPrepDoneMsg`, so all state mutation stays on the reactor.
-    project_path = msg.project_path
-    content_hash = msg.content_hash
-    imported_packages = msg.imported_packages
+    project_path = key.project_path
+    imported_packages = key.imported_packages
     Threads.@async try
         missing_pkgs = _get_missing_packages(project_path, df.store_path, imported_packages)
 
@@ -705,7 +704,7 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
             missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url; df=df)
         end
 
-        put!(df.in_channel, EnvironmentPrepDoneMsg(project_path, content_hash, imported_packages, !isempty(missing_pkgs)))
+        put!(df.in_channel, EnvironmentPrepDoneMsg(key, !isempty(missing_pkgs)))
     catch err
         @error "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
@@ -715,23 +714,23 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
 end
 
 function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
-    key = WatchEnvironmentKey(msg.project_path, msg.content_hash, msg.imported_packages)
+    key = msg.key
     df.progress_state.current_sub_progress = 0.5
 
     if !msg.still_missing
-        @info "All package caches available, skipping DJP" project_path=msg.project_path
-        _report_progress(df, "All caches available for $(basename(msg.project_path))")
+        @info "All package caches available, skipping DJP" project_path=key.project_path
+        _report_progress(df, "All caches available for $(basename(key.project_path))")
         put!(df.out_channel, EnvironmentReadyResult(key))
         push!(df.done, key)
         _complete_work_item!(df, key)
     elseif df.djp_mode != DynamicOff
-        @info "Launching DJP for remaining missing packages" project_path=msg.project_path
-        _report_progress(df, "Indexing $(basename(msg.project_path))...")
-        djp = DynamicJuliaProcess(key, msg.project_path, nothing, :watch_environment)
+        @info "Launching DJP for remaining missing packages" project_path=key.project_path
+        _report_progress(df, "Indexing $(basename(key.project_path))...")
+        djp = DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
         df.procs[key] = djp
         _launch_process!(df, djp)
     else
-        @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=msg.project_path
+        @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=key.project_path
         put!(df.out_channel, EnvironmentReadyResult(key))
         push!(df.done, key)
         _complete_work_item!(df, key)
@@ -741,7 +740,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
 end
 
 function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
-    key = WatchTestEnvironmentKey(msg.project_path, msg.package, msg.content_hash)
+    key = msg.key
     push!(df.inflight, key)
 
     if key in df.failed_projects
@@ -751,8 +750,8 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
         return false
     end
 
-    _report_progress(df, "Indexing test environment for $(msg.package)...")
-    djp = DynamicJuliaProcess(key, msg.project_path, msg.package, :watch_test_environment)
+    _report_progress(df, "Indexing test environment for $(key.package_name)...")
+    djp = DynamicJuliaProcess(key, key.project_path, key.package_name, :watch_test_environment)
     df.procs[key] = djp
     _launch_process!(df, djp)
 
@@ -760,7 +759,7 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
 end
 
 function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
-    key = CreateStandaloneProjectKey(msg.package_path, msg.content_hash)
+    key = msg.key
     push!(df.inflight, key)
 
     if key in df.failed_projects
@@ -770,8 +769,8 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
         return false
     end
 
-    _report_progress(df, "Creating standalone project for $(basename(msg.package_path))...")
-    djp = DynamicJuliaProcess(key, msg.package_path, nothing, :create_standalone_project)
+    _report_progress(df, "Creating standalone project for $(basename(key.package_path))...")
+    djp = DynamicJuliaProcess(key, key.package_path, nothing, :create_standalone_project)
     df.procs[key] = djp
     _launch_process!(df, djp)
 
@@ -957,11 +956,11 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
         _report_progress(df, "Preparing to index...")
 
         if key isa WatchEnvironmentKey
-            handle!(df, WatchEnvironmentMsg(key.project_path, key.content_hash, key.imported_packages))
+            handle!(df, WatchEnvironmentMsg(key))
         elseif key isa WatchTestEnvironmentKey
-            handle!(df, WatchTestEnvironmentMsg(key.project_path, key.package_name, key.content_hash))
+            handle!(df, WatchTestEnvironmentMsg(key))
         elseif key isa CreateStandaloneProjectKey
-            handle!(df, CreateStandaloneProjectMsg(key.package_path, key.content_hash))
+            handle!(df, CreateStandaloneProjectMsg(key))
         end
     end
 

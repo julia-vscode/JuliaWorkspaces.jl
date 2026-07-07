@@ -55,22 +55,17 @@ abstract type DynamicReactorMessage end
 
 """Request to index/watch the environment of a project."""
 struct WatchEnvironmentMsg <: DynamicReactorMessage
-    project_path::String
-    content_hash::UInt64
-    imported_packages::Vector{String}
+    key::WatchEnvironmentKey
 end
 
 """Request to index/watch the test environment of a project + package."""
 struct WatchTestEnvironmentMsg <: DynamicReactorMessage
-    project_path::String
-    package::String
-    content_hash::UInt64
+    key::WatchTestEnvironmentKey
 end
 
 """Request to create a standalone project for a package folder."""
 struct CreateStandaloneProjectMsg <: DynamicReactorMessage
-    package_path::String
-    content_hash::UInt64
+    key::CreateStandaloneProjectKey
 end
 
 """Request an orderly shutdown of the reactor."""
@@ -97,9 +92,7 @@ once the (potentially slow) missing-package check + cloud download finished.
 `still_missing` indicates whether a DJP is still required afterwards.
 """
 struct EnvironmentPrepDoneMsg <: DynamicReactorMessage
-    project_path::String
-    content_hash::UInt64
-    imported_packages::Vector{String}
+    key::WatchEnvironmentKey
     still_missing::Bool
 end
 
