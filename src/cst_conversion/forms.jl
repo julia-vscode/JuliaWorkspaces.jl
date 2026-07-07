@@ -209,6 +209,16 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         args = EXPR[op]
         append!(args, parens.args)
         return EXPR(:call, args, parens.trivia, 0, 0)
+    elseif k == K"call" && kids[1].head === :OPERATOR && kids[1].val in ("-", "!", "~") &&
+           length(kids) == 4 && kkinds[2] == K"(" && kkinds[3] != K"," && kkinds[4] == K")"
+        # `macro -(ex)` / `function -(x)` — `-`/`!`/`~` applied to a single
+        # directly-parenthesized operand keeps it as a :brackets (unlike other
+        # prefix operators, which unwrap). The green tree here has the parens
+        # as direct children (no K"parens" wrapper), so synthesize the brackets.
+        op, lp, inner, rp = kids
+        fs = lp.fullspan + inner.fullspan + rp.fullspan
+        brackets = EXPR(:brackets, EXPR[inner], EXPR[lp, rp], fs, fs - (rp.fullspan - rp.span))
+        return EXPR(:call, EXPR[op, brackets], nothing, 0, 0)
     elseif k == K"juxtapose"
         # 2x / 2(x+1) → implicit multiplication; CSTParser synthesizes a
         # zero-width `*` operator since juxtaposition has no real op leaf.
@@ -338,6 +348,13 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         trivia = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
             ck == K":" ? push!(trivia, ex) : push!(args, ex)
+        end
+        # A quoted dotted operator (`:.&`) arrives as a K"." composite (dot+op
+        # leaves); fuse it into one OPERATOR leaf, same as comparison does.
+        if args[1].head isa EXPR && args[1].head.val == "." && args[1].args !== nothing &&
+           length(args[1].args) == 1 && args[1].args[1].head === :OPERATOR
+            di = args[1]
+            args[1] = EXPR(:OPERATOR, di.fullspan, di.span, di.head.val * di.args[1].val)
         end
         inner = args[1]
         # Word operators (`:where`/`:in`/`:isa`) tokenize as Identifier after

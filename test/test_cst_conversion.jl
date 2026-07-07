@@ -440,6 +440,13 @@ end
         "@m;x",
         "begin @m; x end",
         ":(@_inline_meta; det(x))",
+        # quoted dotted operator fuses to one OPERATOR
+        ":.&",
+        ":.+",
+        # -/!/~ operator defs keep a directly-parenthesized operand as brackets
+        "macro -(ex)\nend",
+        "macro ~(ex)\nend",
+        "function -(x) end",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
