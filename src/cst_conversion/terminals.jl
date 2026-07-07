@@ -167,6 +167,18 @@ byteslice(s::String, a::Int, b::Int) = a <= b ? String(@view codeunits(s)[a:b]) 
 
 DOLLAR_TRIVIA() = EXPR[EXPR(:OPERATOR, 1, 1, "\$")]
 
+# A BARE string literal as the whole `$(...)` subexpression keeps its
+# :string wrapper in CSTParser (parse_string_or_cmd explicitly re-wraps,
+# since the usual single-chunk unwrap "is not supposed to happen in
+# interpolations") — our single-chunk collapse must be undone here. Wrapper
+# is oracle-pinned: trivia is EXPR[] (empty, not nothing), spans copied.
+function rewrap_string_interp(ex::EXPR)
+    if ex.head === :STRING || ex.head === :TRIPLESTRING
+        return EXPR(:string, EXPR[ex], EXPR[], ex.fullspan, ex.span)
+    end
+    return ex
+end
+
 # Manual re-scan of a cmdstring leaf's raw text for interpolation (`$foo` or
 # `$(...)`) — JuliaSyntax gives no green children to walk here (see
 # module-level note above). `\`-escapes are skipped over without inspection,
@@ -209,7 +221,7 @@ function split_cmd_dollar(text::String, s::Int)
                 lparen = EXPR(:LPAREN, 1 + leading, 1, nothing)
                 rparen = EXPR(:RPAREN, 1 + trailing, 1, nothing)
                 trivia = EXPR[EXPR(:OPERATOR, 1, 1, "\$"), lparen, rparen]
-                push!(out, (:interp, real, trivia))
+                push!(out, (:interp, rewrap_string_interp(real), trivia))
                 lastpos = nextind(text, j)
                 i = lastpos
             else
@@ -290,7 +302,7 @@ function collect_quoted_pieces(node::GreenNode, cur::Cursor, iscmd::Bool)
                     t.val = nothing
                 end
                 append!(trivia_here, pex.trivia)
-                push!(pieces, (:interp, pex.args[1], trivia_here))
+                push!(pieces, (:interp, rewrap_string_interp(pex.args[1]), trivia_here))
             else
                 push!(pieces, (:interp, assemble(sub, cur), trivia_here))
             end
@@ -331,7 +343,19 @@ function assemble_quoted(node::GreenNode, cur::Cursor, iscmd::Bool)
     end
     last_lit_raw = raw[lit_idx[end]]
 
-    texts = iscmd ? copy(raw) : Dict(i => rm_escaped_newlines_str(t) for (i, t) in raw)
+    # Macro-wrapped strings (raw"", r"", b"", ...) carry RAW_STRING_FLAG on
+    # the K"string" node itself — exactly CSTParser's `prefixed != false`
+    # path, which skips escape processing entirely except for halving
+    # backslash runs before a quote/chunk-end (unescape_prefixed). Same
+    # istrip dedent order as CSTParser's: prefixed-unescape BEFORE lcp.
+    israw = JuliaSyntax.has_flags(JuliaSyntax.head(node), JuliaSyntax.RAW_STRING_FLAG)
+    texts = if iscmd
+        copy(raw)
+    elseif israw
+        Dict(i => String(CSTParser.unescape_prefixed(t)) for (i, t) in raw)
+    else
+        Dict(i => rm_escaped_newlines_str(t) for (i, t) in raw)
+    end
     if istrip
         lcp = Base.RefValue{Union{Nothing,String}}(nothing)
         for i in lit_idx
@@ -347,7 +371,7 @@ function assemble_quoted(node::GreenNode, cur::Cursor, iscmd::Bool)
             texts[first_i] = texts[first_i][2:end]
         end
     end
-    if !iscmd
+    if !iscmd && !israw
         for i in lit_idx
             texts[i] = unescape_str(texts[i])
         end

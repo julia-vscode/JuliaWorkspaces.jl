@@ -274,6 +274,19 @@ end
         "@m.n x",                # qualified macrocall name
         "a < b < c",             # comparison chain
         "{a, b}",                # standalone braces
+        # raw-flagged (macro-wrapped) strings skip escape processing except
+        # for halving backslash runs before a quote/chunk-end
+        "r\"\\d+\"",
+        "raw\"a\\nb\"",
+        "b\"\\x00\"",
+        "r\"[/\\\\]+\"",
+        "raw\"tr\\\\\\\\\"",
+        "raw\"a\\\\\\\"b\"",
+        # a BARE string literal as the whole $(...) keeps its :string wrapper
+        "\"\$(\"nested\")\"",
+        "\"pre\$(\"lit\")post\"",
+        "\"\"\"triple \$(\"a\")\"\"\"",
+        "`x \$(\"a\")`",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
