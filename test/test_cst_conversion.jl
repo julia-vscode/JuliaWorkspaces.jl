@@ -292,6 +292,118 @@ end
     end
 end
 
+@testitem "cst-conv: imports and docstrings via oracle" begin
+    using JuliaWorkspaces: CSTConversion
+    for src in [
+        "using A",
+        "using A, B",
+        "using A: x, y",
+        "using A.B.C",
+        "import A",
+        "import A as B",
+        "import A: x as y",
+        "import ..A",
+        "export a, b",
+        "\"\"\"\ndoc\n\"\"\"\nf(x) = x",
+        "\"doc\"\nmodule A end",
+        "@doc \"x\" f",
+        "quote\nx\nend",
+        ":(x + y)",
+        ":x",
+        "\$x",
+        "\$(x)",
+        "x where {T, S}",
+        "GC.@preserve a f(a)",
+        "if VERSION > v\"1.6\" end",
+        # more import/export shapes found in the corpus
+        "import A.@m",
+        "import A.B.@m",
+        "using A: @m",
+        "import Base: +, -",
+        "export @uri_str",
+        "export a, @m",
+        "using A.B: c",
+        # quote-form taxonomy: :quotenode vs :quote vs block form
+        ":foo",
+        ":(x)",
+        ":(if x end)",
+        "quote\nend",
+        "quote\na\nb\nend",
+        # word operators quote as OPERATOR only when colon-prefixed
+        ":where", ":in", ":isa",
+        "p.in", "p.:in", "a.where",
+        # docstring on various targets
+        "\"d\"\nf() = 1",
+        "\"d\"\nstruct A end",
+    ]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end
+
+@testitem "cst-conv: containers and burn-down via oracle" begin
+    using JuliaWorkspaces: CSTConversion
+    for src in [
+        # tuple / vect / ref / braces / typed forms carrying keyword-kinded args
+        "(a, :b)",
+        "(a,)",
+        "(;a=1)",
+        "(a=b,)",              # named-tuple field keeps `=` (not `:kw`)
+        "(start=x, stop=y)",
+        "[a, :b]",
+        "a[i, :b]",
+        "a[end]",
+        "{a, :b}",
+        "T[x for x in xs]",
+        "T[1 2]",
+        "T[1;2]",
+        "T[1 2; 3 4]",
+        "T[1;;2]",
+        "a[i; j]",
+        "for Typ in (:Ldiv, :Rdiv)\nend",
+        # composite matrix cells get empty (not nothing) trivia
+        "[\"a\" => 1\n\"b\" => 2]",
+        "[a -b]",
+        "[a -b; -c -d]",
+        "[a+b c]",
+        "[f(x) c]",
+        # dotted comparison chains fuse `.`+op into one OPERATOR
+        "a .== b .== c",
+        "a .=== b",
+        # var\"...\" nonstandard identifiers
+        "var\"foo\"",
+        "var\"@x\"",
+        "esc(var\"@m\")",
+        # macro args keep `=` as assignment, never `:kw`
+        "Base.@propagate_inbounds f() = 1",
+        "@m a=1",
+        "@m f()=1",
+        # nested where clauses (kind-reuse trap)
+        "f() where {T} where {N} = x",
+        # global/local/const with multiple comma-separated names
+        "local a, b",
+        "global a, b",
+        "local pipe, fork, dup2",
+        # bare `return` in a short-circuit grows the operator/block span
+        "c && return",
+        "function f()\nc && return\nend",
+        "a && b",
+        # file-level and toplevel `;` bookkeeping
+        "x = 1;",
+        "1;",
+        ";;",
+        "f();",
+        "return\n",
+        # empty-body elseif measures span to its (empty) block
+        "if r isa X\nelseif r isa Y\nend",
+        # qualified macrocall with parens has span == fullspan
+        "x = M.@m(a)\ny",
+        "if a\nb = M.@m(\"v\")\nend",
+        "x = M.@m(a) + z",
+    ]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end
+
 @testitem "cst-conv: span invariants and corpus smoke" begin
     using JuliaWorkspaces: CSTConversion
     include(joinpath(@__DIR__, "cst_corpus.jl"))

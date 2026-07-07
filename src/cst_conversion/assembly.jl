@@ -48,6 +48,11 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         cur.terminals[next_i - 1] = expr
         cur.i = next_i
         return expr
+    elseif k0 == K"var"
+        expr, next_i = merge_var(cur.leaves, cur.i, cur.src)
+        cur.terminals[next_i - 1] = expr
+        cur.i = next_i
+        return expr
     elseif k0 == K"string" || k0 == K"cmdstring"
         # Interpolation/triple-quote dedent/cmd-literal reconstruction; see
         # assemble_quoted for why this can't be a simple leaf-run merge.

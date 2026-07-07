@@ -165,6 +165,27 @@ unescape_str(s::String) = (e = EXPR(:STRING, 0, 0, s); CSTParser._unescape_strin
 # char (e.g. a docstring containing non-ASCII text).
 byteslice(s::String, a::Int, b::Int) = a <= b ? String(@view codeunits(s)[a:b]) : ""
 
+# var"..." nonstandard identifier: JuliaSyntax splits it into var/quote/
+# content/quote leaves; CSTParser sees a NONSTDIDENTIFIER wrapping
+# IDENTIFIER("var") and a STRING of the (raw) quoted content.
+function merge_var(leaves::Vector{Leaf}, i::Int, source::String)
+    var_leaf = leaves[i]
+    var_id = EXPR(:IDENTIFIER, var_leaf.fullspan, var_leaf.span, "var")
+    open = leaves[i+1]
+    j = i + 2
+    while leaves[j].kind != open.kind
+        j += 1
+    end
+    close = leaves[j]
+    str = EXPR(:STRING, close.pos + close.fullspan - open.pos,
+               close.pos + close.span - open.pos,
+               byteslice(source, open.pos + open.span, close.pos - 1))
+    ex = EXPR(:NONSTDIDENTIFIER, EXPR[var_id, str], nothing,
+              close.pos + close.fullspan - var_leaf.pos,
+              close.pos + close.span - var_leaf.pos)
+    return ex, j + 1
+end
+
 DOLLAR_TRIVIA() = EXPR[EXPR(:OPERATOR, 1, 1, "\$")]
 
 # A BARE string literal as the whole `$(...)` subexpression keeps its

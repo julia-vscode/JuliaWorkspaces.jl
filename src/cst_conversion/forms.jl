@@ -107,17 +107,18 @@ end
 # (vect/ref/call arguments keep the normal `nothing`). Composite cells
 # (already carrying real args/trivia) are untouched.
 function matrix_cell!(ex::EXPR)
-    if ex.args === nothing
-        ex.args = EXPR[]
-        ex.trivia = EXPR[]
-    end
+    # Bare terminals get empty args; every cell (bare or composite) whose
+    # trivia is `nothing` gets an empty trivia vector — a cell that already
+    # carries real trivia (e.g. `f(x)`'s parens) is left as-is.
+    ex.args === nothing && (ex.args = EXPR[])
+    ex.trivia === nothing && (ex.trivia = EXPR[])
     return ex
 end
 
 # Shared by call/dotcall/curly/macrocall arg lists: split into positional
 # args, bracket/comma trivia, and `;`-groups (still unmerged/unrelocated —
 # each caller decides where the merged group lands); `a=b` becomes `:kw`.
-function collect_arglist(kids::Vector{EXPR}, kkinds::Vector{Kind}, open::Kind, close::Kind)
+function collect_arglist(kids::Vector{EXPR}, kkinds::Vector{Kind}, open::Kind, close::Kind; kw::Bool=true)
     args = EXPR[]
     trivia = EXPR[]
     groups = EXPR[]
@@ -126,7 +127,7 @@ function collect_arglist(kids::Vector{EXPR}, kkinds::Vector{Kind}, open::Kind, c
             push!(trivia, ex)
         elseif ck == K"parameters"
             push!(groups, ex)
-        elseif ck == K"="
+        elseif ck == K"=" && kw
             push!(args, to_kw(ex))
         else
             push!(args, ex)
@@ -143,15 +144,34 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # the rightmost leaf of the preceding statement (and that leaf's
         # ancestors), oracle-style.
         args = EXPR[]
+        lead = 0
         for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ck == K";"
                 semi_i = first(cur.kid_ranges[j])
-                fold_semi!(cur, semi_i, ex.fullspan) ||
-                    (isempty(args) || (args[end].fullspan += ex.fullspan))
+                if fold_semi!(cur, semi_i, ex.fullspan)
+                    # Same span bookkeeping as a block: a leading `;` widens a
+                    # leaf outside this node; a trailing `;` widens this node's
+                    # own last leaf but was folded away, so drop it from span.
+                    j == 1 && (cur.trim += ex.fullspan)
+                    j == length(kids) && (cur.trim_span += ex.span)
+                elseif isempty(args)
+                    # A `;` at the very start of the file has no preceding
+                    # statement: CSTParser materializes an empty NOTHING one.
+                    lead += ex.fullspan
+                else
+                    args[end].fullspan += ex.fullspan
+                end
             else
                 push!(args, ex)
             end
         end
+        lead > 0 && pushfirst!(args, EXPR(:NOTHING, lead, lead, ""))
+        # File/toplevel span is measured to the last stored arg (the outer
+        # file root wraps an inner toplevel, so a trailing `;` or bare
+        # `return` shows up as a span mismatch here); reconcile both
+        # directions. Skip when the last kid was a dropped `;` (its own
+        # trim_span above already owns that case).
+        !isempty(args) && kkinds[end] != K";" && trim_span_to_last_arg!(cur, args)
         return EXPR(:toplevel, args, EXPR[], 0, 0)
     elseif k == K"call" && JuliaSyntax.is_infix_op_call(JuliaSyntax.head(node))
         # a + b (+ c ...) → (:call, [op, a, b, c...]); extra op tokens → trivia
@@ -178,8 +198,22 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         return EXPR(:call, EXPR[op, kids[1], kids[2]], nothing, 0, 0)
     elseif k == K"comparison"
         # a < b < c → flat (:comparison, [a, op, b, op, c, ...]) — kids are
-        # already in this exact order/shape, just need the right head/trivia.
-        return EXPR(:comparison, kids, nothing, 0, 0)
+        # already in this exact order/shape. Dotted comparison operators
+        # (`a .== b`) arrive as a K"." composite (dot+op leaves); fuse each
+        # into one OPERATOR leaf (val ".==") like CSTParser does.
+        args = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            if ck == K"." && ex.head isa EXPR && ex.args !== nothing &&
+               length(ex.args) == 1 && ex.args[1].head === :OPERATOR
+                # dotted comparison operator (`.==`); NOT a getfield `.x`
+                # (which has two args ending in a quotenode).
+                push!(args, EXPR(:OPERATOR, ex.fullspan, ex.span,
+                                 ex.head.val * ex.args[1].val))
+            else
+                push!(args, ex)
+            end
+        end
+        return EXPR(:comparison, args, nothing, 0, 0)
     elseif k == K"call"
         # f(x, y) → (:call, [f, x, y], trivia=[lparen, commas..., rparen]).
         # `;`-separated keyword args nest under a `parameters` child at their
@@ -254,11 +288,29 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         lhs = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
                    atex.span + nameex.span, "@" * nameex.val)
         return EXPR(dotex, EXPR[lhs, rhs], nothing, 0, 0)
-    elseif k == K"quote" && length(kids) <= 2
-        # Field-name wrapper under getfield's `.`: bare `b`, `:b` with an
-        # explicit-quote colon kept as trivia, or (A.@m x) an unfused `@`+
-        # name pair fused into a single "@name" IDENTIFIER.
-        if !isempty(kkinds) && kkinds[1] == K"@"
+    elseif k == K"quote"
+        # Three shapes share this kind:
+        #  (a) block form `quote ... end` → :quote wrapping the body block;
+        #      quote/end keywords are held in the block's trivia (block
+        #      branch) and lift up to the :quote node, the inner block keeps
+        #      only its statements.
+        #  (b) getfield field-name (`.b`, `.:b`, `.@m`) → :quotenode.
+        #  (c) `:x`/`:(expr)` → :quotenode for a quoted atom (incl. a
+        #      single-atom `:(x)`), :quote for a quoted composite —
+        #      CSTParser's parse_quote split.
+        if length(kids) == 1 && kkinds[1] == K"block"
+            blk = kids[1]
+            qkw = ekw = nothing
+            for t in (blk.trivia === nothing ? EXPR[] : blk.trivia)
+                t.head === :QUOTE && (qkw = t)
+                t.head === :END && (ekw = t)
+            end
+            fs = sum(a -> a.fullspan, blk.args; init=0)
+            sp = isempty(blk.args) ? 0 : fs - (blk.args[end].fullspan - blk.args[end].span)
+            inner = EXPR(:block, blk.args, nothing, fs, sp)
+            return EXPR(:quote, EXPR[inner], EXPR[qkw, ekw], 0, 0)
+        end
+        if kkinds[1] == K"@"
             atex, nameex = kids
             fused = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
                         atex.span + nameex.span, "@" * nameex.val)
@@ -269,13 +321,112 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         for (ex, ck) in zip(kids, kkinds)
             ck == K":" ? push!(trivia, ex) : push!(args, ex)
         end
-        return EXPR(:quotenode, args, isempty(trivia) ? nothing : trivia, 0, 0)
+        inner = args[1]
+        # Word operators (`:where`/`:in`/`:isa`) tokenize as Identifier after
+        # a quote colon, but CSTParser labels them OPERATOR. Only when the
+        # quote is colon-prefixed — a bare getfield field name (`p.in`) stays
+        # an IDENTIFIER.
+        if K":" in kkinds && inner.head === :IDENTIFIER &&
+           inner.val in ("where", "in", "isa")
+            inner.head = :OPERATOR
+        end
+        target = (inner.head === :brackets && inner.args !== nothing &&
+                  length(inner.args) == 1) ? inner.args[1] : inner
+        head = target.args === nothing ? :quotenode : :quote
+        return EXPR(head, args, isempty(trivia) ? nothing : trivia, 0, 0)
     elseif k == K"curly"
         # A{T; S} → (:curly, [A, parameters, T]) — parameters relocates to
         # args[2] exactly like call's.
         args, trivia, groups = collect_arglist(kids, kkinds, K"{", K"}")
         isempty(groups) || insert!(args, 2, merge_params!(groups))
         return EXPR(:curly, args, trivia, 0, 0)
+    elseif k == K"tuple"
+        # `(a, :b)` → (:tuple, [args], trivia=[parens, commas]); a named-tuple
+        # field (`(a=b,)`) keeps `=` as assignment (not `:kw`); `;`-parameters
+        # (`(; a=1)`) relocate to the front and keep their own `:kw` shape.
+        args, trivia, groups = collect_arglist(kids, kkinds, K"(", K")"; kw=false)
+        isempty(groups) || insert!(args, 1, merge_params!(groups))
+        return EXPR(:tuple, args, trivia, 0, 0)
+    elseif k == K"vect"
+        args, trivia, groups = collect_arglist(kids, kkinds, K"[", K"]")
+        isempty(groups) || insert!(args, 1, merge_params!(groups))
+        return EXPR(:vect, args, trivia, 0, 0)
+    elseif k == K"braces"
+        args, trivia, groups = collect_arglist(kids, kkinds, K"{", K"}")
+        isempty(groups) || insert!(args, 1, merge_params!(groups))
+        return EXPR(:braces, args, trivia, 0, 0)
+    elseif k == K"ref"
+        # `a[i, j]` → (:ref, [callee, indices...], trivia=[brackets, commas]).
+        callee = kids[1]
+        args, trivia, groups = collect_arglist(kids[2:end], kkinds[2:end], K"[", K"]")
+        isempty(groups) || insert!(args, 1, merge_params!(groups))
+        return EXPR(:ref, EXPR[callee, args...], trivia, 0, 0)
+    elseif k == K"typed_comprehension"
+        # `T[gen]` → (:typed_comprehension, [T, generator], trivia=[brackets]).
+        trivia = EXPR[]
+        args = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            (ck == K"[" || ck == K"]") ? push!(trivia, ex) : push!(args, ex)
+        end
+        return EXPR(:typed_comprehension, args, trivia, 0, 0)
+    elseif k == K"typed_hcat"
+        # `T[a b]` → (:typed_hcat, [T, cells...], trivia=[brackets]).
+        typ = kids[1]
+        trivia = EXPR[kids[2], kids[end]]
+        cells = kids[3:end-1]
+        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        return EXPR(:typed_hcat, EXPR[typ, cells...], trivia, 0, 0)
+    elseif k == K"typed_vcat"
+        # `T[1; 2]` / `T[1 2; 3 4]` → (:typed_vcat, [T, rows-or-cells...]),
+        # same `;`-fold + matrix-cell quirk as vcat, T prepended.
+        typ = kids[1]
+        trivia = EXPR[]
+        args = EXPR[]
+        cells = EXPR[]
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if j == 1
+                continue
+            elseif ck == K"[" || ck == K"]"
+                push!(trivia, ex)
+            elseif ck == K";"
+                semi_i = first(cur.kid_ranges[j])
+                fold_semi!(cur, semi_i, ex.fullspan) ||
+                    (isempty(args) || (args[end].fullspan += ex.fullspan))
+            elseif ck == K"row"
+                push!(args, ex)
+            else
+                push!(args, ex)
+                push!(cells, ex)
+            end
+        end
+        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        return EXPR(:typed_vcat, EXPR[typ, args...], trivia, 0, 0)
+    elseif k == K"typed_ncat"
+        # `T[1;; 2]` → typed_vcat plus the ncat dim marker after the type.
+        dim = JuliaSyntax.numeric_flags(JuliaSyntax.flags(node))
+        typ = kids[1]
+        trivia = EXPR[]
+        rest = EXPR[]
+        cells = EXPR[]
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if j == 1
+                continue
+            elseif ck == K"[" || ck == K"]"
+                push!(trivia, ex)
+            elseif ck == K";"
+                semi_i = first(cur.kid_ranges[j])
+                fold_semi!(cur, semi_i, ex.fullspan) ||
+                    (isempty(rest) || (rest[end].fullspan += ex.fullspan))
+            elseif ck == K"nrow"
+                push!(rest, ex)
+            else
+                push!(rest, ex)
+                push!(cells, ex)
+            end
+        end
+        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        args = EXPR[typ, EXPR(Symbol(string(dim)), 0, 0, ""), rest...]
+        return EXPR(:typed_ncat, args, trivia, 0, 0)
     elseif k == K"macrocall"
         # `@m x` fuses the `@` leaf and macro name into ONE IDENTIFIER
         # ("@m") — CSTParser never sees them as separate tokens. String/cmd
@@ -292,13 +443,123 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             name = kids[1]
             rest, restk = kids[2:end], kkinds[2:end]
         end
-        args, trivia, groups = collect_arglist(rest, restk, K"(", K")")
+        # Macro args keep `=` as assignment (never `:kw`), unlike call args.
+        args, trivia, groups = collect_arglist(rest, restk, K"(", K")"; kw=false)
         args = EXPR[name, EXPR(:NOTHING, 0, 0, nothing), args...]
         isempty(groups) || insert!(args, 3, merge_params!(groups))
         # Unprefixed cmd literals (name.head == :globalrefcmd) always keep
         # trivia = EXPR[], oracle-pinned, unlike every other macrocall shape.
         macro_trivia = name.head === :globalrefcmd ? EXPR[] : (isempty(trivia) ? nothing : trivia)
+        # Oracle quirk: a qualified (dotted-name) macrocall WITH a paren arg
+        # list has span == fullspan (its closing paren's trailing trivia is
+        # kept), unlike the unqualified or parenless forms.
+        if name.head isa EXPR && !isempty(kkinds) && kkinds[end] == K")"
+            ll = cur.leaves[cur.i-1]
+            cur.grow_span += ll.fullspan - ll.span
+        end
         return EXPR(:macrocall, args, macro_trivia, 0, 0)
+    elseif k == K"doc"
+        # `"..." expr` docstring → CSTParser's synthetic @doc macrocall:
+        # [globalrefdoc, NOTHING, docstring, documented_expr], no trivia.
+        return EXPR(:macrocall,
+                    EXPR[EXPR(:globalrefdoc, 0, 0, nothing),
+                         EXPR(:NOTHING, 0, 0, nothing), kids[1], kids[2]],
+                    nothing, 0, 0)
+    elseif k == K"importpath"
+        # `A`, `A.B.C`, `..A` → a synthetic zero-width `.`-operator-headed
+        # node: path components (identifiers + leading relative-dot operators)
+        # are args, separator dots between components are trivia.
+        dot_head = EXPR(:OPERATOR, 0, 0, ".")
+        args = EXPR[]
+        trivia = EXPR[]
+        seen = false
+        i = 1
+        while i <= length(kids)
+            ex, ck = kids[i], kkinds[i]
+            if ck == K"@" && i < length(kids)
+                # `A.@m` path component: fuse `@`+MacroName into one IDENTIFIER.
+                nm = kids[i+1]
+                push!(args, EXPR(:IDENTIFIER, ex.fullspan + nm.fullspan,
+                                 ex.span + nm.span, "@" * nm.val))
+                seen = true
+                i += 2
+            elseif ck == K"."
+                # Leading relative dots are OPERATOR args; separator dots
+                # between components are DOT-headed trivia.
+                seen ? push!(trivia, EXPR(:DOT, ex.fullspan, ex.span, ".")) :
+                       push!(args, ex)
+                i += 1
+            else
+                push!(args, ex)
+                seen = true
+                i += 1
+            end
+        end
+        return EXPR(dot_head, args, trivia, 0, 0)
+    elseif k == K"as"
+        # `A as B` → (:as, [path, newname], trivia=[as]).
+        args = EXPR[]
+        trivia = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            ck == K"as" ? push!(trivia, ex) : push!(args, ex)
+        end
+        return EXPR(:as, args, trivia, 0, 0)
+    elseif k == K":" && (kkinds[1] == K"using" || kkinds[1] == K"import")
+        # Selective import `using A: x, y` → colon-operator-headed node,
+        # args=[module_path, imported paths...], trivia=[commas]. The
+        # using/import keyword leaf lives here in the green tree but the
+        # oracle relocates it to the enclosing using/import node's trivia;
+        # trim its leading width off this node (the parent re-adds it).
+        cur.trim += kids[1].fullspan
+        head = nothing
+        args = EXPR[]
+        trivia = EXPR[]
+        for (ex, ck) in zip(kids[2:end], kkinds[2:end])
+            if ck == K":"
+                head = ex
+            elseif ck == K","
+                push!(trivia, ex)
+            else
+                push!(args, ex)
+            end
+        end
+        return EXPR(head, args, trivia, 0, 0)
+    elseif k == K"using" || k == K"import"
+        sym = k == K"using" ? :using : :import
+        if kkinds[1] == K":"
+            # colon node already assembled; the keyword leaf it swallowed is
+            # this node's first consumed leaf (see the K":" branch above).
+            kw = cur.terminals[first(cur.kid_ranges[1])]
+            return EXPR(sym, EXPR[kids[1]], EXPR[kw], 0, 0)
+        end
+        kw = kids[1]
+        args = EXPR[]
+        trivia = EXPR[kw]
+        for (ex, ck) in zip(kids[2:end], kkinds[2:end])
+            ck == K"," ? push!(trivia, ex) : push!(args, ex)
+        end
+        return EXPR(sym, args, trivia, 0, 0)
+    elseif k == K"export" || k == K"public"
+        # `export a, @m` → names in args (fusing `@`+MacroName), keyword and
+        # commas in trivia.
+        args = EXPR[]
+        trivia = EXPR[]
+        i = 1
+        while i <= length(kids)
+            ex, ck = kids[i], kkinds[i]
+            if ck == k || ck == K","
+                push!(trivia, ex)
+            elseif ck == K"@" && i < length(kids)
+                nm = kids[i+1]
+                push!(args, EXPR(:IDENTIFIER, ex.fullspan + nm.fullspan,
+                                 ex.span + nm.span, "@" * nm.val))
+                i += 1
+            else
+                push!(args, ex)
+            end
+            i += 1
+        end
+        return EXPR(Symbol(lowercase(string(k))), args, trivia, 0, 0)
     elseif k == K"do"
         # `f(x) do y ... end` desugars to a call plus a synthetic zero-width
         # `->` operator wrapping the (params-tuple, body-block) pair — no
@@ -377,6 +638,9 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         needs_block = (k == K"->" || kkinds[1] == K"call" || kkinds[1] == K"where") &&
                       kkinds[3] != K"block"
         body = needs_block ? EXPR(:block, EXPR[rhs], nothing, rhs.fullspan, rhs.span) : rhs
+        # Span is measured to the last arg; grow when that arg's span already
+        # reaches its fullspan (bare `return`, qualified-macrocall RHS).
+        grow_span_to_last_arg!(cur, EXPR[lhs, body])
         return EXPR(op, EXPR[lhs, body], nothing, 0, 0)
     elseif (k == K"::" || k == K"<:") && length(kids) == 3
         # binary syntax: operator EXPR becomes the head (type declarations,
@@ -389,7 +653,9 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         args = EXPR[]
         trivia = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
-            if ck == K"where"
+            if ck == K"where" && ex.args === nothing
+                # keyword leaf (nested `where` composite reuses the kind — the
+                # same trap as if/elseif; only the leaf goes to trivia).
                 push!(trivia, ex)
             elseif ck == K"braces"
                 append!(args, ex.args)
@@ -413,6 +679,12 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(args, ex)
             end
         end
+        # An `elseif` ends in its (possibly empty) body block, not an END
+        # keyword, so its span is measured to that last arg — grow when the
+        # block is empty (its trailing exclusion is 0 but the last real leaf's
+        # is not). An `if` ends in END trivia and must NOT grow (its END owns
+        # any trailing whitespace up to the next statement).
+        k == K"elseif" && grow_span_to_last_arg!(cur, args)
         return EXPR(k == K"if" ? :if : :elseif, args, trivia, 0, 0)
     elseif k == K"?"
         # ternary a ? b : c → (:if, [a, b, c], trivia=[?, :]) — reuses if's
@@ -771,7 +1043,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         args = EXPR[]
         trivia = EXPR[]
         for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
-            if ck == K"begin" || ck == K"end"
+            if ck == K"begin" || ck == K"end" || (ck == K"quote" && ex.args === nothing)
+                # `quote ... end`'s keywords live inside its body block; the
+                # K"quote" branch lifts them up to the :quote node. Guard on
+                # the leaf test so a nested composite quote statement stays.
                 push!(trivia, ex)
             elseif ck == K","
                 # `let`'s bindings list reuses K"block" for its comma-joined
@@ -879,10 +1154,11 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         marker = EXPR(is_bare ? :FALSE : :TRUE, 0, 0, nothing)
         return EXPR(:module, EXPR[marker, name, body], trivia, 0, 0)
     elseif k == K"const" || k == K"global" || k == K"local"
+        # `global a, b` / `local x, y` → names in args, keyword+commas trivia.
         trivia = EXPR[]
         args = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
-            ck == k ? push!(trivia, ex) : push!(args, ex)
+            (ck == k || ck == K",") ? push!(trivia, ex) : push!(args, ex)
         end
         return EXPR(Symbol(lowercase(string(k))), args, trivia, 0, 0)
     elseif length(kids) == 3 && kkinds[2] == k && JuliaSyntax.is_operator(k)
@@ -894,6 +1170,9 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # Placed last: `where`/`in`/`isa` are also JuliaSyntax "operators"
         # by precedence but have their own dedicated non-operator-headed
         # branches earlier, which must win first.
+        # A bare `return` RHS (`c && return`) has span==fullspan, so grow this
+        # node's span to its last arg (same as the trivia-less block case).
+        grow_span_to_last_arg!(cur, EXPR[kids[1], kids[3]])
         return EXPR(kids[2], EXPR[kids[1], kids[3]], nothing, 0, 0)
     elseif length(kids) == 2 && kkinds[1] == k && JuliaSyntax.is_operator(k)
         # Remaining prefix-unary-syntax-head kinds (e.g. `&x`), same shape

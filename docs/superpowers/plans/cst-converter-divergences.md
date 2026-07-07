@@ -36,3 +36,19 @@ input):
   inside a cmd literal would mis-scan. Not hit by the current corpus;
   flagged rather than hardened, since fixing it generally requires the same
   tokenizer JuliaSyntax itself uses for the inner re-parse boundary.
+
+## Task 10
+
+- **A file that begins with a `;` before any statement** (e.g. `"; a"`) — a
+  genuine structural disagreement, not a layout gap. JuliaSyntax nests the
+  leading `;` and the following statement in ONE `K"toplevel"` green node
+  (`toplevel[;, a]`), whereas CSTParser splits them across two file-level
+  slots: an empty leading statement wrapped in its own nested toplevel, then
+  the real statement as a sibling — `file[ toplevel[NOTHING], a ]`. The
+  converter cannot produce that split from the single flat green node without
+  re-deriving CSTParser's statement-grouping pass. It DOES synthesize the
+  leading `NOTHING` placeholder (so widths balance and `check_spans` passes,
+  and the pure-`;` degenerate `;;` matches the oracle exactly), but `"; a"`
+  still reports `args length 1 vs 2`. This input never occurs in real
+  code (a source file cannot meaningfully start with `;`); zero corpus files
+  hit it. Resolution: accept drift — downstream never sees leading-`;` files.
