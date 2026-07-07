@@ -438,10 +438,12 @@ function assemble_quoted(node::GreenNode, cur::Cursor, iscmd::Bool)
         if pieces[i][1] == :interp
             append!(trivia, pieces[i][3])
             push!(args, exprs[i])
-        elseif !isempty(exprs[i].val)
+        elseif pieces[i][2] <= pieces[i][3]
+            # chunk with real raw content stays an arg even if its val is
+            # "" after triple-quote dedent / leading-newline drop.
             push!(args, exprs[i])
         elseif i == 1 || i == n
-            push!(trivia, exprs[i])   # empty edge chunk: still carries the folded quote width
+            push!(trivia, exprs[i])   # empty edge chunk: carries the folded quote width
         end
         # empty non-edge chunk: dropped entirely (CSTParser never emits it)
     end
