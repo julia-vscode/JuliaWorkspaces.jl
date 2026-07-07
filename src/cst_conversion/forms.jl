@@ -370,10 +370,12 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # Inside parens, only a dotted assignment (`:(.=)`) fuses to an
         # OPERATOR atom; a dotted broadcast operator (`:(.+)`) stays a
         # composite (a broadcast call), so it remains a :quote.
+        is_assign(v) = endswith(v, "=") &&
+            (length(v) == 1 || !(v[prevind(v, lastindex(v))] in ('=', '!', '<', '>')))
         if args[1].head === :brackets && args[1].args !== nothing &&
            length(args[1].args) == 1 && args[1].args[1].head isa EXPR &&
            args[1].args[1].args !== nothing && !isempty(args[1].args[1].args) &&
-           args[1].args[1].args[1].head === :OPERATOR && args[1].args[1].args[1].val == "="
+           args[1].args[1].args[1].head === :OPERATOR && is_assign(args[1].args[1].args[1].val)
             args[1].args[1] = fuse_dotop(args[1].args[1])
         end
         inner = args[1]
@@ -729,8 +731,12 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # (`f()::T = ...`) — but NOT a plain typed assignment (`x::T = 5`).
         typed_def = kkinds[1] == K"::" && lhs.args !== nothing &&
                     !isempty(lhs.args) && lhs.args[1].head === :call
+        # `(f(x)) = body` / `(f(x) where T) = body` — a parenthesized signature
+        # is still a function def (block-wrapped body); `(x) = y` is not.
+        parens_def = kkinds[1] == K"parens" && lhs.args !== nothing &&
+                     !isempty(lhs.args) && lhs.args[1].head in (:call, :where)
         needs_block = (k == K"->" || kkinds[1] == K"call" || kkinds[1] == K"where" ||
-                       typed_def) && kkinds[3] != K"block"
+                       typed_def || parens_def) && kkinds[3] != K"block"
         body = needs_block ? EXPR(:block, EXPR[rhs], nothing, rhs.fullspan, rhs.span) : rhs
         # Span is measured to the last arg; grow when that arg's span already
         # reaches its fullspan (bare `return`, qualified-macrocall RHS).

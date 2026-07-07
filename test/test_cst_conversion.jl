@@ -490,6 +490,13 @@ end
         "f(x .= y)",
         "Matrix(C .= 2.0 .* A) ≈ B ≈ D",
         "@m(a .= b)",
+        # quoted dotted compound assignment fuses to an OPERATOR atom
+        ":(.+=)",
+        ":(.*=)",
+        # parenthesized signature is a function def (block-wrapped body)
+        "(f(x)) = y",
+        "(f(x) where T) = y",
+        "(x) = y",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
