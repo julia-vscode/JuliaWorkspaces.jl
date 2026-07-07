@@ -30,7 +30,7 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]
 TestItemDetection = "1.1"
-JuliaSyntax = "0.4, 1"
+JuliaSyntax = "1"
 SHA = "<0.0.1, 0.7, 1"
 REPL = "<0.0.1, 1"
 LibGit2 = "<0.0.1, 1"
