@@ -234,6 +234,51 @@ end
     end
 end
 
+@testitem "cst-conv: strings and operators via oracle" begin
+    using JuliaWorkspaces: CSTConversion
+    for src in [
+        "\"a\$b c\"",            # interpolation: CSTParser splits chunks differently
+        "\"a\$(b + c)d\"",
+        "\"\"\"\ntriple \$x\n\"\"\"",
+        "`cmd \$x`",
+        "```\ncmd\n```",
+        "raw\"no \$interp\"",
+        "'\\n'",
+        "\"esc\\\"aped\"",
+        "-x",                    # unary call
+        "!x",
+        "+x",
+        "x'",                    # postfix adjoint
+        "x''",
+        "a .+ b",                # broadcast infix
+        ".!x",
+        "a && b",
+        "a || b && c",
+        "a <: B",
+        "a >: B",
+        "a === b",
+        "x...",
+        "&x",
+        "::Int",
+        "2x",                    # juxtaposition
+        "2(x + 1)",
+        "a = b = c",             # right-assoc chained assignment
+        "a += 1",
+        "a .= b",
+        "x = \"\"\"\n a\n\"\"\"",
+        # inherited concerns
+        "\"a\\\n b\"",           # line continuation: multi-chunk string
+        "m`c`",                  # cmd macro
+        "a && return",
+        "A.@m x",                # dotted macrocall
+        "@m.n x",                # qualified macrocall name
+        "a < b < c",             # comparison chain
+        "{a, b}",                # standalone braces
+    ]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end
+
 @testitem "cst-conv: span invariants and corpus smoke" begin
     using JuliaWorkspaces: CSTConversion
     include(joinpath(@__DIR__, "cst_corpus.jl"))

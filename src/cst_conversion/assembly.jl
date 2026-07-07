@@ -40,13 +40,19 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         return ex
     end
     k0 = kind(node)
-    if k0 == K"string" || k0 == K"char"
+    if k0 == K"char"
         # Quoted literals are open-quote/content/close-quote leaf triples in
-        # the green tree, but CSTParser sees one STRING/CHAR token; consume
-        # the whole run via the cursor instead of descending into children.
+        # the green tree, but CSTParser sees one CHAR token; consume the
+        # whole run via the cursor instead of descending into children.
         expr, next_i = merge_quoted(cur.leaves, cur.i, cur.src)
         cur.terminals[next_i - 1] = expr
         cur.i = next_i
+        return expr
+    elseif k0 == K"string" || k0 == K"cmdstring"
+        # Interpolation/triple-quote dedent/cmd-literal reconstruction; see
+        # assemble_quoted for why this can't be a simple leaf-run merge.
+        expr = assemble_quoted(node, cur, k0 == K"cmdstring")
+        cur.terminals[cur.i - 1] = expr
         return expr
     end
     first_i = cur.i

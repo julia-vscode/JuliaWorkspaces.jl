@@ -166,6 +166,20 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             end
         end
         return EXPR(:call, args, isempty(trivia) ? nothing : trivia, 0, 0)
+    elseif k == K"call" && JuliaSyntax.is_postfix_op_call(JuliaSyntax.head(node)) && length(kids) == 2
+        # x' (postfix adjoint) → operator-headed EXPR (kids=[operand, op]),
+        # unlike prefix calls (-x/!x) which stay :call-symbol-headed with the
+        # operator as a plain leading arg.
+        return EXPR(kids[2], EXPR[kids[1]], nothing, 0, 0)
+    elseif k == K"juxtapose"
+        # 2x / 2(x+1) → implicit multiplication; CSTParser synthesizes a
+        # zero-width `*` operator since juxtaposition has no real op leaf.
+        op = EXPR(:OPERATOR, 0, 0, "*")
+        return EXPR(:call, EXPR[op, kids[1], kids[2]], nothing, 0, 0)
+    elseif k == K"comparison"
+        # a < b < c → flat (:comparison, [a, op, b, op, c, ...]) — kids are
+        # already in this exact order/shape, just need the right head/trivia.
+        return EXPR(:comparison, kids, nothing, 0, 0)
     elseif k == K"call"
         # f(x, y) → (:call, [f, x, y], trivia=[lparen, commas..., rparen]).
         # `;`-separated keyword args nest under a `parameters` child at their
@@ -179,6 +193,37 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         args, trivia, groups = collect_arglist(kids, kkinds, K"(", K")")
         isempty(groups) || insert!(args, 2, merge_params!(groups))
         return EXPR(:call, args, isempty(trivia) ? nothing : trivia, 0, 0)
+    elseif k == K"dotcall" && JuliaSyntax.is_infix_op_call(JuliaSyntax.head(node))
+        # a .+ b (.+ c ...) → dotted infix broadcast; JuliaSyntax keeps `.`
+        # and the operator as TWO separate leaves (unlike macrocall's `@name`
+        # fusion precedent, but the same fold: sum fullspan/span, concat
+        # val), then reuses the plain infix-call shape (:call, [op, a, b,...]).
+        lhs = kids[1]
+        args = EXPR[]
+        trivia = EXPR[]
+        j = 2
+        first_op = true
+        while j < length(kids)
+            dotex, opex = kids[j], kids[j+1]
+            fused = EXPR(:OPERATOR, dotex.fullspan + opex.fullspan,
+                        dotex.span + opex.span, dotex.val * opex.val)
+            if first_op
+                args = EXPR[fused, lhs]
+                first_op = false
+            else
+                push!(trivia, fused)
+            end
+            j += 2
+            push!(args, kids[j])
+            j += 1
+        end
+        return EXPR(:call, args, isempty(trivia) ? nothing : trivia, 0, 0)
+    elseif k == K"dotcall" && JuliaSyntax.is_prefix_op_call(JuliaSyntax.head(node))
+        # .!x → dotted prefix broadcast; same `.`+op fusion, single operand.
+        dotex, opex, operand = kids[1], kids[2], kids[3]
+        fused = EXPR(:OPERATOR, dotex.fullspan + opex.fullspan,
+                    dotex.span + opex.span, dotex.val * opex.val)
+        return EXPR(:call, EXPR[fused, operand], nothing, 0, 0)
     elseif k == K"dotcall"
         # f.(x, y) → (:., [f, tuple(x, y)]); the parenthesized arg list packs
         # into a :tuple the same way a call's does (parameters relocate to
@@ -200,9 +245,25 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # ::/<:/->. The field-name side is always a K"quote" child (see the
         # branch below), already packaged as :quotenode by the time we see it.
         return EXPR(kids[2], EXPR[kids[1], kids[3]], nothing, 0, 0)
+    elseif k == K"." && length(kids) == 4 && kkinds[1] == K"@"
+        # @m.n x: a dotted/qualified macro name — the LHS itself is an
+        # unfused `@`+name pair (same fusion as macrocall's own @+name, and
+        # as the K"quote" branch below does for the A.@m x case where the
+        # `@` sits on the RHS instead).
+        atex, nameex, dotex, rhs = kids
+        lhs = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
+                   atex.span + nameex.span, "@" * nameex.val)
+        return EXPR(dotex, EXPR[lhs, rhs], nothing, 0, 0)
     elseif k == K"quote" && length(kids) <= 2
-        # Field-name wrapper under getfield's `.`: bare `b`, or `:b` with an
-        # explicit-quote colon kept as trivia.
+        # Field-name wrapper under getfield's `.`: bare `b`, `:b` with an
+        # explicit-quote colon kept as trivia, or (A.@m x) an unfused `@`+
+        # name pair fused into a single "@name" IDENTIFIER.
+        if !isempty(kkinds) && kkinds[1] == K"@"
+            atex, nameex = kids
+            fused = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
+                        atex.span + nameex.span, "@" * nameex.val)
+            return EXPR(:quotenode, EXPR[fused], nothing, 0, 0)
+        end
         args = EXPR[]
         trivia = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
@@ -234,7 +295,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         args, trivia, groups = collect_arglist(rest, restk, K"(", K")")
         args = EXPR[name, EXPR(:NOTHING, 0, 0, nothing), args...]
         isempty(groups) || insert!(args, 3, merge_params!(groups))
-        return EXPR(:macrocall, args, isempty(trivia) ? nothing : trivia, 0, 0)
+        # Unprefixed cmd literals (name.head == :globalrefcmd) always keep
+        # trivia = EXPR[], oracle-pinned, unlike every other macrocall shape.
+        macro_trivia = name.head === :globalrefcmd ? EXPR[] : (isempty(trivia) ? nothing : trivia)
+        return EXPR(:macrocall, args, macro_trivia, 0, 0)
     elseif k == K"do"
         # `f(x) do y ... end` desugars to a call plus a synthetic zero-width
         # `->` operator wrapping the (params-tuple, body-block) pair — no
@@ -296,7 +360,13 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # their RHS in an implicit block; plain assignment does not, and an
         # explicit `begin ... end` RHS is never wrapped a second time.
         lhs, op, rhs = kids
-        if k == K"=" && op.val != "="
+        if k == K"=" && JuliaSyntax.is_dotted(JuliaSyntax.head(node))
+            # a .= b: dotted assignment reuses base K"=" plus a DOTTED flag
+            # instead of a distinct Kind (unlike +=/-=/etc, which get their
+            # own Kind and are handled by the generic operator branch below)
+            # — op.val is already the real ".=" text, no fusion needed.
+            return EXPR(op, EXPR[lhs, rhs], nothing, 0, 0)
+        elseif k == K"=" && op.val != "="
             # for-loop/comprehension iteration spec (`i in xs`/`i ∈ xs`):
             # JuliaSyntax reuses K"=" regardless of the actual keyword; the
             # oracle always synthesizes a zero-width "=" head and relocates
@@ -815,6 +885,20 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             ck == k ? push!(trivia, ex) : push!(args, ex)
         end
         return EXPR(Symbol(lowercase(string(k))), args, trivia, 0, 0)
+    elseif length(kids) == 3 && kkinds[2] == k && JuliaSyntax.is_operator(k)
+        # Remaining binary-syntax-head kinds that use the operator's own
+        # Kind as the NODE's kind (not K"call"): compound assignment
+        # (+=/.=/...), short-circuit (&&/||), and remaining comparison-as-
+        # syntax ops (>:) — same shape as =/->/::/<:` above, just not
+        # special-cased per-operator since none of them need block-wrapping.
+        # Placed last: `where`/`in`/`isa` are also JuliaSyntax "operators"
+        # by precedence but have their own dedicated non-operator-headed
+        # branches earlier, which must win first.
+        return EXPR(kids[2], EXPR[kids[1], kids[3]], nothing, 0, 0)
+    elseif length(kids) == 2 && kkinds[1] == k && JuliaSyntax.is_operator(k)
+        # Remaining prefix-unary-syntax-head kinds (e.g. `&x`), same shape
+        # as bare `::T` above; same last-resort placement rationale.
+        return EXPR(kids[1], EXPR[kids[2]], nothing, 0, 0)
     end
     return generic_form(k, kids, kkinds)
 end
