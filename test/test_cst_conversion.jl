@@ -471,6 +471,13 @@ end
         "f(\"\$x\"; k=1)",
         "printstyled(\" x\$flags \"; color=:y)",
         "pipeline(`a \$b`; c)",
+        # `let bindings ; body end`: the `;` folds onto the bindings
+        "let x=1; y end",
+        "let s; x end",
+        "let i=1; f(); end",
+        # `;`-fold onto a qualified macrocall inside a paren-block
+        "(Base.@m; x)",
+        "(Base.@_inline_meta; f(x))",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end

@@ -348,6 +348,9 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             atex, nameex = kids
             fused = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
                         atex.span + nameex.span, "@" * nameex.val)
+            # Register the fused name at its leaf slot so a `;`-fold onto a
+            # qualified macrocall (`(Base.@m; x)`) widens THIS EXPR.
+            cur.terminals[first(cur.kid_ranges[2])] = fused
             return EXPR(:quotenode, EXPR[fused], nothing, 0, 0)
         end
         args = EXPR[]
@@ -915,9 +918,14 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # one binding (`let x = 1` / `let x`); stays a :block for 0 or 2+.
         trivia = EXPR[]
         bindings = body = nothing
-        for (ex, ck) in zip(kids, kkinds)
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ck == K"let" || ck == K"end"
                 push!(trivia, ex)
+            elseif ck == K";"
+                # `let x=1; y end` — the `;` separating bindings from body is
+                # dropped; its width folds onto the bindings' last leaf.
+                semi_i = first(cur.kid_ranges[j])
+                fold_semi!(cur, semi_i, ex.fullspan)
             elseif bindings === nothing
                 bindings = ex
             else
