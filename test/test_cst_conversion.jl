@@ -466,6 +466,11 @@ end
         ":(.=)",
         ":(.+)",
         ":(.==)",
+        # interpolated-string call arg followed by `;` params: the `;` folds
+        # onto the trailing chunk (childsums stay balanced)
+        "f(\"\$x\"; k=1)",
+        "printstyled(\" x\$flags \"; color=:y)",
+        "pipeline(`a \$b`; c)",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end

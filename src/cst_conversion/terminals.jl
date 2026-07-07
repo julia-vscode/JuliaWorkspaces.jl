@@ -427,7 +427,10 @@ function assemble_quoted(node::GreenNode, cur::Cursor, iscmd::Bool)
         end
     end
 
-    n == 1 && return exprs[1]
+    if n == 1
+        cur.terminals[cur.i - 1] = exprs[1]
+        return exprs[1]
+    end
 
     args = EXPR[]
     trivia = EXPR[]
@@ -444,5 +447,10 @@ function assemble_quoted(node::GreenNode, cur::Cursor, iscmd::Bool)
     end
     fullspan = close_leaf.pos + close_leaf.fullspan - open_leaf.pos
     span = close_leaf.pos + close_leaf.span - open_leaf.pos
-    return EXPR(:string, args, trivia, fullspan, span)
+    str = EXPR(:string, args, trivia, fullspan, span)
+    # The trailing chunk owns the closing quote; register it at the close
+    # leaf's slot so a later `;`-fold (`f("$x"; k=1)`) widens the chunk (and,
+    # via its parent, the string) — keeping childsums balanced.
+    cur.terminals[cur.i - 1] = exprs[n]
+    return str
 end

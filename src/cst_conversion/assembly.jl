@@ -56,8 +56,10 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
     elseif k0 == K"string" || k0 == K"cmdstring"
         # Interpolation/triple-quote dedent/cmd-literal reconstruction; see
         # assemble_quoted for why this can't be a simple leaf-run merge.
+        # assemble_quoted registers the close leaf's terminal itself (the
+        # trailing chunk for interpolated strings, the whole literal
+        # otherwise) so a `;`-fold widens the right node.
         expr = assemble_quoted(node, cur, k0 == K"cmdstring")
-        cur.terminals[cur.i - 1] = expr
         return expr
     end
     first_i = cur.i
