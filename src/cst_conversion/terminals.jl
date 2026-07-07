@@ -13,8 +13,6 @@ const TERMINAL_HEADS = Dict{Kind,Symbol}(
     K"OctInt"          => :OCTINT,
     K"Char"            => :CHAR,
     K"String"          => :STRING,
-    K"true"            => :TRUE,
-    K"false"           => :FALSE,
 )
 
 token_text(leaf::Leaf, source::String) = source[leaf.pos:prevind(source, leaf.pos + leaf.span)]
@@ -33,16 +31,25 @@ function terminal_expr(leaf::Leaf, source::String)
         # `a[begin]` — `begin` as an index is an Identifier leaf; CSTParser
         # maps it to a BEGIN literal (mirrors the `end`→END case).
         return EXPR(:BEGIN, leaf.fullspan, leaf.span, "begin")
-    elseif k == K"core_@cmd"
-        # Zero-width marker for an unprefixed backtick literal (implicit
-        # Core.@cmd) — CSTParser wraps it in a dedicated :globalrefcmd head
-        # instead of an IDENTIFIER macro name (see the K"macrocall" branch).
-        return EXPR(:globalrefcmd, leaf.fullspan, leaf.span, nothing)
+    elseif k == K"Bool"
+        # true/false share one Kind; CSTParser distinguishes by literal text.
+        txt = token_text(leaf, source)
+        return EXPR(txt == "true" ? :TRUE : :FALSE, leaf.fullspan, leaf.span, txt)
+    elseif k == K"Placeholder"
+        # Absent-catch-var marker (zero-width). 0.4 spelled this leaf's kind
+        # "false"; CSTParser still expects a FALSE literal there.
+        return EXPR(:FALSE, leaf.fullspan, leaf.span, token_text(leaf, source))
     elseif k == K"StringMacroName" || k == K"CmdMacroName"
         # `m"str"`/`c\`cmd\`` desugar to calling `@m_str`/`@c_cmd`; the
         # green leaf only carries the bare name, oracle wants the mangled one.
         suffix = k == K"StringMacroName" ? "_str" : "_cmd"
         return EXPR(:IDENTIFIER, leaf.fullspan, leaf.span, "@" * token_text(leaf, source) * suffix)
+    elseif k == K"Identifier" && Base.isoperator(Symbol(token_text(leaf, source)))
+        # 1.x reclassifies an operator token used in "value" position (call
+        # target, bare `(+)`, etc.) as plain Identifier — the AST doesn't
+        # distinguish an operator symbol from any other Symbol there. Text
+        # is the only remaining way to tell; oracle still wants OPERATOR.
+        return EXPR(:OPERATOR, leaf.fullspan, leaf.span, token_text(leaf, source))
     elseif JuliaSyntax.is_operator(k)
         return EXPR(:OPERATOR, leaf.fullspan, leaf.span, token_text(leaf, source))
     elseif JuliaSyntax.is_keyword(k)

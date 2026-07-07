@@ -27,9 +27,10 @@ end
     end
 
     # "x + 1" → tokens x,+,1 ; ws folded into preceding token's fullspan
+    # (the infix `+` leaf reclassifies to Identifier in JuliaSyntax 1.x)
     ls, leading = leaves_of("x + 1")
     @test leading == 0
-    @test [l.kind for l in ls] == [K"Identifier", K"+", K"Integer"]
+    @test [l.kind for l in ls] == [K"Identifier", K"Identifier", K"Integer"]
     @test [l.pos for l in ls] == [1, 3, 5]
     @test [l.span for l in ls] == [1, 1, 1]
     @test [l.fullspan for l in ls] == [2, 2, 1]

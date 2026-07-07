@@ -67,7 +67,7 @@ function has_error_descendant(node::GreenNode)
     return any(has_error_descendant, children(node))
 end
 
-function assemble(node::GreenNode, cur::Cursor)::EXPR
+function assemble(node::GreenNode, cur::Cursor, is_cmdmacro_body::Bool=false)::EXPR
     if !haschildren(node)
         leaf = cur.leaves[cur.i]
         ex = terminal_expr(leaf, cur.src)
@@ -96,18 +96,33 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         # trailing chunk for interpolated strings, the whole literal
         # otherwise) so a `;`-fold widens the right node.
         expr = assemble_quoted(node, cur, k0 == K"cmdstring")
-        return patch_dropped_width!(expr, node)
+        expr = patch_dropped_width!(expr, node)
+        if k0 == K"cmdstring" && !is_cmdmacro_body
+            # Unprefixed backtick literal: 1.x emits the bare cmdstring node
+            # with no wrapping macrocall at all (0.4 wrapped it in
+            # macrocall[core_@cmd, cmdstring]); synthesize CSTParser's
+            # :globalrefcmd macrocall wrapper ourselves. A prefixed literal
+            # (`m\`c\``) is the cmdstring DIRECTLY following its
+            # CmdMacroName sibling — already inside its own macrocall, no
+            # extra wrap; a bare cmd used as a macro ARG still wraps.
+            name = EXPR(:globalrefcmd, 0, 0, nothing)
+            return EXPR(:macrocall, EXPR[name, EXPR(:NOTHING, 0, 0, nothing), expr],
+                        EXPR[], expr.fullspan, expr.span)
+        end
+        return expr
     end
     first_i = cur.i
     kids = EXPR[]
     kkinds = Kind[]
     ranges = UnitRange{Int}[]
+    prev_kind = K"TOMBSTONE"
     for c in children(node)
         is_ws_trivia(kind(c)) && continue
         s = cur.i
-        push!(kids, assemble(c, cur))
+        push!(kids, assemble(c, cur, k0 == K"macrocall" && prev_kind == K"CmdMacroName"))
         push!(kkinds, kind(c))
         push!(ranges, s:cur.i-1)
+        prev_kind = kind(c)
     end
     cur.kid_ranges = ranges   # inner assemble calls are done; safe to publish
     ex = assemble_form(kind(node), node, kids, kkinds, cur)
