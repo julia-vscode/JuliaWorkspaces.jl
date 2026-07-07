@@ -399,6 +399,25 @@ end
         "x = M.@m(a)\ny",
         "if a\nb = M.@m(\"v\")\nend",
         "x = M.@m(a) + z",
+        # operator-as-callee: `+(x)` unwraps to a call, `-`/`!`/`~` keep the
+        # bracketed operand
+        "+(x)",
+        "*(x)",
+        "+(::T) = x",
+        "-(x)",
+        "!(x)",
+        "+(::Infinity) = R()",
+        # vect element keeps `=` as assignment
+        "[a=b]",
+        # word operators in selective imports become OPERATOR
+        "import Base: in",
+        "import Base: +, in, -",
+        # interpolated getfield field name (K\"inert\") → quotenode
+        "Base.\$f",
+        "f.\$g",
+        # Float32 literal
+        "2f0",
+        "1.0f0",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end

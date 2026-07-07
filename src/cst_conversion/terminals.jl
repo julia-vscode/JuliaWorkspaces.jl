@@ -7,6 +7,7 @@ const TERMINAL_HEADS = Dict{Kind,Symbol}(
     K"MacroName"       => :IDENTIFIER,
     K"Integer"         => :INTEGER,
     K"Float"           => :FLOAT,
+    K"Float32"         => :FLOAT,
     K"HexInt"          => :HEXINT,
     K"BinInt"          => :BININT,
     K"OctInt"          => :OCTINT,

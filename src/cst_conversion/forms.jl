@@ -191,6 +191,17 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # unlike prefix calls (-x/!x) which stay :call-symbol-headed with the
         # operator as a plain leading arg.
         return EXPR(kids[2], EXPR[kids[1]], nothing, 0, 0)
+    elseif k == K"call" && JuliaSyntax.is_prefix_op_call(JuliaSyntax.head(node)) &&
+           length(kids) == 2 && kkinds[2] == K"parens" &&
+           !(kids[1].val in ("-", "!", "~"))
+        # `+(x)` — a prefix operator applied to a parenthesized single argument
+        # is a normal function call of the operator: unwrap the parens so `x`
+        # is the arg and the parens become the call's trivia. CSTParser keeps
+        # `-`/`!`/`~` as genuine unary applications of the bracketed operand.
+        op, parens = kids[1], kids[2]
+        args = EXPR[op]
+        append!(args, parens.args)
+        return EXPR(:call, args, parens.trivia, 0, 0)
     elseif k == K"juxtapose"
         # 2x / 2(x+1) → implicit multiplication; CSTParser synthesizes a
         # zero-width `*` operator since juxtaposition has no real op leaf.
@@ -348,7 +359,8 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         isempty(groups) || insert!(args, 1, merge_params!(groups))
         return EXPR(:tuple, args, trivia, 0, 0)
     elseif k == K"vect"
-        args, trivia, groups = collect_arglist(kids, kkinds, K"[", K"]")
+        # A `[a=b]` element keeps `=` as assignment (not `:kw`), like a tuple.
+        args, trivia, groups = collect_arglist(kids, kkinds, K"[", K"]"; kw=false)
         isempty(groups) || insert!(args, 1, merge_params!(groups))
         return EXPR(:vect, args, trivia, 0, 0)
     elseif k == K"braces"
@@ -458,6 +470,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             cur.grow_span += ll.fullspan - ll.span
         end
         return EXPR(:macrocall, args, macro_trivia, 0, 0)
+    elseif k == K"inert"
+        # `A.$f` getfield with an interpolated field name: the field is a
+        # K"inert"-wrapped `$` interpolation → CSTParser's :quotenode.
+        return EXPR(:quotenode, kids, nothing, 0, 0)
     elseif k == K"doc"
         # `"..." expr` docstring → CSTParser's synthetic @doc macrocall:
         # [globalrefdoc, NOTHING, docstring, documented_expr], no trivia.
@@ -490,6 +506,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                        push!(args, ex)
                 i += 1
             else
+                # `import Base: in` — a word-operator path component is
+                # tokenized as Identifier but labelled OPERATOR by CSTParser.
+                ex.head === :IDENTIFIER && ex.val in ("where", "in", "isa") &&
+                    (ex.head = :OPERATOR)
                 push!(args, ex)
                 seen = true
                 i += 1
