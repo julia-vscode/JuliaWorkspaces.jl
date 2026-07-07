@@ -912,6 +912,15 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 try_block = ex
             end
         end
+        # An empty catch body followed by an else clause is a degenerate
+        # block in CSTParser (args = nothing, val = "").
+        if has_catch && has_else && catch_block !== nothing &&
+           (catch_block.args === nothing || isempty(catch_block.args)) &&
+           catch_block.fullspan == 0
+            catch_block.args = nothing
+            catch_block.trivia = nothing
+            catch_block.val = ""
+        end
         raw = [(catch_var, has_catch), (catch_block, has_catch),
                (finally_block, has_finally), (else_block, has_else)]
         while !isempty(raw) && !raw[end][2]
@@ -930,8 +939,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         for (v, present) in raw_t
             push!(trivia, present ? v : false_arg())
         end
-        push!(trivia, end_kw)
-        return EXPR(:try, args, trivia, 0, 0)
+        # end_kw can be absent when malformed input (e.g. `try catch finally
+        # else`) buries the `end` inside a JuliaSyntax error node — don't crash.
+        end_kw === nothing || push!(trivia, end_kw)
+        return EXPR(:try, filter(!isnothing, args), trivia, 0, 0)
     elseif k == K"let"
         # bindings block collapses to its single item when there's exactly
         # one binding (`let x = 1` / `let x`); stays a :block for 0 or 2+.

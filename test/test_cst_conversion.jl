@@ -504,6 +504,9 @@ end
         "quote try; f(); catch; false; finally; end; end",
         # triple-string leading chunk with content (dedented to "") stays an arg
         "\"\"\"\n\$(a)\nb\"\"\"",
+        # empty catch body + else clause → degenerate catch block (args nothing, val "")
+        "try\ncatch\nelse\nend",
+        "try\nx\ncatch\ny\nelse\nz\nend",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
