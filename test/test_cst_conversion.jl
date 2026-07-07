@@ -447,6 +447,18 @@ end
         "macro -(ex)\nend",
         "macro ~(ex)\nend",
         "function -(x) end",
+        # operator-as-function-call for <: / >: / ::
+        "<:(a, b)",
+        "<:(a, b, c)",
+        ">:(a, b)",
+        # string getfield field name is used directly (no quotenode)
+        "a.\"prop\"",
+        # global/const nesting: const is outermost
+        "global const x = 1",
+        "const global x = 1",
+        # right-nested juxtaposition of 3+ factors
+        "4A'B'",
+        "2A'B'C'",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end

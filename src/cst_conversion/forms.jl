@@ -222,8 +222,14 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
     elseif k == K"juxtapose"
         # 2x / 2(x+1) → implicit multiplication; CSTParser synthesizes a
         # zero-width `*` operator since juxtaposition has no real op leaf.
-        op = EXPR(:OPERATOR, 0, 0, "*")
-        return EXPR(:call, EXPR[op, kids[1], kids[2]], nothing, 0, 0)
+        # 3+ factors (`4A'B'`) nest right: `4 * (A' * B')`.
+        acc = kids[end]
+        for i in length(kids)-1:-1:1
+            fs = kids[i].fullspan + acc.fullspan
+            acc = EXPR(:call, EXPR[EXPR(:OPERATOR, 0, 0, "*"), kids[i], acc],
+                       nothing, fs, fs - (acc.fullspan - acc.span))
+        end
+        return acc
     elseif k == K"comparison"
         # a < b < c → flat (:comparison, [a, op, b, op, c, ...]) — kids are
         # already in this exact order/shape. Dotted comparison operators
@@ -357,6 +363,11 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             args[1] = EXPR(:OPERATOR, di.fullspan, di.span, di.head.val * di.args[1].val)
         end
         inner = args[1]
+        # A quoted string field name (`a."prop"`) is used directly as the
+        # getfield RHS — no :quotenode wrapper.
+        if isempty(trivia) && inner.head in (:STRING, :TRIPLESTRING)
+            return inner
+        end
         # Word operators (`:where`/`:in`/`:isa`) tokenize as Identifier after
         # a quote colon, but CSTParser labels them OPERATOR. Only when the
         # quote is colon-prefixed — a bare getfield field name (`p.in`) stays
@@ -700,6 +711,13 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # reaches its fullspan (bare `return`, qualified-macrocall RHS).
         grow_span_to_last_arg!(cur, EXPR[lhs, body])
         return EXPR(op, EXPR[lhs, body], nothing, 0, 0)
+    elseif (k == K"::" || k == K"<:" || k == K">:") && length(kids) >= 2 &&
+           kkinds[1] == k && kkinds[2] == K"("
+        # operator-as-function-call: `<:(a, b)` → operator-headed with the
+        # parenthesized args, parens/commas as trivia.
+        op = kids[1]
+        args, trivia, groups = collect_arglist(kids[2:end], kkinds[2:end], K"(", K")")
+        return EXPR(op, args, trivia, 0, 0)
     elseif (k == K"::" || k == K"<:") && length(kids) == 3
         # binary syntax: operator EXPR becomes the head (type declarations,
         # supertype clauses)
@@ -1229,12 +1247,23 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         return EXPR(:module, EXPR[marker, name, body], trivia, 0, 0)
     elseif k == K"const" || k == K"global" || k == K"local"
         # `global a, b` / `local x, y` → names in args, keyword+commas trivia.
+        sym = Symbol(lowercase(string(k)))
         trivia = EXPR[]
         args = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
             (ck == k || ck == K",") ? push!(trivia, ex) : push!(args, ex)
         end
-        return EXPR(Symbol(lowercase(string(k))), args, trivia, 0, 0)
+        # `global const x = 1`: green nests const inside the modifier, but
+        # CSTParser puts const outermost — swap (spans are logical, not
+        # positional; childsums still balance).
+        if sym != :const && length(args) == 1 && args[1].head === :const
+            inner = args[1]
+            gkw = trivia[1]
+            mfs = gkw.fullspan + sum(a -> a.fullspan, inner.args; init=0)
+            modifier = EXPR(sym, inner.args, EXPR[gkw], mfs, mfs)
+            return EXPR(:const, EXPR[modifier], inner.trivia, 0, 0)
+        end
+        return EXPR(sym, args, trivia, 0, 0)
     elseif length(kids) == 3 && kkinds[2] == k && JuliaSyntax.is_operator(k)
         # Remaining binary-syntax-head kinds that use the operator's own
         # Kind as the NODE's kind (not K"call"): compound assignment
