@@ -478,6 +478,10 @@ end
         # `;`-fold onto a qualified macrocall inside a paren-block
         "(Base.@m; x)",
         "(Base.@_inline_meta; f(x))",
+        # a lone bare cell in a multi-row matrix still gets the cell quirk
+        "[1 2; 3]",
+        "Float64[1 2; 3]",
+        "T[1 2; 3]",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end

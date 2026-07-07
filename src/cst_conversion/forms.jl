@@ -464,7 +464,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(cells, ex)
             end
         end
-        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        length(args) >= 2 && foreach(matrix_cell!, cells)
         return EXPR(:typed_vcat, EXPR[typ, args...], trivia, 0, 0)
     elseif k == K"typed_ncat"
         # `T[1;; 2]` → typed_vcat plus the ncat dim marker after the type.
@@ -489,7 +489,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(cells, ex)
             end
         end
-        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        length(rest) >= 2 && foreach(matrix_cell!, cells)
         args = EXPR[typ, EXPR(Symbol(string(dim)), 0, 0, ""), rest...]
         return EXPR(:typed_ncat, args, trivia, 0, 0)
     elseif k == K"macrocall"
@@ -1074,7 +1074,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(cells, ex)
             end
         end
-        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        # The bare-cell quirk fires when the matrix has 2+ elements total
+        # (rows + bare cells) — a lone bare cell in a multi-row vcat
+        # (`[1 2; 3]`) still gets it, unlike the degenerate `[a;]`.
+        length(args) >= 2 && foreach(matrix_cell!, cells)
         return EXPR(:vcat, args, trivia, 0, 0)
     elseif k == K"nrow"
         # Like row, but prefixed with a synthetic dim-number marker (a bare
@@ -1118,7 +1121,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(cells, ex)
             end
         end
-        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        length(rest) >= 2 && foreach(matrix_cell!, cells)
         args = EXPR[EXPR(Symbol(string(dim)), 0, 0, "")]
         append!(args, rest)
         return EXPR(:ncat, args, trivia, 0, 0)
