@@ -355,12 +355,21 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         for (ex, ck) in zip(kids, kkinds)
             ck == K":" ? push!(trivia, ex) : push!(args, ex)
         end
-        # A quoted dotted operator (`:.&`) arrives as a K"." composite (dot+op
-        # leaves); fuse it into one OPERATOR leaf, same as comparison does.
-        if args[1].head isa EXPR && args[1].head.val == "." && args[1].args !== nothing &&
-           length(args[1].args) == 1 && args[1].args[1].head === :OPERATOR
-            di = args[1]
-            args[1] = EXPR(:OPERATOR, di.fullspan, di.span, di.head.val * di.args[1].val)
+        # A quoted dotted operator (`:.&`, `:(.=)`) arrives as a K"." composite
+        # (dot+op leaves); fuse it into one OPERATOR leaf, either directly or
+        # inside a single-item brackets.
+        fuse_dotop(ex) = (ex.head isa EXPR && ex.head.val == "." && ex.args !== nothing &&
+                          length(ex.args) == 1 && ex.args[1].head === :OPERATOR) ?
+            EXPR(:OPERATOR, ex.fullspan, ex.span, ex.head.val * ex.args[1].val) : ex
+        args[1] = fuse_dotop(args[1])
+        # Inside parens, only a dotted assignment (`:(.=)`) fuses to an
+        # OPERATOR atom; a dotted broadcast operator (`:(.+)`) stays a
+        # composite (a broadcast call), so it remains a :quote.
+        if args[1].head === :brackets && args[1].args !== nothing &&
+           length(args[1].args) == 1 && args[1].args[1].head isa EXPR &&
+           args[1].args[1].args !== nothing && !isempty(args[1].args[1].args) &&
+           args[1].args[1].args[1].head === :OPERATOR && args[1].args[1].args[1].val == "="
+            args[1].args[1] = fuse_dotop(args[1].args[1])
         end
         inner = args[1]
         # A quoted string field name (`a."prop"`) is used directly as the
@@ -506,10 +515,12 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # Unprefixed cmd literals (name.head == :globalrefcmd) always keep
         # trivia = EXPR[], oracle-pinned, unlike every other macrocall shape.
         macro_trivia = name.head === :globalrefcmd ? EXPR[] : (isempty(trivia) ? nothing : trivia)
-        # Oracle quirk: a qualified (dotted-name) macrocall WITH a paren arg
-        # list has span == fullspan (its closing paren's trailing trivia is
-        # kept), unlike the unqualified or parenless forms.
-        if name.head isa EXPR && !isempty(kkinds) && kkinds[end] == K")"
+        # Oracle quirk: a qualified (dotted-name) macrocall's span reaches its
+        # fullspan (keeping trailing trivia) when it ends in a paren arg list
+        # (`M.@m(a)`) or has no real args at all (`Base.@_inline_meta`, whose
+        # last arg is the zero-width NOTHING). A qualified macrocall with a
+        # trailing real arg (`M.@m a`) keeps a normal span.
+        if name.head isa EXPR && (kkinds[end] == K")" || last(args).fullspan == 0)
             ll = cur.leaves[cur.i-1]
             cur.grow_span += ll.fullspan - ll.span
         end

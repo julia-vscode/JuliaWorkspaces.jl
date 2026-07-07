@@ -459,6 +459,13 @@ end
         # right-nested juxtaposition of 3+ factors
         "4A'B'",
         "2A'B'C'",
+        # bare qualified macrocall (no args) grows span to fullspan
+        "function g()\nBase.@_inline_meta\nx\nend",
+        "Base.@inline_meta\ny",
+        # dotted assignment quotes to an OPERATOR atom; dotted broadcast stays a quote
+        ":(.=)",
+        ":(.+)",
+        ":(.==)",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
