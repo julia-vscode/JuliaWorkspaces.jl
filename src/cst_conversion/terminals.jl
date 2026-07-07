@@ -29,6 +29,10 @@ function terminal_expr(leaf::Leaf, source::String)
         # context (`a[end]`) — real block-closing `end` is its own keyword
         # kind. CSTParser treats both spellings as the same END literal.
         return EXPR(:END, leaf.fullspan, leaf.span, "end")
+    elseif k == K"Identifier" && token_text(leaf, source) == "begin"
+        # `a[begin]` — `begin` as an index is an Identifier leaf; CSTParser
+        # maps it to a BEGIN literal (mirrors the `end`→END case).
+        return EXPR(:BEGIN, leaf.fullspan, leaf.span, "begin")
     elseif k == K"core_@cmd"
         # Zero-width marker for an unprefixed backtick literal (implicit
         # Core.@cmd) — CSTParser wraps it in a dedicated :globalrefcmd head

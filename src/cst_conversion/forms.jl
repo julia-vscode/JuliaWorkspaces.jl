@@ -13,7 +13,14 @@ function widen_at_leaf!(cur::Cursor, i::Int, width::Int)
     node = i >= 1 ? cur.terminals[i] : nothing
     node === nothing && return false
     while node !== nothing
+        # A node whose LAST arg is a zero-width marker (e.g. a bare `@m`
+        # macrocall's NOTHING) measures span to fullspan; a `;` folded onto
+        # it extends span too. Every other node keeps the `;` as excluded
+        # trailing width (span measures to the last real leaf/arg).
+        grow = node.args !== nothing && !isempty(node.args) &&
+               node.args[end].fullspan == 0 && node.span == node.fullspan
         node.fullspan += width
+        grow && (node.span += width)
         node = node.parent
     end
     return true
@@ -341,9 +348,15 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
            inner.val in ("where", "in", "isa")
             inner.head = :OPERATOR
         end
+        # `begin` maps to BEGIN in index context (terminal_expr), but as a
+        # quoted field/symbol (`a.begin`, `:begin`) it is an IDENTIFIER.
+        inner.head === :BEGIN && (inner.head = :IDENTIFIER)
         target = (inner.head === :brackets && inner.args !== nothing &&
                   length(inner.args) == 1) ? inner.args[1] : inner
-        head = target.args === nothing ? :quotenode : :quote
+        # atoms → :quotenode, composites → :quote; a var"..." nonstandard
+        # identifier counts as an atom.
+        head = (target.args === nothing || target.head === :NONSTDIDENTIFIER) ?
+               :quotenode : :quote
         return EXPR(head, args, isempty(trivia) ? nothing : trivia, 0, 0)
     elseif k == K"curly"
         # A{T; S} → (:curly, [A, parameters, T]) — parameters relocates to
@@ -450,6 +463,9 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             atex, nameex = kids[1], kids[2]
             name = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
                         atex.span + nameex.span, "@" * nameex.val)
+            # Register the fused name at its leaf slot so a later `;`-fold
+            # (e.g. `:(@m; x)`) widens THIS EXPR, not the orphaned MacroName.
+            cur.terminals[first(cur.kid_ranges[2])] = name
             rest, restk = kids[3:end], kkinds[3:end]
         else
             name = kids[1]
@@ -655,8 +671,13 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             head = EXPR(:OPERATOR, 0, 0, "=")
             return EXPR(head, EXPR[lhs, rhs], EXPR[op], 0, 0)
         end
-        needs_block = (k == K"->" || kkinds[1] == K"call" || kkinds[1] == K"where") &&
-                      kkinds[3] != K"block"
+        # A short-form definition (block-wrapped body) is keyed by the LHS
+        # being a call / where-clause / return-type-annotated call
+        # (`f()::T = ...`) — but NOT a plain typed assignment (`x::T = 5`).
+        typed_def = kkinds[1] == K"::" && lhs.args !== nothing &&
+                    !isempty(lhs.args) && lhs.args[1].head === :call
+        needs_block = (k == K"->" || kkinds[1] == K"call" || kkinds[1] == K"where" ||
+                       typed_def) && kkinds[3] != K"block"
         body = needs_block ? EXPR(:block, EXPR[rhs], nothing, rhs.fullspan, rhs.span) : rhs
         # Span is measured to the last arg; grow when that arg's span already
         # reaches its fullspan (bare `return`, qualified-macrocall RHS).
@@ -859,6 +880,18 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         end
         length(bindings.args) == 1 && (bindings = bindings.args[1])
         return EXPR(:let, EXPR[bindings, body], trivia, 0, 0)
+    elseif k == K"while" || k == K"for"
+        # `while cond body end` / `for spec body end` → args=[cond/spec, body],
+        # trivia=[keyword, END]. A real branch (not generic_form) is needed
+        # because the condition/spec can itself be keyword-kinded (e.g. a
+        # `while let ... end`), which generic_form would misfile as trivia.
+        sym = k == K"while" ? :while : :for
+        trivia = EXPR[]
+        args = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            (ck == k || ck == K"end") ? push!(trivia, ex) : push!(args, ex)
+        end
+        return EXPR(sym, args, trivia, 0, 0)
     elseif k == K"cartesian_iterator"
         # Multi-spec `for`/generator iteration (`i = 1:10, j in ys`) → a
         # synthetic :block of iteration specs with comma trivia.
@@ -959,8 +992,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             end
         end
         length(cells) >= 2 && foreach(matrix_cell!, cells)
-        !isempty(kkinds) && kkinds[end] == K";" &&
-            (cur.trim_span += trailing_semi_span(kids, kkinds))
+        # Span is measured to the last cell, not the trailing `;` run (which
+        # folds into that cell's fullspan) — this also excludes whitespace
+        # between the last cell and the `;`.
+        trim_span_to_last_arg!(cur, cells)
         return EXPR(:row, cells, EXPR[], 0, 0)
     elseif k == K"vcat"
         # Either wraps nested :row children (2D matrices) or holds bare cells
@@ -1003,8 +1038,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             end
         end
         length(cells) >= 2 && foreach(matrix_cell!, cells)
-        !isempty(kkinds) && kkinds[end] == K";" &&
-            (cur.trim_span += trailing_semi_span(kids, kkinds))
+        # Span is measured to the last cell, not the trailing `;` run (which
+        # folds into that cell's fullspan) — this also excludes whitespace
+        # between the last cell and the `;`.
+        trim_span_to_last_arg!(cur, cells)
         args = EXPR[EXPR(Symbol(string(dim)), 0, 0, "")]
         append!(args, cells)
         return EXPR(:nrow, args, EXPR[], 0, 0)

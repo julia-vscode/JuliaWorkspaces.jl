@@ -418,6 +418,28 @@ end
         # Float32 literal
         "2f0",
         "1.0f0",
+        # while/for with a keyword-kinded condition
+        "while let x=1\nx\nend\ny\nend",
+        "while c\nx\nend",
+        "for i in x\ni\nend",
+        # row span with spaces around the `;`
+        "[1 2 ; 3 4]",
+        "[a b ; c d]",
+        # `begin` as an index literal → BEGIN; as a field/symbol → IDENTIFIER
+        "a[begin]",
+        "a[begin:end]",
+        "a.begin",
+        ":begin",
+        # return-type-annotated short function def wraps its body in a block
+        "f()::T = a, b",
+        "g()::Tuple{Int,Int} = a, b",
+        "x::Int = 5",
+        # var\"...\" quoted as a symbol keeps :quotenode
+        ":var\"@x\"",
+        # a bare `@m` macrocall followed by `;` grows its span to fullspan
+        "@m;x",
+        "begin @m; x end",
+        ":(@_inline_meta; det(x))",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
