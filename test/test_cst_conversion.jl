@@ -569,3 +569,45 @@ end
         @test (f, CSTConversion.check_spans(ex)) == (f, nothing)
     end
 end
+
+@testitem "cst-conv: broken code invariants" begin
+    using CSTParser
+    using JuliaWorkspaces: CSTConversion
+
+    walk(x, count) = begin
+        count[] += 1
+        x.args === nothing || foreach(a -> walk(a, count), x.args)
+    end
+
+    for src in [
+        "function f(",
+        "a +",
+        "f(x,",
+        "if a",
+        "struct",
+        "a.b.",
+        "\"unterminated",
+        "x = @",
+        "function f() en",
+        "a ? b",
+        "[1, 2",
+        "module A function g() end",
+    ]
+        ex = CSTConversion.build_cst(src)
+        @test ex isa CSTParser.EXPR
+        @test ex.fullspan == sizeof(src)
+        @test CSTConversion.check_spans(ex) === nothing
+        # error subtrees must be traversable by StaticLint-style recursion
+        count = Ref(0)
+        walk(ex, count)
+        @test count[] > 0
+    end
+
+    # three degenerate whole-file shapes from the divergence log: must
+    # never throw even though they carry no real statement content
+    for src in [";", ";; a", "\"just a docstring\""]
+        ex = CSTConversion.build_cst(src)
+        @test ex.fullspan == sizeof(src)
+        @test CSTConversion.check_spans(ex) === nothing
+    end
+end

@@ -54,6 +54,13 @@ function terminal_expr(leaf::Leaf, source::String)
         # broken code; mirrors CSTParser's errortoken so recovery keeps spans
         # consistent instead of crashing the whole corpus file.
         return EXPR(:errortoken, leaf.fullspan, leaf.span, token_text(leaf, source))
+    elseif leaf.span == 0
+        # Zero-width marker kind with no punctuation mapping (e.g.
+        # K"TOMBSTONE", an internal deleted-token placeholder that
+        # shouldn't normally reach the built tree but might under
+        # recovery) — no real punctuation has zero width, so treat this
+        # like any other error marker instead of a KeyError.
+        return EXPR(:errortoken, leaf.fullspan, leaf.span, token_text(leaf, source))
     else
         return EXPR(punctuation_head(k), leaf.fullspan, leaf.span, token_text(leaf, source))
     end
@@ -77,15 +84,21 @@ punctuation_head(k::Kind) = PUNCTUATION_HEADS[k]
 # leaves starting at a quote leaf into a single EXPR, returning the next
 # unconsumed index. Interpolation and triple-quoted/cmd literals are out of
 # scope here (Task 4 territory).
-function merge_quoted(leaves::Vector{Leaf}, i::Int, source::String)
+function merge_quoted(leaves::Vector{Leaf}, i::Int, source::String, hi::Int)
     open = leaves[i]
+    n = min(hi, length(leaves))
     j = i + 1
     content = nothing
-    while leaves[j].kind != open.kind
+    while j <= n && leaves[j].kind != open.kind
         content = leaves[j]
         j += 1
     end
-    close = leaves[j]
+    # Unterminated literal at EOF (broken input): no closing quote leaf
+    # exists — fall back to the last consumed leaf instead of indexing
+    # past the end; there's nothing left to consume either way.
+    closed = j <= n
+    close = closed ? leaves[j] : leaves[n]
+    next_i = closed ? j + 1 : n + 1
     fullspan = close.pos - open.pos + close.fullspan
     span = close.pos - open.pos + close.span
     if open.kind == K"\""
@@ -95,10 +108,10 @@ function merge_quoted(leaves::Vector{Leaf}, i::Int, source::String)
                     content === nothing ? "" : token_text(content, source))
         CSTParser._rm_escaped_newlines(expr)
         CSTParser._unescape_string_expr(expr)
-        return expr, j + 1
+        return expr, next_i
     else # K"'"
         val = source[open.pos:prevind(source, close.pos + close.span)]
-        return EXPR(:CHAR, fullspan, span, val), j + 1
+        return EXPR(:CHAR, fullspan, span, val), next_i
     end
 end
 
@@ -173,22 +186,27 @@ byteslice(s::String, a::Int, b::Int) = a <= b ? String(@view codeunits(s)[a:b]) 
 # var"..." nonstandard identifier: JuliaSyntax splits it into var/quote/
 # content/quote leaves; CSTParser sees a NONSTDIDENTIFIER wrapping
 # IDENTIFIER("var") and a STRING of the (raw) quoted content.
-function merge_var(leaves::Vector{Leaf}, i::Int, source::String)
+function merge_var(leaves::Vector{Leaf}, i::Int, source::String, hi::Int)
     var_leaf = leaves[i]
     var_id = EXPR(:IDENTIFIER, var_leaf.fullspan, var_leaf.span, "var")
     open = leaves[i+1]
+    n = min(hi, length(leaves))
     j = i + 2
-    while leaves[j].kind != open.kind
+    while j <= n && leaves[j].kind != open.kind
         j += 1
     end
-    close = leaves[j]
+    # Unterminated var"..." at EOF (broken input): no closing quote leaf —
+    # fall back to the last consumed leaf instead of indexing past it.
+    closed = j <= n
+    close = closed ? leaves[j] : leaves[n]
+    next_i = closed ? j + 1 : n + 1
     str = EXPR(:STRING, close.pos + close.fullspan - open.pos,
                close.pos + close.span - open.pos,
                byteslice(source, open.pos + open.span, close.pos - 1))
     ex = EXPR(:NONSTDIDENTIFIER, EXPR[var_id, str], nothing,
               close.pos + close.fullspan - var_leaf.pos,
               close.pos + close.span - var_leaf.pos)
-    return ex, j + 1
+    return ex, next_i
 end
 
 DOLLAR_TRIVIA() = EXPR[EXPR(:OPERATOR, 1, 1, "\$")]
@@ -316,8 +334,18 @@ function collect_quoted_pieces(node::GreenNode, cur::Cursor, iscmd::Bool)
             have_run = false
             dollar_ex = assemble(c, cur)
             j += 1
-            sub = kids[j]
             trivia_here = EXPR[dollar_ex]
+            if j > n
+                # Broken input: `$` with nothing after it at all (e.g.
+                # truncated right at EOF) — no sub-expression child exists
+                # to descend into; keep the `$` itself reachable and stop.
+                # `leaf` (the `$` itself) becomes the effective close, since
+                # cur.i has already advanced past it and nothing follows.
+                close_leaf = leaf
+                push!(pieces, (:interp, EXPR(:errortoken, 0, 0, nothing), trivia_here))
+                break
+            end
+            sub = kids[j]
             if kind(sub) == K"parens"
                 pex = assemble(sub, cur)   # :brackets(args=[inner], trivia=[lparen,rparen])
                 # CSTParser hand-builds these two (parse_string_or_cmd's own
@@ -327,8 +355,15 @@ function collect_quoted_pieces(node::GreenNode, cur::Cursor, iscmd::Bool)
                 for t in pex.trivia
                     t.val = nothing
                 end
-                append!(trivia_here, pex.trivia)
-                push!(pieces, (:interp, rewrap_string_interp(pex.args[1]), trivia_here))
+                if isempty(pex.args)
+                    # Broken interpolation (`$(` with no inner expression
+                    # before EOF/recovery) — keep the whole brackets node
+                    # instead of indexing into empty args.
+                    push!(pieces, (:interp, pex, trivia_here))
+                else
+                    append!(trivia_here, pex.trivia)
+                    push!(pieces, (:interp, rewrap_string_interp(pex.args[1]), trivia_here))
+                end
             else
                 push!(pieces, (:interp, assemble(sub, cur), trivia_here))
             end

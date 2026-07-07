@@ -35,3 +35,13 @@ function _flatten!(leaves::Vector{Leaf}, leading::Int, node::GreenNode, pos::Int
     end
     return pos, leading
 end
+
+# Number of non-ws leaves flatten_leaves would assign to this subtree.
+# merge_quoted/merge_var scan cur.leaves by KIND (looking for the closing
+# quote) with no other stopping condition; on broken (unterminated) input
+# that scan can otherwise run past this node's own leaves into a
+# sibling/ancestor's — this bounds it to exactly what the node owns.
+function leaf_count(node::GreenNode)
+    haschildren(node) || return is_ws_trivia(kind(node)) ? 0 : 1
+    return sum(leaf_count(c) for c in children(node); init=0)
+end

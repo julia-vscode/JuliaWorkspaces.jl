@@ -31,6 +31,32 @@ Cursor(leaves::Vector{Leaf}, i::Int, src::String) =
 
 const UNHANDLED_KINDS = Set{Kind}()
 
+# Error-recovery safety net: a per-form branch's kid-dispatch loop can, on
+# broken input, route an unexpected extra kid (e.g. a trailing marker for a
+# missing `end`) into overwriting a single-slot field instead of keeping it
+# — silently dropping that kid's width from the node's own children instead
+# of just losing the kid itself. Mirrors check_spans' own childsum rule; when
+# it would report a shortfall, pad it with a zero-content filler so spans
+# stay tiled instead of desyncing. Never fires for valid code (childsum
+# always matches there) or for genuinely childless nodes (matrix cells).
+function patch_dropped_width!(ex::EXPR)
+    ex.args === nothing && return ex
+    has_children = !isempty(ex.args) ||
+                   (ex.trivia !== nothing && !isempty(ex.trivia)) ||
+                   ex.head isa EXPR
+    has_children || return ex
+    childsum = sum(c -> c.fullspan, ex.args; init=0) +
+               (ex.trivia === nothing ? 0 : sum(c -> c.fullspan, ex.trivia; init=0)) +
+               (ex.head isa EXPR ? ex.head.fullspan : 0)
+    gap = ex.fullspan - childsum
+    if gap > 0
+        filler = EXPR(:errortoken, gap, 0, nothing)
+        push!(ex.args, filler)
+        CSTParser.setparent!(filler, ex)
+    end
+    return ex
+end
+
 function assemble(node::GreenNode, cur::Cursor)::EXPR
     if !haschildren(node)
         leaf = cur.leaves[cur.i]
@@ -44,12 +70,12 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         # Quoted literals are open-quote/content/close-quote leaf triples in
         # the green tree, but CSTParser sees one CHAR token; consume the
         # whole run via the cursor instead of descending into children.
-        expr, next_i = merge_quoted(cur.leaves, cur.i, cur.src)
+        expr, next_i = merge_quoted(cur.leaves, cur.i, cur.src, cur.i + leaf_count(node) - 1)
         cur.terminals[next_i - 1] = expr
         cur.i = next_i
         return expr
     elseif k0 == K"var"
-        expr, next_i = merge_var(cur.leaves, cur.i, cur.src)
+        expr, next_i = merge_var(cur.leaves, cur.i, cur.src, cur.i + leaf_count(node) - 1)
         cur.terminals[next_i - 1] = expr
         cur.i = next_i
         return expr
@@ -60,7 +86,7 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         # trailing chunk for interpolated strings, the whole literal
         # otherwise) so a `;`-fold widens the right node.
         expr = assemble_quoted(node, cur, k0 == K"cmdstring")
-        return expr
+        return patch_dropped_width!(expr)
     end
     first_i = cur.i
     kids = EXPR[]
@@ -92,6 +118,7 @@ function assemble(node::GreenNode, cur::Cursor)::EXPR
         ex.span = min(ex.span + cur.grow_span, ex.fullspan)
         cur.grow_span = 0
     end
+    patch_dropped_width!(ex)
     return ex
 end
 

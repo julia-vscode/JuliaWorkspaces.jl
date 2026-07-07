@@ -340,8 +340,15 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # as the K"quote" branch below does for the A.@m x case where the
         # `@` sits on the RHS instead).
         atex, nameex, dotex, rhs = kids
-        lhs = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
-                   atex.span + nameex.span, "@" * nameex.val)
+        lhs = if nameex.val isa String
+            EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
+                 atex.span + nameex.span, "@" * nameex.val)
+        else
+            # Broken macro name (missing/errored) — can't fuse into one
+            # IDENTIFIER; keep both pieces reachable instead.
+            EXPR(:errortoken, EXPR[atex, nameex], nothing,
+                 atex.fullspan + nameex.fullspan, atex.span + nameex.span)
+        end
         return EXPR(dotex, EXPR[lhs, rhs], nothing, 0, 0)
     elseif k == K"quote"
         # Three shapes share this kind:
@@ -369,11 +376,18 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         end
         if kkinds[1] == K"@"
             atex, nameex = kids
-            fused = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
-                        atex.span + nameex.span, "@" * nameex.val)
-            # Register the fused name at its leaf slot so a `;`-fold onto a
-            # qualified macrocall (`(Base.@m; x)`) widens THIS EXPR.
-            cur.terminals[first(cur.kid_ranges[2])] = fused
+            if nameex.val isa String
+                fused = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
+                            atex.span + nameex.span, "@" * nameex.val)
+                # Register the fused name at its leaf slot so a `;`-fold onto
+                # a qualified macrocall (`(Base.@m; x)`) widens THIS EXPR.
+                cur.terminals[first(cur.kid_ranges[2])] = fused
+                return EXPR(:quotenode, EXPR[fused], nothing, 0, 0)
+            end
+            # Broken macro name (missing/errored) — can't fuse into one
+            # IDENTIFIER; keep both pieces reachable instead.
+            fused = EXPR(:errortoken, EXPR[atex, nameex], nothing,
+                         atex.fullspan + nameex.fullspan, atex.span + nameex.span)
             return EXPR(:quotenode, EXPR[fused], nothing, 0, 0)
         end
         args = EXPR[]
@@ -526,11 +540,19 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # after it (args[3]).
         if kkinds[1] == K"@"
             atex, nameex = kids[1], kids[2]
-            name = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
-                        atex.span + nameex.span, "@" * nameex.val)
-            # Register the fused name at its leaf slot so a later `;`-fold
-            # (e.g. `:(@m; x)`) widens THIS EXPR, not the orphaned MacroName.
-            cur.terminals[first(cur.kid_ranges[2])] = name
+            if nameex.val isa String
+                name = EXPR(:IDENTIFIER, atex.fullspan + nameex.fullspan,
+                            atex.span + nameex.span, "@" * nameex.val)
+                # Register the fused name at its leaf slot so a later `;`-fold
+                # (e.g. `:(@m; x)`) widens THIS EXPR, not the orphaned MacroName.
+                cur.terminals[first(cur.kid_ranges[2])] = name
+            else
+                # Broken macro name (missing/errored, e.g. `x = @`): can't
+                # fuse `@`+name into one IDENTIFIER — keep both pieces so
+                # spans still tile and the error stays traversable.
+                name = EXPR(:errortoken, EXPR[atex, nameex], nothing,
+                             atex.fullspan + nameex.fullspan, atex.span + nameex.span)
+            end
             rest, restk = kids[3:end], kkinds[3:end]
         else
             name = kids[1]
@@ -586,8 +608,16 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             if ck == K"@" && i < length(kids)
                 # `A.@m` path component: fuse `@`+MacroName into one IDENTIFIER.
                 nm = kids[i+1]
-                push!(args, EXPR(:IDENTIFIER, ex.fullspan + nm.fullspan,
-                                 ex.span + nm.span, "@" * nm.val))
+                if nm.val isa String
+                    push!(args, EXPR(:IDENTIFIER, ex.fullspan + nm.fullspan,
+                                     ex.span + nm.span, "@" * nm.val))
+                else
+                    # Broken macro name (missing/errored, e.g. a bare `@` at
+                    # EOF) — can't fuse into one IDENTIFIER; keep both pieces
+                    # reachable instead.
+                    push!(args, EXPR(:errortoken, EXPR[ex, nm], nothing,
+                                      ex.fullspan + nm.fullspan, ex.span + nm.span))
+                end
                 seen = true
                 i += 2
             elseif ck == K"."
@@ -662,8 +692,15 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(trivia, ex)
             elseif ck == K"@" && i < length(kids)
                 nm = kids[i+1]
-                push!(args, EXPR(:IDENTIFIER, ex.fullspan + nm.fullspan,
-                                 ex.span + nm.span, "@" * nm.val))
+                if nm.val isa String
+                    push!(args, EXPR(:IDENTIFIER, ex.fullspan + nm.fullspan,
+                                     ex.span + nm.span, "@" * nm.val))
+                else
+                    # Broken macro name (missing/errored) — can't fuse into
+                    # one IDENTIFIER; keep both pieces reachable instead.
+                    push!(args, EXPR(:errortoken, EXPR[ex, nm], nothing,
+                                      ex.fullspan + nm.fullspan, ex.span + nm.span))
+                end
                 i += 1
             else
                 push!(args, ex)
@@ -1264,6 +1301,12 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             grow_span_to_last_arg!(cur, args)
         return EXPR(:block, args, isempty(trivia) ? nothing : trivia, 0, 0)
     elseif k == K"parens"
+        if length(kids) < 2
+            # Broken input: missing open and/or close paren (e.g. an
+            # unterminated `$(` at EOF) collapses to a single error kid —
+            # no open/close pair to split off as trivia.
+            return EXPR(:brackets, EXPR[], kids, 0, 0)
+        end
         trivia = EXPR[kids[1], kids[end]]
         return EXPR(:brackets, kids[2:end-1], trivia, 0, 0)
     elseif k == K"function"
@@ -1281,6 +1324,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         is_mutable = false
         sig = nothing
         body = nothing
+        errs = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
             if ck == K"mutable"
                 is_mutable = true
@@ -1289,12 +1333,17 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(trivia, ex)
             elseif ck == K"block"
                 body = ex
-            else
+            elseif sig === nothing
                 sig = ex
+            else
+                # A further unclassified kid (e.g. broken input's trailing
+                # error marker for a missing `end`) — never overwrite the
+                # real signature; keep it reachable instead of dropping it.
+                push!(errs, ex)
             end
         end
         marker = EXPR(is_mutable ? :TRUE : :FALSE, 0, 0, nothing)
-        return EXPR(:struct, EXPR[marker, sig, body], trivia, 0, 0)
+        return EXPR(:struct, EXPR[marker, sig, body, errs...], trivia, 0, 0)
     elseif k == K"abstract"
         trivia = EXPR[]
         args = EXPR[]
@@ -1324,6 +1373,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         is_bare = false
         name = nothing
         body = nothing
+        errs = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
             if ck == K"baremodule"
                 is_bare = true
@@ -1332,15 +1382,20 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(trivia, ex)
             elseif ck == K"block"
                 body = ex
-            else
+            elseif name === nothing
                 name = ex
+            else
+                # A further unclassified kid (e.g. broken input's trailing
+                # error marker for a missing `end`) — never overwrite the
+                # real name; keep it reachable instead of dropping it.
+                push!(errs, ex)
             end
         end
         # A var"..." module name keeps trivia = EXPR[] (oracle-pinned; a
         # standalone var"..." value keeps nothing).
         name.head === :NONSTDIDENTIFIER && (name.trivia = EXPR[])
         marker = EXPR(is_bare ? :FALSE : :TRUE, 0, 0, nothing)
-        return EXPR(:module, EXPR[marker, name, body], trivia, 0, 0)
+        return EXPR(:module, EXPR[marker, name, body, errs...], trivia, 0, 0)
     elseif k == K"const" || k == K"global" || k == K"local"
         # `global a, b` / `local x, y` → names in args, keyword+commas trivia.
         sym = Symbol(lowercase(string(k)))
@@ -1380,6 +1435,12 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # Remaining prefix-unary-syntax-head kinds (e.g. `&x`), same shape
         # as bare `::T` above; same last-resort placement rationale.
         return EXPR(kids[1], EXPR[kids[2]], nothing, 0, 0)
+    elseif k == K"error"
+        # A non-leaf error node (e.g. wraps an unexpected token, or is
+        # entirely childless — a missing-token marker). CSTParser has no
+        # equivalent shape for this; mirror the leaf errortoken so the
+        # subtree stays traversable and spans still tile.
+        return EXPR(:errortoken, kids, nothing, 0, 0)
     end
     return generic_form(k, kids, kkinds)
 end
