@@ -81,13 +81,63 @@ input):
     (`BlockBandedMatrices/examples/finitedifference_2d.jl`)
   Resolution: accept drift.
 
-- **Deep context-dependent span/arg discrepancies** (3 corpus files:
-  `StaticArrays/src/blas.jl` — `@eval`-block RHS inside a nested cartesian
-  `for (a,b) in …, (c,d) in …`; `StaticArrays/test/broadcast.jl` — a nested
-  `@testset`/`@test`/`@inferred`/`SA[…]` stack; `CodeTracking/test/script.jl`
-  — a file-level statement count off by one around a `'\n'` char literal + `;`).
-  Each fails only when embedded in its full surrounding context; every minimal
-  extraction of the construct converts identically to the oracle, and all
-  three are `check_spans`-clean. Not reduced to a fixable rule within this
-  task's budget; documented as remaining loop state rather than a claimed
-  divergence.
+- **Statement group split at a mid-file `;` after a block form** — same
+  structural family as the leading-`;` entry above. `CodeTracking/test/
+  script.jl` reduces to:
+
+  ```julia
+  struct S
+  end;1
+  ```
+
+  Oracle (CSTParser) hoists the post-`;` statement to a FILE-level sibling,
+  wrapping only the pre-`;` group in a nested toplevel:
+
+  ```
+  file
+    toplevel            fs=13 s=12
+      struct …end
+    INTEGER "1"         fs=1 s=1
+  ```
+
+  Ours (from the single flat green `toplevel[struct, ;, 1]` node):
+
+  ```
+  file
+    toplevel            fs=14 s=14
+      struct …end
+      INTEGER "1"
+  ```
+
+  Reproducing the split would require re-deriving CSTParser's file-level
+  statement-grouping pass (which decides per-`;` whether the run continues
+  the group or starts a file sibling) — information not represented in the
+  green tree. `check_spans` passes. Resolution: accept drift.
+  (Task-10 round-2 note: this was initially misfiled as "context-dependent /
+  resists reduction"; the reviewer reduced it to the two-liner above.)
+
+- **JuliaSyntax's parser overflows on a file CSTParser parses fine** —
+  `JuliaSyntax/src/tokenize_utils.jl` (a deeply-nested chained-`||`
+  expression): `CSTParser.parse(src, true)` succeeds, but our pipeline's
+  `JuliaSyntax.parse!` throws `StackOverflowError` before the converter ever
+  runs. This is NOT a tree-shape divergence — it is a **pipeline availability
+  gap and a Task 12 backend-flip liability**: after the flip, any file whose
+  nesting depth overflows JuliaSyntax's recursive-descent parser regresses
+  from "parsed" to "unparseable", a regression surface CSTParser's parser
+  does not have (or hits at a different depth). Needs either a bigger parse
+  stack (e.g. parsing on a dedicated task with an enlarged stack) or an
+  upstream JuliaSyntax fix before the flip. Resolution: converter cannot shim
+  it; flag for Task 12.
+
+- **One genuinely context-dependent case** — `StaticArrays/test/broadcast.jl`
+  (an `::`/`==` binding inside a macro arg that diverges only in the full
+  nested `@testset`/`@test`/`@inferred`/`SA[…]` context; every minimal
+  extraction converts identically). Reviewer-confirmed as genuinely
+  context-dependent in the round-2 review. `check_spans`-clean. Left as
+  remaining loop state.
+  (Round-2 correction: the earlier claim that a "trio" of files shared this
+  character was wrong for 2 of 3 — `StaticArrays/src/blas.jl` was a real
+  converter bug, fixed in round 2 [qualified-macrocall span quirk not
+  propagating through a nesting macrocall, `x = @eval M.@m(a)`], and
+  `CodeTracking/test/script.jl` reduced to the statement-group split logged
+  above.)

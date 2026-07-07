@@ -516,6 +516,13 @@ end
         # inherited deferred: bare return + explicit `;` in begin/do blocks
         "begin return; end",
         "f(x) do y; return; end",
+        # qualified-macrocall span quirk propagates through a nesting macrocall
+        "x = @eval M.@m(a)\n\ny",
+        "@eval M.@m(a)\ny",
+        # dotted-operator prefix calls unwrap parens like the non-dotted path
+        ".+(x)",
+        ".+(a,b)",
+        ".!(x)",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end

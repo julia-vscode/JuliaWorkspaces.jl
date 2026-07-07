@@ -265,6 +265,14 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # stayed the initial empty Vector{EXPR} instead of `nothing`.
         args, trivia, groups = collect_arglist(kids, kkinds, K"(", K")")
         isempty(groups) || insert!(args, 2, merge_params!(groups))
+        # A dotted-operator callee (`.+(a, b)`) arrives as a K"." composite
+        # (dot+op leaves); fuse it into one OPERATOR leaf.
+        if kkinds[1] == K"." && args[1].head isa EXPR && args[1].head.val == "." &&
+           args[1].args !== nothing && length(args[1].args) == 1 &&
+           args[1].args[1].head === :OPERATOR
+            di = args[1]
+            args[1] = EXPR(:OPERATOR, di.fullspan, di.span, di.head.val * di.args[1].val)
+        end
         return EXPR(:call, args, isempty(trivia) ? nothing : trivia, 0, 0)
     elseif k == K"dotcall" && JuliaSyntax.is_infix_op_call(JuliaSyntax.head(node))
         # a .+ b (.+ c ...) → dotted infix broadcast; JuliaSyntax keeps `.`
@@ -293,9 +301,17 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         return EXPR(:call, args, isempty(trivia) ? nothing : trivia, 0, 0)
     elseif k == K"dotcall" && JuliaSyntax.is_prefix_op_call(JuliaSyntax.head(node))
         # .!x → dotted prefix broadcast; same `.`+op fusion, single operand.
+        # `.+(x)` — a parenthesized operand unwraps to a call (parens →
+        # trivia), like the non-dotted `+(x)` path; unlike `-`/`!`/`~`,
+        # dotted operators have NO keep-brackets exception.
         dotex, opex, operand = kids[1], kids[2], kids[3]
         fused = EXPR(:OPERATOR, dotex.fullspan + opex.fullspan,
                     dotex.span + opex.span, dotex.val * opex.val)
+        if kkinds[3] == K"parens"
+            args = EXPR[fused]
+            append!(args, operand.args)
+            return EXPR(:call, args, operand.trivia, 0, 0)
+        end
         return EXPR(:call, EXPR[fused, operand], nothing, 0, 0)
     elseif k == K"dotcall"
         # f.(x, y) → (:., [f, tuple(x, y)]); the parenthesized arg list packs
@@ -535,6 +551,14 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         if name.head isa EXPR && (kkinds[end] == K")" || last(args).fullspan == 0)
             ll = cur.leaves[cur.i-1]
             cur.grow_span += ll.fullspan - ll.span
+        elseif kkinds[end] != K")" && last(args).fullspan != 0
+            # A parenless macrocall's span is measured to its last REAL arg —
+            # grow when that arg's span already extends past its own raw
+            # leaves (e.g. `@eval M.@m(a)`: the nested qualified macrocall has
+            # span == fullspan), so the quirk propagates through nesting. A
+            # zero-width last arg (bare unqualified `@m`'s NOTHING) keeps the
+            # normal trailing exclusion.
+            grow_span_to_last_arg!(cur, args)
         end
         return EXPR(:macrocall, args, macro_trivia, 0, 0)
     elseif k == K"inert"
