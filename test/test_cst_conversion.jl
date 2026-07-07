@@ -167,6 +167,53 @@ end
         # (a single empty group survives only when all groups are empty)
         "f(a;;b)",
         "f(;;)",
+        # pre-existing gap found via Task 8 corpus probing: a parenless
+        # prefix-op call never gets any trivia, so it must be `nothing`
+        "!x",
+        "!f(x)",
+    ]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end
+
+@testitem "cst-conv: control flow and containers via oracle" begin
+    using JuliaWorkspaces: CSTConversion
+    for src in [
+        "if a\nb\nend",
+        "if a\nb\nelse\nc\nend",
+        "if a\nb\nelseif c\nd\nelse\ne\nend",
+        "a ? b : c",
+        "while a\nb\nend",
+        "for i in xs\ni\nend",
+        "for i = 1:10, j in ys\nend",
+        "for (a, b) in xs end",
+        "try\na\ncatch\nend",
+        "try\na\ncatch err\nb\nfinally\nc\nend",
+        "try\na\ncatch e\nb\nelse\nc\nend",
+        "let x = 1\nx\nend",
+        "let\nend",
+        "return",
+        "return x",
+        "break",
+        "continue",
+        "(a, b)",
+        "(a,)",
+        "(;a=1)",
+        "[1, 2]",
+        "[1 2]",
+        "[1 2; 3 4]",
+        "[1; 2;; 3; 4]",
+        "Int[1, 2]",
+        "[x for x in xs]",
+        "[x for x in xs if x > 0]",
+        "(x for x in xs)",
+        "[x + y for x in xs, y in ys]",
+        "Dict(a => b)",
+        "a:b",
+        "a:b:c",
+        # inherited concerns: paren-block and trailing-`;` vcat
+        "(a; b)",
+        "[a;]",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end

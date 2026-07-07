@@ -51,6 +51,53 @@ function merge_params!(groups::Vector{EXPR})
     return groups[1]
 end
 
+# Zero-width absent-clause marker shared by try's catch/finally/else slots
+# (val is the empty string, NOT nothing — differs from struct/module's
+# TRUE/FALSE marker convention, oracle-pinned via dump).
+false_arg() = EXPR(:FALSE, 0, 0, "")
+
+# generator/filter compute span via `fullspan - (args[end].fullspan -
+# args[end].span)` (CSTParser's own convention, same family as
+# merge_params!'s), not the auto raw-leaf-bookend calc `assemble()` performs
+# by default — the two coincide UNLESS args[end] itself already carries a
+# trim_span-style correction (filter's own fix feeds into generator's).
+# Corrects the auto calc via the existing trim_span field; needs no new
+# span machinery since it's a pure arithmetic reconciliation of the two
+# already-sanctioned formulas.
+function trim_span_to_last_arg!(cur::Cursor, args::Vector{EXPR})
+    isempty(args) && return
+    last_leaf = cur.leaves[cur.i-1]
+    a = args[end]
+    cur.trim_span += (a.fullspan - a.span) - (last_leaf.fullspan - last_leaf.span)
+end
+
+# Sum of the OWN spans of a maximal trailing run of `;`-kind kids (e.g. the
+# double `;;` promoting to the next ncat dimension) — every one of them
+# folds away via fold_semi!, but assemble()'s automatic span calc still
+# counts each dropped separator's own "meaningful" width since the raw
+# leaf-range last leaf IS the final one of the run; trim_span excludes them.
+function trailing_semi_span(kids::Vector{EXPR}, kkinds::Vector{Kind})
+    total = 0
+    for j in length(kkinds):-1:1
+        kkinds[j] == K";" || break
+        total += kids[j].span
+    end
+    return total
+end
+
+# Cell elements directly inside hcat/vcat/row/ncat/nrow get EMPTY args AND
+# trivia vectors instead of `nothing` when they're bare terminals — an
+# oracle-pinned CSTParser quirk exclusive to matrix-literal contexts
+# (vect/ref/call arguments keep the normal `nothing`). Composite cells
+# (already carrying real args/trivia) are untouched.
+function matrix_cell!(ex::EXPR)
+    if ex.args === nothing
+        ex.args = EXPR[]
+        ex.trivia = EXPR[]
+    end
+    return ex
+end
+
 # Shared by call/dotcall/curly/macrocall arg lists: split into positional
 # args, bracket/comma trivia, and `;`-groups (still unmerged/unrelocated —
 # each caller decides where the merged group lands); `a=b` becomes `:kw`.
@@ -110,9 +157,12 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # right after the callee (kids[1], which lands in args[1] here since
         # it matches none of collect_arglist's special cases); `a=b`
         # positional args become `:kw`.
+        # Pre-existing gap found via corpus probing: a parenless prefix-op
+        # call (`!x`, no LPAREN/RPAREN at all) never populates trivia, so it
+        # stayed the initial empty Vector{EXPR} instead of `nothing`.
         args, trivia, groups = collect_arglist(kids, kkinds, K"(", K")")
         isempty(groups) || insert!(args, 2, merge_params!(groups))
-        return EXPR(:call, args, trivia, 0, 0)
+        return EXPR(:call, args, isempty(trivia) ? nothing : trivia, 0, 0)
     elseif k == K"dotcall"
         # f.(x, y) → (:., [f, tuple(x, y)]); the parenthesized arg list packs
         # into a :tuple the same way a call's does (parameters relocate to
@@ -230,6 +280,14 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # their RHS in an implicit block; plain assignment does not, and an
         # explicit `begin ... end` RHS is never wrapped a second time.
         lhs, op, rhs = kids
+        if k == K"=" && op.val != "="
+            # for-loop/comprehension iteration spec (`i in xs`/`i ∈ xs`):
+            # JuliaSyntax reuses K"=" regardless of the actual keyword; the
+            # oracle always synthesizes a zero-width "=" head and relocates
+            # the real in/∈ operator to trivia.
+            head = EXPR(:OPERATOR, 0, 0, "=")
+            return EXPR(head, EXPR[lhs, rhs], EXPR[op], 0, 0)
+        end
         needs_block = (k == K"->" || kkinds[1] == K"call" || kkinds[1] == K"where") &&
                       kkinds[3] != K"block"
         body = needs_block ? EXPR(:block, EXPR[rhs], nothing, rhs.fullspan, rhs.span) : rhs
@@ -255,6 +313,339 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             end
         end
         return EXPR(:where, args, trivia, 0, 0)
+    elseif k == K"if" || k == K"elseif"
+        # JuliaSyntax reuses K"if"/K"elseif" for both the composite node AND
+        # its own leading keyword leaf — a leaf keyword has `args === nothing`
+        # (built by terminal_expr), a nested elseif clause doesn't, so that's
+        # the only reliable way to tell "keyword to drop" from "child node".
+        trivia = EXPR[]
+        args = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            if ex.args === nothing && JuliaSyntax.is_keyword(ck)
+                push!(trivia, ex)
+            else
+                push!(args, ex)
+            end
+        end
+        return EXPR(k == K"if" ? :if : :elseif, args, trivia, 0, 0)
+    elseif k == K"?"
+        # ternary a ? b : c → (:if, [a, b, c], trivia=[?, :]) — reuses if's head.
+        trivia = EXPR[]
+        args = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            (ck == K"?" || ck == K":") ? push!(trivia, ex) : push!(args, ex)
+        end
+        return EXPR(:if, args, trivia, 0, 0)
+    elseif (k == K"break" || k == K"continue") && length(kids) == 1
+        # The composite node wraps a single leaf of the SAME kind; the oracle
+        # collapses the statement to just that leaf, no wrapping at all.
+        return kids[1]
+    elseif k == K"return"
+        # `return` (no value) gets a synthetic zero-width NOTHING arg; `return
+        # x` already has a real value kid, no synthesis needed.
+        trivia = EXPR[]
+        args = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            ck == K"return" ? push!(trivia, ex) : push!(args, ex)
+        end
+        isempty(args) && push!(args, EXPR(:NOTHING, 0, 0, ""))
+        return EXPR(:return, args, trivia, 0, 0)
+    elseif k == K"catch"
+        # Flattened into try's own args/trivia by the K"try" branch below;
+        # this intermediate shape is never part of the final tree.
+        catch_kw = nothing
+        rest = EXPR[]
+        restk = Kind[]
+        for (ex, ck) in zip(kids, kkinds)
+            if ck == K"catch"
+                catch_kw = ex
+            else
+                push!(rest, ex)
+                push!(restk, ck)
+            end
+        end
+        var, block = rest[1], rest[2]
+        if var.span == 0 && var.fullspan != 0
+            # JuliaSyntax's absent-catch-var placeholder is a zero-content
+            # leaf that still swallows trailing whitespace up to the next
+            # token; CSTParser's own CATCH keyword owns that width instead.
+            catch_kw.fullspan += var.fullspan
+            var.fullspan = 0
+        end
+        if restk[1] == K"false" && isempty(block.args)
+            # Oracle-pinned quirk: an empty catch body with NO named var
+            # keeps `trivia = EXPR[]`, not `nothing` (every other empty
+            # block, incl. this same one WITH a var, uses `nothing`).
+            block.trivia = EXPR[]
+        end
+        return EXPR(:catch, EXPR[var, block], EXPR[catch_kw], 0, 0)
+    elseif k == K"finally"
+        # Oracle-pinned: the finally block always keeps `trivia = EXPR[]`,
+        # never `nothing`, regardless of statement count.
+        trivia = EXPR[]
+        args = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            if ck == K"finally"
+                push!(trivia, ex)
+            else
+                ex.trivia === nothing && (ex.trivia = EXPR[])
+                push!(args, ex)
+            end
+        end
+        return EXPR(:finally, args, trivia, 0, 0)
+    elseif k == K"else" && kkinds[1] == K"else"
+        # try's else-clause is its own composite node (unlike if/elseif's
+        # bare ELSE leaf, which never reaches assemble_form at all). Same
+        # trivia-always-EXPR[] quirk as finally's block.
+        block = kids[2]
+        block.trivia === nothing && (block.trivia = EXPR[])
+        return EXPR(:elseclause, EXPR[block], EXPR[kids[1]], 0, 0)
+    elseif k == K"try"
+        # CSTParser's :try has a fixed 5-slot layout beyond the try-block:
+        # [catch_var, catch_block, finally_block, else_block]. Absent
+        # trailing slots are dropped entirely; an absent slot that still has
+        # a present slot AFTER it (in this order) keeps a zero-width FALSE
+        # placeholder instead. Same trim-from-the-tail rule applies to the
+        # keyword trivia (CATCH is unconditional — a try always has catch or
+        # finally, so CATCH is never the trailing item).
+        try_kw = end_kw = try_block = nothing
+        catch_kw = catch_var = catch_block = nothing
+        finally_kw = finally_block = nothing
+        else_kw = else_block = nothing
+        has_catch = has_finally = has_else = false
+        for (ex, ck) in zip(kids, kkinds)
+            if ck == K"try"
+                try_kw = ex
+            elseif ck == K"end"
+                end_kw = ex
+            elseif ck == K"catch"
+                has_catch = true
+                catch_kw, catch_var, catch_block = ex.trivia[1], ex.args[1], ex.args[2]
+            elseif ck == K"finally"
+                has_finally = true
+                finally_kw, finally_block = ex.trivia[1], ex.args[1]
+            elseif ck == K"else"
+                has_else = true
+                else_kw, else_block = ex.trivia[1], ex.args[1]
+            else
+                try_block = ex
+            end
+        end
+        raw = [(catch_var, has_catch), (catch_block, has_catch),
+               (finally_block, has_finally), (else_block, has_else)]
+        while !isempty(raw) && !raw[end][2]
+            pop!(raw)
+        end
+        args = EXPR[try_block]
+        for (v, present) in raw
+            push!(args, present ? v : false_arg())
+        end
+        catch_trivia = has_catch ? catch_kw : EXPR(:CATCH, 0, 0, nothing)
+        raw_t = [(finally_kw, has_finally), (else_kw, has_else)]
+        while !isempty(raw_t) && !raw_t[end][2]
+            pop!(raw_t)
+        end
+        trivia = EXPR[try_kw, catch_trivia]
+        for (v, present) in raw_t
+            push!(trivia, present ? v : false_arg())
+        end
+        push!(trivia, end_kw)
+        return EXPR(:try, args, trivia, 0, 0)
+    elseif k == K"let"
+        # bindings block collapses to its single item when there's exactly
+        # one binding (`let x = 1` / `let x`); stays a :block for 0 or 2+.
+        trivia = EXPR[]
+        bindings = body = nothing
+        for (ex, ck) in zip(kids, kkinds)
+            if ck == K"let" || ck == K"end"
+                push!(trivia, ex)
+            elseif bindings === nothing
+                bindings = ex
+            else
+                body = ex
+            end
+        end
+        length(bindings.args) == 1 && (bindings = bindings.args[1])
+        return EXPR(:let, EXPR[bindings, body], trivia, 0, 0)
+    elseif k == K"cartesian_iterator"
+        # Multi-spec `for`/generator iteration (`i = 1:10, j in ys`) → a
+        # synthetic :block of iteration specs with comma trivia.
+        trivia = EXPR[]
+        args = EXPR[]
+        for (ex, ck) in zip(kids, kkinds)
+            ck == K"," ? push!(trivia, ex) : push!(args, ex)
+        end
+        return EXPR(:block, args, trivia, 0, 0)
+    elseif k == K"comprehension"
+        trivia = EXPR[kids[1], kids[end]]
+        return EXPR(:comprehension, EXPR[kids[2]], trivia, 0, 0)
+    elseif k == K"generator"
+        # [expr for spec] → (:generator, [expr, spec], trivia=[for]); a
+        # multi-spec cartesian_iterator FLATTENS its args/trivia directly
+        # into generator's own (unlike `for`, which keeps it as a nested
+        # :block) — confirmed via dump: comma lands in generator's trivia.
+        trivia = EXPR[]
+        expr = spec = nothing
+        speck = K"None"
+        for (ex, ck) in zip(kids, kkinds)
+            if ck == K"for"
+                push!(trivia, ex)
+            elseif expr === nothing
+                expr = ex
+            else
+                spec, speck = ex, ck
+            end
+        end
+        args = EXPR[expr]
+        if speck == K"cartesian_iterator"
+            append!(args, spec.args)
+            append!(trivia, spec.trivia)
+        else
+            push!(args, spec)
+        end
+        trim_span_to_last_arg!(cur, args)
+        return EXPR(:generator, args, trivia, 0, 0)
+    elseif k == K"filter"
+        # `... if cond` clause → (:filter, [cond, spec], trivia=[if]) — args
+        # order is COND-then-SPEC, reversed from source order (spec if cond),
+        # so span follows CSTParser's own args[end]-trailing-exclusion
+        # convention rather than the raw leaf-bookend calc.
+        trivia = EXPR[]
+        spec = cond = nothing
+        for (ex, ck) in zip(kids, kkinds)
+            if ck == K"if"
+                push!(trivia, ex)
+            elseif spec === nothing
+                spec = ex
+            else
+                cond = ex
+            end
+        end
+        args = EXPR[cond, spec]
+        trim_span_to_last_arg!(cur, args)
+        return EXPR(:filter, args, trivia, 0, 0)
+    elseif k == K"hcat"
+        # Bare cells get the matrix_cell! quirk (hcat always has >=2, since
+        # a single bracketed item is a :vect instead).
+        trivia = EXPR[kids[1], kids[end]]
+        cells = kids[2:end-1]
+        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        return EXPR(:hcat, cells, trivia, 0, 0)
+    elseif k == K"row"
+        # `1 2;` inside vcat — bare cells, trailing `;` dropped/folded like a
+        # block's, oracle-pinned zero-width trivia (never `nothing`). The
+        # matrix_cell! quirk only fires with >=2 real cells — oracle-pinned:
+        # a lone cell (e.g. the degenerate `[a;]`, no row wrapping needed)
+        # keeps the normal `nothing` args/trivia.
+        cells = EXPR[]
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if ck == K";"
+                semi_i = first(cur.kid_ranges[j])
+                fold_semi!(cur, semi_i, ex.fullspan) ||
+                    (isempty(cells) || (cells[end].fullspan += ex.fullspan))
+            else
+                push!(cells, ex)
+            end
+        end
+        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        !isempty(kkinds) && kkinds[end] == K";" &&
+            (cur.trim_span += trailing_semi_span(kids, kkinds))
+        return EXPR(:row, cells, EXPR[], 0, 0)
+    elseif k == K"vcat"
+        # Either wraps nested :row children (2D matrices) or holds bare cells
+        # directly with `;` fold (flat column vectors) — both shapes seen in
+        # the wild; handle both in one pass. Unlike row/nrow, a trailing `;`
+        # here is always followed by the closing `]`, so it's never this
+        # node's own leaf-range-computed last leaf — no trim_span needed.
+        trivia = EXPR[kids[1], kids[end]]
+        args = EXPR[]
+        cells = EXPR[]   # bare (non-row) cells only, to gate the quirk
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if ck == K"[" || ck == K"]"
+                continue
+            elseif ck == K";"
+                semi_i = first(cur.kid_ranges[j])
+                fold_semi!(cur, semi_i, ex.fullspan) ||
+                    (isempty(args) || (args[end].fullspan += ex.fullspan))
+            elseif ck == K"row"
+                push!(args, ex)
+            else
+                push!(args, ex)
+                push!(cells, ex)
+            end
+        end
+        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        return EXPR(:vcat, args, trivia, 0, 0)
+    elseif k == K"nrow"
+        # Like row, but prefixed with a synthetic dim-number marker (a bare
+        # Symbol head named after the digit, e.g. Symbol("1")) read from the
+        # green node's own flags — CSTParser's ncat/nrow dimension encoding.
+        dim = JuliaSyntax.numeric_flags(JuliaSyntax.flags(node))
+        cells = EXPR[]
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if ck == K";"
+                semi_i = first(cur.kid_ranges[j])
+                fold_semi!(cur, semi_i, ex.fullspan) ||
+                    (isempty(cells) || (cells[end].fullspan += ex.fullspan))
+            else
+                push!(cells, ex)
+            end
+        end
+        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        !isempty(kkinds) && kkinds[end] == K";" &&
+            (cur.trim_span += trailing_semi_span(kids, kkinds))
+        args = EXPR[EXPR(Symbol(string(dim)), 0, 0, "")]
+        append!(args, cells)
+        return EXPR(:nrow, args, EXPR[], 0, 0)
+    elseif k == K"ncat"
+        dim = JuliaSyntax.numeric_flags(JuliaSyntax.flags(node))
+        trivia = EXPR[kids[1], kids[end]]
+        rest = EXPR[]
+        cells = EXPR[]
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if ck == K"[" || ck == K"]"
+                continue
+            elseif ck == K";"
+                semi_i = first(cur.kid_ranges[j])
+                fold_semi!(cur, semi_i, ex.fullspan) ||
+                    (isempty(rest) || (rest[end].fullspan += ex.fullspan))
+            elseif ck == K"nrow"
+                push!(rest, ex)
+            else
+                push!(rest, ex)
+                push!(cells, ex)
+            end
+        end
+        length(cells) >= 2 && foreach(matrix_cell!, cells)
+        args = EXPR[EXPR(Symbol(string(dim)), 0, 0, "")]
+        append!(args, rest)
+        return EXPR(:ncat, args, trivia, 0, 0)
+    elseif k == K"block" && length(kids) >= 2 && kkinds[1] == K"(" && kkinds[end] == K")"
+        # `(a; b)` — JuliaSyntax gives ONE green `block` node wrapping the
+        # parens directly (no nested "parens" node); the oracle synthesizes
+        # two EXPR levels instead: outer :brackets(paren trivia) wrapping an
+        # inner :block built with the same `;`-fold rules as a real block.
+        # The inner node is hand-built (not an assemble_form return value
+        # for a real node), so its span is computed directly rather than via
+        # Cursor.trim/trim_span.
+        args = EXPR[]
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if j == 1 || j == length(kids)
+                continue
+            elseif ck == K";"
+                semi_i = first(cur.kid_ranges[j])
+                if fold_semi!(cur, semi_i, ex.fullspan)
+                else
+                    isempty(args) || (args[end].fullspan += ex.fullspan)
+                end
+            else
+                push!(args, ex)
+            end
+        end
+        fullspan = sum(x -> x.fullspan, args; init=0)
+        span = isempty(args) ? 0 : fullspan - (args[end].fullspan - args[end].span)
+        inner = EXPR(:block, args, EXPR[], fullspan, span)
+        return EXPR(:brackets, EXPR[inner], EXPR[kids[1], kids[end]], 0, 0)
     elseif k == K"block"
         # `;`-separated statements drop the `;` entirely, same as toplevel's:
         # its width folds onto the rightmost leaf of the preceding statement.
@@ -262,6 +653,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         trivia = EXPR[]
         for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ck == K"begin" || ck == K"end"
+                push!(trivia, ex)
+            elseif ck == K","
+                # `let`'s bindings list reuses K"block" for its comma-joined
+                # `=` items; a plain statement block never has raw commas.
                 push!(trivia, ex)
             elseif ck == K";"
                 semi_i = first(cur.kid_ranges[j])
