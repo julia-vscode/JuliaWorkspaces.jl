@@ -7,8 +7,8 @@ using JuliaSyntax: GreenNode, Kind, @K_str, kind, haschildren, children, span
 
 include("compare.jl")
 include("tokens.jl")
+include("assembly.jl")    # defines Cursor (used in terminals.jl signatures)
 include("terminals.jl")
-include("assembly.jl")
 include("forms.jl")
 
 export first_tree_diff, trees_equal, Leaf, flatten_leaves, is_ws_trivia, build_cst, oracle_diff
