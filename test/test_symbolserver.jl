@@ -369,6 +369,43 @@ end
     @test isempty(derived_file_imported_packages(jw.runtime, empty_uri))
 end
 
+@testitem "SymbolServer: project imported packages aggregate into the env key" begin
+    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace, derived_project_imported_packages
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "AggTest"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///aggtest/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///aggtest/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///aggtest/src/AggTest.jl"),
+        SourceText("module AggTest\nusing Foo\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///aggtest/src/extra.jl"),
+        SourceText("import Bar\nusing .Local\n", "julia")))
+
+    project_uri = JuliaWorkspaces.derived_project_uri_for_root(
+        jw.runtime, URI("file:///aggtest/src/AggTest.jl"))
+
+    # Imports are unioned across every file the project resolves; relative imports drop out.
+    @test derived_project_imported_packages(jw.runtime, project_uri) == ["Bar", "Foo"]
+
+    # ...and the aggregate is carried on the project's environment DJP key.
+    reqs = JuliaWorkspaces.derived_required_dynamic_projects(jw.runtime)
+    wek = only(k for k in reqs if k isa JuliaWorkspaces.WatchEnvironmentKey)
+    @test wek.imported_packages == ["Bar", "Foo"]
+end
+
 @testitem "SymbolServer: #1395 DataTypeStore field types are serializable and aligned" begin
     using JuliaWorkspaces.SymbolServer: DataTypeStore, FakeTypeName, MethodStore
     using JuliaWorkspaces.SymbolServer.CacheStore: write, read
@@ -735,6 +772,89 @@ end
 
         # Importing nothing (and no deved packages) ⇒ nothing to index.
         @test isempty(JuliaWorkspaces._get_missing_packages(proj, store, String[]))
+    end
+end
+
+@testitem "SymbolServer: get_store loads only imported plus deved packages" begin
+    a_uuid = "5a61a11e-3d95-423b-8231-1a5bca90429f"
+    b_uuid = "09fe8bcb-ac26-410c-9c93-4f8b45323ba9"
+    la_uuid = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"   # LinearAlgebra (stdlib, non-deved)
+    symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
+
+    mktempdir() do root
+        proj = joinpath(root, "proj")
+        adir = joinpath(root, "A")
+        bdir = joinpath(root, "B")
+        store = joinpath(root, "store")
+        mkpath(joinpath(adir, "src"))
+        mkpath(joinpath(bdir, "src"))
+        mkpath(proj)
+        mkpath(store)
+
+        write(joinpath(adir, "Project.toml"), """
+        name = "A"
+        uuid = "$a_uuid"
+        version = "0.1.0"
+        """)
+        write(joinpath(adir, "src", "A.jl"), "module A\nfoo(x) = 1\nend # module A\n")
+
+        write(joinpath(bdir, "Project.toml"), """
+        name = "B"
+        uuid = "$b_uuid"
+        version = "0.1.0"
+        """)
+        write(joinpath(bdir, "src", "B.jl"), "module B\nbar(x) = 2\nend # module B\n")
+
+        write(joinpath(proj, "Project.toml"), """
+        [deps]
+        A = "$a_uuid"
+        B = "$b_uuid"
+        LinearAlgebra = "$la_uuid"
+        """)
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "1.11.0"
+        manifest_format = "2.0"
+        project_hash = "0000000000000000000000000000000000000000"
+
+        [[deps.A]]
+        path = "../A"
+        uuid = "$a_uuid"
+        version = "0.1.0"
+
+        [[deps.B]]
+        path = "../B"
+        uuid = "$b_uuid"
+        version = "0.1.0"
+
+        [[deps.LinearAlgebra]]
+        uuid = "$la_uuid"
+        """)
+
+        runner = joinpath(root, "run_indexer.jl")
+        write(runner, """
+        include(raw"$symbolserver_jl")
+        using Pkg
+        Pkg.activate(raw"$proj")
+        SymbolServer.get_store(raw"$store", nothing; used_packages=["A"])
+        """)
+
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        logfile = joinpath(root, "indexer.log")
+        cmd = `$jl --startup-file=no --project=$proj $runner`
+        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0", "JULIA_DEBUG" => "SymbolServer") do
+            run(pipeline(ignorestatus(cmd), stderr=logfile))
+        end
+        log = read(logfile, String)
+        @test proc.exitcode == 0
+
+        # A is imported by the workspace → indexed.
+        @test isfile(joinpath(store, "A", "A", a_uuid, "0.1.0.jstore"))
+        # B isn't imported but is a workspace (deved) package → still indexed.
+        @test isfile(joinpath(store, "B", "B", b_uuid, "0.1.0.jstore"))
+        # LinearAlgebra is neither imported nor deved, so the loader skips loading
+        # it on its own account (it may still be captured if already resident).
+        @test occursin(r"LinearAlgebra.*not imported by the workspace, skipping load", log)
     end
 end
 
