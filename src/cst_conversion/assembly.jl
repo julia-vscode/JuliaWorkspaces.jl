@@ -24,10 +24,40 @@ mutable struct Cursor
     # way to fullspan, covering the keyword's trailing trivia. Same
     # lifecycle as trim/trim_span: set by a form, applied+reset by assemble.
     grow_span::Int
+    # Prefix count of error-covered leaves: error_prefix[k+1] = number of the
+    # first k leaves that lie inside (or are) a green error node
+    # (error_prefix[1] = 0). Lets patch_dropped_width! test "does leaf range
+    # i:j overlap an error" in O(1) instead of re-walking the green subtree at
+    # every dropped-width site. Coverage (not just error-KIND leaves) is
+    # needed because a non-terminal K"error" can wrap ordinary tokens.
+    error_prefix::Vector{Int}
 end
 
-Cursor(leaves::Vector{Leaf}, i::Int, src::String) =
-    Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[], 0, 0, 0)
+function Cursor(leaves::Vector{Leaf}, i::Int, src::String, green::GreenNode)
+    covered = Bool[]
+    _mark_error_covered!(covered, green, false)
+    error_prefix = Vector{Int}(undef, length(covered) + 1)
+    error_prefix[1] = 0
+    for k in eachindex(covered)
+        error_prefix[k+1] = error_prefix[k] + (covered[k] ? 1 : 0)
+    end
+    return Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)),
+                  UnitRange{Int}[], 0, 0, 0, error_prefix)
+end
+
+# One non-ws leaf per entry, in flatten_leaves order; true when the leaf is
+# inside or is a green error node.
+function _mark_error_covered!(covered::Vector{Bool}, node::GreenNode, in_error::Bool)
+    e = in_error || JuliaSyntax.is_error(kind(node))
+    if !haschildren(node)
+        is_ws_trivia(kind(node)) || push!(covered, e)
+        return
+    end
+    for c in children(node)
+        _mark_error_covered!(covered, c, e)
+    end
+    return
+end
 
 const UNHANDLED_KINDS = Set{Kind}()
 # Salsa runs derived queries concurrently; no live race today, but harden anyway.
@@ -45,7 +75,7 @@ const UNHANDLED_LOCK = ReentrantLock()
 # gate only runs when a gap exists, which never happens on valid code, so
 # the non-error path pays nothing. Skips genuinely childless nodes (matrix
 # cells), same rule as check_spans itself.
-function patch_dropped_width!(ex::EXPR, node::GreenNode)
+function patch_dropped_width!(ex::EXPR, node::GreenNode, cur::Cursor, lo::Int, hi::Int)
     ex.args === nothing && return ex
     has_children = !isempty(ex.args) ||
                    (ex.trivia !== nothing && !isempty(ex.trivia)) ||
@@ -55,7 +85,7 @@ function patch_dropped_width!(ex::EXPR, node::GreenNode)
                (ex.trivia === nothing ? 0 : sum(c -> c.fullspan, ex.trivia; init=0)) +
                (ex.head isa EXPR ? ex.head.fullspan : 0)
     gap = ex.fullspan - childsum
-    if gap > 0 && has_error_descendant(node)
+    if gap > 0 && has_error_in_range(cur, node, lo, hi)
         filler = EXPR(:errortoken, gap, 0, nothing)
         push!(ex.args, filler)
         CSTParser.setparent!(filler, ex)
@@ -63,10 +93,13 @@ function patch_dropped_width!(ex::EXPR, node::GreenNode)
     return ex
 end
 
-function has_error_descendant(node::GreenNode)
+# O(1) error presence over a node's consumed leaf range via the prefix count,
+# plus the node's own kind (a childless/zero-width K"error" non-terminal
+# consumes no leaf, so it wouldn't show up in the leaf range).
+function has_error_in_range(cur::Cursor, node::GreenNode, lo::Int, hi::Int)
     JuliaSyntax.is_error(kind(node)) && return true
-    haschildren(node) || return false
-    return any(has_error_descendant, children(node))
+    hi >= lo || return false
+    return cur.error_prefix[hi+1] - cur.error_prefix[lo] > 0
 end
 
 function assemble(node::GreenNode, cur::Cursor, is_cmdmacro_body::Bool=false)::EXPR
@@ -97,8 +130,9 @@ function assemble(node::GreenNode, cur::Cursor, is_cmdmacro_body::Bool=false)::E
         # assemble_quoted registers the close leaf's terminal itself (the
         # trailing chunk for interpolated strings, the whole literal
         # otherwise) so a `;`-fold widens the right node.
+        str_lo = cur.i
         expr = assemble_quoted(node, cur, k0 == K"cmdstring")
-        expr = patch_dropped_width!(expr, node)
+        expr = patch_dropped_width!(expr, node, cur, str_lo, cur.i - 1)
         if k0 == K"cmdstring" && !is_cmdmacro_body
             # Unprefixed backtick literal: 1.x emits the bare cmdstring node
             # with no wrapping macrocall at all (0.4 wrapped it in
@@ -145,7 +179,7 @@ function assemble(node::GreenNode, cur::Cursor, is_cmdmacro_body::Bool=false)::E
         ex.span = min(ex.span + cur.grow_span, ex.fullspan)
         cur.grow_span = 0
     end
-    patch_dropped_width!(ex, node)
+    patch_dropped_width!(ex, node, cur, first_i, cur.i - 1)
     return ex
 end
 

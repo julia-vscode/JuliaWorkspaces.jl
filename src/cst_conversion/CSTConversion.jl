@@ -23,7 +23,7 @@ function build_cst(green::GreenNode, source::AbstractString)
     src = String(source)
     isempty(src) && return EXPR(:file, EXPR[], EXPR[], 0, 0)
     leaves, leading = flatten_leaves(green, src)
-    cur = Cursor(leaves, 1, src)
+    cur = Cursor(leaves, 1, src, green)
     ex = assemble(green, cur)   # root green node is always kind K"toplevel"
     ex.head = :file
     ex.trivia = nothing
