@@ -645,6 +645,15 @@ end
         "macro m()\n",
         "begin\nfor i in xs\n",
         "module M\nwhile c\n",
+        # trailing trivia folded into a dropped error marker must not
+        # materialize as a width-bearing filler arg (ternary arity break)
+        "a ? b\n",
+        "a ? b \n",
+        "x = a ? b\n",
+        "a ? b :\n",
+        "if a \n",
+        "struct \n",
+        "while true \n",
         # truncated triple-quoted docstrings: error kids inside a K"string"
         # node must extend the content run, not double as close quotes
         # (overlapping-chunk childsum bug found by a depot prefix sweep)
@@ -724,7 +733,8 @@ end
     # An unterminated for/while/try leaked an errortoken into args, breaking
     # CSTParser's iterate protocol; StaticLint's include walker then threw a
     # BoundsError and killed diagnostics for the whole workspace.
-    for src in ["for i in 1:10\n", "while true\n", "try\nfoo(\n", "function f()\n"]
+    for src in ["for i in 1:10\n", "while true\n", "try\nfoo(\n", "function f()\n",
+                "a ? b\n"]
         jw = JuliaWorkspace()
         add_file!(jw, TextFile(URI("file:///a.jl"), SourceText(src, "julia")))
         @test (get_diagnostics_blocking(jw); true)

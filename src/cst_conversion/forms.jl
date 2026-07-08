@@ -1081,13 +1081,25 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         trivia = EXPR[]
         args = EXPR[]
         haserr = false
-        for (ex, ck) in zip(kids, kkinds)
+        orphan = 0
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ex.args === nothing && (ck == K"?" || ck == K":")
                 push!(trivia, ex)
             elseif JuliaSyntax.is_error(ck)
                 # Broken ternary emits zero-width error markers; drop them and
-                # rebuild the fixed cond?then:else arity below.
+                # rebuild the fixed cond?then:else arity below. A marker can
+                # carry folded trailing trivia (`a ? b\n`): fold that width
+                # onto the preceding real leaf (skipping earlier markers) so
+                # patch_dropped_width! never materializes a filler arg that
+                # breaks the arity.
                 haserr = true
+                if ex.fullspan > 0
+                    i = first(cur.kid_ranges[j]) - 1
+                    while i >= 1 && JuliaSyntax.is_error(cur.leaves[i].kind)
+                        i -= 1
+                    end
+                    widen_at_leaf!(cur, i, ex.fullspan) || (orphan += ex.fullspan)
+                end
             else
                 push!(args, ex)
             end
@@ -1095,11 +1107,15 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         if haserr
             # Pad to CSTParser's 3-arg/2-trivia ternary shape so its iterate
             # accessor stays in bounds (recovery differs from the oracle).
+            # `orphan` (no real leaf preceded the marker) rides on the first
+            # pad so childsums stay balanced.
             while length(args) < 3
-                push!(args, EXPR(:errortoken, 0, 0, nothing))
+                push!(args, EXPR(:errortoken, orphan, 0, nothing))
+                orphan = 0
             end
             while length(trivia) < 2
-                push!(trivia, EXPR(:errortoken, 0, 0, nothing))
+                push!(trivia, EXPR(:errortoken, orphan, 0, nothing))
+                orphan = 0
             end
         end
         return EXPR(:if, args, trivia, 0, 0)
