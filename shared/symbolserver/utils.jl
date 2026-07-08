@@ -669,7 +669,7 @@ end
 function write_cache(uuid, pkg::Package, outpath)
     dir = dirname(outpath)
     mkpath(dir)
-    @info "Now writing to disc $uuid"
+    @info "Writing cache for $(pkg.name) ($uuid) to disc."
     # Write to a unique temp file, then rename atomically so a shared store under
     # parallel indexing can't tear a cache (last writer wins, intact). mktemp (not
     # a getpid()-based name): containerized workers all run as PID 1 in their own

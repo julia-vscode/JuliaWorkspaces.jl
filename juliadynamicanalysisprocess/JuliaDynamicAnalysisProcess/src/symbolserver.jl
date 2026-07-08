@@ -25,6 +25,9 @@ else
     is_stdlib(uuid::UUID) = uuid in keys(ctx.stdlibs)
 end
 
+# `progress_callback` is either `nothing` or a function taking
+# `(message::String, percentage::Union{Int,Missing})`, where `missing` marks a
+# report without a meaningful completion percentage.
 function get_store(store_path::String, progress_callback)
     loading_bay = Module(:LoadingBay)
 
@@ -90,11 +93,27 @@ function get_store(store_path::String, progress_callback)
 
     # Load all packages together
     # This is important, or methods added to functions in other packages that are loaded earlier would not be in the cache
+    n_to_load = length(packages_to_load)
+    # Progress is reported on a step grid covering the whole pipeline: one step
+    # per package to load, plus symbol extraction and cache writing. Each report
+    # claims the middle of the step it is starting, so percentages rise strictly
+    # from the first report on — LSP clients are allowed to ignore reports whose
+    # percentage doesn't rise, so a 0% first report would never be displayed.
+    n_steps = n_to_load + 2
+    step_pct(step) = round(Int, 100 * (step - 0.5) / n_steps)
+    n_to_load > 0 && @info "Indexing $n_to_load package(s)."
     for (i, uuid) in enumerate(packages_to_load)
-        load_package(ctx, uuid, progress_callback, loading_bay, round(Int, 100*(i - 1)/length(packages_to_load)))
+        pe_name = packagename(ctx, uuid)
+        @info "Loading package $pe_name ($i/$n_to_load)."
+        progress_callback === nothing || progress_callback("Indexing $pe_name ($i/$n_to_load)...", step_pct(i))
+        t_load = time()
+        load_package(ctx, uuid, nothing, loading_bay)
+        @info "Loaded package $pe_name in $(round(time() - t_load, digits=1)) seconds."
     end
 
     # Create image of whole package env. This creates the module structure only.
+    @info "Extracting symbols from loaded packages."
+    progress_callback === nothing || progress_callback("Extracting symbols from loaded packages...", step_pct(n_to_load + 1))
     env_symbols = getenvtree()
 
     # Populate the above with symbols, skipping modules that don't need caching.
@@ -123,6 +142,7 @@ function get_store(store_path::String, progress_callback)
         server.depot[uuid] = Package(String(pkg_name), cache, uuid, sha_pkg(manifest_dir, pe))
     end
 
+    progress_callback === nothing || progress_callback("Writing symbol caches to disc...", step_pct(n_to_load + 2))
     write_depot(server, server.context, written_caches)
 
     @info "Symbol server indexing took $((time_ns() - start_time) / 1e9) seconds."
