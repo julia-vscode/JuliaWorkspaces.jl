@@ -447,7 +447,20 @@ function process_from_dynamic(jw::JuliaWorkspace)
 
         if msg isa FailedResult
             @warn "DJP reported failure" msg.key
-            # Nothing to update — failed_projects was already populated in the reactor.
+            # `failed_projects` was already populated in the reactor. A failure
+            # is treated as a terminal state for readiness (best-effort, with
+            # whatever symbol caches exist) so `is_ready` doesn't stay false
+            # forever and per-project gating doesn't suppress diagnostics
+            # indefinitely. A failed watched environment is recorded like a
+            # successful one; failed test environments and standalone projects
+            # have nothing to record — the artifacts their success paths
+            # register (a test/standalone project URI) don't exist on failure —
+            # so they only contribute to the global readiness flag.
+            if msg.key isa WatchEnvironmentKey
+                push!(ready_envs, msg.key)
+                envs_dirty = true
+            end
+            any_env_ready = true
 
         elseif msg isa EnvironmentReadyResult
             @info "Processing new env"
