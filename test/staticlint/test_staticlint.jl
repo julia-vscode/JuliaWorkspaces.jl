@@ -888,6 +888,19 @@ end
 end
 
 
+# Direct coverage of the EqInIfConditional check: the default backend rejects
+# `if x = 1 end`, so this exercises the JW_CST_BACKEND=cstparser escape-hatch
+# path where the lenient parse still reaches the check.
+@testitem "check_if_conds assignment direct" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: check_if_conds, errorof, EqInIfConditional, Meta
+
+    cst = JuliaWorkspaces.CSTParser.parse("if x = 1 end", true)
+    ifx = cst.args[1]
+    meta_dict = Dict{UInt64,Meta}()
+    check_if_conds(ifx, meta_dict)
+    @test errorof(ifx.args[1], meta_dict) == EqInIfConditional
+end
+
 @testitem "check_farg_unused unused second argument" setup=[shared_static_lint] begin
     import CSTParser
     using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument

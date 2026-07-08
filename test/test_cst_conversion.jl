@@ -123,6 +123,37 @@ end
         # toplevel `;` width lands on the preceding statement's rightmost leaf
         "f(); b",
         "g(); h()",
+        # `;` before `end` in end-terminated, non-block-bodied type decls folds
+        # onto the preceding leaf (no block body to hold it)
+        "abstract type A; end",
+        "primitive type P 8; end",
+        "abstract type A end;",
+        # short-form def whose RHS is itself an anon `function`: the def
+        # discriminator keys on a genuine `function` keyword LEAF, not a nested
+        # K"function" child
+        "f(x) = function (y) y end",
+        "f(x) = function g() end",
+        # bare unary `::T` (call-shaped T) kwarg default is not a return-type
+        # def; its wrapped body block keeps EXPR[] trivia
+        "f(::typeof(x) = x) = 1",
+        "g(::typeof(sin) = sin) = 1",
+        "f(x::Int)::Int = x",
+    ]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end
+
+@testitem "cst-conv: word-operator reclassification via oracle" begin
+    using JuliaWorkspaces: CSTConversion
+    for src in [
+        # comparison-chain word operators label OPERATOR, not IDENTIFIER
+        "p isa typeinfo <: Pair",
+        "a in b in c",
+        "a isa B",
+        # export/public name lists reclassify word operators too
+        "export isa",
+        "export in, isa",
+        "export a, b",
     ]
         @test CSTConversion.oracle_diff(src) === nothing
     end
@@ -586,6 +617,12 @@ end
         x.args === nothing || foreach(a -> walk(a, count), x.args)
     end
 
+    # Full CSTParser iterate/getindex traversal (the exact protocol StaticLint's
+    # include walker uses); it must not throw on any broken shape — an
+    # arity/slot mismatch (e.g. an errortoken misfiled into args) surfaces here
+    # as a BoundsError even when check_spans is clean.
+    iterate_walk(x) = (for c in x; iterate_walk(c); end)
+
     for src in [
         "function f(",
         "a +",
@@ -599,6 +636,15 @@ end
         "a ? b",
         "[1, 2",
         "module A function g() end",
+        # unterminated end-keyword forms: the missing `end` must land as a
+        # trivia END-placeholder, not a spurious extra arg that breaks iterate
+        "for i in 1:10\n",
+        "while true\n",
+        "try\nfoo(\n",
+        "function f()\n",
+        "macro m()\n",
+        "begin\nfor i in xs\n",
+        "module M\nwhile c\n",
         # truncated triple-quoted docstrings: error kids inside a K"string"
         # node must extend the content run, not double as close quotes
         # (overlapping-chunk childsum bug found by a depot prefix sweep)
@@ -618,6 +664,8 @@ end
         count = Ref(0)
         walk(ex, count)
         @test count[] > 0
+        # and by CSTParser's own iterate protocol
+        @test (iterate_walk(ex); true)
     end
 
     # three degenerate whole-file shapes from the divergence log: must
@@ -655,8 +703,32 @@ end
     @test JuliaWorkspaces.CSTConversion.trees_equal(cst, CSTParser.parse(content, true))
 
     sn = JuliaWorkspaces.get_julia_syntax_tree(jw, uri)
-    @test JuliaWorkspaces.syntax_node_at(sn, 1) isa JuliaSyntax.SyntaxNode
-    @test kind(JuliaWorkspaces.syntax_node_at(sn, 8)) == K"Identifier"  # byte 8 = 'x'
+    # syntax_node_at takes a 0-based offset (matching get_expr1): offset 7 is
+    # byte 8, the RHS 'x'.
+    @test JuliaWorkspaces.syntax_node_at(sn, 0) isa JuliaSyntax.SyntaxNode
+    @test kind(JuliaWorkspaces.syntax_node_at(sn, 7)) == K"Identifier"
+
+    # Boundary contract: 0-based, in-range only.
+    sn2 = JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, "x + 1")  # sizeof 5
+    @test kind(JuliaWorkspaces.syntax_node_at(sn2, 0)) == K"Identifier"   # first leaf
+    @test kind(JuliaWorkspaces.syntax_node_at(sn2, 4)) == K"Integer"      # last leaf
+    @test_throws ArgumentError JuliaWorkspaces.syntax_node_at(sn2, -1)
+    @test_throws ArgumentError JuliaWorkspaces.syntax_node_at(sn2, 5)     # == sizeof
+end
+
+@testitem "cst-conv: unterminated block diagnostics never throw" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, URI,
+        get_diagnostics_blocking
+
+    # An unterminated for/while/try leaked an errortoken into args, breaking
+    # CSTParser's iterate protocol; StaticLint's include walker then threw a
+    # BoundsError and killed diagnostics for the whole workspace.
+    for src in ["for i in 1:10\n", "while true\n", "try\nfoo(\n", "function f()\n"]
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///a.jl"), SourceText(src, "julia")))
+        @test (get_diagnostics_blocking(jw); true)
+    end
 end
 
 @testitem "cst-conv: deep nesting never throws (enlarged parse stack)" begin
