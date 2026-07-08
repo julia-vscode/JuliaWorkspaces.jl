@@ -166,3 +166,11 @@ emits a `Placeholder` catch-var where CSTParser errortokens the stray
 `catch` — but the root causes are unchanged). No entry dissolved; no new
 divergence was introduced by the retarget. Depot corpus: 1154/1161, the
 same six accepted-drift files plus the StackOverflow file as before.
+
+## Task 11.5 (JuliaSyntax 1.x retarget) — reviewer addendum
+
+- The `(…;…) ->` brackets-vs-tuple heuristic is oracle-pinned for all corpus
+  and common spellings, with one degenerate gap: an EMPTY `;`-group after a
+  splat (`(a...;) -> a`) converts as `:tuple` where CSTParser says
+  `:brackets`. Here the converter matches real Julia (`Meta.parse` gives a
+  tuple LHS) and CSTParser is the deviant; corpus-clean. Accept drift.
