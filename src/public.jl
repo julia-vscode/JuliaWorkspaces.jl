@@ -148,8 +148,19 @@ function add_files!(jw::JuliaWorkspace, files)
 
     process_from_dynamic(jw)
 
+    # Build the new file set once and update the `input_files` input once:
+    # going through `_add_file!` would rebuild the whole set (and invalidate
+    # the input) per file, making large batches quadratic.
+    new_files = Set{URI}(input_files(jw.runtime))
     for file in files
-        _add_file!(jw, file)
+        file.uri in new_files && throw(JWDuplicateFile("Duplicate file $(file.uri)"))
+        push!(new_files, file.uri)
+    end
+    set_input_files!(jw.runtime, new_files)
+
+    for file in files
+        set_input_text_file!(jw.runtime, file.uri, file)
+        _clear_indirect_tracking!(jw, file.uri)
         # Let cooperatively scheduled tasks (connection handling in a host, the
         # dynamic-feature reactor) run between files during large batches.
         yield()
