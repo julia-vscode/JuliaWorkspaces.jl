@@ -48,7 +48,7 @@ end
 
     # invariant: leaves tile the file
     for src in ["f(a; b=1) do x\n  x\nend", "\"str\\n\" * `cmd`", ""]
-        ls, lead = leaves_of(src)
+        local ls, lead = leaves_of(src)
         @test lead + sum(l -> l.fullspan, ls; init=0) == sizeof(src)
     end
 end

@@ -30,6 +30,8 @@ Cursor(leaves::Vector{Leaf}, i::Int, src::String) =
     Cursor(leaves, i, src, Vector{Union{Nothing,EXPR}}(nothing, length(leaves)), UnitRange{Int}[], 0, 0, 0)
 
 const UNHANDLED_KINDS = Set{Kind}()
+# Salsa runs derived queries concurrently; no live race today, but harden anyway.
+const UNHANDLED_LOCK = ReentrantLock()
 
 # Error-recovery safety net: a per-form branch's kid-dispatch loop can, on
 # broken input, route an unexpected extra kid (e.g. a trailing marker for a
@@ -151,7 +153,9 @@ end
 # Wrong layout for anything CSTParser consumers pattern-match, but keeps the
 # corpus runner alive and counts what still needs a real rule.
 function generic_form(k::Kind, kids::Vector{EXPR}, kkinds::Vector{Kind})
-    push!(UNHANDLED_KINDS, k)
+    lock(UNHANDLED_LOCK) do
+        push!(UNHANDLED_KINDS, k)
+    end
     args = EXPR[]
     trivia = EXPR[]
     for (ex, ck) in zip(kids, kkinds)
