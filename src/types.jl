@@ -413,6 +413,8 @@ function _load_package_caches_for_project!(jw, project_uri)
             # @info "Now package data is ready" v.name v.uuid v.version v.git_tree_sha1
             set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1, package_data)
         end
+        # Reading caches can take a while; keep other tasks responsive.
+        yield()
     end
 
     for (_, v) in project.stdlib_packages
@@ -423,7 +425,40 @@ function _load_package_caches_for_project!(jw, project_uri)
             # @info "Now package data is ready (stdlib)" v.name v.uuid v.version
             set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, ver, nothing, package_data)
         end
+        yield()
     end
+end
+
+"""
+    _load_missing_package_metadata!(jw::JuliaWorkspace)
+
+Load the on-disc symbol caches for every package recorded in
+`missing_pkg_metadata` into the Salsa runtime. Reading dozens of caches (some
+tens of MB) takes seconds, and this runs on the consumer task — typically a
+host's main dispatch loop — so it yields between packages to keep other tasks
+responsive and reports per-package progress on its own progress bar.
+"""
+function _load_missing_package_metadata!(jw::JuliaWorkspace)
+    df = jw.dynamic_feature
+    n_meta = length(df.missing_pkg_metadata)
+    n_meta == 0 && return
+
+    for (idx, m) in enumerate(df.missing_pkg_metadata)
+        package_data = _try_load_package_cache(df.store_path, m.name, m.uuid, m.version, m.git_tree_sha1)
+        if package_data !== nothing
+            set_input_package_metadata!(jw.runtime, m.name, m.uuid, m.version, m.git_tree_sha1, package_data)
+        end
+
+        # Cap below 100: the final report closes the progress bar.
+        pct = min(floor(Int, 100 * idx / n_meta), 99)
+        _report_progress(df, "package-caches", "Loading package caches ($idx/$n_meta)...", pct)
+
+        yield()
+    end
+
+    _report_progress(df, "package-caches", "Package caches loaded", 100)
+
+    return
 end
 
 function process_from_dynamic(jw::JuliaWorkspace)
@@ -464,12 +499,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
 
         elseif msg isa EnvironmentReadyResult
             @info "Processing new env"
-            for i in df.missing_pkg_metadata
-                package_data = _try_load_package_cache(df.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
-                if package_data !== nothing
-                    set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
-                end
-            end
+            _load_missing_package_metadata!(jw)
 
             # Mark THIS specific project's environment as ready. Per-project
             # gating (in derived_file_env_ready) prevents env-dependent
