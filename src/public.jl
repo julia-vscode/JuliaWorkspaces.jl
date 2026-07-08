@@ -133,6 +133,31 @@ function add_file!(jw::JuliaWorkspace, file::TextFile)
     _reconcile!(jw)
 end
 
+"""
+    add_files!(jw::JuliaWorkspace, files)
+
+Add a batch of files to the workspace. Semantically equivalent to calling
+[`add_file!`](@ref) for every file, but drains dynamic results once and
+reconciles the set of required dynamic processes once after the whole batch
+instead of after every file — for large batches (e.g. the initial workspace
+load of a host) this avoids recomputing the required-projects derivation per
+file.
+"""
+function add_files!(jw::JuliaWorkspace, files)
+    @debug "add_files!" count=length(files)
+
+    process_from_dynamic(jw)
+
+    for file in files
+        _add_file!(jw, file)
+        # Let cooperatively scheduled tasks (connection handling in a host, the
+        # dynamic-feature reactor) run between files during large batches.
+        yield()
+    end
+
+    _reconcile!(jw)
+end
+
 # Input-only mutation for adding a file. Does not drain results or reconcile, so
 # it can be used as a building block for bulk operations that reconcile once.
 function _add_file!(jw::JuliaWorkspace, file::TextFile)
@@ -488,7 +513,7 @@ Get the diagnostics of a file from the workspace.
 - A vector of `Diagnostic` structs.
 """
 function get_diagnostic(jw::JuliaWorkspace, uri::URI)
-    @debug "get_diagnostic" uri=uri
+    # @debug "get_diagnostic" uri=uri
 
     process_from_dynamic(jw)
 
@@ -504,7 +529,7 @@ Get all diagnostics from the workspace.
 - A vector of `Diagnostic` structs.
 """
 function get_diagnostics(jw::JuliaWorkspace)
-    @debug "get_diagnostics"
+    # @debug "get_diagnostics"
 
     process_from_dynamic(jw)
 
