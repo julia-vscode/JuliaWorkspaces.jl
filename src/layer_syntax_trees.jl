@@ -97,7 +97,9 @@ Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
     return diag_results
 end
 
-# Backend escape hatch while the converter soaks; read once at load time.
+# Backend escape hatch while the converter soaks. The env var is read once
+# at load time only — a runtime withenv is a no-op; set CST_BACKEND[]
+# directly for in-process flips.
 const CST_BACKEND = Ref(get(ENV, "JW_CST_BACKEND", "juliasyntax"))
 
 Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)

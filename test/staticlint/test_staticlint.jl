@@ -11,6 +11,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
 
     export parse_and_pass, check_resolved, get_hints, get_env, collect_hints
     export module_name, find_module_by_name, find_first
+    export TEST_URI
 
     const TEST_URI = JuliaWorkspaces.URIs2.uri"file://test.jl"
 
@@ -850,34 +851,40 @@ end
     @test getmeta(cst.args[1].args[1], meta_dict).error == ConstIfCondition
 end
 
+# An unbracketed `=` in an `if` condition is invalid Julia (`Meta.parse`
+# rejects it); the parser reports a syntax error, so the EqInIfConditional
+# lint check never sees the pattern anymore.
 @testitem "check_if_conds assignment in condition" setup=[shared_static_lint] begin
-    using JuliaWorkspaces.StaticLint: getmeta, EqInIfConditional
+    using JuliaWorkspaces
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
         if x = 1 end
         """)
 
-    @test getmeta(cst.args[1].args[1], meta_dict).error == EqInIfConditional
+    diags = JuliaWorkspaces.derived_julia_syntax_diagnostics(jw.runtime, TEST_URI)
+    @test any(d -> d.severity == :error, diags)
 end
 
 @testitem "check_if_conds assignment in or-condition" setup=[shared_static_lint] begin
-    using JuliaWorkspaces.StaticLint: getmeta, EqInIfConditional
+    using JuliaWorkspaces
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
         if a || x = 1 end
         """)
 
-    @test getmeta(cst.args[1].args[1], meta_dict).error == EqInIfConditional
+    diags = JuliaWorkspaces.derived_julia_syntax_diagnostics(jw.runtime, TEST_URI)
+    @test any(d -> d.severity == :error, diags)
 end
 
 @testitem "check_if_conds assignment in and-condition" setup=[shared_static_lint] begin
-    using JuliaWorkspaces.StaticLint: getmeta, EqInIfConditional
+    using JuliaWorkspaces
 
-    cst, meta_dict = parse_and_pass("""
+    cst, meta_dict, jw = parse_and_pass("""
         if x = 1 && b end
         """)
 
-    @test getmeta(cst.args[1].args[1], meta_dict).error == EqInIfConditional
+    diags = JuliaWorkspaces.derived_julia_syntax_diagnostics(jw.runtime, TEST_URI)
+    @test any(d -> d.severity == :error, diags)
 end
 
 
