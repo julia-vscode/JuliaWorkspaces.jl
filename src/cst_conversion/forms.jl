@@ -1054,17 +1054,25 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         trivia = EXPR[]
         args = EXPR[]
         has_end = K"end" in kkinds
+        err_w = 0
         for (ex, ck) in zip(kids, kkinds)
             if ex.args === nothing && JuliaSyntax.is_keyword(ck)
                 push!(trivia, ex)
             elseif JuliaSyntax.is_error(ck) && !has_end && !isempty(args)
-                # Unterminated `if`: the missing-`end` marker becomes a trivia
-                # END-placeholder (not a spurious extra arg) so iterate holds.
-                push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
-                                   nothing, ex.fullspan, ex.span))
+                # missing-`end` recovery marker; its width rides on the
+                # END-placeholder appended below
+                err_w += ex.fullspan
             else
                 push!(args, ex)
             end
+        end
+        if k == K"if" && !has_end
+            # Unterminated `if` needs a trivia END-placeholder for iterate's
+            # arity even when no marker kid survived (a stray-content error
+            # was absorbed into the body block, or `else`/`end` escaped to
+            # toplevel error siblings). Never for `elseif` (no END slot).
+            push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
+                               nothing, err_w, 0))
         end
         # An `elseif` ends in its (possibly empty) body block, not an END
         # keyword, so its span is measured to that last arg — grow when the

@@ -160,6 +160,33 @@ function assemble(node::GreenNode, cur::Cursor, is_cmdmacro_body::Bool=false)::E
         push!(ranges, s:cur.i-1)
         prev_kind = kind(c)
     end
+    # Stray statement-continuation errors (`1 x` juxtaposition and friends):
+    # JuliaSyntax closes the enclosing body block and emits the leftover
+    # tokens as an error SIBLING right after it, giving terminated containers
+    # (function/let/module/struct/while/...) an extra kid that breaks
+    # CSTParser's fixed iterate arities. Absorb such a width-bearing error kid
+    # into the preceding block as a trailing statement — blocks iterate args
+    # positionally, so any arg count is safe. Zero-SPAN markers (missing-`end`
+    # recovery) keep their per-form handling.
+    for j in length(kids):-1:2
+        if JuliaSyntax.is_error(kkinds[j]) && kids[j].span > 0
+            # look back past zero-span recovery markers for the body block
+            p = j - 1
+            while p >= 1 && JuliaSyntax.is_error(kkinds[p]) && kids[p].span == 0
+                p -= 1
+            end
+            if p >= 1 && kkinds[p] == K"block" && kids[p].head === :block &&
+               kids[p].args !== nothing
+                blk, err = kids[p], kids[j]
+                push!(blk.args, err)
+                CSTParser.setparent!(err, blk)
+                blk.fullspan += err.fullspan
+                blk.span = blk.fullspan - (err.fullspan - err.span)
+                ranges[p] = first(ranges[p]):last(ranges[j])
+                deleteat!(kids, j); deleteat!(kkinds, j); deleteat!(ranges, j)
+            end
+        end
+    end
     cur.kid_ranges = ranges   # inner assemble calls are done; safe to publish
     ex = assemble_form(kind(node), node, kids, kkinds, cur)
     # Spans from absolute leaf positions: independent of per-form layout.

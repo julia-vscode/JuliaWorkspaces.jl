@@ -654,6 +654,33 @@ end
         "if a \n",
         "struct \n",
         "while true \n",
+        # juxtaposition errors (`1 x`): the stray error sibling after a body
+        # block must fold into the block, not become an arity-breaking extra
+        # arg of the terminated container
+        "function f() 1 x end",
+        "function f()\n1 x\nend",
+        "begin 1 x end",
+        "if a\n1 x\nend",
+        "if a\n1 x\nelse\nend",
+        "let\n1 x\nend",
+        "let x=1\n1 x\nend",
+        "module M\n1 x\nend",
+        "baremodule M\n1 x\nend",
+        "struct S\n1 x\nend",
+        "mutable struct S\n1 x\nend",
+        "while c\n1 x\nend",
+        "for i in xs\n1 x\nend",
+        "macro m()\n1 x\nend",
+        "quote\n1 x\nend",
+        "try\n1 x\ncatch\nend",
+        "(1 x)",
+        "f(1 x)",
+        "1 x",
+        "1 x\n",
+        # juxtaposition + missing `end` combined
+        "function f()\n1 x\n",
+        "while c\n1 x\n",
+        "if a\n1 x\n",
         # truncated triple-quoted docstrings: error kids inside a K"string"
         # node must extend the content run, not double as close quotes
         # (overlapping-chunk childsum bug found by a depot prefix sweep)
@@ -734,7 +761,7 @@ end
     # CSTParser's iterate protocol; StaticLint's include walker then threw a
     # BoundsError and killed diagnostics for the whole workspace.
     for src in ["for i in 1:10\n", "while true\n", "try\nfoo(\n", "function f()\n",
-                "a ? b\n"]
+                "a ? b\n", "function f() 1 x end"]
         jw = JuliaWorkspace()
         add_file!(jw, TextFile(URI("file:///a.jl"), SourceText(src, "julia")))
         @test (get_diagnostics_blocking(jw); true)
