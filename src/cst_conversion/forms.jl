@@ -132,6 +132,7 @@ end
 # CSTParser still expects, mirroring the K"quote" branch's own atom path.
 function wrap_field_atom(inner::EXPR)::EXPR
     inner.head === :BEGIN && (inner.head = :IDENTIFIER)
+    inner.head === :END && (inner.head = :IDENTIFIER)
     inner.head in (:STRING, :TRIPLESTRING) && return inner
     head = (inner.args === nothing || inner.head === :NONSTDIDENTIFIER) ? :quotenode : :quote
     # Transparent width: this wrapper adds no source characters of its own,
@@ -500,9 +501,11 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
            inner.val in ("where", "in", "isa")
             inner.head = :OPERATOR
         end
-        # `begin` maps to BEGIN in index context (terminal_expr), but as a
-        # quoted field/symbol (`a.begin`, `:begin`) it is an IDENTIFIER.
+        # `begin`/`end` map to BEGIN/END in index context (terminal_expr),
+        # but as a quoted field/symbol (`a.begin`, `a.end`, `:begin`) they
+        # are IDENTIFIER.
         inner.head === :BEGIN && (inner.head = :IDENTIFIER)
+        inner.head === :END && (inner.head = :IDENTIFIER)
         target = (inner.head === :brackets && inner.args !== nothing &&
                   length(inner.args) == 1) ? inner.args[1] : inner
         # atoms → :quotenode, composites → :quote; a var"..." nonstandard
@@ -1574,7 +1577,6 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         is_bare = false
         name = nothing
         body = nothing
-        errs = EXPR[]
         for (ex, ck) in zip(kids, kkinds)
             if ck == K"baremodule"
                 is_bare = true
@@ -1586,17 +1588,19 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             elseif name === nothing
                 name = ex
             else
-                # A further unclassified kid (e.g. broken input's trailing
-                # error marker for a missing `end`) — never overwrite the
-                # real name; keep it reachable instead of dropping it.
-                push!(errs, ex)
+                # A further unclassified kid (broken input's trailing marker
+                # for a missing `end`) — oracle-pinned: CSTParser represents
+                # a missing expected token as errortoken wrapping a
+                # zero-width, val-less placeholder of that token's kind, kept
+                # in trivia[2], never a 4th arg; never overwrite the name.
+                push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)], nothing, ex.fullspan, ex.span))
             end
         end
         # A var"..." module name keeps trivia = EXPR[] (oracle-pinned; a
         # standalone var"..." value keeps nothing).
         name.head === :NONSTDIDENTIFIER && (name.trivia = EXPR[])
         marker = EXPR(is_bare ? :FALSE : :TRUE, 0, 0, nothing)
-        return EXPR(:module, EXPR[marker, name, body, errs...], trivia, 0, 0)
+        return EXPR(:module, EXPR[marker, name, body], trivia, 0, 0)
     elseif k == K"const" || k == K"global" || k == K"local"
         # `global a, b` / `local x, y` → names in args, keyword+commas trivia.
         sym = Symbol(lowercase(string(k)))

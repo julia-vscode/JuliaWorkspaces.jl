@@ -19,6 +19,7 @@ export JuliaWorkspace,
     has_file,
     get_text_file,
     get_julia_syntax_tree,
+    syntax_node_at,
     get_toml_syntax_tree,
     get_diagnostic,
     get_diagnostics,
@@ -461,6 +462,27 @@ function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     return derived_julia_syntax_tree(jw.runtime, uri)
+end
+
+"""
+    syntax_node_at(node::SyntaxNode, byte::Int)
+
+Return the deepest `SyntaxNode` in the subtree rooted at `node` that contains
+`byte`. The `SyntaxNode` counterpart of `get_expr1` for cross-tree migration.
+"""
+function syntax_node_at(node::SyntaxNode, byte::Int)
+    while haschildren(node)
+        found = false
+        for c in children(node)
+            if first_byte(c) <= byte <= last_byte(c)
+                node = c
+                found = true
+                break
+            end
+        end
+        found || break
+    end
+    return node
 end
 
 """

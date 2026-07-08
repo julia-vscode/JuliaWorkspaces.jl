@@ -426,11 +426,17 @@ end
         # row span with spaces around the `;`
         "[1 2 ; 3 4]",
         "[a b ; c d]",
-        # `begin` as an index literal → BEGIN; as a field/symbol → IDENTIFIER
+        # `begin`/`end` as an index literal → BEGIN/END; as a field/symbol
+        # or quoted name → IDENTIFIER (regression: `.end` was wrongly kept
+        # as the END literal, matched only for `.begin`)
         "a[begin]",
         "a[begin:end]",
         "a.begin",
+        "a.end",
+        "(a).end",
+        "f().end",
         ":begin",
+        ":end",
         # return-type-annotated short function def wraps its body in a block
         "f()::T = a, b",
         "g()::Tuple{Int,Int} = a, b",
@@ -621,4 +627,56 @@ end
         @test ex.fullspan == sizeof(src)
         @test CSTConversion.check_spans(ex) === nothing
     end
+
+    # regression: a module missing its closing `end` entirely (the getfield
+    # completion trigger shape, `module M\nBase.\nend\n`, where the dangling
+    # `Base.` consumes the literal `end` as its field name) must match
+    # CSTParser's own missing-token convention (errortoken wrapping a
+    # zero-width END in trivia[2]), not leak a 4th :module arg — the leak
+    # broke CSTParser's own iterate protocol with a BoundsError downstream.
+    for src in ["module CompDot\nBase.\nend\n", "module A\nBase.\nend\n"]
+        @test CSTConversion.oracle_diff(src) === nothing
+    end
+end
+
+@testitem "cst-conv: single-parse salsa integration" begin
+    using CSTParser, JuliaSyntax
+    using JuliaSyntax: kind, @K_str
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, URI
+
+    content = "f(x) = x + 1\n"
+    jw = JuliaWorkspace()
+    uri = URI("file:///a.jl")
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
+
+    cst = JuliaWorkspaces.get_legacy_cst(jw, uri)
+    @test cst isa CSTParser.EXPR
+    @test JuliaWorkspaces.CSTConversion.trees_equal(cst, CSTParser.parse(content, true))
+
+    sn = JuliaWorkspaces.get_julia_syntax_tree(jw, uri)
+    @test JuliaWorkspaces.syntax_node_at(sn, 1) isa JuliaSyntax.SyntaxNode
+    @test kind(JuliaWorkspaces.syntax_node_at(sn, 8)) == K"Identifier"  # byte 8 = 'x'
+end
+
+@testitem "cst-conv: deep nesting never throws (enlarged parse stack)" begin
+    using CSTParser
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, URI
+
+    # Machine-generated deeply-nested `||` chain: overflows JuliaSyntax's
+    # recursive-descent parser at the default task stack size.
+    n = 50_000
+    content = "x = " * join(fill("a", n), " || ") * "\n"
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///deep.jl")
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
+
+    sn = JuliaWorkspaces.get_julia_syntax_tree(jw, uri)
+    @test sn !== nothing
+
+    cst = JuliaWorkspaces.get_legacy_cst(jw, uri)
+    @test cst isa CSTParser.EXPR
+    @test cst.fullspan == sizeof(content)
 end

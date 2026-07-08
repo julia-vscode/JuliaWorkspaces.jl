@@ -174,3 +174,63 @@ same six accepted-drift files plus the StackOverflow file as before.
   splat (`(a...;) -> a`) converts as `:tuple` where CSTParser says
   `:brackets`. Here the converter matches real Julia (`Meta.parse` gives a
   tuple LHS) and CSTParser is the deviant; corpus-clean. Accept drift.
+
+## Task 12 (Salsa single-parse integration + backend flip)
+
+Backend-flip regression sweep (full package test suite, both
+`JW_CST_BACKEND` values) surfaced two real converter bugs, both fixed, plus
+two genuine parser-level (not converter) divergences left as accepted drift.
+
+- **Fixed**: `a.end`/`a.begin` as a dot-getfield field name converted to the
+  `:END`/`:BEGIN` index-context literal instead of plain `:IDENTIFIER`.
+  `terminal_expr` maps any Identifier-kinded `end`/`begin` leaf to the index
+  literal head unconditionally; the getfield/quotenode forms already demoted
+  `:BEGIN` back to `:IDENTIFIER` for quoted-field context (`wrap_field_atom`,
+  the `K"quote"` form) but were missing the matching `:END` demotion. Fixed
+  by adding the same demotion for `:END` in both spots
+  (`src/cst_conversion/forms.jl`).
+- **Fixed**: a `module`/`baremodule` whose closing `end` is missing entirely
+  (e.g. mid-edit `module M\nBase.\nend\n` where the dangling `Base.` consumes
+  the literal `end` as its field name, autocompletion's classic trigger
+  shape) produced a 4th `:module` arg (the raw green error-recovery leaf)
+  instead of CSTParser's own convention: an `:errortoken` wrapping a
+  zero-width, val-less `:END` placeholder filed as `trivia[2]`. The stray
+  4th arg broke CSTParser's own `_module` iterate accessor (`x.args[2]`
+  assumed a 3-slot arg list), crashing any StaticLint/completions code that
+  walks the module via CSTParser's iteration protocol (not just `.args`
+  directly) with a `BoundsError`. Fixed by synthesizing the oracle-shaped
+  `errortoken`/`:END` placeholder in `trivia` instead of appending to `args`
+  (`src/cst_conversion/forms.jl`, the `K"module"` form). Two more
+  truncated-module edge cases (`"module A\n"` with an entirely empty body,
+  and an unterminated call before a stray `end`) still show narrow arg-shape
+  diffs; both are `check_spans`-clean and not exercised by any real test —
+  left as further loop state rather than chased with no failing test to
+  pin them.
+- **Accept drift**: `if x = 1 end` / `if a || x = 1 end` / `if x = 1 && b
+  end` (assignment used directly as an `if` condition) parses as a genuine
+  syntax error under JuliaSyntax 1.x — this vendored fork's parser rejects
+  bare `=` in condition position (`"unexpected \`=\`"` diagnostic, then
+  cascading error recovery), whereas CSTParser accepts it leniently as a
+  normal assignment expression. Confirmed via green-tree inspection: the
+  divergence originates in the parse itself, not the conversion — the
+  converter faithfully mirrors JuliaSyntax's error-recovery shape. Surfaces
+  as 3 failing StaticLint `check_if_conds` tests
+  (`test/staticlint/test_staticlint.jl`) that assert the (pre-flip) lenient
+  parse; out of converter scope.
+- **Accept drift**: `[i for i in length(1) end]` (a test fixture with a
+  stray, syntactically-invalid `end` inside a list-comprehension literal)
+  recovers differently between parsers — CSTParser folds the stray `end`
+  into an `hcat` alongside the comprehension; JuliaSyntax closes the
+  comprehension cleanly and leaves the `end`+`]` as trailing errortokens one
+  level up. Again a parser-level error-recovery difference, not a converter
+  bug. Surfaces as 2 erroring StaticLint tests
+  (`test/staticlint/test_inference.jl`,
+  `error_list_comp_incorrect_iter_specs`); out of converter scope.
+
+Full-suite backend-flip regression (custom broad run excluding vendored
+`packages/*` subpackage suites and `testdata/` fixtures, both backends):
+2195 total both ways; identical except for exactly the 5 tests above
+(2178/10/1/6 under `cstparser` vs 2173/13/3/6 under `juliasyntax`). All
+other non-identical-seeming counts (Runic package missing, cache-infra
+rclone sandbox gate, `test_uris2.jl` broken markers) are pre-existing
+environment gaps, confirmed identical between backends.

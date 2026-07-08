@@ -23,13 +23,14 @@ token_text(leaf::Leaf, source::String) = source[leaf.pos:prevind(source, leaf.po
 function terminal_expr(leaf::Leaf, source::String)
     k = leaf.kind
     if k == K"Identifier" && token_text(leaf, source) == "end"
-        # "end" is only ever an Identifier-kinded leaf inside index/range
-        # context (`a[end]`) — real block-closing `end` is its own keyword
-        # kind. CSTParser treats both spellings as the same END literal.
+        # "end" is Identifier-kinded both inside index/range context
+        # (`a[end]`, wants CSTParser's END literal) and as a dot-getfield
+        # field name (`a.end`, wants plain IDENTIFIER) — real block-closing
+        # `end` is its own keyword kind either way. Default to END here;
+        # the getfield/quotenode forms demote it back to IDENTIFIER.
         return EXPR(:END, leaf.fullspan, leaf.span, "end")
     elseif k == K"Identifier" && token_text(leaf, source) == "begin"
-        # `a[begin]` — `begin` as an index is an Identifier leaf; CSTParser
-        # maps it to a BEGIN literal (mirrors the `end`→END case).
+        # Same story as `end` above (`a[begin]` vs `a.begin`).
         return EXPR(:BEGIN, leaf.fullspan, leaf.span, "begin")
     elseif k == K"Bool"
         # true/false share one Kind; CSTParser distinguishes by literal text.
