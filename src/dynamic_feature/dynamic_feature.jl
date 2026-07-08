@@ -136,9 +136,15 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 delete!(env_to_use, "JULIA_DEPOT_PATH")
             end
 
+            # Use the same binary as the current process: `julia` from PATH may
+            # not resolve at all inside an editor-launched language server (which
+            # is started with an explicit executable path), or may resolve to a
+            # different Julia version than the one this process runs on.
+            julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
+
             jl_process = open(
                 pipeline(
-                    Cmd(`julia --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
+                    Cmd(`$julia_exe --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
                     stdout = pipe_out,
                     stderr = pipe_out
                 )
@@ -601,7 +607,16 @@ end
 function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     transition!(djp.fsm, DynamicProcessStarting; reason="launching")
     token = CancellationTokens.get_token(djp.cancellation_source)
-    djp.task = Threads.@async start(djp, df.in_channel, token)
+    djp.task = Threads.@async try
+        start(djp, df.in_channel, token)
+    catch err
+        # `start` reports errors from its supervised region itself; this catches
+        # failures outside it (e.g. the process spawn throwing because the Julia
+        # binary can't be executed), which would otherwise die silently with the
+        # task and leave the work item inflight forever.
+        @error "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
+        put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err))
+    end
     return
 end
 
