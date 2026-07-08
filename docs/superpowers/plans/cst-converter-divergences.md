@@ -200,12 +200,19 @@ two genuine parser-level (not converter) divergences left as accepted drift.
   walks the module via CSTParser's iteration protocol (not just `.args`
   directly) with a `BoundsError`. Fixed by synthesizing the oracle-shaped
   `errortoken`/`:END` placeholder in `trivia` instead of appending to `args`
-  (`src/cst_conversion/forms.jl`, the `K"module"` form). Two more
-  truncated-module edge cases (`"module A\n"` with an entirely empty body,
-  and an unterminated call before a stray `end`) still show narrow arg-shape
-  diffs; both are `check_spans`-clean and not exercised by any real test —
-  left as further loop state rather than chased with no failing test to
-  pin them.
+  (`src/cst_conversion/forms.jl`, the `K"module"` form).
+- **Fixed**: `"module A\n"` (an entirely empty, unterminated module body) leaked
+  a phantom zero-width `:errortoken` into the module body block's `args` where
+  the oracle keeps an empty body. The zero-width error-leaf recovery marker is
+  now dropped from block `args` (a `begin`/`quote` block keeps it as an `:END`
+  placeholder in trivia instead); `oracle_diff("module A\n")` is now `nothing`.
+  The same class of bug for the other end-keyword forms — an unterminated
+  `for`/`while`/`try`/`function`/`macro` leaked the missing-`end` error node
+  into `args`, breaking CSTParser's `taat`/`_function`/`_try` iterate accessors
+  with a `BoundsError` (which killed `get_diagnostics_blocking` for the whole
+  workspace) — is fixed the same way: the marker becomes a trivia `:END`
+  placeholder (and a degenerate unterminated `try` synthesizes an empty catch so
+  its fixed iterate arity holds). All spans stay `check_spans`-clean.
 - **Accept drift**: `if x = 1 end` / `if a || x = 1 end` / `if x = 1 && b
   end` (assignment used directly as an `if` condition) parses as a genuine
   syntax error under JuliaSyntax 1.x — this vendored fork's parser rejects

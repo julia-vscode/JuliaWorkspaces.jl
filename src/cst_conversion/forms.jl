@@ -279,7 +279,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # (`a .== b`) arrive as a K"." composite (dot+op leaves); fuse each
         # into one OPERATOR leaf (val ".==") like CSTParser does.
         args = EXPR[]
-        for (ex, ck) in zip(kids, kkinds)
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
             if ck == K"." && ex.head isa EXPR && ex.args !== nothing &&
                length(ex.args) == 1 && ex.args[1].head === :OPERATOR
                 # dotted comparison operator (`.==`); NOT a getfield `.x`
@@ -287,6 +287,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(args, EXPR(:OPERATOR, ex.fullspan, ex.span,
                                  ex.head.val * ex.args[1].val))
             else
+                # Word operators (`isa`/`in`/`where`) in an operator slot
+                # (even position) tokenize as Identifier but label OPERATOR.
+                iseven(j) && ex.head === :IDENTIFIER &&
+                    ex.val in ("where", "in", "isa") && (ex.head = :OPERATOR)
                 push!(args, ex)
             end
         end
@@ -810,6 +814,10 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 end
                 i += 1
             else
+                # A word-operator name (`export isa`) tokenizes as Identifier
+                # but is labelled OPERATOR, same as importpath's own path.
+                ex.head === :IDENTIFIER && ex.val in ("where", "in", "isa") &&
+                    (ex.head = :OPERATOR)
                 push!(args, ex)
             end
             i += 1
@@ -914,7 +922,9 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         end
         return EXPR(:block, args, trivia, 0, 0)
     elseif (k == K"=" || k == K"->" ||
-            (k == K"function" && K"function" ∉ kkinds)) && length(kids) == 3
+            (k == K"function" &&
+             !any(j -> kkinds[j] == K"function" && kids[j].args === nothing,
+                  eachindex(kids)))) && length(kids) == 3
         # binary syntax: operator EXPR becomes the head. Short-form function
         # defs (`f(x) = ...`, `f(x::T) where T = ...`) and `->` bodies wrap
         # their RHS in an implicit block; plain assignment does not, and an
@@ -997,7 +1007,11 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                      !isempty(lhs.args) && lhs.args[1].head in (:call, :where)
         needs_block = (k == K"->" || kkinds[1] == K"call" || kkinds[1] == K"where" ||
                        typed_def || parens_def) && kkinds[3] != K"block"
-        body = needs_block ? EXPR(:block, EXPR[rhs], nothing, rhs.fullspan, rhs.span) : rhs
+        # A bare unary `::T` signature (`::typeof(x) = x` kwarg default) keeps
+        # the wrapped body's trivia as EXPR[]; a binary `::` return-type def
+        # (`f()::T = x`) and every other wrapped body use `nothing`.
+        body_trivia = (typed_def && length(lhs.args) == 1) ? EXPR[] : nothing
+        body = needs_block ? EXPR(:block, EXPR[rhs], body_trivia, rhs.fullspan, rhs.span) : rhs
         # Span is measured to the last arg; grow when that arg's span already
         # reaches its fullspan (bare `return`, qualified-macrocall RHS).
         grow_span_to_last_arg!(cur, EXPR[lhs, body])
@@ -1039,9 +1053,15 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # the only reliable way to tell "keyword to drop" from "child node".
         trivia = EXPR[]
         args = EXPR[]
+        has_end = K"end" in kkinds
         for (ex, ck) in zip(kids, kkinds)
             if ex.args === nothing && JuliaSyntax.is_keyword(ck)
                 push!(trivia, ex)
+            elseif JuliaSyntax.is_error(ck) && !has_end && !isempty(args)
+                # Unterminated `if`: the missing-`end` marker becomes a trivia
+                # END-placeholder (not a spurious extra arg) so iterate holds.
+                push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
+                                   nothing, ex.fullspan, ex.span))
             else
                 push!(args, ex)
             end
@@ -1060,11 +1080,26 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # may be filed into trivia.
         trivia = EXPR[]
         args = EXPR[]
+        haserr = false
         for (ex, ck) in zip(kids, kkinds)
             if ex.args === nothing && (ck == K"?" || ck == K":")
                 push!(trivia, ex)
+            elseif JuliaSyntax.is_error(ck)
+                # Broken ternary emits zero-width error markers; drop them and
+                # rebuild the fixed cond?then:else arity below.
+                haserr = true
             else
                 push!(args, ex)
+            end
+        end
+        if haserr
+            # Pad to CSTParser's 3-arg/2-trivia ternary shape so its iterate
+            # accessor stays in bounds (recovery differs from the oracle).
+            while length(args) < 3
+                push!(args, EXPR(:errortoken, 0, 0, nothing))
+            end
+            while length(trivia) < 2
+                push!(trivia, EXPR(:errortoken, 0, 0, nothing))
             end
         end
         return EXPR(:if, args, trivia, 0, 0)
@@ -1147,7 +1182,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         # placeholder instead. Same trim-from-the-tail rule applies to the
         # keyword trivia (CATCH is unconditional — a try always has catch or
         # finally, so CATCH is never the trailing item).
-        try_kw = end_kw = try_block = nothing
+        try_kw = end_kw = try_block = missing_end = nothing
         catch_kw = catch_var = catch_block = nothing
         finally_kw = finally_block = nothing
         else_kw = else_block = nothing
@@ -1166,9 +1201,21 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             elseif ck == K"else"
                 has_else = true
                 else_kw, else_block = ex.trivia[1], ex.args[1]
+            elseif JuliaSyntax.is_error(ck) && try_block !== nothing
+                # Unterminated try (missing `end`); keep as the trailing
+                # END-placeholder instead of clobbering the try body.
+                missing_end = ex
             else
                 try_block = ex
             end
+        end
+        if !has_catch && !has_finally && !has_else
+            # Broken input (no catch/finally/else at all): synthesize an empty
+            # catch so the node matches CSTParser iterate's fixed try arity.
+            has_catch = true
+            catch_kw = EXPR(:CATCH, 0, 0, nothing)
+            catch_var = false_arg()
+            catch_block = EXPR(:block, EXPR[], nothing, 0, 0)
         end
         # An empty catch body followed by a finally/else clause is degenerate
         # in CSTParser: a FALSE marker before `finally`, an args=nothing
@@ -1203,8 +1250,15 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
             push!(trivia, present ? v : false_arg())
         end
         # end_kw can be absent when malformed input (e.g. `try catch finally
-        # else`) buries the `end` inside a JuliaSyntax error node — don't crash.
-        end_kw === nothing || push!(trivia, end_kw)
+        # else`) buries the `end` inside a JuliaSyntax error node. Keep the
+        # missing-`end` marker as a trailing END-placeholder so iterate's
+        # arity holds; otherwise drop the slot entirely.
+        if end_kw !== nothing
+            push!(trivia, end_kw)
+        elseif missing_end !== nothing
+            push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
+                               nothing, missing_end.fullspan, missing_end.span))
+        end
         return EXPR(:try, filter(!isnothing, args), trivia, 0, 0)
     elseif k == K"let"
         # bindings block collapses to its single item when there's exactly
@@ -1235,8 +1289,19 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         sym = k == K"while" ? :while : :for
         trivia = EXPR[]
         args = EXPR[]
+        has_end = K"end" in kkinds
         for (ex, ck) in zip(kids, kkinds)
-            (ck == k || ck == K"end") ? push!(trivia, ex) : push!(args, ex)
+            if ck == k || ck == K"end"
+                push!(trivia, ex)
+            elseif JuliaSyntax.is_error(ck) && !has_end && !isempty(args)
+                # Unterminated body: the missing-`end` marker becomes an
+                # END-placeholder in trivia (not a spurious extra arg) so
+                # CSTParser's iterate finds the expected arity.
+                push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
+                                   nothing, ex.fullspan, ex.span))
+            else
+                push!(args, ex)
+            end
         end
         return EXPR(sym, args, trivia, 0, 0)
     elseif k == K"comprehension"
@@ -1451,6 +1516,16 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 # `let`'s bindings list reuses K"block" for its comma-joined
                 # `=` items; a plain statement block never has raw commas.
                 push!(trivia, ex)
+            elseif JuliaSyntax.is_error(ck) && ex.fullspan == 0
+                # Unterminated block: JuliaSyntax emits a zero-width error
+                # recovery marker for the missing terminator. A `begin`/`quote`
+                # block carries END in its trivia, so keep an END-placeholder
+                # there (iterate expects trivia[2]); a plain statement block's
+                # oracle keeps an empty body, so drop it (no width to fold).
+                if !isempty(trivia) && trivia[1].head in (:BEGIN, :QUOTE)
+                    push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
+                                       nothing, ex.fullspan, ex.span))
+                end
             elseif ck == K";"
                 semi_i = first(cur.kid_ranges[j])
                 if fold_semi!(cur, semi_i, ex.fullspan)
@@ -1498,8 +1573,16 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
     elseif k == K"function"
         trivia = EXPR[]
         args = EXPR[]
+        has_end = K"end" in kkinds
         for (ex, ck) in zip(kids, kkinds)
-            (ck == K"function" || ck == K"end") ? push!(trivia, ex) : push!(args, ex)
+            if ck == K"function" || ck == K"end"
+                push!(trivia, ex)
+            elseif JuliaSyntax.is_error(ck) && !has_end && !isempty(args)
+                push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
+                                   nothing, ex.fullspan, ex.span))
+            else
+                push!(args, ex)
+            end
         end
         return EXPR(:function, args, trivia, 0, 0)
     elseif k == K"struct"
@@ -1511,6 +1594,7 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
         sig = nothing
         body = nothing
         errs = EXPR[]
+        has_end = K"end" in kkinds
         for (ex, ck) in zip(kids, kkinds)
             if ck == K"mutable"
                 is_mutable = true
@@ -1519,12 +1603,16 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
                 push!(trivia, ex)
             elseif ck == K"block"
                 body = ex
+            elseif JuliaSyntax.is_error(ck) && !has_end && body !== nothing
+                # Unterminated struct: the missing-`end` marker (after the body)
+                # becomes a trivia END-placeholder so iterate's arity holds.
+                push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
+                                   nothing, ex.fullspan, ex.span))
             elseif sig === nothing
                 sig = ex
             else
-                # A further unclassified kid (e.g. broken input's trailing
-                # error marker for a missing `end`) — never overwrite the
-                # real signature; keep it reachable instead of dropping it.
+                # A further unclassified kid — never overwrite the real
+                # signature; keep it reachable instead of dropping it.
                 push!(errs, ex)
             end
         end
@@ -1551,22 +1639,44 @@ function assemble_form(k::Kind, node::GreenNode, kids::Vector{EXPR}, kkinds::Vec
     elseif k == K"abstract"
         trivia = EXPR[]
         args = EXPR[]
-        for (ex, ck) in zip(kids, kkinds)
-            (ck == K"abstract" || ck == K"type" || ck == K"end") ? push!(trivia, ex) : push!(args, ex)
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if ck == K"abstract" || ck == K"type" || ck == K"end"
+                push!(trivia, ex)
+            elseif ck == K";"
+                # `abstract type A; end` — the `;` before `end` drops, folding
+                # onto the preceding leaf (no block body to hold it).
+                fold_semi!(cur, first(cur.kid_ranges[j]), ex.fullspan)
+            else
+                push!(args, ex)
+            end
         end
         return EXPR(:abstract, args, trivia, 0, 0)
     elseif k == K"primitive"
         trivia = EXPR[]
         args = EXPR[]
-        for (ex, ck) in zip(kids, kkinds)
-            (ck == K"primitive" || ck == K"type" || ck == K"end") ? push!(trivia, ex) : push!(args, ex)
+        for (j, (ex, ck)) in enumerate(zip(kids, kkinds))
+            if ck == K"primitive" || ck == K"type" || ck == K"end"
+                push!(trivia, ex)
+            elseif ck == K";"
+                fold_semi!(cur, first(cur.kid_ranges[j]), ex.fullspan)
+            else
+                push!(args, ex)
+            end
         end
         return EXPR(:primitive, args, trivia, 0, 0)
     elseif k == K"macro"
         trivia = EXPR[]
         args = EXPR[]
+        has_end = K"end" in kkinds
         for (ex, ck) in zip(kids, kkinds)
-            (ck == K"macro" || ck == K"end") ? push!(trivia, ex) : push!(args, ex)
+            if ck == K"macro" || ck == K"end"
+                push!(trivia, ex)
+            elseif JuliaSyntax.is_error(ck) && !has_end && !isempty(args)
+                push!(trivia, EXPR(:errortoken, EXPR[EXPR(:END, 0, 0, nothing)],
+                                   nothing, ex.fullspan, ex.span))
+            else
+                push!(args, ex)
+            end
         end
         return EXPR(:macro, args, trivia, 0, 0)
     elseif k == K"module"
