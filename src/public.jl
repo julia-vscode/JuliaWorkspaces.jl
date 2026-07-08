@@ -465,12 +465,19 @@ function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
 end
 
 """
-    syntax_node_at(node::SyntaxNode, byte::Int)
+    syntax_node_at(node::SyntaxNode, offset::Int)
 
 Return the deepest `SyntaxNode` in the subtree rooted at `node` that contains
-`byte`. The `SyntaxNode` counterpart of `get_expr1` for cross-tree migration.
+`offset`. The `SyntaxNode` counterpart of `get_expr1` for cross-tree migration.
+
+`offset` is a 0-based byte offset, matching `get_expr1`. Throws `ArgumentError`
+for an offset outside `[0, sizeof)`.
 """
-function syntax_node_at(node::SyntaxNode, byte::Int)
+function syntax_node_at(node::SyntaxNode, offset::Int)
+    node_size = last_byte(node) - first_byte(node) + 1
+    (offset < 0 || offset >= node_size) &&
+        throw(ArgumentError("byte offset $offset out of range [0, $node_size)"))
+    byte = first_byte(node) + offset   # 0-based offset → 1-based absolute byte
     while haschildren(node)
         found = false
         for c in children(node)
