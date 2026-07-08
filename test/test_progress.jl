@@ -1,74 +1,20 @@
-@testitem "ProgressState basics" begin
-    using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, ProgressState, _report_progress
-
-    # Direct ProgressState tests
-    ps = ProgressState()
-    @test ps.total_items == 0
-    @test ps.completed_items == 0
-    @test ps.current_sub_progress == 0.0
-    @test ps.current_message == ""
-end
-
-@testitem "DynamicFeature with progress_callback" begin
+@testitem "_report_progress basics" begin
     using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, _report_progress
 
     store_path = mktempdir()
 
-    # Collect all progress calls
-    calls = Tuple{String,Int}[]
-    cb = (msg, pct) -> push!(calls, (msg, pct))
+    calls = Tuple{String,String,Int}[]
+    cb = (key, msg, pct) -> push!(calls, (key, msg, pct))
 
     df = DynamicFeature(DynamicIndexingOnly, store_path; progress_callback=cb)
-
     @test df.progress_callback === cb
-    @test df.progress_state.total_items == 0
 
-    # Simulate: 2 items dispatched
-    df.progress_state.total_items = 2
+    _report_progress(df, "some-op", "Working...", 10)
+    @test calls == [("some-op", "Working...", 10)]
 
-    # First item starts downloading (sub_progress = 0.25 → 25% of item 1 of 2)
-    df.progress_state.current_sub_progress = 0.25
-    _report_progress(df, "Downloading caches (5/20)...")
-    @test length(calls) == 1
-    @test calls[end][1] == "Downloading caches (5/20)..."
-    @test calls[end][2] == 12  # floor((0 + 0.25) / 2 * 100)
-
-    # First item finishes download, starts indexing (sub_progress = 0.5)
-    df.progress_state.current_sub_progress = 0.5
-    _report_progress(df, "Indexing project...")
-    @test calls[end][2] == 25  # floor((0 + 0.5) / 2 * 100)
-
-    # First item done
-    df.progress_state.completed_items = 1
-    df.progress_state.current_sub_progress = 0.0
-    _report_progress(df, "Item 1 done")
-    @test calls[end][2] == 50  # floor((1 + 0) / 2 * 100)
-
-    # Second item at sub_progress 0.5
-    df.progress_state.current_sub_progress = 0.5
-    _report_progress(df, "Indexing project 2...")
-    @test calls[end][2] == 75  # floor((1 + 0.5) / 2 * 100)
-
-    # All done
-    df.progress_state.completed_items = 2
-    df.progress_state.current_sub_progress = 0.0
-    _report_progress(df, "Indexing complete")
-    @test calls[end][2] == 100
-end
-
-@testitem "DynamicFeature without progress_callback" begin
-    using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, _report_progress
-
-    store_path = mktempdir()
-
-    # No callback — should not error
-    df = DynamicFeature(DynamicIndexingOnly, store_path)
-    @test df.progress_callback === nothing
-
-    df.progress_state.total_items = 1
-    df.progress_state.current_sub_progress = 0.5
-    # This should be a no-op without errors
-    _report_progress(df, "Should not crash")
+    # No callback — should be a no-op without errors
+    df2 = DynamicFeature(DynamicIndexingOnly, store_path)
+    _report_progress(df2, "some-op", "Working...", 10)
 end
 
 @testitem "Progress callback error resilience" begin
@@ -77,27 +23,92 @@ end
     store_path = mktempdir()
 
     # A callback that throws
-    bad_cb = (msg, pct) -> error("callback exploded")
+    bad_cb = (key, msg, pct) -> error("callback exploded")
 
     df = DynamicFeature(DynamicIndexingOnly, store_path; progress_callback=bad_cb)
-    df.progress_state.total_items = 1
 
     # Should not propagate the error
-    @test_logs (:warn, "progress_callback threw") _report_progress(df, "test")
+    @test_logs (:warn, "progress_callback threw") _report_progress(df, "some-op", "test", 1)
 end
 
-@testitem "Progress with zero total_items" begin
-    using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, _report_progress
+@testitem "Per-operation progress bars" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, ProcessProgressMsg, PrepProgressMsg,
+        WatchEnvironmentKey, WatchTestEnvironmentKey, handle!, _complete_work_item!
 
     store_path = mktempdir()
 
-    calls = Tuple{String,Int}[]
-    cb = (msg, pct) -> push!(calls, (msg, pct))
+    calls = Tuple{String,String,Int}[]
+    cb = (key, msg, pct) -> push!(calls, (key, msg, pct))
 
     df = DynamicFeature(DynamicIndexingOnly, store_path; progress_callback=cb)
+    df.pending_count[] = 1
 
-    # total_items == 0 — should report 0% without division error
-    _report_progress(df, "Nothing to do")
-    @test length(calls) == 1
-    @test calls[1][2] == 0
+    key = WatchEnvironmentKey("/some/project", UInt64(1))
+    push!(df.inflight, key)
+
+    # Download-phase reports land on the item's download bar with the phase's
+    # own 0-100 range.
+    handle!(df, PrepProgressMsg(key, "Downloading caches (5/20)...", 0.25))
+    @test calls[end] == ("download:/some/project", "Downloading caches (5/20)...", 25)
+    handle!(df, PrepProgressMsg(key, "Downloaded caches", 1.0))
+    @test calls[end] == ("download:/some/project", "Downloaded caches", 100)
+
+    # Child indexing percentages pass through onto the item's index bar,
+    # capped below 100 (completion ends the bar).
+    handle!(df, ProcessProgressMsg(key, "Indexing Foo (1/2)...", 50))
+    @test calls[end] == ("index:/some/project", "Indexing Foo (1/2)...", 50)
+
+    # A report without a percentage re-uses the last one.
+    handle!(df, ProcessProgressMsg(key, "Extracting symbols...", missing))
+    @test calls[end] == ("index:/some/project", "Extracting symbols...", 50)
+
+    # A report with a lower percentage must not move the bar backwards.
+    handle!(df, ProcessProgressMsg(key, "Late report", 25))
+    @test calls[end] == ("index:/some/project", "Late report", 50)
+
+    # Progress for a key that is not in flight is ignored.
+    stale_key = WatchEnvironmentKey("/other/project", UInt64(2))
+    n_calls = length(calls)
+    handle!(df, ProcessProgressMsg(stale_key, "Should be ignored", 10))
+    handle!(df, PrepProgressMsg(stale_key, "Should be ignored", 0.5))
+    @test length(calls) == n_calls
+
+    # Completing the work item ends its bars.
+    _complete_work_item!(df, key)
+    @test ("download:/some/project", "Done", 100) in calls
+    @test calls[end] == ("index:/some/project", "Done", 100)
+    @test key ∉ keys(df.child_progress)
+end
+
+@testitem "Concurrent work items get independent bars" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, ProcessProgressMsg,
+        WatchEnvironmentKey, WatchTestEnvironmentKey, handle!, _complete_work_item!
+
+    store_path = mktempdir()
+
+    calls = Tuple{String,String,Int}[]
+    cb = (key, msg, pct) -> push!(calls, (key, msg, pct))
+
+    df = DynamicFeature(DynamicIndexingOnly, store_path; progress_callback=cb)
+    df.pending_count[] = 2
+
+    key_a = WatchEnvironmentKey("/some/project", UInt64(1))
+    key_b = WatchTestEnvironmentKey("/some/project", "SomePackage", UInt64(1))
+    push!(df.inflight, key_a); push!(df.inflight, key_b)
+
+    # Each item's reports go to its own key; neither masks the other.
+    handle!(df, ProcessProgressMsg(key_a, "Indexing Foo (1/2)...", 50))
+    @test calls[end] == ("index:/some/project", "Indexing Foo (1/2)...", 50)
+    handle!(df, ProcessProgressMsg(key_b, "Indexing test env...", 30))
+    @test calls[end] == ("index:/some/project:SomePackage", "Indexing test env...", 30)
+    handle!(df, ProcessProgressMsg(key_a, "Indexing Bar (2/2)...", 80))
+    @test calls[end] == ("index:/some/project", "Indexing Bar (2/2)...", 80)
+
+    # Completing one item ends only its own bar; the sibling is untouched.
+    _complete_work_item!(df, key_a)
+    @test calls[end] == ("index:/some/project", "Done", 100)
+    handle!(df, ProcessProgressMsg(key_b, "Indexing test env...", 60))
+    @test calls[end] == ("index:/some/project:SomePackage", "Indexing test env...", 60)
+    _complete_work_item!(df, key_b)
+    @test calls[end] == ("index:/some/project:SomePackage", "Done", 100)
 end

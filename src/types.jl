@@ -343,8 +343,12 @@ Create an empty workspace. To build one directly from folders on disc, use
   `URI` the first time an *indirect* file (a file pulled in via `include` but
   not explicitly added) is requested. Intended for a host to register a file
   watcher.
-- `progress_callback::Union{Nothing,Function}`: Invoked with progress updates
-  while the dynamic feature indexes environments.
+- `progress_callback::Union{Nothing,Function}`: Invoked as
+  `(key::String, message::String, percentage::Int)` with progress updates while
+  the dynamic feature indexes environments. `key` identifies the operation
+  (each concurrently running operation — downloading caches for a project,
+  indexing a project, loading caches — is its own progress bar with the full
+  0–100 range); a report with `percentage >= 100` ends that operation's bar.
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}

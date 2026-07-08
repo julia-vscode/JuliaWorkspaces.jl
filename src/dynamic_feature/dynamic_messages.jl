@@ -95,6 +95,18 @@ struct EnvironmentPrepDoneMsg <: DynamicReactorMessage
     still_missing::Bool
 end
 
+"""
+Posted by the async environment-prep task to report cache-download progress for
+a work item. `fraction` is the download phase's own completion fraction (0..1);
+`1.0` ends the item's download progress bar. Routing these through the reactor
+keeps progress bookkeeping on the reactor task.
+"""
+struct PrepProgressMsg <: DynamicReactorMessage
+    key::DJPKey
+    message::String
+    fraction::Float64
+end
+
 # --- Lifecycle messages: produced by `start(djp)` and the index tasks ---
 
 """Posted by `start(djp)` once the child process is connected and ready."""
@@ -102,6 +114,17 @@ struct ProcessLaunchedMsg <: DynamicReactorMessage
     key::DJPKey
     proc::Base.Process
     endpoint::JSONRPC.JSONRPCEndpoint
+end
+
+"""
+Posted by the child-process message loop when the child reports indexing
+progress (an `indexProgress` notification). `percentage` is the child's own
+completion estimate in `0:100`, or `missing` for reports without one.
+"""
+struct ProcessProgressMsg <: DynamicReactorMessage
+    key::DJPKey
+    message::String
+    percentage::Union{Int,Missing}
 end
 
 """Posted by the index task once the child returned a result (project dir)."""
