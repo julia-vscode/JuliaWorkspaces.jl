@@ -112,28 +112,39 @@ parameter-name inlay hint.  Returns an `InlayHintResult` or `nothing`.
 """
 function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, pos::Int, st::SourceText)
     if config.parameter_names === :all || (config.parameter_names === :literals && CSTParser.isliteral(x))
+        # Only positional arguments get parameter-name hints — the `;`-kwarg
+        # block and inline `kw = v` args name themselves.
+        (CSTParser.headof(x) === :parameters || CSTParser.iskwarg(x)) && return nothing
+        call = CSTParser.parentof(x)
+        is_positional(a) = !(CSTParser.headof(a) === :parameters || CSTParser.iskwarg(a))
+        # Count positional args only (exclude the callee at index 1), so a
+        # trailing kwarg doesn't inflate the arity used to pick the overload.
+        nargs = count(is_positional, call.args) - 1
+        nargs < 2 && return nothing
         # Prefer the overload whose parameter types match the call arguments;
         # fall back to all overloads when nothing matches (e.g. unresolved types).
         sigs = _collect_signatures(x, meta_dict, env, runtime; match_call=true)
         isempty(sigs) && (sigs = _collect_signatures(x, meta_dict, env, runtime))
-        nargs = length(CSTParser.parentof(x).args) - 1
-        nargs < 2 && return nothing
         filter!(s -> length(s.parameters) == nargs, sigs)
         isempty(sigs) && return nothing
         pars = first(sigs).parameters
+        # 1-based index of x among the positional args. If x isn't one of them
+        # (e.g. the walker handed us a trivia node), don't emit a hint.
         thisarg = 0
-        for a in CSTParser.parentof(x).args
-            if x == a
+        found = false
+        for i in 2:length(call.args)
+            is_positional(call.args[i]) || continue
+            thisarg += 1
+            if call.args[i] == x
+                found = true
                 break
             end
-            thisarg += 1
         end
-        if thisarg <= nargs && thisarg <= length(pars)
+        if found && 1 <= thisarg <= length(pars)
             label = pars[thisarg].label
             label == "#unused#" && return nothing
             length(label) <= 2 && return nothing
             CSTParser.str_value(x) == label && return nothing
-            CSTParser.headof(x) === :parameters && return nothing
             if CSTParser.headof(x) isa CSTParser.EXPR && CSTParser.headof(CSTParser.headof(x)) === :OPERATOR && CSTParser.valof(CSTParser.headof(x)) == "."
                 if x.args !== nothing && !isempty(x.args) && x.args[end] isa CSTParser.EXPR &&
                         x.args[end].args !== nothing && !isempty(x.args[end].args) && x.args[end].args[end] isa CSTParser.EXPR
