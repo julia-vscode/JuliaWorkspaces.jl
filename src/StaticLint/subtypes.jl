@@ -41,10 +41,8 @@ _type_compare(a::SymbolServer.DataTypeStore, b::SymbolServer.FakeTypeVar) = _typ
 # unwrapped body with empty `.parameters` — compare base names only. `ua_first`
 # keeps the fallback recursion in the original argument order, since some
 # `_type_compare` methods are one-directional.
-_unionall_basename(x::SymbolServer.FakeUnionAll) =
-    x.body isa SymbolServer.FakeUnionAll ? _unionall_basename(x.body) : x.body
 function _unionall_compare(other, ua::SymbolServer.FakeUnionAll, ua_first::Bool)
-    inner = _unionall_basename(ua)
+    inner = unwrap_fakeunionall(ua)
     bn = _basename(inner)
     bn === nothing && return ua_first ? _type_compare(inner, other) : _type_compare(other, inner)
     return _basename(other) == bn
