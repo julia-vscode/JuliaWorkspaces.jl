@@ -250,13 +250,7 @@ _is_union_curly(t) =
 
 # Nest resolved members into a binary `FakeUnion` (mirrors how the store carries
 # unions), so `_has_type_intersection` can test the branches individually.
-function _fake_union(members)
-    u = members[1]
-    for i in 2:length(members)
-        u = SymbolServer.FakeUnion(u, members[i])
-    end
-    return u
-end
+_fake_union(members) = foldl(SymbolServer.FakeUnion, members)
 
 # True when `t` provably refers to a type: a store `DataTypeStore` (possibly
 # behind its constructor `FunctionStore`) or a locally defined datatype.
