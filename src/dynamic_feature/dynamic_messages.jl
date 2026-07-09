@@ -49,21 +49,17 @@ abstract type DynamicReactorMessage end
 
 """Request to index/watch the environment of a project."""
 struct WatchEnvironmentMsg <: DynamicReactorMessage
-    project_path::String
-    content_hash::UInt64
+    key::WatchEnvironmentKey
 end
 
 """Request to index/watch the test environment of a project + package."""
 struct WatchTestEnvironmentMsg <: DynamicReactorMessage
-    project_path::String
-    package::String
-    content_hash::UInt64
+    key::WatchTestEnvironmentKey
 end
 
 """Request to create a standalone project for a package folder."""
 struct CreateStandaloneProjectMsg <: DynamicReactorMessage
-    package_path::String
-    content_hash::UInt64
+    key::CreateStandaloneProjectKey
 end
 
 """Request an orderly shutdown of the reactor."""
@@ -90,9 +86,20 @@ once the (potentially slow) missing-package check + cloud download finished.
 `still_missing` indicates whether a DJP is still required afterwards.
 """
 struct EnvironmentPrepDoneMsg <: DynamicReactorMessage
-    project_path::String
-    content_hash::UInt64
+    key::WatchEnvironmentKey
     still_missing::Bool
+end
+
+"""
+Posted by the async environment-prep task to report cache-download progress for
+a work item. `fraction` is the download phase's own completion fraction (0..1);
+`1.0` ends the item's download progress bar. Routing these through the reactor
+keeps progress bookkeeping on the reactor task.
+"""
+struct PrepProgressMsg <: DynamicReactorMessage
+    key::DJPKey
+    message::String
+    fraction::Float64
 end
 
 # --- Lifecycle messages: produced by `start(djp)` and the index tasks ---
@@ -102,6 +109,17 @@ struct ProcessLaunchedMsg <: DynamicReactorMessage
     key::DJPKey
     proc::Base.Process
     endpoint::JSONRPC.JSONRPCEndpoint
+end
+
+"""
+Posted by the child-process message loop when the child reports indexing
+progress (an `indexProgress` notification). `percentage` is the child's own
+completion estimate in `0:100`, or `missing` for reports without one.
+"""
+struct ProcessProgressMsg <: DynamicReactorMessage
+    key::DJPKey
+    message::String
+    percentage::Union{Int,Missing}
 end
 
 """Posted by the index task once the child returned a result (project dir)."""

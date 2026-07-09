@@ -119,10 +119,14 @@ Salsa.@derived function derived_all_testitems(rt)
 
     files = derived_julia_files(rt)
 
-    res = Dict{URI,TestDetails}(
-        uri => derived_testitems(rt, uri)
-        for uri in files
-    )
+    res = Dict{URI,TestDetails}()
+    for uri in files
+        res[uri] = derived_testitems(rt, uri)
+        # Yield between files so cooperatively scheduled tasks aren't starved
+        # while testitems for a whole workspace are computed (see
+        # derived_all_diagnostics).
+        yield()
+    end
 
     return res
 end

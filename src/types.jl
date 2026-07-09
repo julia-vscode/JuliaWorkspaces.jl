@@ -343,8 +343,12 @@ Create an empty workspace. To build one directly from folders on disc, use
   `URI` the first time an *indirect* file (a file pulled in via `include` but
   not explicitly added) is requested. Intended for a host to register a file
   watcher.
-- `progress_callback::Union{Nothing,Function}`: Invoked with progress updates
-  while the dynamic feature indexes environments.
+- `progress_callback::Union{Nothing,Function}`: Invoked as
+  `(key::String, message::String, percentage::Int)` with progress updates while
+  the dynamic feature indexes environments. `key` identifies the operation
+  (each concurrently running operation — downloading caches for a project,
+  indexing a project, loading caches — is its own progress bar with the full
+  0–100 range); a report with `percentage >= 100` ends that operation's bar.
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
@@ -409,6 +413,8 @@ function _load_package_caches_for_project!(jw, project_uri)
             # @info "Now package data is ready" v.name v.uuid v.version v.git_tree_sha1
             set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1, package_data)
         end
+        # Reading caches can take a while; keep other tasks responsive.
+        yield()
     end
 
     for (_, v) in project.stdlib_packages
@@ -419,7 +425,40 @@ function _load_package_caches_for_project!(jw, project_uri)
             # @info "Now package data is ready (stdlib)" v.name v.uuid v.version
             set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, ver, nothing, package_data)
         end
+        yield()
     end
+end
+
+"""
+    _load_missing_package_metadata!(jw::JuliaWorkspace)
+
+Load the on-disc symbol caches for every package recorded in
+`missing_pkg_metadata` into the Salsa runtime. Reading dozens of caches (some
+tens of MB) takes seconds, and this runs on the consumer task — typically a
+host's main dispatch loop — so it yields between packages to keep other tasks
+responsive and reports per-package progress on its own progress bar.
+"""
+function _load_missing_package_metadata!(jw::JuliaWorkspace)
+    df = jw.dynamic_feature
+    n_meta = length(df.missing_pkg_metadata)
+    n_meta == 0 && return
+
+    for (idx, m) in enumerate(df.missing_pkg_metadata)
+        package_data = _try_load_package_cache(df.store_path, m.name, m.uuid, m.version, m.git_tree_sha1)
+        if package_data !== nothing
+            set_input_package_metadata!(jw.runtime, m.name, m.uuid, m.version, m.git_tree_sha1, package_data)
+        end
+
+        # Cap below 100: the final report closes the progress bar.
+        pct = min(floor(Int, 100 * idx / n_meta), 99)
+        _report_progress(df, "package-caches", "Loading package caches ($idx/$n_meta)...", pct)
+
+        yield()
+    end
+
+    _report_progress(df, "package-caches", "Package caches loaded", 100)
+
+    return
 end
 
 function process_from_dynamic(jw::JuliaWorkspace)
@@ -443,16 +482,24 @@ function process_from_dynamic(jw::JuliaWorkspace)
 
         if msg isa FailedResult
             @warn "DJP reported failure" msg.key
-            # Nothing to update — failed_projects was already populated in the reactor.
+            # `failed_projects` was already populated in the reactor. A failure
+            # is treated as a terminal state for readiness (best-effort, with
+            # whatever symbol caches exist) so `is_ready` doesn't stay false
+            # forever and per-project gating doesn't suppress diagnostics
+            # indefinitely. A failed watched environment is recorded like a
+            # successful one; failed test environments and standalone projects
+            # have nothing to record — the artifacts their success paths
+            # register (a test/standalone project URI) don't exist on failure —
+            # so they only contribute to the global readiness flag.
+            if msg.key isa WatchEnvironmentKey
+                push!(ready_envs, msg.key)
+                envs_dirty = true
+            end
+            any_env_ready = true
 
         elseif msg isa EnvironmentReadyResult
             @info "Processing new env"
-            for i in df.missing_pkg_metadata
-                package_data = _try_load_package_cache(df.store_path, i.name, i.uuid, i.version, i.git_tree_sha1)
-                if package_data !== nothing
-                    set_input_package_metadata!(jw.runtime, i.name, i.uuid, i.version, i.git_tree_sha1, package_data)
-                end
-            end
+            _load_missing_package_metadata!(jw)
 
             # Mark THIS specific project's environment as ready. Per-project
             # gating (in derived_file_env_ready) prevents env-dependent

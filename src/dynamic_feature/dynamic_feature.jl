@@ -80,10 +80,31 @@ struct DynamicProcessCrashException <: Exception
 end
 
 # Dispatch handler for JSONRPC messages received FROM the dynamic analysis
-# process. The protocol currently defines no child→parent notifications, so this
-# is a placeholder that keeps the message loop functional and future-proof.
+# process. `ctx` is the `(reactor_channel, djp)` tuple passed by the message
+# loop in `start`; all state mutation happens on the reactor, so this only
+# translates notifications into reactor messages.
+#
+# Deliberately hand-written rather than a `JSONRPC.@message_dispatcher`: the
+# generated dispatcher throws on unknown methods, which would unwind the
+# message loop, kill the child mid-index, and permanently mark the project
+# failed. Progress is cosmetic, so anything unexpected — an unknown method
+# from a version-skewed child, or a malformed payload — is logged and ignored
+# instead.
 function dispatch_dynamicprocess_msg(endpoint, msg, ctx)
-    @debug "Received message from dynamic analysis process" method=msg.method
+    reactor_channel, djp = ctx
+
+    if msg.method == JuliaDynamicAnalysisProtocol.index_progress_notification_type.method
+        params = try
+            JuliaDynamicAnalysisProtocol.IndexProgressParams(msg.params)
+        catch err
+            @warn "Malformed indexProgress notification from dynamic analysis process" exception=err
+            return nothing
+        end
+        put!(reactor_channel, ProcessProgressMsg(djp.key, params.message, params.percentage))
+    else
+        @debug "Ignoring unknown message from dynamic analysis process" method=msg.method
+    end
+
     return nothing
 end
 
@@ -115,9 +136,15 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 delete!(env_to_use, "JULIA_DEPOT_PATH")
             end
 
+            # Use the same binary as the current process: `julia` from PATH may
+            # not resolve at all inside an editor-launched language server (which
+            # is started with an explicit executable path), or may resolve to a
+            # different Julia version than the one this process runs on.
+            julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
+
             jl_process = open(
                 pipeline(
-                    Cmd(`julia --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
+                    Cmd(`$julia_exe --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
                     stdout = pipe_out,
                     stderr = pipe_out
                 )
@@ -275,15 +302,6 @@ Downloading a cached index avoids having to index a package locally.
 """
 const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://www.julia-vscode.org/symbolcache"
 
-mutable struct ProgressState
-    total_items::Int
-    completed_items::Int
-    current_sub_progress::Float64
-    current_message::String
-end
-
-ProgressState() = ProgressState(0, 0, 0.0, "")
-
 struct DynamicFeature
     djp_mode::DynamicMode
     store_path::String
@@ -305,7 +323,10 @@ struct DynamicFeature
     pending_count::Threads.Atomic{Int}
     update_channel::Channel{Symbol}
     progress_callback::Union{Nothing,Function}
-    progress_state::ProgressState
+    # Last child-reported indexing percentage per work item (reactor-owned).
+    # Used to keep each item's progress bar monotone across late/duplicate
+    # child reports and to re-use the last percentage for reports without one.
+    child_progress::Dict{DJPKey,Int}
     controller_fsm::FSM{DynamicControllerPhase}
 
     function DynamicFeature(djp_mode::DynamicMode, store_path::String; download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM, progress_callback::Union{Nothing,Function}=nothing)
@@ -325,35 +346,36 @@ struct DynamicFeature
             Threads.Atomic{Int}(0),
             Channel{Symbol}(100),
             progress_callback,
-            ProgressState(),
+            Dict{DJPKey,Int}(),
             dynamic_controller_fsm("dynamic_controller")
         )
     end
 end
 
 """
-    _report_progress(df::DynamicFeature, message::String)
+    _report_progress(df::DynamicFeature, key::String, message::String, percentage::Int)
 
-Compute the aggregated progress percentage from `df.progress_state` and invoke
-`df.progress_callback` if one is registered.
+Invoke `df.progress_callback` if one is registered. `key` identifies the
+operation the report belongs to — each operation (downloading caches for a
+project, indexing a project, loading caches, …) is its own progress bar with
+the full 0–100 range, and a report with `percentage >= 100` ends it. This is
+stateless, so it is safe to call from any task.
 """
-function _report_progress(df::DynamicFeature, message::String)
+function _report_progress(df::DynamicFeature, key::String, message::String, percentage::Int)
     df.progress_callback === nothing && return
-    ps = df.progress_state
-    ps.current_message = message
-    if ps.total_items == 0
-        pct = 0
-    else
-        pct = floor(Int, (ps.completed_items + ps.current_sub_progress) / ps.total_items * 100)
-        pct = clamp(pct, 0, 100)
-    end
     try
-        df.progress_callback(message, pct)
+        df.progress_callback(key, message, percentage)
     catch err
         @warn "progress_callback threw" exception=(err, catch_backtrace())
     end
     return
 end
+
+# Progress-bar keys for the two phases of a work item. The content hash is
+# deliberately excluded so a re-index of the same project reuses its bar.
+_progress_key(phase::String, key::WatchEnvironmentKey) = string(phase, ":", key.project_path)
+_progress_key(phase::String, key::WatchTestEnvironmentKey) = string(phase, ":", key.project_path, ":", key.package_name)
+_progress_key(phase::String, key::CreateStandaloneProjectKey) = string(phase, ":", key.package_path)
 
 const MissingPackage = @NamedTuple{name::String, uuid::UUID, version::String, git_tree_sha1::Union{String,Nothing}}
 
@@ -510,10 +532,11 @@ Download missing package caches from the cloud. Consults the server's
 availability index and only requests packages it advertises as cached; anything
 absent from the index (private, uncached, or tombstoned) is skipped, which also
 keeps private package names off the wire. Returns the list of packages still
-missing after download. If `df` is provided, progress is reported through its
-callback.
+missing after download. If `report` is provided, it is called as
+`report(message::String, fraction::Float64)` with the download phase's
+completion fraction (0..1) after each finished download attempt.
 """
-function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_path::String, upstream_url::String; df::Union{Nothing,DynamicFeature}=nothing)
+function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_path::String, upstream_url::String; report::Union{Nothing,Function}=nothing)
     index = SymbolServer.fetch_availability_index(upstream_url)
     if index === nothing
         @warn "Could not fetch availability index, skipping cloud downloads"
@@ -545,9 +568,8 @@ function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_pa
                         push!(downloaded_set, pkg)
                     end
                     Threads.atomic_add!(downloaded_count, 1)
-                    if df !== nothing
-                        df.progress_state.current_sub_progress = downloaded_count[] / total_downloadable * 0.5
-                        _report_progress(df, "Downloading caches ($(downloaded_count[])/$total_downloadable)...")
+                    if report !== nothing
+                        report("Downloading caches ($(downloaded_count[])/$total_downloadable)...", downloaded_count[] / total_downloadable)
                     end
                     yield()
                 end
@@ -571,14 +593,12 @@ function _complete_work_item!(df::DynamicFeature, key::DJPKey)
     key in df.inflight || return false
     delete!(df.inflight, key)
     Threads.atomic_sub!(df.pending_count, 1)
-    df.progress_state.completed_items += 1
-    df.progress_state.current_sub_progress = 0.0
-    if df.pending_count[] == 0
-        _report_progress(df, "Indexing complete")
-        # Reset for the next round of indexing
-        df.progress_state.total_items = 0
-        df.progress_state.completed_items = 0
-    end
+    delete!(df.child_progress, key)
+    # End the item's progress bars. Ending a bar that was never opened (e.g.
+    # the download bar of an item that had nothing to download) is a no-op on
+    # the consumer side.
+    key isa WatchEnvironmentKey && _report_progress(df, _progress_key("download", key), "Done", 100)
+    _report_progress(df, _progress_key("index", key), "Done", 100)
     try put!(df.update_channel, :data_available) catch; end
     return true
 end
@@ -587,7 +607,16 @@ end
 function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     transition!(djp.fsm, DynamicProcessStarting; reason="launching")
     token = CancellationTokens.get_token(djp.cancellation_source)
-    djp.task = Threads.@async start(djp, df.in_channel, token)
+    djp.task = Threads.@async try
+        start(djp, df.in_channel, token)
+    catch err
+        # `start` reports errors from its supervised region itself; this catches
+        # failures outside it (e.g. the process spawn throwing because the Julia
+        # binary can't be executed), which would otherwise die silently with the
+        # task and leave the work item inflight forever.
+        @error "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
+        put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err))
+    end
     return
 end
 
@@ -623,7 +652,7 @@ end
 # ─── Work messages ──────────────────────────────────────────────────────────
 
 function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
-    key = WatchEnvironmentKey(msg.project_path, msg.content_hash)
+    key = msg.key
     push!(df.inflight, key)
 
     if key in df.failed_projects
@@ -636,18 +665,22 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
     # Offload the (potentially slow) missing-package check + cloud download to a
     # task so the reactor stays responsive. The result is fed back as an
     # `EnvironmentPrepDoneMsg`, so all state mutation stays on the reactor.
-    project_path = msg.project_path
-    content_hash = msg.content_hash
+    project_path = key.project_path
     Threads.@async try
         missing_pkgs = _get_missing_packages(project_path, df.store_path)
 
         if !isempty(missing_pkgs) && df.download_enabled
             @info "Downloading missing package caches" count=length(missing_pkgs)
-            _report_progress(df, "Downloading caches for $(basename(project_path))...")
-            missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url; df=df)
+            # Progress is routed through the reactor as `PrepProgressMsg`s
+            # carrying the download phase's own completion fraction; the
+            # reactor reports them onto the item's dedicated download bar.
+            put!(df.in_channel, PrepProgressMsg(key, "Downloading caches for $(basename(project_path))...", 0.0))
+            missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url;
+                report = (message, fraction) -> put!(df.in_channel, PrepProgressMsg(key, message, fraction)))
+            put!(df.in_channel, PrepProgressMsg(key, "Downloaded caches for $(basename(project_path))", 1.0))
         end
 
-        put!(df.in_channel, EnvironmentPrepDoneMsg(project_path, content_hash, !isempty(missing_pkgs)))
+        put!(df.in_channel, EnvironmentPrepDoneMsg(key, !isempty(missing_pkgs)))
     catch err
         @error "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
@@ -656,25 +689,34 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
     return false
 end
 
+function handle!(df::DynamicFeature, msg::PrepProgressMsg)
+    if msg.key ∉ df.inflight
+        @debug "Stale PrepProgressMsg; ignoring" key=msg.key
+        return false
+    end
+
+    _report_progress(df, _progress_key("download", msg.key), msg.message, round(Int, 100 * clamp(msg.fraction, 0.0, 1.0)))
+
+    return false
+end
+
 function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
-    key = WatchEnvironmentKey(msg.project_path, msg.content_hash)
-    df.progress_state.current_sub_progress = 0.5
+    key = msg.key
 
     if !msg.still_missing
-        @info "All package caches available, skipping DJP" project_path=msg.project_path
-        _report_progress(df, "All caches available for $(basename(msg.project_path))")
-        put!(df.out_channel, EnvironmentReadyResult(msg.project_path, msg.content_hash))
+        @info "All package caches available, skipping DJP" project_path=key.project_path
+        put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
     elseif df.djp_mode != DynamicOff
-        @info "Launching DJP for remaining missing packages" project_path=msg.project_path
-        _report_progress(df, "Indexing $(basename(msg.project_path))...")
-        djp = DynamicJuliaProcess(key, msg.project_path, nothing, :watch_environment)
+        @info "Launching DJP for remaining missing packages" project_path=key.project_path
+        _report_progress(df, _progress_key("index", key), "Starting indexer for $(basename(key.project_path))...", 0)
+        djp = DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
         df.procs[key] = djp
         _launch_process!(df, djp)
     else
-        @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=msg.project_path
-        put!(df.out_channel, EnvironmentReadyResult(msg.project_path, msg.content_hash))
+        @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=key.project_path
+        put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
     end
@@ -683,7 +725,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
 end
 
 function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
-    key = WatchTestEnvironmentKey(msg.project_path, msg.package, msg.content_hash)
+    key = msg.key
     push!(df.inflight, key)
 
     if key in df.failed_projects
@@ -693,8 +735,8 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
         return false
     end
 
-    _report_progress(df, "Indexing test environment for $(msg.package)...")
-    djp = DynamicJuliaProcess(key, msg.project_path, msg.package, :watch_test_environment)
+    _report_progress(df, _progress_key("index", key), "Starting indexer for the test environment of $(key.package_name)...", 0)
+    djp = DynamicJuliaProcess(key, key.project_path, key.package_name, :watch_test_environment)
     df.procs[key] = djp
     _launch_process!(df, djp)
 
@@ -702,7 +744,7 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
 end
 
 function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
-    key = CreateStandaloneProjectKey(msg.package_path, msg.content_hash)
+    key = msg.key
     push!(df.inflight, key)
 
     if key in df.failed_projects
@@ -712,8 +754,8 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
         return false
     end
 
-    _report_progress(df, "Creating standalone project for $(basename(msg.package_path))...")
-    djp = DynamicJuliaProcess(key, msg.package_path, nothing, :create_standalone_project)
+    _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
+    djp = DynamicJuliaProcess(key, key.package_path, nothing, :create_standalone_project)
     df.procs[key] = djp
     _launch_process!(df, djp)
 
@@ -749,6 +791,25 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
         @error "Dynamic index request failed" key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
+
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::ProcessProgressMsg)
+    key = msg.key
+    if key ∉ df.inflight
+        @debug "Stale ProcessProgressMsg; ignoring" key
+        return false
+    end
+
+    # The child's percentage feeds the item's own indexing bar directly. Keep
+    # it monotone across late/duplicate reports, cap below 100 (completion ends
+    # the bar via `_complete_work_item!`), and re-use the last percentage for
+    # reports that don't carry one.
+    last = get(df.child_progress, key, 0)
+    pct = msg.percentage === missing ? last : max(last, clamp(msg.percentage, 0, 99))
+    df.child_progress[key] = pct
+    _report_progress(df, _progress_key("index", key), msg.message, pct)
 
     return false
 end
@@ -895,15 +956,14 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
         # Accounting that previously lived in the lazy inputs: register one
         # pending work item before dispatching the corresponding work message.
         Threads.atomic_add!(df.pending_count, 1)
-        df.progress_state.total_items += 1
-        _report_progress(df, "Preparing to index...")
+        _report_progress(df, _progress_key("index", key), "Preparing to index...", 0)
 
         if key isa WatchEnvironmentKey
-            handle!(df, WatchEnvironmentMsg(key.project_path, key.content_hash))
+            handle!(df, WatchEnvironmentMsg(key))
         elseif key isa WatchTestEnvironmentKey
-            handle!(df, WatchTestEnvironmentMsg(key.project_path, key.package_name, key.content_hash))
+            handle!(df, WatchTestEnvironmentMsg(key))
         elseif key isa CreateStandaloneProjectKey
-            handle!(df, CreateStandaloneProjectMsg(key.package_path, key.content_hash))
+            handle!(df, CreateStandaloneProjectMsg(key))
         end
     end
 

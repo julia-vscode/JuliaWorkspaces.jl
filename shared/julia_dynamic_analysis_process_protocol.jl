@@ -16,6 +16,11 @@ end
     storePath::String
 end
 
+@dict_readable struct IndexProgressParams <: JSONRPC.Outbound
+    message::String
+    percentage::Union{Int,Missing}
+end
+
 # Messages to the dynamic analysis process
 const index_project_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/indexProject", IndexProjectParams, String)
 const create_standalone_project_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/createStandaloneProject", CreateStandaloneProjectParams, String)
@@ -26,6 +31,7 @@ const create_standalone_project_request_type = JSONRPC.RequestType("juliadynamic
 # const testserver_shutdown_request_type = JSONRPC.RequestType("testserver/shutdown", Nothing, Nothing)
 
 # Messages from the dynamic analysis process
+const index_progress_notification_type = JSONRPC.NotificationType("juliadynamicanalysisprocess/indexProgress", IndexProgressParams)
 # const started_notification_type = JSONRPC.NotificationType("started", StartedParams)
 # const passed_notification_type = JSONRPC.NotificationType("passed", PassedParams)
 # const errored_notification_type = JSONRPC.NotificationType("errored", ErroredParams)

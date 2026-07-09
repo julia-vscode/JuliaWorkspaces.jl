@@ -182,7 +182,15 @@ end
 Salsa.@derived function derived_all_diagnostics(rt)
     files = derived_text_files(rt)
 
-    results = Dict{URI,Vector{Diagnostic}}(uri => derived_diagnostics(rt, uri) for uri in files)
+    results = Dict{URI,Vector{Diagnostic}}()
+    for uri in files
+        results[uri] = derived_diagnostics(rt, uri)
+        # Computing diagnostics for a whole workspace is one of the longest
+        # uninterrupted computations on the calling task; yield between files
+        # so cooperatively scheduled tasks (the dynamic-feature reactor,
+        # connection handling in a host) aren't starved for its duration.
+        yield()
+    end
 
     return results
 end
