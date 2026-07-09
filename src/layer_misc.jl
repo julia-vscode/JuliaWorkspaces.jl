@@ -114,9 +114,9 @@ function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env,
     if config.parameter_names === :all || (config.parameter_names === :literals && CSTParser.isliteral(x))
         # Only positional arguments get parameter-name hints — the `;`-kwarg
         # block and inline `kw = v` args name themselves.
-        (CSTParser.headof(x) === :parameters || CSTParser.iskwarg(x)) && return nothing
+        (CSTParser.isparameters(x) || CSTParser.iskwarg(x)) && return nothing
         call = CSTParser.parentof(x)
-        is_positional(a) = !(CSTParser.headof(a) === :parameters || CSTParser.iskwarg(a))
+        is_positional(a) = !(CSTParser.isparameters(a) || CSTParser.iskwarg(a))
         # Count positional args only (exclude the callee at index 1), so a
         # trailing kwarg doesn't inflate the arity used to pick the overload.
         nargs = count(is_positional, call.args) - 1
