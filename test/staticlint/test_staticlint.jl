@@ -501,6 +501,31 @@ end
     end
 end
 
+@testitem "check_call subtyping through parameterized aliases" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # `Vector` is stored as `Array{T,1}` and `AbstractVector` as
+    # `AbstractArray{T,1}`, but walking up `Array`'s supertype chain yields the
+    # generic `AbstractArray{T,N}` store entry. Type comparison must ignore the
+    # parameters ({T,1} vs {T,N}), otherwise these valid calls get flagged.
+    for src in [
+        "f1(b::AbstractVector) = b\ng1(v::Vector) = f1(v)",
+        "f1(b::AbstractVector) = b\ng1(v::Vector{Int}) = f1(v)",
+        "f1(b::AbstractArray) = b\ng1(v::Vector) = f1(v)",
+        "f1(b::AbstractDict) = b\ng1(d::Dict) = f1(d)",
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === nothing
+    end
+
+    # Genuine arity mismatch on the same signatures must still be flagged.
+    let (cst, meta_dict) = parse_and_pass("f1(b::AbstractVector) = b\ng1(v::Vector) = f1(v, v)")
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
 @testitem "check_call function with no methods (#445)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, FunctionHasNoMethods, IncorrectCallArgs
 
