@@ -119,6 +119,10 @@ end
 Salsa.@derived function derived_project(rt, uri)
     @debug "derived_project" uri=uri
 
+    # `nothing` means no project (e.g. no active project and the file is not
+    # inside any package or project folder)
+    uri === nothing && return nothing
+
     # Try the known project folders first (workspace files + active project),
     # then fall back to lazy probing for DJP-created projects.
     project_folders = derived_potential_project_folders(rt)

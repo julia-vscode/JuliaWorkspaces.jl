@@ -147,3 +147,23 @@ end
     result = get_signature_help(jw, uri, idx)
     @test isempty(result.signatures)
 end
+
+@testitem "Signatures: file without any project" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    func(arg) = 1
+    func()
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///lonely/script.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    # Inside func() on line 2 — no Project.toml/Manifest.toml and no active
+    # project anywhere, so the environment falls back to stdlib-only
+    idx = ncodeunits("func(arg) = 1\n") + 5
+    result = get_signature_help(jw, uri, idx)
+    @test !isempty(result.signatures)
+end
