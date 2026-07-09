@@ -112,7 +112,10 @@ parameter-name inlay hint.  Returns an `InlayHintResult` or `nothing`.
 """
 function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, pos::Int, st::SourceText)
     if config.parameter_names === :all || (config.parameter_names === :literals && CSTParser.isliteral(x))
-        sigs = _collect_signatures(x, meta_dict, env, runtime)
+        # Prefer the overload whose parameter types match the call arguments;
+        # fall back to all overloads when nothing matches (e.g. unresolved types).
+        sigs = _collect_signatures(x, meta_dict, env, runtime; match_call=true)
+        isempty(sigs) && (sigs = _collect_signatures(x, meta_dict, env, runtime))
         nargs = length(CSTParser.parentof(x).args) - 1
         nargs < 2 && return nothing
         filter!(s -> length(s.parameters) == nargs, sigs)

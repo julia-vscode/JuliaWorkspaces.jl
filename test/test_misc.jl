@@ -115,3 +115,26 @@ end
     hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
     @test isempty(hints)
 end
+
+@testitem "Misc: get_inlay_hints picks the type-matching method" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # `join([1,2,3], '\n')` must resolve to `join(iterator, delim)`, not the
+    # `join(io::IO, iterator)` overload. The delimiter `'\n'` must be labeled
+    # `delim=`, not `iterator=`.
+    source = """
+    module HintPick
+    x = join([1,2,3], '\\n')
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hintpick/src/HintPick.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///hintpick/src/HintPick.jl")
+    config = InlayHintConfig(true, false, :all)
+    hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
+
+    # Ordered by position: the array is `iterator`, the char is `delim`.
+    @test [h.label for h in hints] == ["iterator=", "delim="]
+end

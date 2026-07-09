@@ -69,12 +69,15 @@ function _fcall_arg_number(x)
 end
 
 """
-    _collect_signatures(x, meta_dict, env, runtime)
+    _collect_signatures(x, meta_dict, env, runtime; match_call=false)
 
 Given an EXPR `x` inside a call, collect all signature information for the
-called function.
+called function. When `match_call` is true, only signatures whose method is
+type-compatible with the call's arguments are collected — used by inlay hints
+to pick the actually-called overload rather than the first one of matching
+arity.
 """
-function _collect_signatures(x, meta_dict::MetaDict, env, runtime)
+function _collect_signatures(x, meta_dict::MetaDict, env, runtime; match_call::Bool=false)
     sigs = SignatureInfo[]
 
     if x isa CSTParser.EXPR && CSTParser.parentof(x) isa CSTParser.EXPR && CSTParser.iscall(CSTParser.parentof(x))
@@ -91,7 +94,13 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime)
         if call_name !== nothing &&
                 (f_binding = StaticLint.refof(call_name, meta_dict)) !== nothing &&
                 (tls = _retrieve_toplevel_scope(call_name, meta_dict)) !== nothing
-            _get_signatures(f_binding, tls, sigs, env, meta_dict)
+            matcher = nothing
+            if match_call
+                args, kws = StaticLint.call_arg_types(parent_call, false, meta_dict)
+                store = StaticLint.getsymbols(env)
+                matcher = m -> StaticLint.match_method(args, kws, m, store, meta_dict)
+            end
+            _get_signatures(f_binding, tls, sigs, env, meta_dict, matcher)
         end
     end
 
@@ -99,36 +108,39 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime)
 end
 
 # Fallback
-function _get_signatures(b, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) end
+function _get_signatures(b, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, matcher=nothing) end
 
-function _get_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict)
+function _get_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, matcher=nothing)
     if b.val isa StaticLint.Binding
-        _get_signatures(b.val, tls, sigs, env, meta_dict)
+        _get_signatures(b.val, tls, sigs, env, meta_dict, matcher)
     end
     if b.type == StaticLint.CoreTypes.Function || b.type == StaticLint.CoreTypes.DataType
-        b.val isa SymbolServer.SymStore && _get_signatures(b.val, tls, sigs, env, meta_dict)
+        b.val isa SymbolServer.SymStore && _get_signatures(b.val, tls, sigs, env, meta_dict, matcher)
         for ref in b.refs
             method = StaticLint.get_method(ref)
             if method !== nothing
-                _get_signatures(method, tls, sigs, env, meta_dict)
+                _get_signatures(method, tls, sigs, env, meta_dict, matcher)
             end
         end
     end
 end
 
-function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
+function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, matcher=nothing) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
     StaticLint.iterate_over_ss_methods(b, tls, env, function (m)
-        push!(sigs, SignatureInfo(
-            string(m),
-            "",
-            [ParameterInfo(string(a[1]), string(a[2])) for a in m.sig]
-        ))
+        if matcher === nothing || matcher(m)
+            push!(sigs, SignatureInfo(
+                string(m),
+                "",
+                [ParameterInfo(string(a[1]), string(a[2])) for a in m.sig]
+            ))
+        end
         return false
     end)
 end
 
-function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict)
+function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, matcher=nothing)
     if CSTParser.defines_function(x)
+        (matcher === nothing || matcher(x)) || return
         sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
         params = ParameterInfo[]
         if sig isa CSTParser.EXPR && sig.args !== nothing
@@ -142,6 +154,7 @@ function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{
             push!(sigs, SignatureInfo(string(CSTParser.to_codeobject(sig)), "", params))
         end
     elseif CSTParser.defines_struct(x)
+        (matcher === nothing || matcher(x)) || return
         args = x.args[3]
         if length(args) > 0
             if !any(CSTParser.defines_function, args.args)

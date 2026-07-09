@@ -56,6 +56,8 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
             end
         elseif headof(arg) === :TRUE || headof(arg) === :FALSE
             return CoreTypes.Bool
+        elseif headof(arg) === :vect || headof(arg) === :vcat || headof(arg) === :hcat
+            return CoreTypes.Array
         elseif isquotedsymbol(arg)
             return SymbolServer.stdlibs[:Core][:Symbol]
         end
