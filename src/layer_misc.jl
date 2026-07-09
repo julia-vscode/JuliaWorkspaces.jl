@@ -144,7 +144,7 @@ function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env,
                 break
             end
         end
-        if found && 1 <= thisarg <= length(pars)
+        if found && thisarg <= length(pars)
             label = pars[thisarg].label
             label == "#unused#" && return nothing
             length(label) <= 2 && return nothing
