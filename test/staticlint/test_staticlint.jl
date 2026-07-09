@@ -526,6 +526,36 @@ end
     end
 end
 
+@testitem "check_call subtyping through unions and parametric aliases" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A `x::Union{…}` parameter types its binding as the bare `Union` datatype,
+    # which drops the members; the members must be resolved so a call matching
+    # any branch is accepted. `AbstractMatrix`/`AbstractArray{<:Any,N}` exercise
+    # the same alias/typevar handling in higher dimensions.
+    for src in [
+        "f(a::AbstractMatrix) = size(a, 1)\ncaller(m::Matrix) = f(m)",
+        "g(a::Union{AbstractVector,Vector}) = length(a)\ncaller(v::Vector) = g(v)",
+        "h(a::Union{AbstractVector,Int}) = length(a)\ncaller(v::Vector) = h(v)",
+        "h(a::Union{AbstractVector,Int}) = length(a)\ncaller(x::Int) = h(x)",
+        "k(::AbstractArray{<:Any,N}) where N = zeros(Int, N)\ncaller(v::Vector) = k(v)",
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === nothing
+    end
+
+    # An argument matching no union branch must still be flagged.
+    for src in [
+        "g(a::Union{AbstractVector,Vector}) = length(a)\ncaller(s::String) = g(s)",
+        "h(a::Union{AbstractVector,Int}) = length(a)\ncaller(s::String) = h(s)",
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
 @testitem "check_call function with no methods (#445)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, FunctionHasNoMethods, IncorrectCallArgs
 
