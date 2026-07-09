@@ -96,8 +96,8 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime; match_call::B
                 (tls = _retrieve_toplevel_scope(call_name, meta_dict)) !== nothing
             matcher = nothing
             if match_call
-                args, kws = StaticLint.call_arg_types(parent_call, false, meta_dict)
                 store = StaticLint.getsymbols(env)
+                args, kws = StaticLint.call_arg_types(parent_call, false, meta_dict, store)
                 matcher = m -> StaticLint.match_method(args, kws, m, store, meta_dict)
             end
             _get_signatures(f_binding, tls, sigs, env, meta_dict, matcher)

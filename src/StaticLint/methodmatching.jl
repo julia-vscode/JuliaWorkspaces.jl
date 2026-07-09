@@ -56,7 +56,14 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
             end
         elseif headof(arg) === :TRUE || headof(arg) === :FALSE
             return CoreTypes.Bool
-        elseif headof(arg) === :vect || headof(arg) === :vcat || headof(arg) === :hcat
+        elseif headof(arg) in (:vect, :vcat, :hcat, :ncat, :typed_vcat, :typed_hcat,
+                :typed_ncat, :comprehension, :typed_comprehension)
+            # Bare generators aren't arrays; they stay untyped.
+            return CoreTypes.Array
+        elseif headof(arg) === :ref && arg.args !== nothing && length(arg.args) >= 1 &&
+                store !== nothing && _is_type_callee(arg.args[1], store, meta_dict)
+            # `T[…]` parses like indexing, but with `T` a type it's a typed
+            # array literal.
             return CoreTypes.Array
         elseif isquotedsymbol(arg)
             return SymbolServer.stdlibs[:Core][:Symbol]
@@ -75,7 +82,7 @@ function _kw_name(x::EXPR)
     x.args !== nothing && !isempty(x.args) ? x.args[1] : x
 end
 
-function call_arg_types(call::EXPR, ismethod, meta_dict)
+function call_arg_types(call::EXPR, ismethod, meta_dict, store=nothing)
     types, kws = [], []
     call.args === nothing && return types, kws
     if length(call.args) > 1 && headof(call.args[2]) === :parameters
@@ -86,7 +93,7 @@ function call_arg_types(call::EXPR, ismethod, meta_dict)
             if CSTParser.iskwarg(call.args[i])
                 push!(kws, call.args[i].args[1])
             else
-                push!(types, arg_type(call.args[i], ismethod, meta_dict))
+                push!(types, arg_type(call.args[i], ismethod, meta_dict, store))
             end
         end
     else
@@ -95,7 +102,7 @@ function call_arg_types(call::EXPR, ismethod, meta_dict)
                 # `f(a, b, kw = v)` — kwarg without semicolon.
                 push!(kws, call.args[i].args[1])
             else
-                push!(types, arg_type(call.args[i], ismethod, meta_dict))
+                push!(types, arg_type(call.args[i], ismethod, meta_dict, store))
             end
         end
     end
@@ -134,7 +141,7 @@ function find_methods(x::EXPR, store, meta_dict)
         length(x.args) === 0 && return possibles
         func_ref = refof_call_func(x, meta_dict)
         func_ref === nothing && return possibles
-        args, kws = call_arg_types(x, false, meta_dict)
+        args, kws = call_arg_types(x, false, meta_dict, store)
         if func_ref isa Binding && func_ref.val isa SymbolServer.FunctionStore ||
             func_ref isa Binding && func_ref.val isa SymbolServer.DataTypeStore
             func_ref = func_ref.val
@@ -249,6 +256,22 @@ function _fake_union(members)
         u = SymbolServer.FakeUnion(u, members[i])
     end
     return u
+end
+
+# True when `t` provably refers to a type: a store `DataTypeStore` (possibly
+# behind its constructor `FunctionStore`) or a locally defined datatype.
+function _is_type_callee(t, store, meta_dict)
+    if iscurly(t) && length(t.args) >= 1
+        t = t.args[1]
+    end
+    hasref(t, meta_dict) || return false
+    r = refof(t, meta_dict)
+    r isa SymbolServer.DataTypeStore && return true
+    if r isa SymbolServer.FunctionStore
+        return SymbolServer._lookup(r.extends, store) isa SymbolServer.DataTypeStore
+    end
+    r isa Binding || return false
+    return r.type == CoreTypes.DataType || (r.type isa Binding && r.type.val isa SymbolServer.DataTypeStore)
 end
 
 # Resolve a type-position EXPR (`String`, `Vector{Int}`, …) to the SymbolServer

@@ -593,10 +593,34 @@ end
         ("f(x) = x\ng() = f([1,2,3])", nothing),
         ("f(x::IO) = x\ng() = f([1,2,3])", IncorrectCallArgs),
         ("f(x::AbstractDict) = x\ng() = f([1,2,3])", IncorrectCallArgs),
+        # Typed literals, ncat and comprehensions are array literals too.
+        ("f(x::AbstractArray) = x\ng() = f([i for i in 1:3])", nothing),
+        ("f(x::AbstractMatrix) = x\ng() = f(Int[1 2])", nothing),
+        ("f(x::IO) = x\ng() = f(Int[1;2])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f(Int[1 2])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f([1;;2])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f(Int[1;;2])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f([i for i in 1:3])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f(Int[i for i in 1:3])", IncorrectCallArgs),
+        # `T[…]` parses as `:ref`; it's a typed array literal when `T` provably
+        # refers to a type…
+        ("f(x::IO) = x\ng() = f(Int[1,2,3])", IncorrectCallArgs),
+        ("f(x::AbstractVector) = x\ng() = f(Int[1,2,3])", nothing),
+        ("f(x::IO) = x\ng() = f(Vector{Int}[[1]])", IncorrectCallArgs),
+        ("f(x::AbstractVector) = x\ng() = f(Vector{Int}[[1]])", nothing),
+        # …and plain indexing when it doesn't.
+        ("f(x::IO) = x\ng(a::Vector{IO}) = f(a[1])", nothing),
+        ("f(x::AbstractVector) = x\ng(a) = f(a[1])", nothing),
     ]
         cst, meta_dict = parse_and_pass(src)
         call = cst.args[2].args[2].args[1]
         @test errorof(call, meta_dict) === expected
+    end
+
+    # A locally defined struct is also a provable type.
+    let (cst, meta_dict) = parse_and_pass("struct T end\nf(x::IO) = x\ng() = f(T[])")
+        call = cst.args[3].args[2].args[1]
+        @test errorof(call, meta_dict) === IncorrectCallArgs
     end
 end
 

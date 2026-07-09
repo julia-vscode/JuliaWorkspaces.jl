@@ -371,7 +371,7 @@ function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.D
     if call_has_splat(x)
         return iterate_over_ss_methods(func_ref, tls, env, m -> compare_f_call(func_nargs(m), call_counts))
     end
-    args, kws = call_arg_types(x, false, meta_dict)
+    args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
     iterate_over_ss_methods(func_ref, tls, env, m -> match_method(args, kws, m, getsymbols(env), meta_dict))
 end
 
@@ -440,7 +440,7 @@ function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv,
             m_counts = CSTParser.defines_struct(func) ? struct_nargs(func, env, meta_dict) : func_nargs(func, env, meta_dict)
             compare_f_call(m_counts, call_counts) && return true
         else
-            args, kws = call_arg_types(x, false, meta_dict)
+            args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
             match_method(args, kws, func, getsymbols(env), meta_dict) && return true
         end
         return false
