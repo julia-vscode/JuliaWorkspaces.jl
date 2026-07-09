@@ -8,12 +8,19 @@ function _issubtype(a, b, store, meta_dict)
 end
 
 function _has_type_intersection(a, b, store, meta_dict)
+    # A bare `Union` datatype means "some union, members unknown" (e.g. the
+    # binding type of a `x::Union{…}` declaration); it can't disprove a call.
+    (_is_bare_union(a) || _is_bare_union(b)) && return true
     return _issubtype(a, b, store, meta_dict) || _issubtype(b, a, store, meta_dict)
 end
 
 _isany(x::SymbolServer.FakeTypeName) = x.name == VarRef(VarRef(nothing, :Core), :Any)
 _isany(x::SymbolServer.DataTypeStore) = x.name.name == VarRef(VarRef(nothing, :Core), :Any)
 _isany(x) = false
+
+_is_bare_union(x::SymbolServer.FakeTypeName) = x.name == VarRef(VarRef(nothing, :Core), :Union)
+_is_bare_union(x::SymbolServer.DataTypeStore) = x.name.name == VarRef(VarRef(nothing, :Core), :Union)
+_is_bare_union(x) = false
 
 # Base name of a type, ignoring parameters. Nominal comparison relies on this
 # because the store mostly carries free typevars in its parameters, but aliases

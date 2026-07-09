@@ -539,6 +539,11 @@ end
         "h(a::Union{AbstractVector,Int}) = length(a)\ncaller(v::Vector) = h(v)",
         "h(a::Union{AbstractVector,Int}) = length(a)\ncaller(x::Int) = h(x)",
         "k(::AbstractArray{<:Any,N}) where N = zeros(Int, N)\ncaller(v::Vector) = k(v)",
+        # A union-typed *variable* in call position: its binding carries the
+        # bare `Union` datatype (members unknown), which must never disprove
+        # a call.
+        "f(x::Union{Int,String}) = x\ng(y::Union{Int,String}) = f(y)",
+        "f(x::AbstractString) = x\ng(y::Union{Int,String}) = f(y)",
     ]
         cst, meta_dict = parse_and_pass(src)
         call = cst.args[2].args[2].args[1]
