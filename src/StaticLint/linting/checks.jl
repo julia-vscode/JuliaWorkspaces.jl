@@ -418,6 +418,14 @@ end
 
 function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
     if CSTParser.defines_function(func) || CSTParser.defines_struct(func)
+        # If the expression being analysed *is* the method's own signature, it's
+        # a definition, not a call — never flag it. Checked before the macro
+        # branch below, since a macro-wrapped def (`@inline foo(u, bar=u) = …`)
+        # still exposes its signature as a call-shaped node that check_call visits.
+        x1 = CSTParser.rem_wheres_decls(CSTParser.get_sig(func))
+        if x1.head == :call && x1 == x
+            return true
+        end
         # Macro-wrapped definitions can rewrite arity/constructors at expansion
         # time (`@kwdef` structs, `@kernel` functions, …). For unknown macros we
         # can't see that statically — fall back to arity-only matching, which
@@ -434,12 +442,6 @@ function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv,
         else
             args, kws = call_arg_types(x, false, meta_dict)
             match_method(args, kws, func, getsymbols(env), meta_dict) && return true
-        end
-        # Preserve the existing sig-self check: if the call expression being
-        # analysed *is* the method's own signature, don't flag it.
-        x1 = CSTParser.rem_wheres_decls(CSTParser.get_sig(func))
-        if x1.head == :call && x1 == x
-            return true
         end
         return false
     end

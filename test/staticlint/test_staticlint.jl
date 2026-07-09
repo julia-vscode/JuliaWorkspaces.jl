@@ -586,6 +586,26 @@ end
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[1], meta_dict) === nothing
 end
 
+@testitem "check_call macro-wrapped definition signature not flagged" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A macro-wrapped definition still exposes its signature as a call-shaped
+    # node. The optional positional `bar = u` reads as a kwarg to the arity
+    # check, so without the sig-self guard `@inline foo(u, bar = u) = …` was
+    # wrongly flagged on its own definition.
+    (cst, meta_dict) = parse_and_pass("""
+    @inline foo(u, bar = u) = nothing
+    foo(1)
+    foo(1, 2)
+    foo(1, 2, 3)
+    """)
+    sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(cst.args[1].args[3]))
+    @test errorof(sig, meta_dict) === nothing          # the definition's own signature
+    @test errorof(cst.args[2], meta_dict) === nothing  # foo(1)
+    @test errorof(cst.args[3], meta_dict) === nothing  # foo(1, 2)
+    @test errorof(cst.args[4], meta_dict) === IncorrectCallArgs  # foo(1, 2, 3)
+end
+
 @testitem "check_call too many positional args" setup=[shared_static_lint] begin
     (cst, meta_dict) = parse_and_pass("""
     f(x) = 1
