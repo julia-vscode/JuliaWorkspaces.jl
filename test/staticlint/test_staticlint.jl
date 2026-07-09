@@ -556,6 +556,26 @@ end
     end
 end
 
+@testitem "check_call array and matrix literal argument types" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # `[…]`, `[; ]` and `[ ]` literals are typed as `Array`, so they satisfy
+    # abstract-array parameters but are flagged against unrelated types.
+    for (src, expected) in [
+        ("f(x::AbstractVector) = x\ng() = f([1,2,3])", nothing),
+        ("f(x::Vector{Int}) = x\ng() = f([1,2,3])", nothing),
+        ("f(x::AbstractArray) = x\ng() = f([1,2,3])", nothing),
+        ("f(x::AbstractMatrix) = x\ng() = f([1 2; 3 4])", nothing),
+        ("f(x) = x\ng() = f([1,2,3])", nothing),
+        ("f(x::IO) = x\ng() = f([1,2,3])", IncorrectCallArgs),
+        ("f(x::AbstractDict) = x\ng() = f([1,2,3])", IncorrectCallArgs),
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === expected
+    end
+end
+
 @testitem "check_call function with no methods (#445)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, FunctionHasNoMethods, IncorrectCallArgs
 
