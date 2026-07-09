@@ -561,6 +561,25 @@ end
     end
 end
 
+@testitem "check_call pinned type parameters are erased" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # Binding inference erases declared type parameters (`Vector{UInt8}` →
+    # `Array{T,1}`), and nominal type comparison ignores the parameters the
+    # store pins. `String(::Vector{UInt8})` must therefore accept any `Vector`
+    # argument — flagging here was a false positive…
+    let (cst, meta_dict) = parse_and_pass("g(v::Vector{UInt8}) = String(v)")
+        call = cst.args[1].args[2].args[1]
+        @test errorof(call, meta_dict) === nothing
+    end
+    # …at the cost of missing a genuine element-type mismatch. Catching it
+    # needs binding types that carry the declared parameters.
+    let (cst, meta_dict) = parse_and_pass("g(v::Vector{Int}) = String(v)")
+        call = cst.args[1].args[2].args[1]
+        @test_broken errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
 @testitem "check_call array and matrix literal argument types" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
 
