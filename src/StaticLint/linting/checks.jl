@@ -321,6 +321,10 @@ function check_call(x, env::ExternalEnv, meta_dict)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
+        # A definition's own signature is call-shaped but not a call — this
+        # includes macro-wrapped defs (`@inline foo(u, bar = u) = …`), whose
+        # signatures check_call still visits.
+        _is_def_sig(x) && return
         # find the function we're dealing with
         func_ref = refof_call_func(x, meta_dict)
         func_ref === nothing && return
@@ -344,6 +348,21 @@ function check_call(x, env::ExternalEnv, meta_dict)
             seterror!(x, IncorrectCallArgs, meta_dict)
         end
     end
+end
+
+# True when call-shaped `x` is the signature of a definition, possibly behind
+# `::T`/`where` wrappers. Position matters: only `args[1]` of the wrapping
+# `=`/`function` is a signature (the RHS of an assignment is a real call).
+function _is_def_sig(x::EXPR)
+    p = parentof(x)
+    p isa EXPR || return false
+    p.args !== nothing && !isempty(p.args) && p.args[1] == x || return false
+    if headof(p) === :function || CSTParser.is_eq(headof(p))
+        return CSTParser.defines_function(p)
+    elseif isdeclaration(p) || iswhere(p)
+        return _is_def_sig(p)
+    end
+    return false
 end
 
 # True when every visible definition of `func_ref` is a bare forward
@@ -418,14 +437,6 @@ end
 
 function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
     if CSTParser.defines_function(func) || CSTParser.defines_struct(func)
-        # If the expression being analysed *is* the method's own signature, it's
-        # a definition, not a call — never flag it. Checked before the macro
-        # branch below, since a macro-wrapped def (`@inline foo(u, bar=u) = …`)
-        # still exposes its signature as a call-shaped node that check_call visits.
-        x1 = CSTParser.rem_wheres_decls(CSTParser.get_sig(func))
-        if x1.head == :call && x1 == x
-            return true
-        end
         # Macro-wrapped definitions can rewrite arity/constructors at expansion
         # time (`@kwdef` structs, `@kernel` functions, …). For unknown macros we
         # can't see that statically — fall back to arity-only matching, which

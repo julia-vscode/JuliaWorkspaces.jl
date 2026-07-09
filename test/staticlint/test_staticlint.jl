@@ -655,6 +655,7 @@ end
 end
 
 @testitem "check_call macro-wrapped definition signature not flagged" setup=[shared_static_lint] begin
+    using JuliaWorkspaces: CSTParser
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
 
     # A macro-wrapped definition still exposes its signature as a call-shaped
@@ -672,6 +673,30 @@ end
     @test errorof(cst.args[2], meta_dict) === nothing  # foo(1)
     @test errorof(cst.args[3], meta_dict) === nothing  # foo(1, 2)
     @test errorof(cst.args[4], meta_dict) === IncorrectCallArgs  # foo(1, 2, 3)
+end
+
+@testitem "check_call definition signatures vs assignment-RHS calls" setup=[shared_static_lint] begin
+    using JuliaWorkspaces: CSTParser
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # Definition signatures are call-shaped but must never be treated as
+    # calls, through `::T` and `where` wrappers too.
+    for src in [
+        "foo(u, bar = u) = nothing",
+        "foo(x::T) where T = nothing",
+        "foo(x)::Int = 1",
+        "function foo(x::T) where T\n    nothing\nend",
+    ]
+        (cst, meta_dict) = parse_and_pass(src)
+        sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(cst.args[1]))
+        @test errorof(sig, meta_dict) === nothing
+    end
+
+    # A call on the RHS of an assignment is a real call — the definition
+    # detection must not swallow it.
+    let (cst, meta_dict) = parse_and_pass("f(x) = 1\ny = f(1, 2)")
+        @test errorof(cst.args[2].args[2], meta_dict) === IncorrectCallArgs
+    end
 end
 
 @testitem "check_call too many positional args" setup=[shared_static_lint] begin
