@@ -16,6 +16,7 @@ const UInt16 = SymbolServer.stdlibs[:Core][:UInt16]
 const UInt32 = SymbolServer.stdlibs[:Core][:UInt32]
 const UInt64 = SymbolServer.stdlibs[:Core][:UInt64]
 const Float64 = SymbolServer.stdlibs[:Core][:Float64]
+const Array = SymbolServer.stdlibs[:Core][:Array]
 const Vararg = SymbolServer.FakeTypeName(Core.Vararg)
 
 iscoretype(x, name) = false

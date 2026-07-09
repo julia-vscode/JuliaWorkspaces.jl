@@ -115,3 +115,55 @@ end
     hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
     @test isempty(hints)
 end
+
+@testitem "Misc: get_inlay_hints picks the type-matching method" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # `join([1,2,3], '\n')` must resolve to `join(iterator, delim)`, not the
+    # `join(io::IO, iterator)` overload. The delimiter `'\n'` must be labeled
+    # `delim=`, not `iterator=`.
+    source = """
+    module HintPick
+    x = join([1,2,3], '\\n')
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hintpick/src/HintPick.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///hintpick/src/HintPick.jl")
+    config = InlayHintConfig(true, false, :all)
+    hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
+
+    # Ordered by position: the array is `iterator`, the char is `delim`.
+    @test [h.label for h in hints] == ["iterator=", "delim="]
+end
+
+@testitem "Misc: get_inlay_hints parameter names across argument shapes" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    function labels(body)
+        src = "module M\n$body\nend\n"
+        uri = URI("file:///inlayshapes/src/M.jl")
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+        cfg = InlayHintConfig(true, false, :all)
+        return [h.label for h in get_inlay_hints(jw, uri, 1, ncodeunits(src) + 1, cfg)]
+    end
+
+    # Positional args of a single-method function.
+    @test labels("foo(alpha, beta) = alpha\nx = foo(1, 2)") == ["alpha=", "beta="]
+    # Keyword args (with or without `;`) must not suppress the positional hints.
+    @test labels("foo(alpha, beta; c=1) = alpha\nx = foo(1, 2; c=3)") == ["alpha=", "beta="]
+    @test labels("foo(alpha, beta; c=1) = alpha\nx = foo(1, 2, c=3)") == ["alpha=", "beta="]
+    # Nested calls are hinted at both levels.
+    @test labels("foo(alpha, beta) = alpha\nx = foo(foo(1,2), 3)") == ["alpha=", "alpha=", "beta=", "beta="]
+    # A hint whose label matches the argument text is suppressed.
+    @test labels("foo(alpha, beta) = alpha\nalpha = 1\nx = foo(alpha, 2)") == ["beta="]
+    # Parameter names of two chars or fewer are suppressed.
+    @test labels("foo(a, b) = a\nx = foo(1, 2)") == String[]
+    # A single positional argument gets no hint.
+    @test labels("foo(alpha) = alpha\nx = foo(1)") == String[]
+    # A matrix literal resolves the type-matching `join` overload.
+    @test labels("x = join([1 2; 3 4], '\\n')") == ["iterator=", "delim="]
+end

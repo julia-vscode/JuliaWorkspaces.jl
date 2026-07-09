@@ -321,6 +321,10 @@ function check_call(x, env::ExternalEnv, meta_dict)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
+        # A definition's own signature is call-shaped but not a call — this
+        # includes macro-wrapped defs (`@inline foo(u, bar = u) = …`), whose
+        # signatures check_call still visits.
+        _is_def_sig(x) && return
         # find the function we're dealing with
         func_ref = refof_call_func(x, meta_dict)
         func_ref === nothing && return
@@ -344,6 +348,21 @@ function check_call(x, env::ExternalEnv, meta_dict)
             seterror!(x, IncorrectCallArgs, meta_dict)
         end
     end
+end
+
+# True when call-shaped `x` is the signature of a definition, possibly behind
+# `::T`/`where` wrappers. Position matters: only `args[1]` of the wrapping
+# `=`/`function` is a signature (the RHS of an assignment is a real call).
+function _is_def_sig(x::EXPR)
+    p = parentof(x)
+    p isa EXPR || return false
+    p.args !== nothing && !isempty(p.args) && p.args[1] == x || return false
+    if headof(p) === :function || CSTParser.is_eq(headof(p))
+        return CSTParser.defines_function(p)
+    elseif isdeclaration(p) || iswhere(p)
+        return _is_def_sig(p)
+    end
+    return false
 end
 
 # True when every visible definition of `func_ref` is a bare forward
@@ -371,7 +390,7 @@ function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.D
     if call_has_splat(x)
         return iterate_over_ss_methods(func_ref, tls, env, m -> compare_f_call(func_nargs(m), call_counts))
     end
-    args, kws = call_arg_types(x, false, meta_dict)
+    args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
     iterate_over_ss_methods(func_ref, tls, env, m -> match_method(args, kws, m, getsymbols(env), meta_dict))
 end
 
@@ -432,14 +451,8 @@ function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv,
             m_counts = CSTParser.defines_struct(func) ? struct_nargs(func, env, meta_dict) : func_nargs(func, env, meta_dict)
             compare_f_call(m_counts, call_counts) && return true
         else
-            args, kws = call_arg_types(x, false, meta_dict)
+            args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
             match_method(args, kws, func, getsymbols(env), meta_dict) && return true
-        end
-        # Preserve the existing sig-self check: if the call expression being
-        # analysed *is* the method's own signature, don't flag it.
-        x1 = CSTParser.rem_wheres_decls(CSTParser.get_sig(func))
-        if x1.head == :call && x1 == x
-            return true
         end
         return false
     end
