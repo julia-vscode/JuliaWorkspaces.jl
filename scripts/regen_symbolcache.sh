@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$REMOTE" ]] || { echo "[regen] ERROR: --remote is required" >&2; usage >&2; exit 2; }
-WORK="${WORK:-$(mktemp -d /tmp/regen_symbolcache.XXXXXX)}"
+WORK="${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/regen_symbolcache.XXXXXX")}"
 SWEEP_CMD="${SWEEP_CMD:-bash ${SCRIPT_DIR}/run_cloudindex_docker.sh}"
 PKG="$(dirname "$SCRIPT_DIR")"  # package root == scripts/..
 
@@ -115,6 +115,24 @@ $SWEEP_CMD \
     ${sweep_args[@]+"${sweep_args[@]}"}
 
 echo "[regen] sweep complete"
+
+# Surface systemic failures directly in the CI log: per-status counts plus the
+# terse per-worker error line for a few samples (full stderr per version stays
+# in results.jsonl).
+if [[ -f "$sweepwork/results.jsonl" ]]; then
+    echo "[regen] sweep status counts:"
+    jq -r '.status' "$sweepwork/results.jsonl" | sort | uniq -c | sort -rn | sed 's/^/[regen]   /'
+    # Best-effort: tolerate records without name/version/error and the SIGPIPE
+    # jq takes when head stops reading (exit 141 would otherwise kill the script).
+    samples=$(jq -r 'select(.status != "ok" and .status != "cancelled")
+        | "\(.name // "?")@\(.version // "?") [\(.status)]: " +
+          (((.error // "") | split("\n") | (map(select(startswith("jwcloudindex-worker:"))) + map(select(. != "")))[0]) // "")' \
+        "$sweepwork/results.jsonl" 2>/dev/null | head -5 | cut -c1-300 || true)
+    if [[ -n "$samples" ]]; then
+        echo "[regen] sample failures (first 5, see results.jsonl for full errors):"
+        sed 's/^/[regen]   /' <<< "$samples"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Step 4: Compute new lists

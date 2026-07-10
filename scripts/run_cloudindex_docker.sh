@@ -61,7 +61,7 @@ done
 command -v julia  >/dev/null || { echo "julia not found on PATH" >&2; exit 1; }
 command -v docker >/dev/null || { echo "docker not found on PATH" >&2; exit 1; }
 
-WORK=${WORK:-$(mktemp -d /tmp/jwci.XXXXXX)}
+WORK=${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/jwci.XXXXXX")}
 mkdir -p "$WORK/store" "$WORK/depot"
 
 # Inject defaults only when the user didn't supply them.
@@ -82,7 +82,59 @@ JULIA_DEPOT_PATH="$REGDEPOT:" JULIA_PKG_UNPACK_REGISTRY=true \
 REG="$REGDEPOT/registries/General"
 test -f "$REG/Registry.toml" || { echo "registry download failed" >&2; exit 1; }
 
-# 2. Per-worker container launcher. Workers run the image's own Julia (the
+# 2. Preflight: one throwaway container with the same mounts, checking the
+#    things every worker depends on. Each failure mode here otherwise surfaces
+#    as a uniform per-version failure (usually "unsatisfiable") with the real
+#    error buried in results.jsonl:
+#      - -v sources must be visible to the DOCKER DAEMON, not just this shell.
+#        With docker-in-docker (e.g. Kubernetes-based CI runners) a host path
+#        like /tmp/... silently mounts empty unless it lives on a volume shared
+#        with the daemon — put --work / TMPDIR on such a volume.
+#      - writes to the depot mount must round-trip back to the host, or every
+#        cache the sweep produces is silently lost.
+#      - DNS + package-server egress, or Pkg.add can download nothing.
+echo "[preflight] verifying worker-container mounts and network ..."
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -e HOME="$WORK/depot" \
+  -v "$REPO:$REPO:ro" \
+  -v "$REGDEPOT:$REGDEPOT:ro" \
+  -v "$WORK/depot:$WORK/depot" \
+  "$IMAGE" julia --startup-file=no -e '
+    using Sockets
+    import Downloads
+    reg, repo, depot = ARGS
+    fail = false
+    function check(ok::Bool, what, hint)
+        println(stderr, "[preflight] ", ok ? "ok   " : "FAIL ", what, ok ? "" : string(" — ", hint))
+        ok || (global fail = true)
+        return ok
+    end
+    check(isfile(joinpath(reg, "registries", "General", "Registry.toml")),
+          "registry mount ($reg)",
+          "empty inside the container; the -v source is not visible to the docker daemon")
+    check(isfile(joinpath(repo, "src", "CloudIndex", "worker.jl")),
+          "repo mount ($repo)",
+          "worker.jl is not visible inside the container")
+    write(joinpath(depot, "preflight-roundtrip"), "1")
+    dns = check((try; getaddrinfo("pkg.julialang.org"); true; catch; false; end),
+          "DNS lookup of pkg.julialang.org",
+          "name resolution fails inside worker containers; Pkg.add cannot download anything")
+    dns && check((try; Downloads.download("https://pkg.julialang.org/registries", devnull; timeout = 30); true; catch; false; end),
+          "HTTPS fetch from pkg.julialang.org",
+          "DNS works but HTTPS egress from worker containers fails")
+    exit(fail ? 1 : 0)
+' "$REGDEPOT" "$REPO" "$WORK/depot" \
+  || { echo "[preflight] worker-container environment is broken — aborting before the sweep (it would fail and tombstone every version)" >&2; exit 1; }
+if [[ -f "$WORK/depot/preflight-roundtrip" ]]; then
+    rm -f "$WORK/depot/preflight-roundtrip"
+    echo "[preflight] ok    depot mount round-trip ($WORK/depot)"
+else
+    echo "[preflight] FAIL  depot mount round-trip ($WORK/depot) — files written in the container do not appear on the host, so caches would be silently lost (docker-in-docker with an unshared --work path?)" >&2
+    exit 1
+fi
+
+# 3. Per-worker container launcher. Workers run the image's own Julia (the
 #    driver's worker command is the bare name `julia`, resolved on PATH), so
 #    only the repo (read-only) and the work dirs are mounted. JULIA_DEPOT_PATH is
 #    {depot} (writable: installs land here) : the read-only registry depot : and a
@@ -100,7 +152,7 @@ LAUNCHER="docker run --rm \
   -v {depot}:{depot} -v {store}:{store} -v {env}:{env} \
   $IMAGE {cmd}"
 
-# 3. Drive the indexer. ARGS[1..3] = work, registry, launcher; ARGS[4:] = the
+# 4. Drive the indexer. ARGS[1..3] = work, registry, launcher; ARGS[4:] = the
 #    forwarded jwcloudindex flags. Script-managed flags are appended last so they
 #    win over any duplicates in the forwarded set (parse_args is last-wins).
 #    Workers use the image's Julia: the driver's default julia_exe is the bare
