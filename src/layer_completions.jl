@@ -678,6 +678,29 @@ function _is_rebinding_of_module(x, meta_dict)
     CSTParser.defines_module(StaticLint.refof(StaticLint.refof(x, meta_dict).val.args[2], meta_dict).val)
 end
 
+# Field names of a workspace struct definition, mirroring the field-marking
+# logic in `mark_bindings!`: skips inner constructors, unwraps `const` and
+# @kwdef defaults.
+function _struct_field_names(x::CSTParser.EXPR)
+    names = String[]
+    for arg in x.args[3].args
+        CSTParser.defines_function(arg) && continue
+        if CSTParser.headof(arg) === :const
+            arg = arg.args[1]
+        end
+        if CSTParser.isassignment(arg)
+            arg = arg.args[1]
+        end
+        if CSTParser.isdeclaration(arg)
+            arg = arg.args[1]
+        end
+        if CSTParser.isidentifier(arg) && CSTParser.valof(arg) isa String
+            push!(names, CSTParser.valof(arg))
+        end
+    end
+    return names
+end
+
 function _get_dot_completion(px, spartial, state::_CompletionState) end
 function _get_dot_completion(px::CSTParser.EXPR, spartial, state::_CompletionState)
     px === nothing && return
@@ -707,8 +730,16 @@ function _get_dot_completion(px::CSTParser.EXPR, spartial, state::_CompletionSta
                         _texteditfor(state, spartial, a)))
                 end
             end
-        elseif r.type isa StaticLint.Binding && r.type.val isa CSTParser.EXPR && CSTParser.defines_struct(r.type.val) && StaticLint.scopeof(r.type.val, state.meta_dict) isa StaticLint.Scope
-            _collect_completions(StaticLint.scopeof(r.type.val, state.meta_dict), spartial, state, true)
+        elseif r.type isa StaticLint.Binding && r.type.val isa CSTParser.EXPR && CSTParser.defines_struct(r.type.val)
+            # only the fields: the struct scope also holds type params and
+            # inner constructor names
+            for a in _struct_field_names(r.type.val)
+                if is_completion_match(a, spartial)
+                    _add_completion_item(state, CompletionResultItem(
+                        a, CompletionKinds.Field, nothing, a,
+                        _texteditfor(state, spartial, a)))
+                end
+            end
         end
     elseif r isa SymbolServer.ModuleStore
         _collect_completions(r, spartial, state, true)
