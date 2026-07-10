@@ -2776,6 +2776,103 @@ end
         end""")
 end
 
+@testitem "function params don't rebind enclosing scope names" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, scopeof, InvalidRedefofConst
+    using JuliaWorkspaces.CSTParser: isassignment, EXPR
+
+    function const_redefs(src)
+        cst, meta_dict, jw = parse_and_pass(src)
+        [x for (_, x) in collect_hints(cst, meta_dict, jw) if errorof(x, meta_dict) === InvalidRedefofConst]
+    end
+
+    # Inner constructor args and where-params are new locals, not rebindings
+    # of the fields/type params they shadow.
+    @test isempty(const_redefs("""
+        mutable struct Foo{T}
+            const val1::Int
+            val2::T
+            Foo(val1::Integer, val2::T) where T = new{T}(Int(val1), val2)
+            Foo{T}(val1::Integer, val2::T) where T = new{T}(Int(val1), val2)
+            Bar{V}(val1::Integer, val2::V) where V = new{V}(2 * Int(val1), val2)
+            Bar{T}(val1::Integer, val2::T) where T = new{T}(Int(val1), val2)
+        end"""))
+
+    # Assignments in a constructor body don't reach the struct scope either.
+    @test isempty(const_redefs("""
+        mutable struct Baz
+            const val::Int
+            Baz() = (val = 3; new(val))
+        end"""))
+
+    # A shadowing binding stays local to its own scope: `x` in f's scope must
+    # still be the `x = 1` binding afterwards, not the shadowing binding.
+    function outer_x_intact(src)
+        cst, meta_dict, jw = parse_and_pass(src)
+        b = scopeof(cst.args[1], meta_dict).names["x"]
+        b.val isa EXPR && isassignment(b.val)
+    end
+
+    # closure arg
+    @test outer_x_intact("""
+        function f()
+            x = 1
+            g(x::Int) = x + 1
+            return g(x)
+        end""")
+
+    # kwarg default
+    @test outer_x_intact("""
+        function f()
+            x = 1
+            g(; x = 2) = x
+            return g() + x
+        end""")
+
+    # do-block arg
+    @test outer_x_intact("""
+        function f()
+            x = 1
+            map([1]) do x
+                x + 1
+            end
+            return x
+        end""")
+
+    # anonymous function arg
+    @test outer_x_intact("""
+        function f()
+            x = 1
+            g = x -> x + 1
+            return g(x)
+        end""")
+
+    # destructured arg
+    @test outer_x_intact("""
+        function f()
+            x = 1
+            g((x, y)) = x + y
+            return g((1, 2)) + x
+        end""")
+
+    # generator variable
+    @test outer_x_intact("""
+        function f()
+            x = 1
+            ys = [x^2 for x in 1:3]
+            return ys .+ x
+        end""")
+
+    # `let` with its own binding in the head
+    @test outer_x_intact("""
+        function f()
+            x = 1
+            let x = 2
+                @info x
+            end
+            return x
+        end""")
+end
+
 @testitem "@nospecialize without argument (#390)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: func_nargs
     using JuliaWorkspaces.CSTParser: parse, EXPR
