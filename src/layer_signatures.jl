@@ -258,23 +258,6 @@ function _collect_call_candidates!(candidates::Vector{_CallCandidate}, b, tls::S
     return nothing
 end
 
-# Cheap type of a call argument: literals and identifiers with a known binding
-# type. `nothing` means unknown and matches any parameter type.
-function _call_arg_type(x::CSTParser.EXPR, meta_dict::MetaDict)
-    h = CSTParser.headof(x)
-    h === :INTEGER && return StaticLint.CoreTypes.Int
-    h === :FLOAT && return StaticLint.CoreTypes.Float64
-    h === :CHAR && return StaticLint.CoreTypes.Char
-    h === :TRUE && return StaticLint.CoreTypes.Bool
-    h === :FALSE && return StaticLint.CoreTypes.Bool
-    CSTParser.isstringliteral(x) && return StaticLint.CoreTypes.String
-    if CSTParser.isidentifier(x) || CSTParser.is_getfield_w_quotenode(x)
-        r = CSTParser.isidentifier(x) ? StaticLint.refof(x, meta_dict) : StaticLint.refof_maybe_getfield(x, meta_dict)
-        r isa StaticLint.Binding && return r.type
-    end
-    return nothing
-end
-
 """
     _resolve_call_arg_name(call, arg_i, meta_dict, env)
 
@@ -320,7 +303,7 @@ function _resolve_call_arg_name_impl(call::CSTParser.EXPR, arg_i::Int, meta_dict
     for i in 2:length(call.args)
         arg = call.args[i]
         (CSTParser.isparameters(arg) || CSTParser.iskwarg(arg)) && continue
-        push!(argtypes, CSTParser.issplat(arg) ? nothing : _call_arg_type(arg, meta_dict))
+        push!(argtypes, CSTParser.issplat(arg) ? nothing : StaticLint.infer_shallow_type(arg, meta_dict))
     end
 
     store = StaticLint.getsymbols(env)

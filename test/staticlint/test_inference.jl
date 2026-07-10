@@ -54,6 +54,13 @@ end
     end
 end
 
+@testitem "infer_char_literal" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof
+    let (cst, meta_dict) = parse_and_pass("x = 'c'")
+        @test bindingof(cst.args[1].args[1], meta_dict).type === JuliaWorkspaces.StaticLint.CoreTypes.Char
+    end
+end
+
 @testitem "infer_string_literal" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: bindingof
     let (cst, meta_dict) = parse_and_pass("x = \"text\"")

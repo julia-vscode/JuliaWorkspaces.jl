@@ -93,24 +93,8 @@ function infer_type_assignment_rhs(binding, state, scope)
                     end
                 end
             end
-        elseif headof(rhs) === :INTEGER
-            settype!(binding, CoreTypes.Int)
-        elseif headof(rhs) === :HEXINT
-            if length(rhs.val) < 5
-                settype!(binding, CoreTypes.UInt8)
-            elseif length(rhs.val) < 7
-                settype!(binding, CoreTypes.UInt16)
-            elseif length(rhs.val) < 11
-                settype!(binding, CoreTypes.UInt32)
-            else
-                settype!(binding, CoreTypes.UInt64)
-            end
-        elseif headof(rhs) === :FLOAT
-            settype!(binding, CoreTypes.Float64)
-        elseif CSTParser.isstringliteral(rhs)
-            settype!(binding, CoreTypes.String)
-        elseif headof(rhs) === :TRUE || headof(rhs) === :FALSE
-            settype!(binding, CoreTypes.Bool)
+        elseif (literal_type = infer_literal_type(rhs)) !== nothing
+            settype!(binding, literal_type)
         elseif isidentifier(rhs) || is_getfield_w_quotenode(rhs)
             refof_rhs = isidentifier(rhs) ? refof(rhs, meta_dict) : refof_maybe_getfield(rhs, meta_dict)
             if is_destructuring
@@ -412,20 +396,40 @@ function _is_scalar_index(a::EXPR, state, scope)
     return false
 end
 
-# Best-effort scalar type of an expression used as a range bound: a numeric/char
-# literal, or a reference whose type is known. Returns `nothing` when unknown.
-function _infer_scalar_type(x::EXPR, state)
-    headof(x) === :INTEGER && return CoreTypes.Int
-    headof(x) === :FLOAT && return CoreTypes.Float64
-    headof(x) === :CHAR && return CoreTypes.Char
-    meta_dict = state.meta_dict
+# Type of a literal EXPR (as a CoreTypes store), or `nothing`.
+function infer_literal_type(x::EXPR)
+    h = headof(x)
+    h === :INTEGER && return CoreTypes.Int
+    if h === :HEXINT
+        return if length(x.val) < 5
+            CoreTypes.UInt8
+        elseif length(x.val) < 7
+            CoreTypes.UInt16
+        elseif length(x.val) < 11
+            CoreTypes.UInt32
+        else
+            CoreTypes.UInt64
+        end
+    end
+    h === :FLOAT && return CoreTypes.Float64
+    h === :CHAR && return CoreTypes.Char
+    (h === :TRUE || h === :FALSE) && return CoreTypes.Bool
+    CSTParser.isstringliteral(x) && return CoreTypes.String
+    return nothing
+end
+
+# Best-effort shallow type of an expression: a literal, or an identifier /
+# getfield chain whose binding type is known. Returns `nothing` when unknown.
+function infer_shallow_type(x::EXPR, meta_dict)
+    t = infer_literal_type(x)
+    t !== nothing && return t
     if isidentifier(x) || CSTParser.is_getfield_w_quotenode(x)
         r = isidentifier(x) ? refof(x, meta_dict) : refof_maybe_getfield(x, meta_dict)
         r isa Binding && return r.type
     end
     return nothing
 end
-_infer_scalar_type(x, state) = nothing
+infer_shallow_type(x, meta_dict) = nothing
 
 # Is `t` (a type binding / DataTypeStore) a `Number`?
 function _is_number(t, state)
@@ -456,9 +460,9 @@ function infer_eltype(x::EXPR, state)
         return CoreTypes.Char
     elseif headof(x) === :call && length(x.args) > 2 && CSTParser.is_colon(x.args[1])
         # number ranges are likely scalar
-        t = _infer_scalar_type(x.args[2], state)
+        t = infer_shallow_type(x.args[2], state.meta_dict)
         if t !== nothing && all(3:length(x.args)) do i
-                b = _infer_scalar_type(x.args[i], state)
+                b = infer_shallow_type(x.args[i], state.meta_dict)
                 b !== nothing && (_type_compare(t, b) || (_is_number(t, state) && _is_number(b, state)))
             end
             return t
