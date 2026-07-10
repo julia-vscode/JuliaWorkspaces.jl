@@ -391,10 +391,13 @@ function add_binding(x, state, scope=state.scope)
             scope.names[name] = b
         elseif is_soft_scope(scope) && parentof(scope) isa Scope && isidentifier(b.name) && scopehasbinding(parentof(scope), valofid(b.name)) && !enforce_hard_scope(x, scope)
             add_binding(x, state, scope.parent)
-        elseif isidentifier(b.name) && !enforce_hard_scope(x, scope) &&
+        elseif isidentifier(b.name) && b.val isa EXPR && CSTParser.isassignment(b.val) &&
+                !enforce_hard_scope(x, scope) &&
                 (outer_scope = enclosing_local_binding_scope(scope, valofid(b.name))) !== nothing
             # Assigning to a name already local in an enclosing local scope
             # (let block / closure) reassigns it rather than introducing a new local.
+            # Only plain assignments qualify: function params (args, kwargs, where
+            # params) always introduce fresh locals in their own scope.
             add_binding(x, state, outer_scope)
         else
             scope.names[name] = b
@@ -416,6 +419,8 @@ end
 function enclosing_local_binding_scope(scope, name::String)
     p = parentof(scope)
     while p isa Scope && !is_toplevel_scope(p)
+        # inner constructor bodies don't close over the struct scope
+        CSTParser.defines_struct(p.expr) && return nothing
         scopehasbinding(p, name) && return p
         p = parentof(p)
     end

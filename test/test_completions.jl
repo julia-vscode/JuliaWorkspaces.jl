@@ -198,6 +198,47 @@ end
     @test any(item -> item.label == "rand", result.items)
 end
 
+@testitem "Completions: getfield completions for workspace structs" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    mutable struct Foo{T}
+        const val1::Int
+        val2::T
+        Foo(val1::Integer, val2::T) where T = new{T}(Int(val1), val2)
+        Foo{T}(val1::Integer, val2::T) where T = new{T}(Int(val1), val2)
+        Bar{V}(val1::Integer, val2::V) where V = new{V}(2 * Int(val1), val2)
+        Bar{T}(val1::Integer, val2::T) where T = new{T}(Int(val1), val2)
+    end
+    x = Foo(1, 2)
+    x.
+    """
+
+    uri = URI("file:///compfield/test.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    # right after "x."
+    index = findfirst("\nx.\n", source)[end]
+    result = get_completions(jw, uri, index)
+
+    # only the fields, not type params or inner constructor names
+    @test sort([item.label for item in result.items]) == ["val1", "val2"]
+
+    # partial field: cursor at the end and in the middle of "va"
+    source2 = replace(source, "x.\n" => "x.va\n")
+    uri2 = URI("file:///compfield/test2.jl")
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(uri2, SourceText(source2, "julia")))
+
+    index_mid = findfirst("x.va", source2)[end]  # between "v" and "a"
+    for index in (index_mid, index_mid + 1)
+        result2 = get_completions(jw2, uri2, index)
+        @test sort([item.label for item in result2.items]) == ["val1", "val2"]
+    end
+end
+
 @testitem "Completions: token completions" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI

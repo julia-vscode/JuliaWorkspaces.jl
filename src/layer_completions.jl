@@ -678,6 +678,29 @@ function _is_rebinding_of_module(x, meta_dict)
     CSTParser.defines_module(StaticLint.refof(StaticLint.refof(x, meta_dict).val.args[2], meta_dict).val)
 end
 
+# Field names of a workspace struct definition, mirroring the field-marking
+# logic in `mark_bindings!`: skips inner constructors, unwraps `const` and
+# @kwdef defaults.
+function _struct_field_names(x::CSTParser.EXPR)
+    names = String[]
+    for arg in x.args[3].args
+        CSTParser.defines_function(arg) && continue
+        if CSTParser.headof(arg) === :const
+            arg = arg.args[1]
+        end
+        if CSTParser.isassignment(arg)
+            arg = arg.args[1]
+        end
+        if CSTParser.isdeclaration(arg)
+            arg = arg.args[1]
+        end
+        if CSTParser.isidentifier(arg) && CSTParser.valof(arg) isa String
+            push!(names, CSTParser.valof(arg))
+        end
+    end
+    return names
+end
+
 function _get_dot_completion(px, spartial, state::_CompletionState) end
 function _get_dot_completion(px::CSTParser.EXPR, spartial, state::_CompletionState)
     px === nothing && return
@@ -707,8 +730,16 @@ function _get_dot_completion(px::CSTParser.EXPR, spartial, state::_CompletionSta
                         _texteditfor(state, spartial, a)))
                 end
             end
-        elseif r.type isa StaticLint.Binding && r.type.val isa CSTParser.EXPR && CSTParser.defines_struct(r.type.val) && StaticLint.scopeof(r.type.val, state.meta_dict) isa StaticLint.Scope
-            _collect_completions(StaticLint.scopeof(r.type.val, state.meta_dict), spartial, state, true)
+        elseif r.type isa StaticLint.Binding && r.type.val isa CSTParser.EXPR && CSTParser.defines_struct(r.type.val)
+            # only the fields: the struct scope also holds type params and
+            # inner constructor names
+            for a in _struct_field_names(r.type.val)
+                if is_completion_match(a, spartial)
+                    _add_completion_item(state, CompletionResultItem(
+                        a, CompletionKinds.Field, nothing, a,
+                        _texteditfor(state, spartial, a)))
+                end
+            end
         end
     elseif r isa SymbolServer.ModuleStore
         _collect_completions(r, spartial, state, true)
@@ -996,10 +1027,12 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
     elseif state.x isa CSTParser.EXPR && _is_in_import_statement(state.x) || _relative_dot_depth_at(st.content, offset) > 0
         _import_completions(ppt, pt, t, is_at_end, state.x, state)
     elseif t isa CSTParser.Tokens.Token && t.kind == Tokens.DOT && pt isa CSTParser.Tokens.Token && pt.kind == Tokens.IDENTIFIER
-        px = _get_expr(cst, offset - (1 + t.endbyte - t.startbyte))
+        px = _get_expr(cst, t.startbyte)
         _get_dot_completion(px, "", state)
     elseif t isa CSTParser.Tokens.Token && t.kind == Tokens.IDENTIFIER && pt isa CSTParser.Tokens.Token && pt.kind == Tokens.DOT && ppt isa CSTParser.Tokens.Token && ppt.kind == Tokens.IDENTIFIER
-        px = _get_expr(cst, offset - (1 + t.endbyte - t.startbyte) - (1 + pt.endbyte - pt.startbyte))
+        # anchor on the dot token, not the cursor: with the cursor mid-token,
+        # subtracting whole token lengths from `offset` overshoots to the left
+        px = _get_expr(cst, pt.startbyte)
         _get_dot_completion(px, t.val, state)
     elseif t isa CSTParser.Tokens.Token && t.kind == Tokens.IDENTIFIER
         if is_at_end && state.x !== nothing
