@@ -1120,22 +1120,26 @@ end
     @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === nothing
 end
 
-@testitem "check_farg_unused literal body" setup=[shared_static_lint] begin
+@testitem "check_farg_unused literal body (#96)" setup=[shared_static_lint] begin
     import CSTParser
-    using JuliaWorkspaces.StaticLint: errorof
+    using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument
 
+    # An unused argument is flagged even when the body is a single literal —
+    # long form and short form alike (#96).
     cst, meta_dict = parse_and_pass("function f(arg) 1 end")
-
-    @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === nothing
+    @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === UnusedFunctionArgument
 end
 
-@testitem "check_farg_unused short form definition" setup=[shared_static_lint] begin
+@testitem "check_farg_unused short form definition (#96)" setup=[shared_static_lint] begin
     import CSTParser
-    using JuliaWorkspaces.StaticLint: errorof
+    using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument
 
     cst, meta_dict = parse_and_pass("f(arg) = true")
+    @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === UnusedFunctionArgument
 
-    @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === nothing
+    # ...but a used argument is still fine.
+    cst2, meta_dict2 = parse_and_pass("h(x) = x + 1")
+    @test errorof(CSTParser.get_sig(cst2[1])[3], meta_dict2) === nothing
 end
 
 @testitem "check_farg_unused nospecialize argument" setup=[shared_static_lint] begin
