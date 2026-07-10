@@ -2695,6 +2695,38 @@ end
     end
 end
 
+@testitem "@safetestset blocks have isolated scopes (#84)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof, errorof, Scope, CannotDefineFuncAlreadyHasValue
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # SafeTestsets wraps each block in a fresh module, so a value binding in one
+    # block and a function of the same name in a sibling block must not collide.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @safetestset "t1" begin
+            foo = 1
+        end
+        @safetestset "t2" begin
+            foo() = 2
+        end
+        """)
+        @test scopeof(cst.args[1], meta_dict) isa Scope
+        @test scopeof(cst.args[2], meta_dict) isa Scope
+        @test scopeof(cst.args[1], meta_dict) !== scopeof(cst.args[2], meta_dict)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    # The suppression is narrowly scoped: a plain top-level value/function
+    # collision (no @safetestset) is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        foo = 1
+        foo() = 2
+        """)
+        @test has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
 @testitem "assignment to outer local inside inner scope (#393)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
 
