@@ -322,18 +322,31 @@ function is_nameof_func(name)
 end
 
 function loose_refs(b::Binding, meta_dict)
-    b.val isa EXPR || return b.refs # to account for `#global` binding which doesn't have a val
+    vcat([r.refs for r in loose_bindings(b, meta_dict)]...)
+end
+
+"""
+    loose_bindings(b::Binding, meta_dict)
+
+Every `Binding` that shares `b`'s name within the same logical variable, i.e.
+all the (re)assignment sites of that local. Because StaticLint creates a fresh
+`Binding` for each assignment (see issue #101), a single source-level variable
+is represented by several bindings; this gathers them in source order. Returns
+`[b]` when `b` isn't a plain named local (globals, functions, types, …).
+"""
+function loose_bindings(b::Binding, meta_dict)
+    b.val isa EXPR || return Binding[b] # to account for `#global` binding which doesn't have a val
     scope = retrieve_scope(b.val, meta_dict)
-    scope isa Scope && isidentifier(b.name) || return b.refs
+    (scope isa Scope && isidentifier(b.name)) || return Binding[b]
     name_str = valofid(b.name)
-    name_str isa String || return b.refs
+    name_str isa String || return Binding[b]
 
     if is_soft_scope(scope) && parentof(scope) isa Scope && scopehasbinding(parentof(scope), name_str) && !scopehasbinding(scope, name_str)
         scope = parentof(scope)
     end
     state = LooseRefs(scope.expr, name_str, scope, [], meta_dict)
     process_EXPR(scope.expr, state)
-    vcat([r.refs for r in state.result]...)
+    return state.result
 end
 
 mutable struct LooseRefs <: TraverseState
