@@ -105,40 +105,38 @@ end
 # ============================================================================
 
 """
-    _get_inlay_parameter_hints(x, meta_dict, env, runtime, config, pos)
+    _get_inlay_parameter_hints(x, meta_dict, env, config, pos, st)
 
 Check whether EXPR `x` (which is an argument inside a call) should get a
 parameter-name inlay hint.  Returns an `InlayHintResult` or `nothing`.
 """
-function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, pos::Int, st::SourceText)
+function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, config::InlayHintConfig, pos::Int, st::SourceText)
     if config.parameter_names === :all || (config.parameter_names === :literals && CSTParser.isliteral(x))
-        sigs = _collect_signatures(x, meta_dict, env, runtime)
-        nargs = length(CSTParser.parentof(x).args) - 1
+        call = CSTParser.parentof(x)
+        nargs = length(call.args) - 1
         nargs < 2 && return nothing
-        filter!(s -> length(s.parameters) == nargs, sigs)
-        isempty(sigs) && return nothing
-        pars = first(sigs).parameters
+        CSTParser.headof(x) === :parameters && return nothing
         thisarg = 0
-        for a in CSTParser.parentof(x).args
+        for a in call.args
             if x == a
                 break
             end
             thisarg += 1
         end
-        if thisarg <= nargs && thisarg <= length(pars)
-            label = pars[thisarg].label
-            label == "#unused#" && return nothing
-            length(label) <= 2 && return nothing
-            CSTParser.str_value(x) == label && return nothing
-            CSTParser.headof(x) === :parameters && return nothing
-            if CSTParser.headof(x) isa CSTParser.EXPR && CSTParser.headof(CSTParser.headof(x)) === :OPERATOR && CSTParser.valof(CSTParser.headof(x)) == "."
-                if x.args !== nothing && !isempty(x.args) && x.args[end] isa CSTParser.EXPR &&
-                        x.args[end].args !== nothing && !isempty(x.args[end].args) && x.args[end].args[end] isa CSTParser.EXPR
-                    CSTParser.valof(x.args[end].args[end]) == label && return nothing
-                end
+        # thisarg lands past nargs when x is trivia (parens/commas) rather
+        # than an actual argument
+        1 <= thisarg <= nargs || return nothing
+        label = _resolve_call_arg_name(call, thisarg, meta_dict, env)
+        label === nothing && return nothing
+        length(label) <= 2 && return nothing
+        CSTParser.str_value(x) == label && return nothing
+        if CSTParser.headof(x) isa CSTParser.EXPR && CSTParser.headof(CSTParser.headof(x)) === :OPERATOR && CSTParser.valof(CSTParser.headof(x)) == "."
+            if x.args !== nothing && !isempty(x.args) && x.args[end] isa CSTParser.EXPR &&
+                    x.args[end].args !== nothing && !isempty(x.args[end].args) && x.args[end].args[end] isa CSTParser.EXPR
+                CSTParser.valof(x.args[end].args[end]) == label && return nothing
             end
-            return InlayHintResult(position_at(st, pos + 1), string(label, "="), :parameter, false, false)
         end
+        return InlayHintResult(position_at(st, pos + 1), string(label, "="), :parameter, false, false)
     end
     return nothing
 end
@@ -155,7 +153,7 @@ function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runti
             CSTParser.iscall(CSTParser.parentof(x)) &&
             !(CSTParser.parentof(CSTParser.parentof(x)) isa CSTParser.EXPR && CSTParser.defines_function(CSTParser.parentof(CSTParser.parentof(x)))) &&
             CSTParser.parentof(x).args[1] != x
-        maybe_hint = _get_inlay_parameter_hints(x, meta_dict, env, runtime, config, pos, st)
+        maybe_hint = _get_inlay_parameter_hints(x, meta_dict, env, config, pos, st)
         if maybe_hint !== nothing
             push!(hints, maybe_hint)
         end

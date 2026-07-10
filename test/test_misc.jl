@@ -79,6 +79,56 @@ end
     @test hints isa Vector{InlayHintResult}
 end
 
+@testitem "Misc: parameter name inlay hints use method matching" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "HintNames"
+    uuid = "82345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module HintNames
+
+    g(x::Int, aaa, bbb) = 1
+    g(x::String, ddd, eee) = 2
+    g(1, 2, 3)
+    g("s", 2, 3)
+
+    w(alpha, beta, gamma = 1) = 1
+    w(4, 5)
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hintnames/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hintnames/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hintnames/src/HintNames.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///hintnames/src/HintNames.jl")
+
+    config = InlayHintConfig(true, false, :all)
+    hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
+    labels = [h.label for h in hints if h.kind === :parameter]
+
+    # `g(1, 2, 3)` matches the ::Int method, `g("s", 2, 3)` the ::String one;
+    # `w(4, 5)` matches via the optional third argument. `x` is skipped as a
+    # too-short label.
+    @test labels == ["aaa=", "bbb=", "ddd=", "eee=", "alpha=", "beta="]
+end
+
 @testitem "Misc: get_inlay_hints returns empty when disabled" begin
     using JuliaWorkspaces.URIs2: URI
 

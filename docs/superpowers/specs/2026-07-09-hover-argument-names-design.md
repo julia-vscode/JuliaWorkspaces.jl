@@ -56,10 +56,11 @@ Cheap argument-type inference covers:
 
 Everything else is unknown (wildcard).
 
-The first candidate that survives both stages wins. If no candidate survives
-the type stage, matching falls back to the first arity-compatible candidate.
-If there is no arity-compatible candidate either, the hover keeps the plain
-positional text.
+The first candidate that survives both stages and has a usable name at the
+queried position (non-empty, not `#`-prefixed, not `_`) wins. If no candidate
+survives the type stage, matching falls back to the arity-compatible
+candidates. If there is no arity-compatible candidate either, the hover keeps
+the plain positional text.
 
 ## Candidate collection
 
@@ -86,8 +87,12 @@ plain identifier, `f{T}` curly, and `M.f` getfield-with-quotenode heads, then
 `StaticLint.refof` + `_retrieve_toplevel_scope`.
 
 `SignatureInfo`/`ParameterInfo` and the public signature-help API are
-unchanged; the helper is hover-internal for now but written so signature help
-and inlay hints can adopt it later.
+unchanged. The parameter-name inlay hints (`_get_inlay_parameter_hints` in
+`layer_misc.jl`) share the same matcher instead of their previous
+exact-arity/first-signature heuristic, so they gain optional/vararg arity
+handling and type-based method disambiguation; their display rules (skip
+labels of length ≤ 2, skip when the argument text already matches the label,
+etc.) are unchanged.
 
 ## Hover text assembly
 
@@ -125,3 +130,7 @@ Extend `test/test_hover.jl` (existing in-memory-workspace pattern):
 5. SymbolServer-backed call (e.g. a Base function with ≥ 4 args) — shows a
    parameter name from the method store, exercising the `MethodStore.sig`
    path.
+
+Extend `test/test_misc.jl` for inlay hints: type-based disambiguation between
+two same-arity methods, and a call matching a method through an optional
+argument (which the old exact-arity filter rejected).
