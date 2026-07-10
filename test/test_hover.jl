@@ -326,7 +326,166 @@ end
     # Hovering over the first argument `1` in `M.f(1,2,3,4,5)` line 6
     result = get_hover_text(jw, uri, index_of(source, 6, 5))
     @test result !== nothing
-    @test occursin("Argument 1", result) && occursin("M.f", result)
+    @test occursin("Argument `a` (1 of 5)", result) && occursin("M.f", result)
+end
+
+@testitem "Hover: argument parameter names in call position" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "HoverArgNames"
+    uuid = "72345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module HoverArgNames
+
+    f(alpha, beta, gamma, delta, epsilon) = 1
+    f(1, 2, 3, 4, 5)
+
+    g(x::Int, aaa, bbb, ccc) = 1
+    g(x::String, ddd, eee, fff) = 2
+    g(1, 2, 3, 4)
+    g("s", 2, 3, 4)
+
+    struct T
+        fa
+        fb
+        fc
+        fd
+        fe
+    end
+    T(w, x, y, z) = T(w, x, y, z, 0)
+    T(1, 2, 3, 4)
+
+    h(1, 2, 3, 4, 5)
+
+    arr1 = [1, 2, 3]
+    arr2 = [4, 5, 6]
+    copyto!(arr1, 1, arr2, 1, 3)
+
+    q(x::Int, qaa, qbb, qcc) = 1
+    q(x::String, qdd, qee, qff) = 2
+    qval = 1.5
+    q(qval, 2, 3, 4)
+
+    sv(sa, sb, sc, sd, sxs...) = 1
+    svt = (4, 5)
+    sv(1, 2, 3, svt..., 9)
+
+    kh(alpha, beta, gamma, delta; opt = 1) = 1
+    kh(1, 2, 3, 4; opt = 5)
+
+    va(x, y, z, a, b, c...) = x + y
+    va(1, 2, 3, 4, 5, 6, 7, 8)
+
+    struct P{X}
+        pa::X
+        pb::X
+        pc::X
+        pd::X
+        pe::X
+    end
+    P{X}(w, x, y, z) where X = P{X}(w, x, y, z, zero(X))
+    P{Int}(1, 2, 3, 4)
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hoverargnames/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hoverargnames/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hoverargnames/src/HoverArgNames.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///hoverargnames/src/HoverArgNames.jl")
+
+    hover_at(needle) = get_hover_text(jw, uri, findfirst(needle, source).stop)
+
+    # Workspace function: parameter name from the method definition
+    result = hover_at("f(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `beta` (2 of 5) in call to `f`", result)
+
+    # Two same-arity methods: the Int literal selects the ::Int method
+    result = hover_at("g(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `aaa` (2 of 4) in call to `g`", result)
+
+    # ... and the String literal selects the ::String method
+    result = hover_at("g(\"s\", 2")
+    @test result !== nothing
+    @test occursin("Argument `ddd` (2 of 4) in call to `g`", result)
+
+    # Constructor call resolved to the outer constructor, not the field list
+    result = hover_at("T(1")
+    @test result !== nothing
+    @test occursin("Argument `w` (1 of 4) in call to `T`", result)
+
+    # Unresolvable callee: old positional-only text is preserved
+    result = hover_at("h(1")
+    @test result !== nothing
+    @test occursin("Argument 1 of 5 in call to `h`", result)
+    @test !occursin("(1 of 5)", result)
+
+    # SymbolServer-backed method: name comes from the method store
+    result = hover_at("copyto!(arr1, 1")
+    @test result !== nothing
+    @test occursin(r"Argument `\w+` \(2 of 5\) in call to `copyto!`", result)
+
+    # No type-compatible method: keep the positional text instead of showing
+    # a name from an overload the call doesn't match
+    result = hover_at("q(qval, 2")
+    @test result !== nothing
+    @test occursin("Argument 2 of 4 in call to `q`", result)
+    @test !occursin(r"Argument `\w+`", result)
+
+    # Splat in the call: names before the splat resolve...
+    result = hover_at("sv(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `sb` (2 of 4) in call to `sv`", result)
+
+    # ...but positions at/after the splat are unknowable
+    result = hover_at("svt..., 9")
+    @test result !== nothing
+    @test occursin(r"Argument 5 of \d+ in call to `sv`", result)
+    @test !occursin(r"Argument `\w+`", result)
+
+    # Keyword arguments after `;` don't shift the positional index
+    result = hover_at("kh(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `beta` (2 of 4) in call to `kh`", result)
+
+    # Curly callee: parametric constructor call resolves through `P{Int}`
+    result = hover_at("P{Int}(1")
+    @test result !== nothing
+    @test occursin("Argument `w` (1 of 4) in call to `P`", result)
+
+    # Method-side vararg: fixed positions show their name...
+    result = hover_at("va(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `y` (2 of 8) in call to `va`", result)
+
+    # ...and positions bound to the trailing vararg show `name...`,
+    # from the slot itself to the last argument
+    result = hover_at("va(1, 2, 3, 4, 5, 6")
+    @test result !== nothing
+    @test occursin("Argument `c...` (6 of 8) in call to `va`", result)
+
+    result = hover_at("6, 7, 8")
+    @test result !== nothing
+    @test occursin("Argument `c...` (8 of 8) in call to `va`", result)
 end
 
 @testitem "get_doc_from_word: basic matching" begin

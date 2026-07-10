@@ -1,5 +1,5 @@
 @testitem "@testitem macro missing all args" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -20,7 +20,7 @@
 end
 
 @testitem "Wrong type for name" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -41,7 +41,7 @@ end
 end
 
 @testitem "Code block missing" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -62,7 +62,7 @@ end
 end
 
 @testitem "Final arg not a code block" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -83,7 +83,7 @@ end
 end
 
 @testitem "None kw arg" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -104,7 +104,7 @@ end
 end
 
 @testitem "Duplicate kw arg" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -125,7 +125,7 @@ end
 end
 
 @testitem "Incomplete kw arg" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -146,7 +146,7 @@ end
 end
 
 @testitem "Wrong default_imports type kw arg" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -167,7 +167,7 @@ end
 end
 
 @testitem "non vector arg for tags kw" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -188,7 +188,7 @@ end
 end
 
 @testitem "Wrong types in tags kw arg" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -209,7 +209,7 @@ end
 end
 
 @testitem "Unknown keyword arg" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -230,7 +230,7 @@ end
 end
 
 @testitem "All parts correctly there" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: filepath2uri
 
     pkg_dir = joinpath(@__DIR__, "..", "testdata", "TestPackageTestItems")
@@ -259,7 +259,7 @@ end
 end
 
 @testitem "test items outside package become errors" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: filepath2uri
 
     src_file = joinpath(@__DIR__, "..", "testdata", "not_a_package", "testitem_outside_pkg.jl")
@@ -281,7 +281,7 @@ end
 end
 
 @testitem "test setups outside package become errors" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: filepath2uri
 
     src_file = joinpath(@__DIR__, "..", "testdata", "not_a_package", "testmodule_outside_pkg.jl")
@@ -303,7 +303,7 @@ end
 end
 
 @testitem "@testmodule macro missing begin end" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -324,7 +324,7 @@ end
 end
 
 @testitem "@testsnippet macro missing begin end block" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -345,7 +345,7 @@ end
 end
 
 @testitem "@testmodule macro extra args" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -365,7 +365,7 @@ end
 end
 
 @testitem "@testsnippet macro extra args" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
     uri = uri"file://src/foo.jl"
@@ -385,7 +385,7 @@ end
 end
 
 @testitem "@testmodule all correct" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: filepath2uri
 
     pkg_dir = joinpath(@__DIR__, "..", "testdata", "TestPackageTestItems")
@@ -412,7 +412,7 @@ end
 end
 
 @testitem "@testsnippet all correct" begin
-    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail
+    using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: filepath2uri
 
     pkg_dir = joinpath(@__DIR__, "..", "testdata", "TestPackageTestItems")
@@ -440,7 +440,7 @@ end
 
 @testitem "@testitem project detection" tags=[:skip] begin
     using Pkg
-    using JuliaWorkspaces: JuliaWorkspace
+    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace
     using JuliaWorkspaces.URIs2: @uri_str, filepath2uri
 
     old = Base.active_project()
@@ -468,7 +468,7 @@ end
 end
 
 @testitem "module behind docstring" begin
-    using JuliaWorkspaces: JuliaWorkspace
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: filepath2uri
 
     pkg_dir = joinpath(@__DIR__, "..", "testdata", "TestPackageTestItems")

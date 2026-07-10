@@ -1,4 +1,5 @@
 @testitem "Misc: get_document_links finds file paths" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_document_links
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -37,6 +38,7 @@
 end
 
 @testitem "Misc: get_inlay_hints for variable types" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -79,7 +81,116 @@ end
     @test hints isa Vector{InlayHintResult}
 end
 
+@testitem "Misc: parameter name inlay hints use method matching" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "HintNames"
+    uuid = "82345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module HintNames
+
+    g(x::Int, aaa, bbb) = 1
+    g(x::String, ddd, eee) = 2
+    g(1, 2, 3)
+    g("s", 2, 3)
+
+    w(alpha, beta, gamma = 1) = 1
+    w(4, 5)
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hintnames/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hintnames/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hintnames/src/HintNames.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///hintnames/src/HintNames.jl")
+
+    config = InlayHintConfig(true, false, :all)
+    hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
+    labels = [h.label for h in hints if h.kind === :parameter]
+
+    # `g(1, 2, 3)` matches the ::Int method, `g("s", 2, 3)` the ::String one;
+    # `w(4, 5)` matches via the optional third argument. `x` is skipped as a
+    # too-short label.
+    @test labels == ["aaa=", "bbb=", "ddd=", "eee=", "alpha=", "beta="]
+end
+
+@testitem "Misc: parameter name inlay hints positional index" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "HintPositions"
+    uuid = "92345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module HintPositions
+
+    k(alpha, beta, gamma; opt = 1) = 1
+    k(1, 2, 3; opt = 5)
+
+    m(maa, mbb, mcc = 1; opt = 0) = 1
+    m(1, opt = 2, 3)
+
+    s(aaa, bbb, ccc, sxs...) = 1
+    tup = (3, 4)
+    s(1, tup..., 9)
+
+    v(alpha, beta, rest...) = 1
+    v(1, 2, 3, 4)
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hintpositions/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hintpositions/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hintpositions/src/HintPositions.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///hintpositions/src/HintPositions.jl")
+
+    config = InlayHintConfig(true, false, :all)
+    hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
+    labels = [h.label for h in hints if h.kind === :parameter]
+
+    # The `;`-parameters block and inline kwargs don't shift the positional
+    # index, kwargs themselves get no hint, and positions at/after a splat
+    # are unknowable. A method-side trailing vararg labels only its first
+    # bound argument (`rest...=` on `3`, nothing on `4`).
+    @test labels == ["alpha=", "beta=", "gamma=", "maa=", "mbb=", "aaa=", "alpha=", "beta=", "rest...="]
+end
+
 @testitem "Misc: get_inlay_hints returns empty when disabled" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -117,6 +228,7 @@ end
 end
 
 @testitem "Misc: get_inlay_hints picks the type-matching method" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
     using JuliaWorkspaces.URIs2: URI
 
     # `join([1,2,3], '\n')` must resolve to `join(iterator, delim)`, not the
@@ -140,6 +252,7 @@ end
 end
 
 @testitem "Misc: get_inlay_hints parameter names across argument shapes" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
     using JuliaWorkspaces.URIs2: URI
 
     function labels(body)

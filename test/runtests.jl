@@ -5,6 +5,7 @@ using TestItemRunner
 const _JW_TEST_FILTER = get(ENV, "JW_TEST_FILTER", "")
 
 @run_package_tests filter=ti ->
-    !startswith(ti.filename, joinpath(@__DIR__, "..", "testdata")) &&
+    !startswith(ti.filename, normpath(joinpath(@__DIR__, "..", "testdata"))) &&
     !startswith(ti.filename, joinpath(@__DIR__, "data")) &&
+    !(:skip in ti.tags) &&
     (isempty(_JW_TEST_FILTER) || occursin(_JW_TEST_FILTER, ti.name))

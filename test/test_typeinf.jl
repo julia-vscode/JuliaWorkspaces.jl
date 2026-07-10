@@ -138,6 +138,22 @@ end
     @test scopeof(body.args[8], meta_dict).names["i"].type === nothing         # 1:length(n)
 end
 
+@testitem "range bounds with Bool/UInt literals stay uninferred" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof, CoreTypes
+
+    # Julia promotes Bool/UInt8 range bounds (`false:3` isa UnitRange{Int}),
+    # so the first bound's literal type is not the eltype — stay inconclusive.
+    cst, meta_dict = parse_and_pass("""
+    for x in false:3 end
+    for x in 0x1:10 end
+    for x in 1:3 end
+    """)
+
+    @test scopeof(cst.args[1], meta_dict).names["x"].type === nothing
+    @test scopeof(cst.args[2], meta_dict).names["x"].type === nothing
+    @test CoreTypes.isint(scopeof(cst.args[3], meta_dict).names["x"].type)
+end
+
 @testitem "Vector{T} infer" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: scopeof
 

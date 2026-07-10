@@ -69,15 +69,12 @@ function _fcall_arg_number(x)
 end
 
 """
-    _collect_signatures(x, meta_dict, env, runtime; match_call=false)
+    _collect_signatures(x, meta_dict, env, runtime)
 
 Given an EXPR `x` inside a call, collect all signature information for the
-called function. When `match_call` is true, only signatures whose method is
-type-compatible with the call's arguments are collected — used by inlay hints
-to pick the actually-called overload rather than the first one of matching
-arity.
+called function.
 """
-function _collect_signatures(x, meta_dict::MetaDict, env, runtime; match_call::Bool=false)
+function _collect_signatures(x, meta_dict::MetaDict, env, runtime)
     sigs = SignatureInfo[]
 
     if x isa CSTParser.EXPR && CSTParser.parentof(x) isa CSTParser.EXPR && CSTParser.iscall(CSTParser.parentof(x))
@@ -94,13 +91,7 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime; match_call::B
         if call_name !== nothing &&
                 (f_binding = StaticLint.refof(call_name, meta_dict)) !== nothing &&
                 (tls = _retrieve_toplevel_scope(call_name, meta_dict)) !== nothing
-            matcher = nothing
-            if match_call
-                store = StaticLint.getsymbols(env)
-                args, kws = StaticLint.call_arg_types(parent_call, false, meta_dict, store)
-                matcher = m -> StaticLint.match_method(args, kws, m, store, meta_dict)
-            end
-            _get_signatures(f_binding, tls, sigs, env, meta_dict, matcher)
+            _get_signatures(f_binding, tls, sigs, env, meta_dict)
         end
     end
 
@@ -108,39 +99,36 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime; match_call::B
 end
 
 # Fallback
-function _get_signatures(b, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, matcher=nothing) end
+function _get_signatures(b, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) end
 
-function _get_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, matcher=nothing)
+function _get_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict)
     if b.val isa StaticLint.Binding
-        _get_signatures(b.val, tls, sigs, env, meta_dict, matcher)
+        _get_signatures(b.val, tls, sigs, env, meta_dict)
     end
     if b.type == StaticLint.CoreTypes.Function || b.type == StaticLint.CoreTypes.DataType
-        b.val isa SymbolServer.SymStore && _get_signatures(b.val, tls, sigs, env, meta_dict, matcher)
+        b.val isa SymbolServer.SymStore && _get_signatures(b.val, tls, sigs, env, meta_dict)
         for ref in b.refs
             method = StaticLint.get_method(ref)
             if method !== nothing
-                _get_signatures(method, tls, sigs, env, meta_dict, matcher)
+                _get_signatures(method, tls, sigs, env, meta_dict)
             end
         end
     end
 end
 
-function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, matcher=nothing) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
+function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
     StaticLint.iterate_over_ss_methods(b, tls, env, function (m)
-        if matcher === nothing || matcher(m)
-            push!(sigs, SignatureInfo(
-                string(m),
-                "",
-                [ParameterInfo(string(a[1]), string(a[2])) for a in m.sig]
-            ))
-        end
+        push!(sigs, SignatureInfo(
+            string(m),
+            "",
+            [ParameterInfo(string(a[1]), string(a[2])) for a in m.sig]
+        ))
         return false
     end)
 end
 
-function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, matcher=nothing)
+function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict)
     if CSTParser.defines_function(x)
-        (matcher === nothing || matcher(x)) || return
         sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
         params = ParameterInfo[]
         if sig isa CSTParser.EXPR && sig.args !== nothing
@@ -154,7 +142,6 @@ function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{
             push!(sigs, SignatureInfo(string(CSTParser.to_codeobject(sig)), "", params))
         end
     elseif CSTParser.defines_struct(x)
-        (matcher === nothing || matcher(x)) || return
         args = x.args[3]
         if length(args) > 0
             if !any(CSTParser.defines_function, args.args)
@@ -168,6 +155,135 @@ function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{
             end
         end
     end
+end
+
+# ============================================================================
+# Call-site method matching (parameter names for hover and inlay hints)
+# ============================================================================
+
+# Positional index of `x` among the call's arguments, skipping the
+# `;`-parameters block and inline kwargs. Returns `nothing` when `x` is not a
+# positional argument, or when a splat at/before its position makes the
+# mapping to declared parameters unknowable.
+function _call_positional_arg_index(call::CSTParser.EXPR, x::CSTParser.EXPR)
+    call.args === nothing && return nothing
+    idx = 0
+    for i in 2:length(call.args)
+        a = call.args[i]
+        (CSTParser.isparameters(a) || CSTParser.iskwarg(a)) && continue
+        CSTParser.issplat(a) && return nothing
+        idx += 1
+        a == x && return idx
+    end
+    return nothing
+end
+
+function _sig_param_name(arg::CSTParser.EXPR, meta_dict::MetaDict)
+    arg = StaticLint.unwrap_nospecialize(arg)
+    inner = CSTParser.iskwarg(arg) ? arg.args[1] : arg
+    b = StaticLint.bindingof(arg, meta_dict)
+    b === nothing && (b = StaticLint.bindingof(inner, meta_dict))
+    if b isa StaticLint.Binding && CSTParser.valof(b.name) isa String
+        return CSTParser.valof(b.name)
+    end
+    nm = CSTParser.get_arg_name(inner)
+    nmval = nm isa CSTParser.EXPR ? CSTParser.str_value(nm) : nothing
+    return nmval isa String ? nmval : ""
+end
+
+# Positional parameter names of a matched method as `(names, vararg)`, where
+# `vararg` says the last name is a trailing vararg; `nothing` when they can't
+# be derived.
+_method_param_names(m, meta_dict::MetaDict) = nothing
+
+function _method_param_names(m::SymbolServer.MethodStore, meta_dict::MetaDict)
+    names = String[string(first(p)) for p in m.sig]
+    va = !isempty(m.sig) && StaticLint.CoreTypes.isva(last(m.sig)[2])
+    return (names, va)
+end
+
+function _method_param_names(m::CSTParser.EXPR, meta_dict::MetaDict)
+    if CSTParser.defines_function(m)
+        sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(m))
+        (sig isa CSTParser.EXPR && sig.args !== nothing) || return nothing
+        names = String[]
+        va = false
+        for i in 2:length(sig.args)
+            arg = sig.args[i]
+            CSTParser.isparameters(arg) && continue
+            push!(names, _sig_param_name(arg, meta_dict))
+            inner = StaticLint.unwrap_nospecialize(arg)
+            va = CSTParser.issplat(inner) || StaticLint.is_explicit_vararg_decl(inner)
+        end
+        return (names, va)
+    elseif CSTParser.defines_struct(m)
+        args = m.args[3]
+        args.args === nothing && return nothing
+        inner = findfirst(CSTParser.defines_function, args.args)
+        inner !== nothing && return _method_param_names(args.args[inner], meta_dict)
+        return (String[_sig_param_name(field, meta_dict) for field in args.args], false)
+    end
+    return nothing
+end
+
+"""
+    _resolve_call_param_names(call, meta_dict, env)
+
+Positional parameter-name lists of the methods matching `call` (arity- and
+type-checked by `StaticLint.find_methods`, the same matcher the
+`IncorrectCallArgs` lint semantics build on). Returns `nothing` when the
+callee or no matching method resolves. Never throws.
+"""
+function _resolve_call_param_names(call::CSTParser.EXPR, meta_dict::MetaDict, env)
+    try
+        methods = StaticLint.find_methods(call, StaticLint.getsymbols(env), meta_dict)
+        names = Tuple{Vector{String},Bool}[]
+        for m in methods
+            ns = _method_param_names(m, meta_dict)
+            ns === nothing || push!(names, ns)
+        end
+        return isempty(names) ? nothing : names
+    catch
+        return nothing
+    end
+end
+
+_usable_param_name(name::String) = !(isempty(name) || startswith(name, "#") || name == "_")
+
+# First usable name at position `arg_i` among the matched methods' parameter
+# lists, as `(; name, vararg, slot)`: `vararg` says the position binds the
+# trailing vararg whose declared position is `slot`.
+function _pick_call_arg_name(names::Vector{Tuple{Vector{String},Bool}}, arg_i::Int)
+    arg_i < 1 && return nothing
+    for (ns, va) in names
+        isempty(ns) && continue
+        if arg_i <= length(ns)
+            name = ns[arg_i]
+            _usable_param_name(name) || continue
+            return (name = name, vararg = va && arg_i == length(ns), slot = length(ns))
+        elseif va
+            name = last(ns)
+            _usable_param_name(name) || continue
+            return (name = name, vararg = true, slot = length(ns))
+        end
+    end
+    return nothing
+end
+
+"""
+    _resolve_call_arg_name(call, x, meta_dict, env)
+
+Name of the positional parameter that call argument `x` supplies, from the
+methods matching `call`, as `(; name, vararg, slot)` (see
+`_pick_call_arg_name`). Returns `nothing` when no matching method provides a
+usable name. Never throws.
+"""
+function _resolve_call_arg_name(call::CSTParser.EXPR, x::CSTParser.EXPR, meta_dict::MetaDict, env)
+    arg_i = _call_positional_arg_index(call, x)
+    arg_i === nothing && return nothing
+    names = _resolve_call_param_names(call, meta_dict, env)
+    names === nothing && return nothing
+    return _pick_call_arg_name(names, arg_i)
 end
 
 # ============================================================================

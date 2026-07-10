@@ -105,75 +105,54 @@ end
 # ============================================================================
 
 """
-    _get_inlay_parameter_hints(x, meta_dict, env, runtime, config, pos)
+    _get_inlay_parameter_hints(x, meta_dict, env, config, pos, st, name_cache)
 
 Check whether EXPR `x` (which is an argument inside a call) should get a
 parameter-name inlay hint.  Returns an `InlayHintResult` or `nothing`.
+`name_cache` memoizes the per-call method matching across the call's
+arguments.
 """
-function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, pos::Int, st::SourceText, pars_cache::IdDict{CSTParser.EXPR,Any}=IdDict{CSTParser.EXPR,Any}())
+function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, config::InlayHintConfig, pos::Int, st::SourceText, name_cache::IdDict{CSTParser.EXPR,Any})
     if config.parameter_names === :all || (config.parameter_names === :literals && CSTParser.isliteral(x))
-        # Only positional arguments get parameter-name hints — the `;`-kwarg
-        # block and inline `kw = v` args name themselves.
-        (CSTParser.isparameters(x) || CSTParser.iskwarg(x)) && return nothing
         call = CSTParser.parentof(x)
-        is_positional(a) = !(CSTParser.isparameters(a) || CSTParser.iskwarg(a))
-        # Count positional args only (exclude the callee at index 1), so a
-        # trailing kwarg doesn't inflate the arity used to pick the overload.
-        nargs = count(is_positional, call.args) - 1
-        nargs < 2 && return nothing
-        # The matched signature is a property of the call, not the argument —
-        # compute it once per call node, not once per argument.
-        pars = get!(pars_cache, call) do
-            # Prefer the overload whose parameter types match the call arguments;
-            # fall back to all overloads when nothing matches (e.g. unresolved types).
-            sigs = _collect_signatures(x, meta_dict, env, runtime; match_call=true)
-            isempty(sigs) && (sigs = _collect_signatures(x, meta_dict, env, runtime))
-            filter!(s -> length(s.parameters) == nargs, sigs)
-            isempty(sigs) ? nothing : first(sigs).parameters
-        end
-        pars === nothing && return nothing
-        # 1-based index of x among the positional args. If x isn't one of them
-        # (e.g. the walker handed us a trivia node), don't emit a hint.
-        thisarg = 0
-        found = false
-        for i in 2:length(call.args)
-            is_positional(call.args[i]) || continue
-            thisarg += 1
-            if call.args[i] == x
-                found = true
-                break
+        call.args === nothing && return nothing
+        npos = count(i -> !(CSTParser.isparameters(call.args[i]) || CSTParser.iskwarg(call.args[i])), 2:length(call.args))
+        npos < 2 && return nothing
+        arg_i = _call_positional_arg_index(call, x)
+        arg_i === nothing && return nothing
+        names = get!(() -> _resolve_call_param_names(call, meta_dict, env), name_cache, call)
+        names === nothing && return nothing
+        picked = _pick_call_arg_name(names, arg_i)
+        picked === nothing && return nothing
+        # label a trailing vararg only on its first bound argument
+        picked.vararg && arg_i > picked.slot && return nothing
+        label = picked.vararg ? string(picked.name, "...") : picked.name
+        length(picked.name) <= 2 && return nothing
+        CSTParser.str_value(x) == picked.name && return nothing
+        if CSTParser.headof(x) isa CSTParser.EXPR && CSTParser.headof(CSTParser.headof(x)) === :OPERATOR && CSTParser.valof(CSTParser.headof(x)) == "."
+            if x.args !== nothing && !isempty(x.args) && x.args[end] isa CSTParser.EXPR &&
+                    x.args[end].args !== nothing && !isempty(x.args[end].args) && x.args[end].args[end] isa CSTParser.EXPR
+                CSTParser.valof(x.args[end].args[end]) == picked.name && return nothing
             end
         end
-        if found && thisarg <= length(pars)
-            label = pars[thisarg].label
-            label == "#unused#" && return nothing
-            length(label) <= 2 && return nothing
-            CSTParser.str_value(x) == label && return nothing
-            if CSTParser.headof(x) isa CSTParser.EXPR && CSTParser.headof(CSTParser.headof(x)) === :OPERATOR && CSTParser.valof(CSTParser.headof(x)) == "."
-                if x.args !== nothing && !isempty(x.args) && x.args[end] isa CSTParser.EXPR &&
-                        x.args[end].args !== nothing && !isempty(x.args[end].args) && x.args[end].args[end] isa CSTParser.EXPR
-                    CSTParser.valof(x.args[end].args[end]) == label && return nothing
-                end
-            end
-            return InlayHintResult(position_at(st, pos + 1), string(label, "="), :parameter, false, false)
-        end
+        return InlayHintResult(position_at(st, pos + 1), string(label, "="), :parameter, false, false)
     end
     return nothing
 end
 
 """
-    _collect_inlay_hints(x, meta_dict, env, runtime, config, start, stop, pos, hints)
+    _collect_inlay_hints(x, meta_dict, env, config, start, stop, pos, hints, name_cache)
 
 Recursively walk the CST within range [start, stop] collecting inlay hints
 for parameter names and variable types.
 """
-function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, start::Int, stop::Int, st::SourceText, pos::Int=0, hints::Vector{InlayHintResult}=InlayHintResult[], pars_cache::IdDict{CSTParser.EXPR,Any}=IdDict{CSTParser.EXPR,Any}())
+function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, config::InlayHintConfig, start::Int, stop::Int, st::SourceText, pos::Int=0, hints::Vector{InlayHintResult}=InlayHintResult[], name_cache::IdDict{CSTParser.EXPR,Any}=IdDict{CSTParser.EXPR,Any}())
     # Parameter name hints: x is a call argument (not the callee)
     if CSTParser.parentof(x) isa CSTParser.EXPR &&
             CSTParser.iscall(CSTParser.parentof(x)) &&
             !(CSTParser.parentof(CSTParser.parentof(x)) isa CSTParser.EXPR && CSTParser.defines_function(CSTParser.parentof(CSTParser.parentof(x)))) &&
             CSTParser.parentof(x).args[1] != x
-        maybe_hint = _get_inlay_parameter_hints(x, meta_dict, env, runtime, config, pos, st, pars_cache)
+        maybe_hint = _get_inlay_parameter_hints(x, meta_dict, env, config, pos, st, name_cache)
         if maybe_hint !== nothing
             push!(hints, maybe_hint)
         end
@@ -192,7 +171,7 @@ function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runti
     if length(x) > 0
         for a in x
             if pos < stop && pos + a.fullspan > start
-                _collect_inlay_hints(a, meta_dict, env, runtime, config, start, stop, st, pos, hints, pars_cache)
+                _collect_inlay_hints(a, meta_dict, env, config, start, stop, st, pos, hints, name_cache)
             end
             pos += a.fullspan
             pos > stop && break
@@ -219,5 +198,5 @@ function _get_inlay_hints(runtime, uri::URI, start_offset::Int, end_offset::Int,
 
     st = input_text_file(runtime, uri).content
 
-    return _collect_inlay_hints(cst, meta_dict, env, runtime, config, start_offset, end_offset, st, 0, hints)
+    return _collect_inlay_hints(cst, meta_dict, env, config, start_offset, end_offset, st, 0, hints)
 end
