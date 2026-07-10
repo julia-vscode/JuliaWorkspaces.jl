@@ -1027,10 +1027,12 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
     elseif state.x isa CSTParser.EXPR && _is_in_import_statement(state.x) || _relative_dot_depth_at(st.content, offset) > 0
         _import_completions(ppt, pt, t, is_at_end, state.x, state)
     elseif t isa CSTParser.Tokens.Token && t.kind == Tokens.DOT && pt isa CSTParser.Tokens.Token && pt.kind == Tokens.IDENTIFIER
-        px = _get_expr(cst, offset - (1 + t.endbyte - t.startbyte))
+        px = _get_expr(cst, t.startbyte)
         _get_dot_completion(px, "", state)
     elseif t isa CSTParser.Tokens.Token && t.kind == Tokens.IDENTIFIER && pt isa CSTParser.Tokens.Token && pt.kind == Tokens.DOT && ppt isa CSTParser.Tokens.Token && ppt.kind == Tokens.IDENTIFIER
-        px = _get_expr(cst, offset - (1 + t.endbyte - t.startbyte) - (1 + pt.endbyte - pt.startbyte))
+        # anchor on the dot token, not the cursor: with the cursor mid-token,
+        # subtracting whole token lengths from `offset` overshoots to the left
+        px = _get_expr(cst, pt.startbyte)
         _get_dot_completion(px, t.val, state)
     elseif t isa CSTParser.Tokens.Token && t.kind == Tokens.IDENTIFIER
         if is_at_end && state.x !== nothing

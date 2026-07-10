@@ -225,6 +225,18 @@ end
 
     # only the fields, not type params or inner constructor names
     @test sort([item.label for item in result.items]) == ["val1", "val2"]
+
+    # partial field: cursor at the end and in the middle of "va"
+    source2 = replace(source, "x.\n" => "x.va\n")
+    uri2 = URI("file:///compfield/test2.jl")
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(uri2, SourceText(source2, "julia")))
+
+    index_mid = findfirst("x.va", source2)[end]  # between "v" and "a"
+    for index in (index_mid, index_mid + 1)
+        result2 = get_completions(jw2, uri2, index)
+        @test sort([item.label for item in result2.items]) == ["val1", "val2"]
+    end
 end
 
 @testitem "Completions: token completions" begin
