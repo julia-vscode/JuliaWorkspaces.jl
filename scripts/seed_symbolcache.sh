@@ -40,7 +40,7 @@ done
 [[ -n "$REMOTE" ]] || { echo "[seed] ERROR: --remote is required" >&2; usage >&2; exit 2; }
 [[ -n "$STORE"  ]] || { echo "[seed] ERROR: --store is required"  >&2; usage >&2; exit 2; }
 STORE="${STORE%/}"
-WORK="${WORK:-$(mktemp -d /tmp/seed_symbolcache.XXXXXX)}"
+WORK="${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/seed_symbolcache.XXXXXX")}"
 PFX="${STORE_PREFIX}"
 STATE="$PFX/_state"
 

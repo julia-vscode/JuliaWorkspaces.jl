@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$REMOTE" ]] || { echo "[reconcile] ERROR: --remote is required" >&2; usage >&2; exit 2; }
-WORK="${WORK:-$(mktemp -d /tmp/reconcile_symbolcache.XXXXXX)}"
+WORK="${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/reconcile_symbolcache.XXXXXX")}"
 
 PFX="${STORE_PREFIX}"
 STATE="$PFX/_state"

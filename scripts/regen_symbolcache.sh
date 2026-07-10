@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$REMOTE" ]] || { echo "[regen] ERROR: --remote is required" >&2; usage >&2; exit 2; }
-WORK="${WORK:-$(mktemp -d /tmp/regen_symbolcache.XXXXXX)}"
+WORK="${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/regen_symbolcache.XXXXXX")}"
 SWEEP_CMD="${SWEEP_CMD:-bash ${SCRIPT_DIR}/run_cloudindex_docker.sh}"
 PKG="$(dirname "$SCRIPT_DIR")"  # package root == scripts/..
 

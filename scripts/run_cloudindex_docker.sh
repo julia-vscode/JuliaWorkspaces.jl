@@ -61,7 +61,7 @@ done
 command -v julia  >/dev/null || { echo "julia not found on PATH" >&2; exit 1; }
 command -v docker >/dev/null || { echo "docker not found on PATH" >&2; exit 1; }
 
-WORK=${WORK:-$(mktemp -d /tmp/jwci.XXXXXX)}
+WORK=${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/jwci.XXXXXX")}
 mkdir -p "$WORK/store" "$WORK/depot"
 
 # Inject defaults only when the user didn't supply them.
