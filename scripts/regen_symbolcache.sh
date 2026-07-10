@@ -122,10 +122,12 @@ echo "[regen] sweep complete"
 if [[ -f "$sweepwork/results.jsonl" ]]; then
     echo "[regen] sweep status counts:"
     jq -r '.status' "$sweepwork/results.jsonl" | sort | uniq -c | sort -rn | sed 's/^/[regen]   /'
+    # Best-effort: tolerate records without name/version/error and the SIGPIPE
+    # jq takes when head stops reading (exit 141 would otherwise kill the script).
     samples=$(jq -r 'select(.status != "ok" and .status != "cancelled")
-        | "\(.name)@\(.version) [\(.status)]: " +
-          ((.error | split("\n") | (map(select(startswith("jwcloudindex-worker:"))) + map(select(. != "")))[0]) // "")' \
-        "$sweepwork/results.jsonl" | head -5 | cut -c1-300)
+        | "\(.name // "?")@\(.version // "?") [\(.status)]: " +
+          (((.error // "") | split("\n") | (map(select(startswith("jwcloudindex-worker:"))) + map(select(. != "")))[0]) // "")' \
+        "$sweepwork/results.jsonl" 2>/dev/null | head -5 | cut -c1-300 || true)
     if [[ -n "$samples" ]]; then
         echo "[regen] sample failures (first 5, see results.jsonl for full errors):"
         sed 's/^/[regen]   /' <<< "$samples"
