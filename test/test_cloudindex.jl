@@ -518,6 +518,47 @@ end
     end
 end
 
+@testitem "CloudIndex: progress lines carry a one-line error snippet on failure" begin
+    using JuliaWorkspaces.CloudIndexApp: PkgVersion, IndexOpts, run_index, _error_snippet
+
+    # Prefers the worker's terse marker line, falls back to the first non-empty
+    # line, truncates so a resolver dump cannot flood the CI log.
+    @test _error_snippet("") == ""
+    @test _error_snippet("\n   \nfirst real line\nsecond") == "first real line"
+    marked = "  Installing known registries\njwcloudindex-worker: resolve/instantiate failed: Could not resolve host\nStacktrace:"
+    @test _error_snippet(marked) == "jwcloudindex-worker: resolve/instantiate failed: Could not resolve host"
+    long = _error_snippet("x"^500)
+    @test length(long) == 200 && endswith(long, "…")
+
+    u = Base.UUID("22222222-2222-2222-2222-222222222222")
+    pv = PkgVersion("Bad", u, v"1.0.0", "hbad", false, nothing)
+
+    mktempdir() do root
+        store = joinpath(root, "store"); work = joinpath(root, "work"); depot = joinpath(root, "depot")
+        jwfake = joinpath(root, "jw", "CloudIndex"); mkpath(jwfake); mkpath(store)
+        # Stub worker that fails resolution (exit 10) after a terse marker line.
+        write(joinpath(jwfake, "worker.jl"), raw"""
+        println(stderr, "jwcloudindex-worker: resolve/instantiate failed: boom")
+        exit(10)
+        """)
+
+        errfile = joinpath(root, "stderr.txt")
+        open(errfile, "w") do io
+            redirect_stderr(io) do
+                run_index([pv], IndexOpts(store=store, depot=depot, workdir=work,
+                    jwroot=joinpath(root, "jw"), jobs=1, resume=false,
+                    julia_exe=joinpath(Sys.BINDIR, Base.julia_exename())))
+            end
+        end
+        out = read(errfile, String)
+
+        @test occursin("unsatisfiable", out)
+        @test occursin("— jwcloudindex-worker: resolve/instantiate failed: boom", out)
+        # Still single-line per completion, no cursor control.
+        @test !occursin('\r', out)
+    end
+end
+
 @testitem "CloudIndex: parse_args maps flags to FilterSpec and config" begin
     using JuliaWorkspaces.CloudIndexApp: parse_args
 

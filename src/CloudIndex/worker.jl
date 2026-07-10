@@ -18,6 +18,14 @@ const EXIT_UNSAT = 10
 const EXIT_INDEX = 20
 const EXIT_INTERRUPTED = 130   # 128 + SIGINT; the driver maps this to :cancelled
 
+# Terse single-line failure summary; the driver lifts this line into its
+# progress output, so keep it greppable and bounded (the full error with
+# backtrace still follows via @error).
+function report_failure(stage, err)
+    msg = replace(sprint(showerror, err), r"\s*\n\s*" => " | ")
+    println(stderr, "jwcloudindex-worker: ", stage, " failed: ", first(msg, 1000))
+end
+
 # argv[1] = JuliaWorkspaces `src/` dir. symbolserver.jl is one level up from it.
 const SYMBOLSERVER_JL = abspath(joinpath(ARGS[1], "..",
     "juliadynamicanalysisprocess", "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
@@ -46,6 +54,7 @@ function ensure_installed(uuid_s, name, version_s)
         Pkg.instantiate()
     catch err
         err isa InterruptException && return EXIT_INTERRUPTED
+        report_failure("resolve/instantiate", err)
         @error "resolve/instantiate failed" exception=(err, catch_backtrace())
         return EXIT_UNSAT
     end
@@ -91,6 +100,7 @@ function index_and_scrub(store_path)
         end
     catch err
         err isa InterruptException && return EXIT_INTERRUPTED
+        report_failure("index/scrub", err)
         @error "index/scrub failed" exception=(err, catch_backtrace())
         return EXIT_INDEX
     end

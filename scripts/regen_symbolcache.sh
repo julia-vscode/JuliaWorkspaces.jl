@@ -116,6 +116,22 @@ $SWEEP_CMD \
 
 echo "[regen] sweep complete"
 
+# Surface systemic failures directly in the CI log: per-status counts plus the
+# terse per-worker error line for a few samples (full stderr per version stays
+# in results.jsonl).
+if [[ -f "$sweepwork/results.jsonl" ]]; then
+    echo "[regen] sweep status counts:"
+    jq -r '.status' "$sweepwork/results.jsonl" | sort | uniq -c | sort -rn | sed 's/^/[regen]   /'
+    samples=$(jq -r 'select(.status != "ok" and .status != "cancelled")
+        | "\(.name)@\(.version) [\(.status)]: " +
+          ((.error | split("\n") | (map(select(startswith("jwcloudindex-worker:"))) + map(select(. != "")))[0]) // "")' \
+        "$sweepwork/results.jsonl" | head -5 | cut -c1-300)
+    if [[ -n "$samples" ]]; then
+        echo "[regen] sample failures (first 5, see results.jsonl for full errors):"
+        sed 's/^/[regen]   /' <<< "$samples"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Step 4: Compute new lists
 # ---------------------------------------------------------------------------

@@ -133,13 +133,29 @@ function _run_one(pv::PkgVersion, opts::IndexOpts, cancelled::Ref{Bool} = Ref(fa
 end
 
 
+# One line of the worker's stderr for the progress output: prefer the terse
+# `jwcloudindex-worker:` summary the worker prints on failure, else the first
+# non-empty line; truncated so a resolver conflict dump cannot flood the log.
+function _error_snippet(errmsg::AbstractString; maxlen::Int = 200)
+    lines = split(errmsg, '\n')
+    i = findfirst(l -> startswith(l, "jwcloudindex-worker:"), lines)
+    i === nothing && (i = findfirst(l -> !isempty(strip(l)), lines))
+    i === nothing && return ""
+    s = strip(lines[i])
+    return length(s) <= maxlen ? String(s) : string(first(s, maxlen - 1), "…")
+end
+
 # CI-friendly progress: one plain, newline-terminated line per completion (no
 # cursor control / carriage returns), e.g. "[  3/120] ok            Foo@1.2.0  (23.1s)".
+# Non-ok results carry a one-line error snippet so systemic failures (broken
+# network/mounts in the worker environment) are visible without results.jsonl.
 function _progress_line(done::Int, total::Int, r::Result)
     w = ndigits(total)
-    return string("[", lpad(done, w), "/", total, "] ",
+    line = string("[", lpad(done, w), "/", total, "] ",
                   rpad(string(r.status), 13), " ",
                   r.pv.name, "@", r.pv.version, "  (", round(r.duration; digits = 1), "s)")
+    snip = r.status === :ok || r.status === :cancelled ? "" : _error_snippet(r.error)
+    return isempty(snip) ? line : string(line, "  — ", snip)
 end
 
 """
