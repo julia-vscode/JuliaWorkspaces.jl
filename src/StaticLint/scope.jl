@@ -98,9 +98,11 @@ function introduces_scope(x::EXPR, state)
     return false
 end
 
-# `@testitem` (TestItemRunner) runs each block in a fresh module and `@testset`
-# evaluates in a local scope, so bindings inside them don't leak — give them
-# their own Scope to avoid false InvalidRedefofConst across sibling blocks.
+# `@testitem` (TestItemRunner) runs each block in a fresh module, `@testset`
+# evaluates in a local scope, and `@safetestset` (SafeTestsets) wraps its body
+# in a fresh module — so bindings inside them don't leak. Give each its own
+# Scope to avoid false InvalidRedefofConst / CannotDefineFuncAlreadyHasValue
+# across sibling blocks.
 function is_scope_introducing_macrocall(x::EXPR)
     CSTParser.ismacrocall(x) || return false
     name = x.args[1]
@@ -110,7 +112,7 @@ function is_scope_introducing_macrocall(x::EXPR)
     end
     isidentifier(name) || return false
     n = valofid(name)
-    return n == "@testitem" || n == "@testset"
+    return n == "@testitem" || n == "@testset" || n == "@safetestset"
 end
 
 

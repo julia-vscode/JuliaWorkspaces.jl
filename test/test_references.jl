@@ -296,3 +296,36 @@ end
     highlights = get_highlights(jw, uri, 1)
     @test isempty(highlights)
 end
+
+@testitem "References: definition of reassigned local (issue #101)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_definitions
+    using JuliaWorkspaces.URIs2: URI
+
+    # A local reassigned inside a (soft) loop scope is a single variable; every
+    # occurrence of `a` should resolve go-to-definition to the original
+    # declaration `a = 0`, not the loop reassignment `a = x`.
+    source = "function foo()\n    a = 0\n    for x in [1, 2, 3]\n        a = x\n    end\n    a\nend\n"
+    uri = URI("file:///reassign.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # (line, col) of `a` at: the declaration, the loop reassignment, the use.
+    for (line, col) in ((2, 5), (4, 9), (6, 5))
+        idx = string_index(source, line, col)
+        defs = get_definitions(jw, uri, idx)
+        @test length(defs) == 1
+        @test defs[1].uri == uri
+        @test defs[1].start.line == 2      # the `a = 0` line (1-based)
+        @test defs[1].start.column == 5    # the `a`
+    end
+end

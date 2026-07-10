@@ -1120,22 +1120,26 @@ end
     @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === nothing
 end
 
-@testitem "check_farg_unused literal body" setup=[shared_static_lint] begin
+@testitem "check_farg_unused literal body (#96)" setup=[shared_static_lint] begin
     import CSTParser
-    using JuliaWorkspaces.StaticLint: errorof
+    using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument
 
+    # An unused argument is flagged even when the body is a single literal —
+    # long form and short form alike (#96).
     cst, meta_dict = parse_and_pass("function f(arg) 1 end")
-
-    @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === nothing
+    @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === UnusedFunctionArgument
 end
 
-@testitem "check_farg_unused short form definition" setup=[shared_static_lint] begin
+@testitem "check_farg_unused short form definition (#96)" setup=[shared_static_lint] begin
     import CSTParser
-    using JuliaWorkspaces.StaticLint: errorof
+    using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument
 
     cst, meta_dict = parse_and_pass("f(arg) = true")
+    @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === UnusedFunctionArgument
 
-    @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === nothing
+    # ...but a used argument is still fine.
+    cst2, meta_dict2 = parse_and_pass("h(x) = x + 1")
+    @test errorof(CSTParser.get_sig(cst2[1])[3], meta_dict2) === nothing
 end
 
 @testitem "check_farg_unused nospecialize argument" setup=[shared_static_lint] begin
@@ -2692,6 +2696,94 @@ end
         helpers = filter(x -> JuliaWorkspaces.CSTParser.valof(x) == "helper", get_ids(cst.args[2]))
         @test length(helpers) == 1
         @test refof(helpers[1], meta_dict) !== nothing
+    end
+end
+
+@testitem "@safetestset blocks have isolated scopes (#84)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof, errorof, Scope, CannotDefineFuncAlreadyHasValue
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # SafeTestsets wraps each block in a fresh module, so a value binding in one
+    # block and a function of the same name in a sibling block must not collide.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @safetestset "t1" begin
+            foo = 1
+        end
+        @safetestset "t2" begin
+            foo() = 2
+        end
+        """)
+        @test scopeof(cst.args[1], meta_dict) isa Scope
+        @test scopeof(cst.args[2], meta_dict) isa Scope
+        @test scopeof(cst.args[1], meta_dict) !== scopeof(cst.args[2], meta_dict)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    # The suppression is narrowly scoped: a plain top-level value/function
+    # collision (no @safetestset) is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        foo = 1
+        foo() = 2
+        """)
+        @test has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
+@testitem "identifier unicode normalization (#88)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
+
+    # ε (U+03B5) and ɛ (U+025B) are the same identifier to Julia, so assigning
+    # one and reading the other must not produce unused/undefined diagnostics.
+    let (cst, meta_dict, jw) = parse_and_pass(
+            "function f()\n    ε = 1\n    x = ɛ + 1\n    return x\nend\n")
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # A genuinely unused non-ASCII local is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass(
+            "function g()\n    ε = 1\n    return 2\nend\n")
+        @test any(errorof(x, meta_dict) === UnusedBinding for (_, x) in collect_hints(cst, meta_dict, jw))
+    end
+end
+
+@testitem "@parameters / @variables define variables (#85)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: refof
+    import CSTParser
+
+    function ids_named(x, name, out=CSTParser.EXPR[])
+        if CSTParser.headof(x) === :IDENTIFIER && CSTParser.valof(x) == name
+            push!(out, x)
+        end
+        if x.args !== nothing
+            for a in x.args
+                a isa CSTParser.EXPR && ids_named(a, name, out)
+            end
+        end
+        out
+    end
+
+    # Symbolics/ModelingToolkit @parameters introduces its arguments; both the
+    # declaration and later uses must resolve.
+    let (cst, meta_dict, jw) = parse_and_pass("@parameters param1, param2\nf() = param1 + param2\n")
+        for nm in ("param1", "param2")
+            occ = ids_named(cst, nm)
+            @test length(occ) == 2   # declaration + use
+            @test all(refof(i, meta_dict) !== nothing for i in occ)
+        end
+    end
+
+    # @variables with a dependent variable `x(t)` and an array form `y[1:3]`.
+    let (cst, meta_dict, jw) = parse_and_pass("@variables t x(t) y[1:3]\ng() = x + t\n")
+        for nm in ("t", "x", "y")
+            @test all(refof(i, meta_dict) !== nothing for i in ids_named(cst, nm))
+        end
+    end
+
+    # A genuinely undefined name alongside @parameters is still flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("@parameters a\nm() = a + zzz_undef\n")
+        @test refof(only(ids_named(cst, "zzz_undef")), meta_dict) === nothing
     end
 end
 

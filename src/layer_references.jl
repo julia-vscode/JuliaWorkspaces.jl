@@ -154,6 +154,27 @@ function _resolve_shadow_binding(b::StaticLint.Binding, visited=StaticLint.Bindi
 end
 
 """
+    _canonical_local_definition(b, meta_dict)
+
+For a plain reassignable local, StaticLint creates a distinct `Binding` at every
+assignment (issue #101), so `refof` on a use points at the nearest assignment
+rather than the variable's original declaration. Remap such a binding to the
+earliest same-named binding in its scope so go-to-definition lands on the
+original declaration. Anything that isn't an assignment-introduced named local
+(functions, types, modules, parameters, iteration variables, …) is returned
+unchanged.
+"""
+_canonical_local_definition(b, meta_dict) = b
+function _canonical_local_definition(b::StaticLint.Binding, meta_dict)
+    (b.val isa CSTParser.EXPR && b.type === nothing &&
+        StaticLint.isidentifier(b.name) && CSTParser.isassignment(b.val)) || return b
+    bindings = StaticLint.loose_bindings(b, meta_dict)
+    # `loose_bindings` collects in source order, so the first entry is the
+    # earliest (original) binding site.
+    isempty(bindings) ? b : first(bindings)
+end
+
+"""
     _get_file_loc(x::CSTParser.EXPR, runtime)
 
 Return `(uri, offset)` for the given EXPR node by walking parents to the file
@@ -283,6 +304,7 @@ function _get_definitions(runtime, uri::URI, offset::Int)
     if x isa CSTParser.EXPR && StaticLint.hasref(x, meta_dict)
         b = StaticLint.refof(x, meta_dict)
         b = _resolve_shadow_binding(b)
+        b = _canonical_local_definition(b, meta_dict)
         tls = _retrieve_toplevel_scope(x, meta_dict)
         tls === nothing && return results
         _get_definitions_from_val(b, tls, env, results, runtime)

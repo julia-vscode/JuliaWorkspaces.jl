@@ -104,6 +104,13 @@ function handle_macro(x::EXPR, state)
             # bindings into the parent scope. The body_exprs are separately stored in
             # test_setups and process_EXPR'd in each @testitem's scope.
             _handle_testsnippet(x, state)
+        elseif _is_symbolics_vardef_macro(x.args[1])
+            # Symbolics/ModelingToolkit @variables / @parameters / @constants
+            # introduce their arguments as new variables. Mark them as bindings so
+            # they resolve and aren't reported as missing references (#85).
+            for i = 3:length(x.args)
+                _mark_symbolics_binding(x.args[i], meta_dict)
+            end
         # elseif _points_to_arbitrary_macro(x.args[1], :Turing, :model, state) && length(x) == 3 &&
         #     isassignment(x.args[3]) &&
         #     headof(x.args[3].args[2]) === CSTParser.Begin && length(x.args[3].args[2]) == 3 && headof(x.args[3].args[2].args[2]) === :block
@@ -321,6 +328,37 @@ end
 _is_testitem_macro(x) = isidentifier(x) && valofid(x) == "@testitem"
 _is_testmodule_macro(x) = isidentifier(x) && valofid(x) == "@testmodule"
 _is_testsnippet_macro(x) = isidentifier(x) && valofid(x) == "@testsnippet"
+
+# Symbolics/ModelingToolkit variable-defining macros. Matched by name (like the
+# TestItems macros above) so they work even when the defining package isn't
+# indexed; these names are distinctive enough that false matches are unlikely.
+function _is_symbolics_vardef_macro(x::EXPR)
+    if CSTParser.is_getfield_w_quotenode(x)
+        return _is_symbolics_vardef_macro(x.args[2].args[1])
+    end
+    isidentifier(x) || return false
+    n = valofid(x)
+    return n == "@parameters" || n == "@variables" || n == "@constants"
+end
+
+# Mark the name(s) introduced by a single argument of a Symbolics variable
+# macro. Handles bare identifiers, comma tuples, dependent-variable calls
+# (`x(t)`), array/curly forms (`y[1:3]`), typed and defaulted forms
+# (`a::Real`, `a=1`), recursing to the leading identifier.
+function _mark_symbolics_binding(arg, meta_dict)
+    arg isa EXPR || return
+    hasbinding(arg, meta_dict) && return
+    if isidentifier(arg)
+        mark_binding!(arg, meta_dict)
+    elseif CSTParser.istuple(arg) || CSTParser.isbracketed(arg)
+        for a in arg.args
+            _mark_symbolics_binding(a, meta_dict)
+        end
+    elseif (isassignment(arg) || CSTParser.isdeclaration(arg) || CSTParser.iscall(arg) ||
+            headof(arg) === :ref || CSTParser.iscurly(arg)) && length(arg.args) > 0
+        _mark_symbolics_binding(arg.args[1], meta_dict)
+    end
+end
 
 """
     _parse_testitem_kwargs(x::EXPR)
