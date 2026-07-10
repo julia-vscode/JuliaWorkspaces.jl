@@ -357,12 +357,28 @@ resolvable_macroname(x::EXPR) = isidentifier(x) && CSTParser.ismacroname(x) && r
 nameof_expr_to_resolve(x) = isidentifier(x) ? valofid(x) : nothing
 
 """
+    normalize_id(s)
+
+Normalize an identifier's characters the way Julia's parser does: NFC
+normalization plus the two folds Julia applies on top of it (`µ` U+00B5 →
+`μ` U+03BC and `ɛ` U+025B → `ε` U+03B5). CSTParser preserves the raw source
+text, so without this `ɛ` and `ε` — which Julia treats as the same variable —
+would be seen as distinct names and produce spurious unused/undefined
+diagnostics (#88). ASCII identifiers (the overwhelming majority) are returned
+unchanged, so this is a no-op on the hot path.
+"""
+normalize_id(@nospecialize(s)) = s
+normalize_id(s::String) = isascii(s) ? s : replace(Base.Unicode.normalize(s, :NFC), 'µ' => 'μ', 'ɛ' => 'ε')
+
+"""
     valofid(x)
 
 Returns the string value of an expression for which `isidentifier` is true,
-i.e. handles NONSTDIDENTIFIERs.
+i.e. handles NONSTDIDENTIFIERs. The name is normalized to match Julia's own
+identifier normalization (see [`normalize_id`](@ref)) so that scope keys and
+reference lookups line up regardless of the exact source code points.
 """
-valofid(x::EXPR) = headof(x) === :IDENTIFIER ? valof(x) : valof(x.args[2])
+valofid(x::EXPR) = normalize_id(headof(x) === :IDENTIFIER ? valof(x) : valof(x.args[2]))
 
 """
 new_within_struct(x::EXPR)

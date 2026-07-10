@@ -2727,6 +2727,23 @@ end
     end
 end
 
+@testitem "identifier unicode normalization (#88)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
+
+    # ε (U+03B5) and ɛ (U+025B) are the same identifier to Julia, so assigning
+    # one and reading the other must not produce unused/undefined diagnostics.
+    let (cst, meta_dict, jw) = parse_and_pass(
+            "function f()\n    ε = 1\n    x = ɛ + 1\n    return x\nend\n")
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # A genuinely unused non-ASCII local is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass(
+            "function g()\n    ε = 1\n    return 2\nend\n")
+        @test any(errorof(x, meta_dict) === UnusedBinding for (_, x) in collect_hints(cst, meta_dict, jw))
+    end
+end
+
 @testitem "assignment to outer local inside inner scope (#393)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
 
