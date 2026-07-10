@@ -2744,6 +2744,45 @@ end
     end
 end
 
+@testitem "@parameters / @variables define variables (#85)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: refof
+    import CSTParser
+
+    function ids_named(x, name, out=CSTParser.EXPR[])
+        if CSTParser.headof(x) === :IDENTIFIER && CSTParser.valof(x) == name
+            push!(out, x)
+        end
+        if x.args !== nothing
+            for a in x.args
+                a isa CSTParser.EXPR && ids_named(a, name, out)
+            end
+        end
+        out
+    end
+
+    # Symbolics/ModelingToolkit @parameters introduces its arguments; both the
+    # declaration and later uses must resolve.
+    let (cst, meta_dict, jw) = parse_and_pass("@parameters param1, param2\nf() = param1 + param2\n")
+        for nm in ("param1", "param2")
+            occ = ids_named(cst, nm)
+            @test length(occ) == 2   # declaration + use
+            @test all(refof(i, meta_dict) !== nothing for i in occ)
+        end
+    end
+
+    # @variables with a dependent variable `x(t)` and an array form `y[1:3]`.
+    let (cst, meta_dict, jw) = parse_and_pass("@variables t x(t) y[1:3]\ng() = x + t\n")
+        for nm in ("t", "x", "y")
+            @test all(refof(i, meta_dict) !== nothing for i in ids_named(cst, nm))
+        end
+    end
+
+    # A genuinely undefined name alongside @parameters is still flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("@parameters a\nm() = a + zzz_undef\n")
+        @test refof(only(ids_named(cst, "zzz_undef")), meta_dict) === nothing
+    end
+end
+
 @testitem "assignment to outer local inside inner scope (#393)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
 
