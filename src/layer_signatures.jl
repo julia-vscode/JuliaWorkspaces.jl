@@ -158,172 +158,115 @@ function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{
 end
 
 # ============================================================================
-# Call-site method matching (parameter names for hover)
+# Call-site method matching (parameter names for hover and inlay hints)
 # ============================================================================
 
-"""
-    struct _CallCandidate
-
-One candidate method for a call site: positional parameter `names` (`""` when
-unknown), comparable declared `types` (`nothing` when undeclared or vararg),
-and the `func_nargs`-style `counts` tuple used for arity matching.
-"""
-struct _CallCandidate
-    names::Vector{String}
-    types::Vector{Any}
-    counts::Tuple{Int,Int,Vector{Symbol},Bool}
+# Positional index of `x` among the call's arguments, skipping the
+# `;`-parameters block and inline kwargs. Returns `nothing` when `x` is not a
+# positional argument, or when a splat at/before its position makes the
+# mapping to declared parameters unknowable.
+function _call_positional_arg_index(call::CSTParser.EXPR, x::CSTParser.EXPR)
+    call.args === nothing && return nothing
+    idx = 0
+    for i in 2:length(call.args)
+        a = call.args[i]
+        (CSTParser.isparameters(a) || CSTParser.iskwarg(a)) && continue
+        CSTParser.issplat(a) && return nothing
+        idx += 1
+        a == x && return idx
+    end
+    return nothing
 end
 
-function _push_param!(names::Vector{String}, types::Vector{Any}, arg::CSTParser.EXPR, meta_dict::MetaDict)
+function _sig_param_name(arg::CSTParser.EXPR, meta_dict::MetaDict)
+    arg = StaticLint.unwrap_nospecialize(arg)
     inner = CSTParser.iskwarg(arg) ? arg.args[1] : arg
     b = StaticLint.bindingof(arg, meta_dict)
     b === nothing && (b = StaticLint.bindingof(inner, meta_dict))
     if b isa StaticLint.Binding && CSTParser.valof(b.name) isa String
-        push!(names, CSTParser.valof(b.name))
-        push!(types, CSTParser.issplat(inner) ? nothing : b.type)
-    else
-        nm = CSTParser.get_arg_name(inner)
-        nmval = nm isa CSTParser.EXPR ? CSTParser.str_value(nm) : nothing
-        push!(names, nmval isa String ? nmval : "")
-        push!(types, nothing)
+        return CSTParser.valof(b.name)
     end
-    return nothing
+    nm = CSTParser.get_arg_name(inner)
+    nmval = nm isa CSTParser.EXPR ? CSTParser.str_value(nm) : nothing
+    return nmval isa String ? nmval : ""
 end
 
-function _push_call_candidate!(candidates::Vector{_CallCandidate}, x::CSTParser.EXPR, env, meta_dict::MetaDict)
-    if CSTParser.defines_function(x)
-        sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
+# Positional parameter names of a matched method; `nothing` when they can't
+# be derived.
+_method_param_names(m, meta_dict::MetaDict) = nothing
+
+function _method_param_names(m::SymbolServer.MethodStore, meta_dict::MetaDict)
+    return String[string(first(p)) for p in m.sig]
+end
+
+function _method_param_names(m::CSTParser.EXPR, meta_dict::MetaDict)
+    if CSTParser.defines_function(m)
+        sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(m))
         (sig isa CSTParser.EXPR && sig.args !== nothing) || return nothing
         names = String[]
-        types = Any[]
         for i in 2:length(sig.args)
-            arg = StaticLint.unwrap_nospecialize(sig.args[i])
+            arg = sig.args[i]
             CSTParser.isparameters(arg) && continue
-            _push_param!(names, types, arg, meta_dict)
+            push!(names, _sig_param_name(arg, meta_dict))
         end
-        push!(candidates, _CallCandidate(names, types, StaticLint.func_nargs(x, env, meta_dict)))
-    elseif CSTParser.defines_struct(x)
-        args = x.args[3]
+        return names
+    elseif CSTParser.defines_struct(m)
+        args = m.args[3]
         args.args === nothing && return nothing
-        inner_constructors = findall(CSTParser.defines_function, args.args)
-        if !isempty(inner_constructors)
-            for i in inner_constructors
-                _push_call_candidate!(candidates, args.args[i], env, meta_dict)
-            end
-        else
-            names = String[]
-            types = Any[]
-            for field in args.args
-                _push_param!(names, types, field, meta_dict)
-            end
-            push!(candidates, _CallCandidate(names, types, StaticLint.struct_nargs(x, env, meta_dict)))
-        end
-    end
-    return nothing
-end
-
-function _push_ss_call_candidates!(candidates::Vector{_CallCandidate}, b::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, tls::StaticLint.Scope, env)
-    StaticLint.iterate_over_ss_methods(b, tls, env, function (m)
-        names = String[]
-        types = Any[]
-        for p in m.sig
-            push!(names, string(first(p)))
-            t = last(p)
-            push!(types, StaticLint.CoreTypes.isva(t) ? nothing : t)
-        end
-        push!(candidates, _CallCandidate(names, types, StaticLint.func_nargs(m)))
-        return false
-    end)
-    return nothing
-end
-
-function _collect_call_candidates!(candidates::Vector{_CallCandidate}, b, tls::StaticLint.Scope, env, meta_dict::MetaDict, depth::Int=0)
-    depth > 20 && return nothing
-    if b isa StaticLint.Binding
-        b.val isa StaticLint.Binding && _collect_call_candidates!(candidates, b.val, tls, env, meta_dict, depth + 1)
-        if b.type == StaticLint.CoreTypes.Function || b.type == StaticLint.CoreTypes.DataType
-            b.val isa Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} && _push_ss_call_candidates!(candidates, b.val, tls, env)
-            for ref in b.refs
-                method = StaticLint.get_method(ref)
-                if method isa CSTParser.EXPR
-                    _push_call_candidate!(candidates, method, env, meta_dict)
-                elseif method isa Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
-                    _push_ss_call_candidates!(candidates, method, tls, env)
-                end
-            end
-        end
-    elseif b isa Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
-        _push_ss_call_candidates!(candidates, b, tls, env)
+        inner = findfirst(CSTParser.defines_function, args.args)
+        inner !== nothing && return _method_param_names(args.args[inner], meta_dict)
+        return String[_sig_param_name(field, meta_dict) for field in args.args]
     end
     return nothing
 end
 
 """
-    _resolve_call_arg_name(call, arg_i, meta_dict, env)
+    _resolve_call_param_names(call, meta_dict, env)
 
-Name of positional parameter `arg_i` of the method that best matches `call`:
-candidates are filtered by arity, then by type compatibility of the call
-arguments whose types are cheaply inferable. Returns `nothing` when no
-matching method provides a usable name.
+Positional parameter-name lists of the methods matching `call` (arity- and
+type-checked by `StaticLint.find_methods`, the same matcher the
+`IncorrectCallArgs` lint semantics build on). Returns `nothing` when the
+callee or no matching method resolves. Never throws.
 """
-function _resolve_call_arg_name(call::CSTParser.EXPR, arg_i::Int, meta_dict::MetaDict, env)
-    # hover must never throw
+function _resolve_call_param_names(call::CSTParser.EXPR, meta_dict::MetaDict, env)
     try
-        return _resolve_call_arg_name_impl(call, arg_i, meta_dict, env)
+        methods = StaticLint.find_methods(call, StaticLint.getsymbols(env), meta_dict)
+        names = Vector{String}[]
+        for m in methods
+            ns = _method_param_names(m, meta_dict)
+            ns === nothing || push!(names, ns)
+        end
+        return isempty(names) ? nothing : names
     catch
         return nothing
     end
 end
 
-function _resolve_call_arg_name_impl(call::CSTParser.EXPR, arg_i::Int, meta_dict::MetaDict, env)
-    callee = call.args[1]
-    call_name = if CSTParser.isidentifier(callee)
-        callee
-    elseif CSTParser.iscurly(callee) && CSTParser.isidentifier(callee.args[1])
-        callee.args[1]
-    elseif CSTParser.is_getfield_w_quotenode(callee)
-        callee.args[2].args[1]
-    else
-        nothing
-    end
-    call_name === nothing && return nothing
-    f_binding = StaticLint.refof(call_name, meta_dict)
-    f_binding === nothing && return nothing
-    tls = _retrieve_toplevel_scope(call_name, meta_dict)
-    tls === nothing && return nothing
-
-    candidates = _CallCandidate[]
-    _collect_call_candidates!(candidates, f_binding, tls, env, meta_dict)
-
-    call_counts = StaticLint.call_nargs(call)
-    filter!(c -> StaticLint.compare_f_call(c.counts, call_counts), candidates)
-    isempty(candidates) && return nothing
-
-    argtypes = Any[]
-    for i in 2:length(call.args)
-        arg = call.args[i]
-        (CSTParser.isparameters(arg) || CSTParser.iskwarg(arg)) && continue
-        push!(argtypes, CSTParser.issplat(arg) ? nothing : StaticLint.infer_shallow_type(arg, meta_dict))
-    end
-
-    store = StaticLint.getsymbols(env)
-    compatible = filter(candidates) do c
-        all(enumerate(argtypes)) do (k, at)
-            at === nothing && return true
-            k <= length(c.types) || return true
-            pt = c.types[k]
-            pt === nothing && return true
-            return StaticLint._has_type_intersection(at, pt, store, meta_dict)
-        end
-    end
-
-    for c in (isempty(compatible) ? candidates : compatible)
-        1 <= arg_i <= length(c.names) || continue
-        name = c.names[arg_i]
+# First usable name at position `arg_i` among the matched methods' parameter
+# lists.
+function _pick_call_arg_name(names::Vector{Vector{String}}, arg_i::Int)
+    for ns in names
+        1 <= arg_i <= length(ns) || continue
+        name = ns[arg_i]
         (isempty(name) || startswith(name, "#") || name == "_") && continue
         return name
     end
     return nothing
+end
+
+"""
+    _resolve_call_arg_name(call, x, meta_dict, env)
+
+Name of the positional parameter that call argument `x` supplies, from the
+methods matching `call`. Returns `nothing` when no matching method provides
+a usable name. Never throws.
+"""
+function _resolve_call_arg_name(call::CSTParser.EXPR, x::CSTParser.EXPR, meta_dict::MetaDict, env)
+    arg_i = _call_positional_arg_index(call, x)
+    arg_i === nothing && return nothing
+    names = _resolve_call_param_names(call, meta_dict, env)
+    names === nothing && return nothing
+    return _pick_call_arg_name(names, arg_i)
 end
 
 # ============================================================================

@@ -418,18 +418,21 @@ function infer_literal_type(x::EXPR)
     return nothing
 end
 
-# Best-effort shallow type of an expression: a literal, or an identifier /
-# getfield chain whose binding type is known. Returns `nothing` when unknown.
-function infer_shallow_type(x::EXPR, meta_dict)
-    t = infer_literal_type(x)
-    t !== nothing && return t
+# Best-effort scalar type of an expression used as a range bound: an
+# Int/Float/Char literal, or a reference whose type is known. Bool/UInt/String
+# literals are excluded — Julia promotes such range bounds, so the bound's own
+# type is not the eltype. Returns `nothing` when unknown.
+function _infer_scalar_type(x::EXPR, meta_dict)
+    headof(x) === :INTEGER && return CoreTypes.Int
+    headof(x) === :FLOAT && return CoreTypes.Float64
+    headof(x) === :CHAR && return CoreTypes.Char
     if isidentifier(x) || CSTParser.is_getfield_w_quotenode(x)
         r = isidentifier(x) ? refof(x, meta_dict) : refof_maybe_getfield(x, meta_dict)
         r isa Binding && return r.type
     end
     return nothing
 end
-infer_shallow_type(x, meta_dict) = nothing
+_infer_scalar_type(x, meta_dict) = nothing
 
 # Is `t` (a type binding / DataTypeStore) a `Number`?
 function _is_number(t, state)
@@ -460,9 +463,9 @@ function infer_eltype(x::EXPR, state)
         return CoreTypes.Char
     elseif headof(x) === :call && length(x.args) > 2 && CSTParser.is_colon(x.args[1])
         # number ranges are likely scalar
-        t = infer_shallow_type(x.args[2], state.meta_dict)
+        t = _infer_scalar_type(x.args[2], state.meta_dict)
         if t !== nothing && all(3:length(x.args)) do i
-                b = infer_shallow_type(x.args[i], state.meta_dict)
+                b = _infer_scalar_type(x.args[i], state.meta_dict)
                 b !== nothing && (_type_compare(t, b) || (_is_number(t, state) && _is_number(b, state)))
             end
             return t

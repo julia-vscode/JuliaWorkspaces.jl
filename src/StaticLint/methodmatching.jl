@@ -30,26 +30,8 @@ function arg_type(arg, ismethod, meta_dict)
                 end
                 return type
             end
-        elseif headof(arg) === :STRING
-            return CoreTypes.String
-        elseif headof(arg) === :CHAR
-            return CoreTypes.Char
-        elseif headof(arg) === :FLOAT
-            return CoreTypes.Float64
-        elseif headof(arg) === :INTEGER
-            return CoreTypes.Int
-        elseif headof(arg) === :HEXINT
-            if length(arg.val) < 5
-                return CoreTypes.UInt8
-            elseif length(arg.val) < 7
-                return CoreTypes.UInt16
-            elseif length(arg.val) < 11
-                return CoreTypes.UInt32
-            else
-                return CoreTypes.UInt64
-            end
-        elseif headof(arg) === :TRUE || headof(arg) === :FALSE
-            return CoreTypes.Bool
+        elseif (t = infer_literal_type(arg)) !== nothing
+            return t
         elseif isquotedsymbol(arg)
             return SymbolServer.stdlibs[:Core][:Symbol]
         end
@@ -125,7 +107,19 @@ function find_methods(x::EXPR, store, meta_dict)
     if iscall(x)
         length(x.args) === 0 && return possibles
         func_ref = refof_call_func(x, meta_dict)
+        if func_ref === nothing && iscurly(first(x.args)) && first(x.args).args !== nothing &&
+                length(first(x.args).args) >= 1 && isidentifier(first(first(x.args).args)) &&
+                hasref(first(first(x.args).args), meta_dict)
+            # parametric constructor call `P{T}(...)`
+            func_ref = refof(first(first(x.args).args), meta_dict)
+        end
         func_ref === nothing && return possibles
+        # follow shadow bindings (`const g = f`), with fuel against cycles
+        fuel = 20
+        while func_ref isa Binding && func_ref.val isa Binding && fuel > 0
+            func_ref = func_ref.val
+            fuel -= 1
+        end
         args, kws = call_arg_types(x, false, meta_dict)
         if func_ref isa Binding && func_ref.val isa SymbolServer.FunctionStore ||
             func_ref isa Binding && func_ref.val isa SymbolServer.DataTypeStore

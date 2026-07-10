@@ -541,7 +541,7 @@ function _get_fcall_position(x::CSTParser.EXPR, documentation, env, meta_dict, d
                 else
                     CSTParser.str_value(fname)
                 end
-                argname = _resolve_call_arg_name(CSTParser.parentof(x), arg_i, meta_dict, env)
+                argname = _resolve_call_arg_name(CSTParser.parentof(x), x, meta_dict, env)
                 if argname === nothing
                     documentation = string("Argument $arg_i of $(minargs) in call to `", callname, "`\n", documentation)
                 else

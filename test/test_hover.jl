@@ -376,6 +376,28 @@ end
     arr2 = [4, 5, 6]
     copyto!(arr1, 1, arr2, 1, 3)
 
+    q(x::Int, qaa, qbb, qcc) = 1
+    q(x::String, qdd, qee, qff) = 2
+    qval = 1.5
+    q(qval, 2, 3, 4)
+
+    sv(sa, sb, sc, sd, sxs...) = 1
+    svt = (4, 5)
+    sv(1, 2, 3, svt..., 9)
+
+    kh(alpha, beta, gamma, delta; opt = 1) = 1
+    kh(1, 2, 3, 4; opt = 5)
+
+    struct P{X}
+        pa::X
+        pb::X
+        pc::X
+        pd::X
+        pe::X
+    end
+    P{X}(w, x, y, z) where X = P{X}(w, x, y, z, zero(X))
+    P{Int}(1, 2, 3, 4)
+
     end
     """
 
@@ -418,6 +440,34 @@ end
     result = hover_at("copyto!(arr1, 1")
     @test result !== nothing
     @test occursin(r"Argument `\w+` \(2 of 5\) in call to `copyto!`", result)
+
+    # No type-compatible method: keep the positional text instead of showing
+    # a name from an overload the call doesn't match
+    result = hover_at("q(qval, 2")
+    @test result !== nothing
+    @test occursin("Argument 2 of 4 in call to `q`", result)
+    @test !occursin(r"Argument `\w+`", result)
+
+    # Splat in the call: names before the splat resolve...
+    result = hover_at("sv(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `sb` (2 of 4) in call to `sv`", result)
+
+    # ...but positions at/after the splat are unknowable
+    result = hover_at("svt..., 9")
+    @test result !== nothing
+    @test occursin(r"Argument 5 of \d+ in call to `sv`", result)
+    @test !occursin(r"Argument `\w+`", result)
+
+    # Keyword arguments after `;` don't shift the positional index
+    result = hover_at("kh(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `beta` (2 of 4) in call to `kh`", result)
+
+    # Curly callee: parametric constructor call resolves through `P{Int}`
+    result = hover_at("P{Int}(1")
+    @test result !== nothing
+    @test occursin("Argument `w` (1 of 4) in call to `P`", result)
 end
 
 @testitem "get_doc_from_word: basic matching" begin

@@ -1,4 +1,5 @@
 @testitem "Misc: get_document_links finds file paths" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_document_links
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -37,6 +38,7 @@
 end
 
 @testitem "Misc: get_inlay_hints for variable types" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -80,6 +82,7 @@ end
 end
 
 @testitem "Misc: parameter name inlay hints use method matching" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """
@@ -129,7 +132,61 @@ end
     @test labels == ["aaa=", "bbb=", "ddd=", "eee=", "alpha=", "beta="]
 end
 
+@testitem "Misc: parameter name inlay hints positional index" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "HintPositions"
+    uuid = "92345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module HintPositions
+
+    k(alpha, beta, gamma; opt = 1) = 1
+    k(1, 2, 3; opt = 5)
+
+    m(maa, mbb, mcc = 1; opt = 0) = 1
+    m(1, opt = 2, 3)
+
+    s(aaa, bbb, ccc, sxs...) = 1
+    tup = (3, 4)
+    s(1, tup..., 9)
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hintpositions/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hintpositions/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hintpositions/src/HintPositions.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///hintpositions/src/HintPositions.jl")
+
+    config = InlayHintConfig(true, false, :all)
+    hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
+    labels = [h.label for h in hints if h.kind === :parameter]
+
+    # The `;`-parameters block and inline kwargs don't shift the positional
+    # index, kwargs themselves get no hint, and positions at/after a splat
+    # are unknowable.
+    @test labels == ["alpha=", "beta=", "gamma=", "maa=", "mbb=", "aaa="]
+end
+
 @testitem "Misc: get_inlay_hints returns empty when disabled" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = """

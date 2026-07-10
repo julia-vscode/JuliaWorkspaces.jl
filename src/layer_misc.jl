@@ -105,28 +105,24 @@ end
 # ============================================================================
 
 """
-    _get_inlay_parameter_hints(x, meta_dict, env, config, pos, st)
+    _get_inlay_parameter_hints(x, meta_dict, env, config, pos, st, name_cache)
 
 Check whether EXPR `x` (which is an argument inside a call) should get a
 parameter-name inlay hint.  Returns an `InlayHintResult` or `nothing`.
+`name_cache` memoizes the per-call method matching across the call's
+arguments.
 """
-function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, config::InlayHintConfig, pos::Int, st::SourceText)
+function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, config::InlayHintConfig, pos::Int, st::SourceText, name_cache::IdDict{CSTParser.EXPR,Any})
     if config.parameter_names === :all || (config.parameter_names === :literals && CSTParser.isliteral(x))
         call = CSTParser.parentof(x)
-        nargs = length(call.args) - 1
-        nargs < 2 && return nothing
-        CSTParser.headof(x) === :parameters && return nothing
-        thisarg = 0
-        for a in call.args
-            if x == a
-                break
-            end
-            thisarg += 1
-        end
-        # thisarg lands past nargs when x is trivia (parens/commas) rather
-        # than an actual argument
-        1 <= thisarg <= nargs || return nothing
-        label = _resolve_call_arg_name(call, thisarg, meta_dict, env)
+        call.args === nothing && return nothing
+        npos = count(i -> !(CSTParser.isparameters(call.args[i]) || CSTParser.iskwarg(call.args[i])), 2:length(call.args))
+        npos < 2 && return nothing
+        arg_i = _call_positional_arg_index(call, x)
+        arg_i === nothing && return nothing
+        names = get!(() -> _resolve_call_param_names(call, meta_dict, env), name_cache, call)
+        names === nothing && return nothing
+        label = _pick_call_arg_name(names, arg_i)
         label === nothing && return nothing
         length(label) <= 2 && return nothing
         CSTParser.str_value(x) == label && return nothing
@@ -142,18 +138,18 @@ function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env,
 end
 
 """
-    _collect_inlay_hints(x, meta_dict, env, runtime, config, start, stop, pos, hints)
+    _collect_inlay_hints(x, meta_dict, env, config, start, stop, pos, hints, name_cache)
 
 Recursively walk the CST within range [start, stop] collecting inlay hints
 for parameter names and variable types.
 """
-function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runtime, config::InlayHintConfig, start::Int, stop::Int, st::SourceText, pos::Int=0, hints::Vector{InlayHintResult}=InlayHintResult[])
+function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, config::InlayHintConfig, start::Int, stop::Int, st::SourceText, pos::Int=0, hints::Vector{InlayHintResult}=InlayHintResult[], name_cache::IdDict{CSTParser.EXPR,Any}=IdDict{CSTParser.EXPR,Any}())
     # Parameter name hints: x is a call argument (not the callee)
     if CSTParser.parentof(x) isa CSTParser.EXPR &&
             CSTParser.iscall(CSTParser.parentof(x)) &&
             !(CSTParser.parentof(CSTParser.parentof(x)) isa CSTParser.EXPR && CSTParser.defines_function(CSTParser.parentof(CSTParser.parentof(x)))) &&
             CSTParser.parentof(x).args[1] != x
-        maybe_hint = _get_inlay_parameter_hints(x, meta_dict, env, config, pos, st)
+        maybe_hint = _get_inlay_parameter_hints(x, meta_dict, env, config, pos, st, name_cache)
         if maybe_hint !== nothing
             push!(hints, maybe_hint)
         end
@@ -172,7 +168,7 @@ function _collect_inlay_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env, runti
     if length(x) > 0
         for a in x
             if pos < stop && pos + a.fullspan > start
-                _collect_inlay_hints(a, meta_dict, env, runtime, config, start, stop, st, pos, hints)
+                _collect_inlay_hints(a, meta_dict, env, config, start, stop, st, pos, hints, name_cache)
             end
             pos += a.fullspan
             pos > stop && break
@@ -199,5 +195,5 @@ function _get_inlay_hints(runtime, uri::URI, start_offset::Int, end_offset::Int,
 
     st = input_text_file(runtime, uri).content
 
-    return _collect_inlay_hints(cst, meta_dict, env, runtime, config, start_offset, end_offset, st, 0, hints)
+    return _collect_inlay_hints(cst, meta_dict, env, config, start_offset, end_offset, st, 0, hints)
 end
