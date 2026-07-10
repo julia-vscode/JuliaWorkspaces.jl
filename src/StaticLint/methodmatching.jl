@@ -1,4 +1,4 @@
-function arg_type(arg, ismethod, meta_dict)
+function arg_type(arg, ismethod, meta_dict, store=nothing)
     # Strip `@nospecialize` and `x...` wrappers — the binding/type info
     # lives on the inner expression in both cases. unwrap_nospecialize handles
     # a bare `@nospecialize` (no inner arg) safely.
@@ -7,6 +7,12 @@ function arg_type(arg, ismethod, meta_dict)
         arg = arg.args[1]
     end
     if ismethod
+        # A `x::Union{…}` declaration types the binding as the bare `Union`
+        # datatype, dropping the members. Resolve the members directly so
+        # subtyping keeps working (needs `store` for member lookup).
+        if store !== nothing && isdeclaration(arg) && length(arg.args) >= 2 && _is_union_curly(arg.args[2])
+            return _resolve_type_expr(arg.args[2], store, meta_dict)
+        end
         if hasbinding(arg, meta_dict)
             if bindingof(arg, meta_dict) isa Binding && bindingof(arg, meta_dict).type !== nothing
                 type = bindingof(arg, meta_dict).type
@@ -32,6 +38,15 @@ function arg_type(arg, ismethod, meta_dict)
             end
         elseif (t = infer_literal_type(arg)) !== nothing
             return t
+        elseif headof(arg) in (:vect, :vcat, :hcat, :ncat, :typed_vcat, :typed_hcat,
+                :typed_ncat, :comprehension, :typed_comprehension)
+            # Bare generators aren't arrays; they stay untyped.
+            return CoreTypes.Array
+        elseif headof(arg) === :ref && arg.args !== nothing && length(arg.args) >= 1 &&
+                store !== nothing && _is_type_callee(arg.args[1], store, meta_dict)
+            # `T[…]` parses like indexing, but with `T` a type it's a typed
+            # array literal.
+            return CoreTypes.Array
         elseif isquotedsymbol(arg)
             return SymbolServer.stdlibs[:Core][:Symbol]
         end
@@ -49,7 +64,7 @@ function _kw_name(x::EXPR)
     x.args !== nothing && !isempty(x.args) ? x.args[1] : x
 end
 
-function call_arg_types(call::EXPR, ismethod, meta_dict)
+function call_arg_types(call::EXPR, ismethod, meta_dict, store=nothing)
     types, kws = [], []
     call.args === nothing && return types, kws
     if length(call.args) > 1 && headof(call.args[2]) === :parameters
@@ -60,7 +75,7 @@ function call_arg_types(call::EXPR, ismethod, meta_dict)
             if CSTParser.iskwarg(call.args[i])
                 push!(kws, call.args[i].args[1])
             else
-                push!(types, arg_type(call.args[i], ismethod, meta_dict))
+                push!(types, arg_type(call.args[i], ismethod, meta_dict, store))
             end
         end
     else
@@ -69,14 +84,14 @@ function call_arg_types(call::EXPR, ismethod, meta_dict)
                 # `f(a, b, kw = v)` — kwarg without semicolon.
                 push!(kws, call.args[i].args[1])
             else
-                push!(types, arg_type(call.args[i], ismethod, meta_dict))
+                push!(types, arg_type(call.args[i], ismethod, meta_dict, store))
             end
         end
     end
     types, kws
 end
 
-function method_arg_types(call::EXPR, meta_dict)
+function method_arg_types(call::EXPR, meta_dict, store=nothing)
     types, opts, kws = [], [], []
     call.args === nothing && return types, opts, kws
     if length(call.args) > 1 && headof(call.args[2]) === :parameters
@@ -85,17 +100,17 @@ function method_arg_types(call::EXPR, meta_dict)
         end
         for i = 3:length(call.args)
             if CSTParser.iskwarg(call.args[i])
-                push!(opts, arg_type(call.args[i].args[1], true, meta_dict))
+                push!(opts, arg_type(call.args[i].args[1], true, meta_dict, store))
             else
-                push!(types, arg_type(call.args[i], true, meta_dict))
+                push!(types, arg_type(call.args[i], true, meta_dict, store))
             end
         end
     else
         for i = 2:length(call.args)
             if CSTParser.iskwarg(call.args[i])
-                push!(opts, arg_type(call.args[i].args[1], true, meta_dict))
+                push!(opts, arg_type(call.args[i].args[1], true, meta_dict, store))
             else
-                push!(types, arg_type(call.args[i], true, meta_dict))
+                push!(types, arg_type(call.args[i], true, meta_dict, store))
             end
         end
     end
@@ -120,7 +135,7 @@ function find_methods(x::EXPR, store, meta_dict)
             func_ref = func_ref.val
             fuel -= 1
         end
-        args, kws = call_arg_types(x, false, meta_dict)
+        args, kws = call_arg_types(x, false, meta_dict, store)
         if func_ref isa Binding && func_ref.val isa SymbolServer.FunctionStore ||
             func_ref isa Binding && func_ref.val isa SymbolServer.DataTypeStore
             func_ref = func_ref.val
@@ -223,11 +238,40 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::SymbolServer.
     return true
 end
 
+# True for a `Union{A,B,…}` type-position EXPR (at least one member).
+_is_union_curly(t) =
+    iscurly(t) && length(t.args) >= 2 && isidentifier(t.args[1]) && valofid(t.args[1]) == "Union"
+
+# Nest resolved members into a binary `FakeUnion` (mirrors how the store carries
+# unions), so `_has_type_intersection` can test the branches individually.
+_fake_union(members) = foldl(SymbolServer.FakeUnion, members)
+
+# True when `t` provably refers to a type: a store `DataTypeStore` (possibly
+# behind its constructor `FunctionStore`) or a locally defined datatype.
+function _is_type_callee(t, store, meta_dict)
+    if iscurly(t) && length(t.args) >= 1
+        t = t.args[1]
+    end
+    hasref(t, meta_dict) || return false
+    r = refof(t, meta_dict)
+    r isa SymbolServer.DataTypeStore && return true
+    if r isa SymbolServer.FunctionStore
+        return SymbolServer._lookup(r.extends, store) isa SymbolServer.DataTypeStore
+    end
+    r isa Binding || return false
+    return r.type == CoreTypes.DataType || (r.type isa Binding && r.type.val isa SymbolServer.DataTypeStore)
+end
+
 # Resolve a type-position EXPR (`String`, `Vector{Int}`, …) to the SymbolServer
 # type used by `_has_type_intersection`. A type name often `refof`s to its
 # constructor `FunctionStore`; we follow `extends` back to the `DataTypeStore`.
 # Falls back to `CoreTypes.Any` if resolution fails.
 function _resolve_type_expr(t, store, meta_dict)
+    if _is_union_curly(t)
+        # A call matches a `Union{…}` slot if it matches any member, so keep the
+        # members rather than collapsing to the `Union` datatype (which drops them).
+        return _fake_union([_resolve_type_expr(t.args[i], store, meta_dict) for i in 2:length(t.args)])
+    end
     if iscurly(t) && length(t.args) >= 1
         t = t.args[1]
     end
@@ -260,7 +304,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
                 end
                 return true
             end
-            push!(margs, arg_type(arg, true, meta_dict))
+            push!(margs, arg_type(arg, true, meta_dict, store))
         end
     else
         # `rem_wheres_decls` strips outer `where` clauses (so parametric
@@ -289,7 +333,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
             end
         end
 
-        margs, mopts, mkws = method_arg_types(sig, meta_dict)
+        margs, mopts, mkws = method_arg_types(sig, meta_dict, store)
     end
     !isempty(kws) && isempty(mkws) && return false
 

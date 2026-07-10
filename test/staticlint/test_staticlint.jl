@@ -501,6 +501,129 @@ end
     end
 end
 
+@testitem "check_call subtyping through parameterized aliases" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # `Vector` is stored as `Array{T,1}` and `AbstractVector` as
+    # `AbstractArray{T,1}`, but walking up `Array`'s supertype chain yields the
+    # generic `AbstractArray{T,N}` store entry. Type comparison must ignore the
+    # parameters ({T,1} vs {T,N}), otherwise these valid calls get flagged.
+    for src in [
+        "f1(b::AbstractVector) = b\ng1(v::Vector) = f1(v)",
+        "f1(b::AbstractVector) = b\ng1(v::Vector{Int}) = f1(v)",
+        "f1(b::AbstractArray) = b\ng1(v::Vector) = f1(v)",
+        "f1(b::AbstractDict) = b\ng1(d::Dict) = f1(d)",
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === nothing
+    end
+
+    # Genuine arity mismatch on the same signatures must still be flagged.
+    let (cst, meta_dict) = parse_and_pass("f1(b::AbstractVector) = b\ng1(v::Vector) = f1(v, v)")
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
+@testitem "check_call subtyping through unions and parametric aliases" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A `x::Union{…}` parameter types its binding as the bare `Union` datatype,
+    # which drops the members; the members must be resolved so a call matching
+    # any branch is accepted. `AbstractMatrix`/`AbstractArray{<:Any,N}` exercise
+    # the same alias/typevar handling in higher dimensions.
+    for src in [
+        "f(a::AbstractMatrix) = size(a, 1)\ncaller(m::Matrix) = f(m)",
+        "g(a::Union{AbstractVector,Vector}) = length(a)\ncaller(v::Vector) = g(v)",
+        "h(a::Union{AbstractVector,Int}) = length(a)\ncaller(v::Vector) = h(v)",
+        "h(a::Union{AbstractVector,Int}) = length(a)\ncaller(x::Int) = h(x)",
+        "k(::AbstractArray{<:Any,N}) where N = zeros(Int, N)\ncaller(v::Vector) = k(v)",
+        # A union-typed *variable* in call position: its binding carries the
+        # bare `Union` datatype (members unknown), which must never disprove
+        # a call.
+        "f(x::Union{Int,String}) = x\ng(y::Union{Int,String}) = f(y)",
+        "f(x::AbstractString) = x\ng(y::Union{Int,String}) = f(y)",
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === nothing
+    end
+
+    # An argument matching no union branch must still be flagged.
+    for src in [
+        "g(a::Union{AbstractVector,Vector}) = length(a)\ncaller(s::String) = g(s)",
+        "h(a::Union{AbstractVector,Int}) = length(a)\ncaller(s::String) = h(s)",
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
+@testitem "check_call pinned type parameters are erased" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # Binding inference erases declared type parameters (`Vector{UInt8}` →
+    # `Array{T,1}`), and nominal type comparison ignores the parameters the
+    # store pins. `String(::Vector{UInt8})` must therefore accept any `Vector`
+    # argument — flagging here was a false positive…
+    let (cst, meta_dict) = parse_and_pass("g(v::Vector{UInt8}) = String(v)")
+        call = cst.args[1].args[2].args[1]
+        @test errorof(call, meta_dict) === nothing
+    end
+    # …at the cost of missing a genuine element-type mismatch. Catching it
+    # needs binding types that carry the declared parameters.
+    let (cst, meta_dict) = parse_and_pass("g(v::Vector{Int}) = String(v)")
+        call = cst.args[1].args[2].args[1]
+        @test_broken errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
+@testitem "check_call array and matrix literal argument types" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # `[…]`, `[; ]` and `[ ]` literals are typed as `Array`, so they satisfy
+    # abstract-array parameters but are flagged against unrelated types.
+    for (src, expected) in [
+        ("f(x::AbstractVector) = x\ng() = f([1,2,3])", nothing),
+        ("f(x::Vector{Int}) = x\ng() = f([1,2,3])", nothing),
+        ("f(x::AbstractArray) = x\ng() = f([1,2,3])", nothing),
+        ("f(x::AbstractMatrix) = x\ng() = f([1 2; 3 4])", nothing),
+        ("f(x) = x\ng() = f([1,2,3])", nothing),
+        ("f(x::IO) = x\ng() = f([1,2,3])", IncorrectCallArgs),
+        ("f(x::AbstractDict) = x\ng() = f([1,2,3])", IncorrectCallArgs),
+        # Typed literals, ncat and comprehensions are array literals too.
+        ("f(x::AbstractArray) = x\ng() = f([i for i in 1:3])", nothing),
+        ("f(x::AbstractMatrix) = x\ng() = f(Int[1 2])", nothing),
+        ("f(x::IO) = x\ng() = f(Int[1;2])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f(Int[1 2])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f([1;;2])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f(Int[1;;2])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f([i for i in 1:3])", IncorrectCallArgs),
+        ("f(x::IO) = x\ng() = f(Int[i for i in 1:3])", IncorrectCallArgs),
+        # `T[…]` parses as `:ref`; it's a typed array literal when `T` provably
+        # refers to a type…
+        ("f(x::IO) = x\ng() = f(Int[1,2,3])", IncorrectCallArgs),
+        ("f(x::AbstractVector) = x\ng() = f(Int[1,2,3])", nothing),
+        ("f(x::IO) = x\ng() = f(Vector{Int}[[1]])", IncorrectCallArgs),
+        ("f(x::AbstractVector) = x\ng() = f(Vector{Int}[[1]])", nothing),
+        # …and plain indexing when it doesn't.
+        ("f(x::IO) = x\ng(a::Vector{IO}) = f(a[1])", nothing),
+        ("f(x::AbstractVector) = x\ng(a) = f(a[1])", nothing),
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === expected
+    end
+
+    # A locally defined struct is also a provable type.
+    let (cst, meta_dict) = parse_and_pass("struct T end\nf(x::IO) = x\ng() = f(T[])")
+        call = cst.args[3].args[2].args[1]
+        @test errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
 @testitem "check_call function with no methods (#445)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, FunctionHasNoMethods, IncorrectCallArgs
 
@@ -529,6 +652,51 @@ end
     """)
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[1].args[1], meta_dict) === nothing
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[1], meta_dict) === nothing
+end
+
+@testitem "check_call macro-wrapped definition signature not flagged" setup=[shared_static_lint] begin
+    using JuliaWorkspaces: CSTParser
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A macro-wrapped definition still exposes its signature as a call-shaped
+    # node. The optional positional `bar = u` reads as a kwarg to the arity
+    # check, so without the sig-self guard `@inline foo(u, bar = u) = …` was
+    # wrongly flagged on its own definition.
+    (cst, meta_dict) = parse_and_pass("""
+    @inline foo(u, bar = u) = nothing
+    foo(1)
+    foo(1, 2)
+    foo(1, 2, 3)
+    """)
+    sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(cst.args[1].args[3]))
+    @test errorof(sig, meta_dict) === nothing          # the definition's own signature
+    @test errorof(cst.args[2], meta_dict) === nothing  # foo(1)
+    @test errorof(cst.args[3], meta_dict) === nothing  # foo(1, 2)
+    @test errorof(cst.args[4], meta_dict) === IncorrectCallArgs  # foo(1, 2, 3)
+end
+
+@testitem "check_call definition signatures vs assignment-RHS calls" setup=[shared_static_lint] begin
+    using JuliaWorkspaces: CSTParser
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # Definition signatures are call-shaped but must never be treated as
+    # calls, through `::T` and `where` wrappers too.
+    for src in [
+        "foo(u, bar = u) = nothing",
+        "foo(x::T) where T = nothing",
+        "foo(x)::Int = 1",
+        "function foo(x::T) where T\n    nothing\nend",
+    ]
+        (cst, meta_dict) = parse_and_pass(src)
+        sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(cst.args[1]))
+        @test errorof(sig, meta_dict) === nothing
+    end
+
+    # A call on the RHS of an assignment is a real call — the definition
+    # detection must not swallow it.
+    let (cst, meta_dict) = parse_and_pass("f(x) = 1\ny = f(1, 2)")
+        @test errorof(cst.args[2].args[2], meta_dict) === IncorrectCallArgs
+    end
 end
 
 @testitem "check_call too many positional args" setup=[shared_static_lint] begin

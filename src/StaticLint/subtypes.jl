@@ -8,6 +8,9 @@ function _issubtype(a, b, store, meta_dict)
 end
 
 function _has_type_intersection(a, b, store, meta_dict)
+    # A bare `Union` datatype means "some union, members unknown" (e.g. the
+    # binding type of a `x::Union{…}` declaration); it can't disprove a call.
+    (_is_bare_union(a) || _is_bare_union(b)) && return true
     return _issubtype(a, b, store, meta_dict) || _issubtype(b, a, store, meta_dict)
 end
 
@@ -15,17 +18,37 @@ _isany(x::SymbolServer.FakeTypeName) = x.name == VarRef(VarRef(nothing, :Core), 
 _isany(x::SymbolServer.DataTypeStore) = x.name.name == VarRef(VarRef(nothing, :Core), :Any)
 _isany(x) = false
 
-_type_compare(a::SymbolServer.DataTypeStore, b::SymbolServer.DataTypeStore) = a.name == b.name
-_type_compare(a::SymbolServer.FakeTypeName, b::SymbolServer.FakeTypeName) = a == b
-_type_compare(a::SymbolServer.FakeTypeName, b::SymbolServer.DataTypeStore) = a == b.name
-_type_compare(a::SymbolServer.DataTypeStore, b::SymbolServer.FakeTypeName) = a.name == b
-_type_compare(a::SymbolServer.DataTypeStore, b::SymbolServer.FakeUnion) = _type_compare(a, b.a) || _type_compare(a, b.b)
+_is_bare_union(x::SymbolServer.FakeTypeName) = x.name == VarRef(VarRef(nothing, :Core), :Union)
+_is_bare_union(x::SymbolServer.DataTypeStore) = x.name.name == VarRef(VarRef(nothing, :Core), :Union)
+_is_bare_union(x) = false
 
+# Base name of a type, ignoring parameters. Nominal comparison relies on this
+# because the store mostly carries free typevars in its parameters, but aliases
+# can pin some of them, which would make the supertype walk fail to match.
+_basename(x::SymbolServer.FakeTypeName) = x.name
+_basename(x::SymbolServer.DataTypeStore) = x.name.name
+_basename(_) = nothing
+
+const _NominalType = Union{SymbolServer.DataTypeStore,SymbolServer.FakeTypeName}
+
+_type_compare(a::_NominalType, b::_NominalType) = _basename(a) == _basename(b)
+# Two `FakeTypeName`s come from the same reduction, so compare them in full.
+_type_compare(a::SymbolServer.FakeTypeName, b::SymbolServer.FakeTypeName) = a == b
+_type_compare(a::SymbolServer.DataTypeStore, b::SymbolServer.FakeUnion) = _type_compare(a, b.a) || _type_compare(a, b.b)
 _type_compare(a::SymbolServer.DataTypeStore, b::SymbolServer.FakeTypeVar) = _type_compare(a, b.ub)
-_type_compare(a::SymbolServer.DataTypeStore, b::SymbolServer.FakeUnionAll) = _type_compare(a, b.body)
-_type_compare(a::SymbolServer.FakeUnionAll, b::SymbolServer.DataTypeStore) = _type_compare(a.body, b)
-_type_compare(a::SymbolServer.FakeTypeName, b::SymbolServer.FakeUnionAll) = _type_compare(a, b.body)
-_type_compare(a::SymbolServer.FakeUnionAll, b::SymbolServer.FakeTypeName) = _type_compare(a.body, b)
+
+# A `FakeUnionAll`'s parameters are hoisted into UnionAll vars, leaving the
+# unwrapped body with empty `.parameters` — compare base names only. `ua_first`
+# keeps the fallback recursion in the original argument order, since some
+# `_type_compare` methods are one-directional.
+function _unionall_compare(other, ua::SymbolServer.FakeUnionAll, ua_first::Bool)
+    inner = unwrap_fakeunionall(ua)
+    bn = _basename(inner)
+    bn === nothing && return ua_first ? _type_compare(inner, other) : _type_compare(other, inner)
+    return _basename(other) == bn
+end
+_type_compare(a::_NominalType, b::SymbolServer.FakeUnionAll) = _unionall_compare(a, b, false)
+_type_compare(a::SymbolServer.FakeUnionAll, b::_NominalType) = _unionall_compare(b, a, true)
 
 _type_compare(a, b) = a == b
 
