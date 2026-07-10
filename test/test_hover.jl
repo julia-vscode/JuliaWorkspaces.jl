@@ -388,6 +388,9 @@ end
     kh(alpha, beta, gamma, delta; opt = 1) = 1
     kh(1, 2, 3, 4; opt = 5)
 
+    va(x, y, z, a, b, c...) = x + y
+    va(1, 2, 3, 4, 5, 6, 7, 8)
+
     struct P{X}
         pa::X
         pb::X
@@ -468,6 +471,21 @@ end
     result = hover_at("P{Int}(1")
     @test result !== nothing
     @test occursin("Argument `w` (1 of 4) in call to `P`", result)
+
+    # Method-side vararg: fixed positions show their name...
+    result = hover_at("va(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `y` (2 of 8) in call to `va`", result)
+
+    # ...and positions bound to the trailing vararg show `name...`,
+    # from the slot itself to the last argument
+    result = hover_at("va(1, 2, 3, 4, 5, 6")
+    @test result !== nothing
+    @test occursin("Argument `c...` (6 of 8) in call to `va`", result)
+
+    result = hover_at("6, 7, 8")
+    @test result !== nothing
+    @test occursin("Argument `c...` (8 of 8) in call to `va`", result)
 end
 
 @testitem "get_doc_from_word: basic matching" begin

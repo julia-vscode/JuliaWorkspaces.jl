@@ -122,14 +122,17 @@ function _get_inlay_parameter_hints(x::CSTParser.EXPR, meta_dict::MetaDict, env,
         arg_i === nothing && return nothing
         names = get!(() -> _resolve_call_param_names(call, meta_dict, env), name_cache, call)
         names === nothing && return nothing
-        label = _pick_call_arg_name(names, arg_i)
-        label === nothing && return nothing
-        length(label) <= 2 && return nothing
-        CSTParser.str_value(x) == label && return nothing
+        picked = _pick_call_arg_name(names, arg_i)
+        picked === nothing && return nothing
+        # label a trailing vararg only on its first bound argument
+        picked.vararg && arg_i > picked.slot && return nothing
+        label = picked.vararg ? string(picked.name, "...") : picked.name
+        length(picked.name) <= 2 && return nothing
+        CSTParser.str_value(x) == picked.name && return nothing
         if CSTParser.headof(x) isa CSTParser.EXPR && CSTParser.headof(CSTParser.headof(x)) === :OPERATOR && CSTParser.valof(CSTParser.headof(x)) == "."
             if x.args !== nothing && !isempty(x.args) && x.args[end] isa CSTParser.EXPR &&
                     x.args[end].args !== nothing && !isempty(x.args[end].args) && x.args[end].args[end] isa CSTParser.EXPR
-                CSTParser.valof(x.args[end].args[end]) == label && return nothing
+                CSTParser.valof(x.args[end].args[end]) == picked.name && return nothing
             end
         end
         return InlayHintResult(position_at(st, pos + 1), string(label, "="), :parameter, false, false)

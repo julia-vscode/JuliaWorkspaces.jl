@@ -165,6 +165,9 @@ end
     tup = (3, 4)
     s(1, tup..., 9)
 
+    v(alpha, beta, rest...) = 1
+    v(1, 2, 3, 4)
+
     end
     """
 
@@ -181,8 +184,9 @@ end
 
     # The `;`-parameters block and inline kwargs don't shift the positional
     # index, kwargs themselves get no hint, and positions at/after a splat
-    # are unknowable.
-    @test labels == ["alpha=", "beta=", "gamma=", "maa=", "mbb=", "aaa="]
+    # are unknowable. A method-side trailing vararg labels only its first
+    # bound argument (`rest...=` on `3`, nothing on `4`).
+    @test labels == ["alpha=", "beta=", "gamma=", "maa=", "mbb=", "aaa=", "alpha=", "beta=", "rest...="]
 end
 
 @testitem "Misc: get_inlay_hints returns empty when disabled" begin
