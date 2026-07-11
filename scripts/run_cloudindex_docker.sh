@@ -142,11 +142,17 @@ fi
 #    image's *built-in* precompiled Pkg/stdlib cache files instead of recompiling
 #    Pkg from scratch every container (~20s/worker otherwise).
 #    Placeholders {cmd}/{depot}/{store}/{env} are filled per worker by the driver.
+#    JULIA_HEAP_SIZE_HINT is forwarded name-only: docker sets it in the worker
+#    only when the caller's environment defines it. Without it, workers whose
+#    --memory cap doesn't bind (rootless / DinD without cgroup delegation) size
+#    their GC against the whole host and balloon until something OOMs; a hint
+#    below the 4g cap (e.g. 3G) keeps them self-limiting either way.
 LAUNCHER="docker run --rm \
   --memory=4g --pids-limit=512 --cpus=2 \
   --user $(id -u):$(id -g) \
   -e JULIA_DEPOT_PATH={depot}:$REGDEPOT: \
   -e HOME={depot} \
+  -e JULIA_HEAP_SIZE_HINT \
   -v $REPO:$REPO:ro \
   -v $REGDEPOT:$REGDEPOT:ro \
   -v {depot}:{depot} -v {store}:{store} -v {env}:{env} \
