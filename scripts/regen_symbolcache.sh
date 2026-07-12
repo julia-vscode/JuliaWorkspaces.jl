@@ -108,11 +108,25 @@ sweepwork="$WORK/sweep"
 mkdir -p "$sweepwork"
 
 echo "[regen] running sweep: $SWEEP_CMD --work $sweepwork ..."
+sweep_status=0
 $SWEEP_CMD \
     --work "$sweepwork" \
     --done-set "$WORK/done.txt" \
     --out "$sweepwork/results.jsonl" \
-    ${sweep_args[@]+"${sweep_args[@]}"}
+    ${sweep_args[@]+"${sweep_args[@]}"} || sweep_status=$?
+
+# The driver exits 1 when any version ended failed/timeout. Those are
+# expected outcomes -- step 4d tombstones them -- so continue and publish the
+# results we do have; aborting here used to throw away every successful
+# result in the run over a single flaky version. Anything else nonzero
+# (interrupt=130, usage errors, crashes) still aborts before touching the
+# bucket, since results.jsonl may be partial or missing.
+if (( sweep_status == 1 )); then
+    echo "[regen] sweep reported failed/timeout versions (exit 1); continuing -- they are tombstoned below"
+elif (( sweep_status != 0 )); then
+    echo "[regen] ERROR: sweep exited with status $sweep_status; aborting without uploading" >&2
+    exit "$sweep_status"
+fi
 
 echo "[regen] sweep complete"
 
