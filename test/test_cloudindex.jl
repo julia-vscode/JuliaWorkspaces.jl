@@ -189,7 +189,7 @@ end
     @test argv[end] == "hash"
 end
 
-@testitem "CloudIndex: host worker depot path appends defaults (trailing colon)" begin
+@testitem "CloudIndex: host worker depot path appends defaults (trailing separator)" begin
     using JuliaWorkspaces.CloudIndexApp: PkgVersion, IndexOpts, _worker_cmd
 
     u = Base.UUID("22222222-2222-2222-2222-222222222222")
@@ -197,10 +197,11 @@ end
     opts = IndexOpts(store="/s", depot="/d", workdir="/w", jwroot="/jw")  # default (host) launcher
     cmd = _worker_cmd(pv, "/tmp/env", opts)
 
-    # Default launcher returns the inner cmd; its JULIA_DEPOT_PATH must end in ':'
-    # so the worker reuses the default depots' built-in precompile caches.
+    # Default launcher returns the inner cmd; its JULIA_DEPOT_PATH must end in
+    # the platform's path-list separator so the worker appends the default
+    # depots and reuses their built-in precompile caches.
     envline = only(filter(e -> startswith(e, "JULIA_DEPOT_PATH="), cmd.env))
-    @test envline == "JULIA_DEPOT_PATH=/d:"
+    @test envline == "JULIA_DEPOT_PATH=/d" * (Sys.iswindows() ? ";" : ":")
 end
 
 @testitem "CloudIndex: worker indexes a path-deved package and scrubs to PLACEHOLDER" begin
@@ -253,7 +254,7 @@ end
         held = mkpidlock(joinpath(depot, ".pkg-install.lock"))
         errpipe = Pipe()
         proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0",
-                       "JULIA_DEPOT_PATH" => depot * ":") do
+                       "JULIA_DEPOT_PATH" => depot * (Sys.iswindows() ? ";" : ":")) do
             run(pipeline(ignorestatus(cmd); stderr = errpipe); wait = false)
         end
         close(errpipe.in)
@@ -444,8 +445,10 @@ end
         """)
 
         log = joinpath(root, "results.jsonl")
+        # timeout must exceed cold julia startup on slow CI runners (macos-intel
+        # has been seen taking >3 s) while staying under Slow's 30 s sleep.
         opts = IndexOpts(store=store, depot=depot, workdir=work,
-                         jwroot=joinpath(root, "jw"), jobs=2, timeout=3.0, logfile=log,
+                         jwroot=joinpath(root, "jw"), jobs=2, timeout=12.0, logfile=log,
                          progress=false,
                          julia_exe=joinpath(Sys.BINDIR, Base.julia_exename()))
 

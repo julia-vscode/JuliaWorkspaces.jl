@@ -65,12 +65,13 @@ end
 function _worker_cmd(pv::PkgVersion, env::String, opts::IndexOpts)
     worker = joinpath(opts.jwroot, "CloudIndex", "worker.jl")
     inner = `$(opts.julia_exe) --startup-file=no --history-file=no --compiled-modules=existing --project=$env $worker $(opts.jwroot) $(opts.store) $(string(pv.uuid)) $(pv.name) $(string(pv.version)) $(pv.tree_hash)`
-    # Workers install into opts.depot (the first, writable entry); the trailing ':'
-    # appends the default depots so they reuse the built-in precompiled Pkg/stdlib
-    # caches (and the existing registry) instead of recompiling Pkg every worker.
+    # Workers install into opts.depot (the first, writable entry); the trailing
+    # separator (';' on Windows) appends the default depots so they reuse the
+    # built-in precompiled Pkg/stdlib caches (and the existing registry) instead
+    # of recompiling Pkg every worker.
     # Used by the default (host) launcher; a container launcher sets its own
     # JULIA_DEPOT_PATH (the template only splices argv, not this env).
-    spec = LaunchSpec(addenv(inner, "JULIA_DEPOT_PATH" => string(opts.depot, ":")),
+    spec = LaunchSpec(addenv(inner, "JULIA_DEPOT_PATH" => string(opts.depot, Sys.iswindows() ? ";" : ":")),
                       opts.depot, opts.store, env, opts.jwroot)
     return opts.launcher(spec)
 end
