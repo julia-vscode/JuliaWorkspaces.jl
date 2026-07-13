@@ -189,7 +189,7 @@ end
     @test argv[end] == "hash"
 end
 
-@testitem "CloudIndex: host worker depot path appends defaults (trailing colon)" begin
+@testitem "CloudIndex: host worker depot path appends defaults (trailing separator)" begin
     using JuliaWorkspaces.CloudIndexApp: PkgVersion, IndexOpts, _worker_cmd
 
     u = Base.UUID("22222222-2222-2222-2222-222222222222")
@@ -197,14 +197,16 @@ end
     opts = IndexOpts(store="/s", depot="/d", workdir="/w", jwroot="/jw")  # default (host) launcher
     cmd = _worker_cmd(pv, "/tmp/env", opts)
 
-    # Default launcher returns the inner cmd; its JULIA_DEPOT_PATH must end in ':'
-    # so the worker reuses the default depots' built-in precompile caches.
+    # Default launcher returns the inner cmd; its JULIA_DEPOT_PATH must end in
+    # the platform's path-list separator so the worker appends the default
+    # depots and reuses their built-in precompile caches.
     envline = only(filter(e -> startswith(e, "JULIA_DEPOT_PATH="), cmd.env))
-    @test envline == "JULIA_DEPOT_PATH=/d:"
+    @test envline == "JULIA_DEPOT_PATH=/d" * (Sys.iswindows() ? ";" : ":")
 end
 
 @testitem "CloudIndex: worker indexes a path-deved package and scrubs to PLACEHOLDER" begin
     using JuliaWorkspaces.SymbolServer: CacheStore
+    using FileWatching.Pidfile: mkpidlock
 
     b_uuid = "b8d7f5ca-4a81-4f4a-b8c7-1f4a0d2b3c4e"
     jwroot = abspath(joinpath(@__DIR__, "..", "src"))
@@ -243,9 +245,28 @@ end
 
         jl = joinpath(Sys.BINDIR, Base.julia_exename())
         cmd = `$jl --startup-file=no --history-file=no --project=$proj $worker $jwroot $store $b_uuid B 0.1.0 deadbeef`
-        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
-            run(ignorestatus(cmd))
+        depot = joinpath(root, "depot"); mkpath(depot)
+
+        # ensure_installed must serialize installs via the depot-wide lock:
+        # pre-hold it, watch the worker report waiting, release, expect success.
+        # stderr goes through a pipe — a file redirect is buffered in the child
+        # and only flushed at exit, too late to observe the blocked worker.
+        held = mkpidlock(joinpath(depot, ".pkg-install.lock"))
+        errpipe = Pipe()
+        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0",
+                       "JULIA_DEPOT_PATH" => depot * (Sys.iswindows() ? ";" : ":")) do
+            run(pipeline(ignorestatus(cmd); stderr = errpipe); wait = false)
         end
+        close(errpipe.in)
+        saw_waiting = Ref(false)
+        reader = @async for line in eachline(errpipe)   # also drains Pkg output
+            occursin("waiting for the depot install lock", line) && (saw_waiting[] = true)
+        end
+        @test timedwait(() -> saw_waiting[], 120.0) === :ok
+        @test process_running(proc)
+        close(held)
+        wait(proc)
+        wait(reader)
         @test proc.exitcode == 0
 
         # B is a path dep → tree_hash is nothing → get_store names it by version.
@@ -258,6 +279,68 @@ end
         m = pkg.val[:myfunc]
         @test occursin("PLACEHOLDER", m.methods[1].file)
         @test !occursin(bdir, m.methods[1].file)
+    end
+end
+
+@testitem "CloudIndex: depot install lock is exclusive and released on exit" begin
+    using FileWatching.Pidfile: mkpidlock, trymkpidlock
+
+    include(joinpath(@__DIR__, "..", "src", "CloudIndex", "depot_lock.jl"))
+
+    mktempdir() do root
+        # creates the depot dir, returns f's value, removes the lock file on release
+        depot = joinpath(root, "depot")
+        @test with_depot_install_lock(() -> 42, depot) == 42
+        @test isdir(depot)
+        lockfile = joinpath(depot, ".pkg-install.lock")
+        @test !isfile(lockfile)
+
+        # a held pidlock blocks with_depot_install_lock until released
+        held = mkpidlock(lockfile)
+        @test trymkpidlock(lockfile) === false
+        entered = Ref(false)
+        t = @async with_depot_install_lock(() -> (entered[] = true), depot)
+        sleep(1)
+        @test !entered[]
+        close(held)
+        wait(t)
+        @test entered[]
+        @test !isfile(lockfile)
+
+        # released when f throws
+        @test_throws ErrorException with_depot_install_lock(() -> error("boom"), depot)
+        probe = trymkpidlock(lockfile)
+        @test probe !== false
+        close(probe)
+    end
+end
+
+@testitem "CloudIndex: depot install lock serializes read-modify-write across processes" begin
+    lockjl = abspath(joinpath(@__DIR__, "..", "src", "CloudIndex", "depot_lock.jl"))
+
+    mktempdir() do depot
+        counter = joinpath(depot, "counter.txt")
+        write(counter, "0")
+        n = 20
+        code = """
+        include($(repr(lockjl)))
+        depot, counter, n = ARGS[1], ARGS[2], parse(Int, ARGS[3])
+        for _ in 1:n
+            with_depot_install_lock(depot) do
+                v = parse(Int, read(counter, String))
+                sleep(0.002)   # widen the race window; lost updates without the lock
+                write(counter, string(v + 1))
+            end
+        end
+        """
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        cmd = `$jl --startup-file=no --history-file=no -e $code $depot $counter $n`
+        p1 = run(cmd; wait = false)
+        p2 = run(cmd; wait = false)
+        wait(p1); wait(p2)
+        @test success(p1)
+        @test success(p2)
+        @test parse(Int, read(counter, String)) == 2n
     end
 end
 
@@ -362,8 +445,10 @@ end
         """)
 
         log = joinpath(root, "results.jsonl")
+        # timeout must exceed cold julia startup on slow CI runners (macos-intel
+        # has been seen taking >3 s) while staying under Slow's 30 s sleep.
         opts = IndexOpts(store=store, depot=depot, workdir=work,
-                         jwroot=joinpath(root, "jw"), jobs=2, timeout=3.0, logfile=log,
+                         jwroot=joinpath(root, "jw"), jobs=2, timeout=12.0, logfile=log,
                          progress=false,
                          julia_exe=joinpath(Sys.BINDIR, Base.julia_exename()))
 

@@ -3,7 +3,8 @@
 # Containerized registry-wide symbol-cache generation (jwcloudindex).
 #
 # Each per-(package@version) worker runs inside a Docker container with cgroup
-# limits and its own writable depot, while one pre-downloaded General registry
+# limits, sharing one writable depot (installs are serialized via a pidfile
+# lock, see src/CloudIndex/depot_lock.jl), while one pre-downloaded General registry
 # is shared read-only across all workers. Workers use the image's own Julia
 # (the driver's worker command runs the bare name `julia`, resolved on the
 # container's PATH), so nothing from the host is mounted except the repo
