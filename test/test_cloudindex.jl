@@ -243,10 +243,15 @@ end
 
         jl = joinpath(Sys.BINDIR, Base.julia_exename())
         cmd = `$jl --startup-file=no --history-file=no --project=$proj $worker $jwroot $store $b_uuid B 0.1.0 deadbeef`
-        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+        depot = joinpath(root, "depot")
+        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0",
+                       "JULIA_DEPOT_PATH" => depot * ":") do
             run(ignorestatus(cmd))
         end
         @test proc.exitcode == 0
+
+        # ensure_installed must serialize installs via the depot-wide lock file.
+        @test isfile(joinpath(depot, ".pkg-install.lock"))
 
         # B is a path dep → tree_hash is nothing → get_store names it by version.
         cache_path = joinpath(store, "B", "B", b_uuid, "0.1.0.jstore")
@@ -258,6 +263,63 @@ end
         m = pkg.val[:myfunc]
         @test occursin("PLACEHOLDER", m.methods[1].file)
         @test !occursin(bdir, m.methods[1].file)
+    end
+end
+
+@testitem "CloudIndex: depot install lock is exclusive and released on exit" begin
+    include(joinpath(@__DIR__, "..", "src", "CloudIndex", "depot_lock.jl"))
+
+    mktempdir() do root
+        # creates the depot dir and the lock file, returns f's value
+        depot = joinpath(root, "depot")
+        @test with_depot_install_lock(() -> 42, depot) == 42
+        @test isdir(depot)
+        lockfile = joinpath(depot, ".pkg-install.lock")
+        @test isfile(lockfile)
+
+        # exclusive across file handles (flock is per open-file-description)
+        io1 = open(lockfile; write = true)
+        io2 = open(lockfile; write = true)
+        @test try_flock(Base.fd(io1), FLOCK_EX | FLOCK_NB)
+        @test !try_flock(Base.fd(io2), FLOCK_EX | FLOCK_NB)
+        close(io1)
+        @test try_flock(Base.fd(io2), FLOCK_EX | FLOCK_NB)
+        close(io2)
+
+        # released when f throws
+        @test_throws ErrorException with_depot_install_lock(() -> error("boom"), depot)
+        io3 = open(lockfile; write = true)
+        @test try_flock(Base.fd(io3), FLOCK_EX | FLOCK_NB)
+        close(io3)
+    end
+end
+
+@testitem "CloudIndex: depot install lock serializes read-modify-write across processes" begin
+    lockjl = abspath(joinpath(@__DIR__, "..", "src", "CloudIndex", "depot_lock.jl"))
+
+    mktempdir() do depot
+        counter = joinpath(depot, "counter.txt")
+        write(counter, "0")
+        n = 20
+        code = """
+        include($(repr(lockjl)))
+        depot, counter, n = ARGS[1], ARGS[2], parse(Int, ARGS[3])
+        for _ in 1:n
+            with_depot_install_lock(depot) do
+                v = parse(Int, read(counter, String))
+                sleep(0.002)   # widen the race window; lost updates without the lock
+                write(counter, string(v + 1))
+            end
+        end
+        """
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        cmd = `$jl --startup-file=no --history-file=no -e $code $depot $counter $n`
+        p1 = run(cmd; wait = false)
+        p2 = run(cmd; wait = false)
+        wait(p1); wait(p2)
+        @test success(p1)
+        @test success(p2)
+        @test parse(Int, read(counter, String)) == 2n
     end
 end
 

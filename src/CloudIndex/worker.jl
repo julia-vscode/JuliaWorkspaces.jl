@@ -13,6 +13,8 @@
 
 import Pkg
 
+include(joinpath(@__DIR__, "depot_lock.jl"))
+
 const EXIT_OK = 0
 const EXIT_UNSAT = 10
 const EXIT_INDEX = 20
@@ -47,11 +49,17 @@ function ensure_installed(uuid_s, name, version_s)
     try
         ctx = Pkg.Types.Context()
         # ctx.env.manifest.deps :: Dict{UUID,PackageEntry} (verified on 1.12.6)
-        if !haskey(ctx.env.manifest.deps, Base.UUID(uuid_s))
-            Pkg.add(Pkg.PackageSpec(name = name, uuid = Base.UUID(uuid_s),
-                                    version = VersionNumber(version_s)))
+        need_add = !haskey(ctx.env.manifest.deps, Base.UUID(uuid_s))
+        # Installs into the shared depot are serialized across workers (see
+        # depot_lock.jl). Precompilation is rename-atomic and parallel-safe, so
+        # it stays outside the lock: disabled here, it runs at first import.
+        withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+            with_depot_install_lock(first(Base.DEPOT_PATH)) do
+                need_add && Pkg.add(Pkg.PackageSpec(name = name, uuid = Base.UUID(uuid_s),
+                                                    version = VersionNumber(version_s)))
+                Pkg.instantiate()
+            end
         end
-        Pkg.instantiate()
     catch err
         err isa InterruptException && return EXIT_INTERRUPTED
         report_failure("resolve/instantiate", err)
