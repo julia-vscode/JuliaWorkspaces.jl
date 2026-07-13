@@ -238,11 +238,13 @@ end
 
 @testitem "error_list_comp_incorrect_iter_specs" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof
+    # comprehensions take no `end`; the old fixture's stray `end` made every
+    # line invalid Julia, which the parser now rejects outright
     let (cst, meta_dict) = parse_and_pass("""
-        [i for i in length(1) end]
-        [i for i in 1.1 end]
-        [i for i in 1 end]
-        [i for i in 1:1 end]
+        [i for i in length(1)]
+        [i for i in 1.1]
+        [i for i in 1]
+        [i for i in 1:1]
         """)
         @test errorof(cst[1][2][3], meta_dict) === JuliaWorkspaces.StaticLint.IncorrectIterSpec
         @test errorof(cst[2][2][3], meta_dict) === JuliaWorkspaces.StaticLint.IncorrectIterSpec

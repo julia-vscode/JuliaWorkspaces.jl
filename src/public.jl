@@ -19,6 +19,7 @@ export JuliaWorkspace,
     has_file,
     get_text_file,
     get_julia_syntax_tree,
+    syntax_node_at,
     get_toml_syntax_tree,
     get_diagnostic,
     get_diagnostics,
@@ -497,6 +498,34 @@ function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     return derived_julia_syntax_tree(jw.runtime, uri)
+end
+
+"""
+    syntax_node_at(node::SyntaxNode, offset::Int)
+
+Return the deepest `SyntaxNode` in the subtree rooted at `node` that contains
+`offset`. The `SyntaxNode` counterpart of `get_expr1` for cross-tree migration.
+
+`offset` is a 0-based byte offset, matching `get_expr1`. Throws `ArgumentError`
+for an offset outside `[0, sizeof)`.
+"""
+function syntax_node_at(node::SyntaxNode, offset::Int)
+    node_size = last_byte(node) - first_byte(node) + 1
+    (offset < 0 || offset >= node_size) &&
+        throw(ArgumentError("byte offset $offset out of range [0, $node_size)"))
+    byte = first_byte(node) + offset   # 0-based offset → 1-based absolute byte
+    while haschildren(node)
+        found = false
+        for c in children(node)
+            if first_byte(c) <= byte <= last_byte(c)
+                node = c
+                found = true
+                break
+            end
+        end
+        found || break
+    end
+    return node
 end
 
 """
