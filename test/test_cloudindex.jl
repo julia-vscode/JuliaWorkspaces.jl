@@ -205,6 +205,7 @@ end
 
 @testitem "CloudIndex: worker indexes a path-deved package and scrubs to PLACEHOLDER" begin
     using JuliaWorkspaces.SymbolServer: CacheStore
+    using FileWatching.Pidfile: mkpidlock
 
     b_uuid = "b8d7f5ca-4a81-4f4a-b8c7-1f4a0d2b3c4e"
     jwroot = abspath(joinpath(@__DIR__, "..", "src"))
@@ -243,15 +244,29 @@ end
 
         jl = joinpath(Sys.BINDIR, Base.julia_exename())
         cmd = `$jl --startup-file=no --history-file=no --project=$proj $worker $jwroot $store $b_uuid B 0.1.0 deadbeef`
-        depot = joinpath(root, "depot")
+        depot = joinpath(root, "depot"); mkpath(depot)
+
+        # ensure_installed must serialize installs via the depot-wide lock:
+        # pre-hold it, watch the worker report waiting, release, expect success.
+        # stderr goes through a pipe — a file redirect is buffered in the child
+        # and only flushed at exit, too late to observe the blocked worker.
+        held = mkpidlock(joinpath(depot, ".pkg-install.lock"))
+        errpipe = Pipe()
         proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0",
                        "JULIA_DEPOT_PATH" => depot * ":") do
-            run(ignorestatus(cmd))
+            run(pipeline(ignorestatus(cmd); stderr = errpipe); wait = false)
         end
+        close(errpipe.in)
+        saw_waiting = Ref(false)
+        reader = @async for line in eachline(errpipe)   # also drains Pkg output
+            occursin("waiting for the depot install lock", line) && (saw_waiting[] = true)
+        end
+        @test timedwait(() -> saw_waiting[], 120.0) === :ok
+        @test process_running(proc)
+        close(held)
+        wait(proc)
+        wait(reader)
         @test proc.exitcode == 0
-
-        # ensure_installed must serialize installs via the depot-wide lock file.
-        @test isfile(joinpath(depot, ".pkg-install.lock"))
 
         # B is a path dep → tree_hash is nothing → get_store names it by version.
         cache_path = joinpath(store, "B", "B", b_uuid, "0.1.0.jstore")
@@ -267,30 +282,35 @@ end
 end
 
 @testitem "CloudIndex: depot install lock is exclusive and released on exit" begin
+    using FileWatching.Pidfile: mkpidlock, trymkpidlock
+
     include(joinpath(@__DIR__, "..", "src", "CloudIndex", "depot_lock.jl"))
 
     mktempdir() do root
-        # creates the depot dir and the lock file, returns f's value
+        # creates the depot dir, returns f's value, removes the lock file on release
         depot = joinpath(root, "depot")
         @test with_depot_install_lock(() -> 42, depot) == 42
         @test isdir(depot)
         lockfile = joinpath(depot, ".pkg-install.lock")
-        @test isfile(lockfile)
+        @test !isfile(lockfile)
 
-        # exclusive across file handles (flock is per open-file-description)
-        io1 = open(lockfile; write = true)
-        io2 = open(lockfile; write = true)
-        @test try_flock(Base.fd(io1), FLOCK_EX | FLOCK_NB)
-        @test !try_flock(Base.fd(io2), FLOCK_EX | FLOCK_NB)
-        close(io1)
-        @test try_flock(Base.fd(io2), FLOCK_EX | FLOCK_NB)
-        close(io2)
+        # a held pidlock blocks with_depot_install_lock until released
+        held = mkpidlock(lockfile)
+        @test trymkpidlock(lockfile) === false
+        entered = Ref(false)
+        t = @async with_depot_install_lock(() -> (entered[] = true), depot)
+        sleep(1)
+        @test !entered[]
+        close(held)
+        wait(t)
+        @test entered[]
+        @test !isfile(lockfile)
 
         # released when f throws
         @test_throws ErrorException with_depot_install_lock(() -> error("boom"), depot)
-        io3 = open(lockfile; write = true)
-        @test try_flock(Base.fd(io3), FLOCK_EX | FLOCK_NB)
-        close(io3)
+        probe = trymkpidlock(lockfile)
+        @test probe !== false
+        close(probe)
     end
 end
 

@@ -254,7 +254,7 @@ opt-in orchestration layer:
     *writable* depot across containers would reintroduce contention and defeat
     the isolation, so it is explicitly not the containerized default. When a
     shared writable depot *is* used (as `run_cloudindex_docker.sh` does), the
-    worker serializes `Pkg` installs with an flock on the depot
+    worker serializes `Pkg` installs with a pidfile lock on the depot
     (`depot_lock.jl`) — Pkg deletes an existing version tree before replacing
     it, so unserialized concurrent installs of the same dependency corrupt
     each other. Precompilation stays unlocked: cache writes are rename-atomic.
