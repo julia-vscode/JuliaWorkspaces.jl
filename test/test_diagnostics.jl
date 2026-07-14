@@ -1218,6 +1218,169 @@ end
     @test any(d -> d.message == "Missing reference: nested_typo", diags)
 end
 
+@testitem "unresolved import: macro-name imports are bound, uses silent" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresMacro"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2d"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresMacro
+    using NotARealPkgQ: @mac
+    import AlsoNotRealQ.@othermac
+    function f()
+        @mac(1)
+        @othermac(2)
+        genuine_typo
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresmacro/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresmacro/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresmacro/src/UnresMacro.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresmacro/src/UnresMacro.jl"))
+
+    # Both unresolvable modules are flagged once, on the module name
+    @test any(d -> d.message == "Failed to resolve `NotARealPkgQ`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test any(d -> d.message == "Failed to resolve `AlsoNotRealQ`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    # The imported macros are bound synthetically; their uses stay silent
+    @test !any(d -> d.message == "Missing reference: @mac", diags)
+    @test !any(d -> d.message == "Missing reference: @othermac", diags)
+    # A genuine typo in the same scope is still reported
+    @test any(d -> d.message == "Missing reference: genuine_typo", diags)
+end
+
+@testitem "unresolved import: file-toplevel using is flagged and binds names" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresTop"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2e"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    # No enclosing module: the import sits at the top level of the file.
+    source = """
+    using NotARealTopPkg: foo
+    foo()
+    genuine_typo_top
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unrestop/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestop/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestop/src/UnresTop.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unrestop/src/UnresTop.jl"))
+
+    @test any(d -> d.message == "Failed to resolve `NotARealTopPkg`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    # The imported name is bound; its use stays silent
+    @test !any(d -> d.message == "Missing reference: foo", diags)
+    # A genuine typo at file top level is still reported
+    @test any(d -> d.message == "Missing reference: genuine_typo_top", diags)
+end
+
+@testitem "unresolved import: file-toplevel late-resolving sibling fills binding" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresTopSib"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2f"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    # `using .Sib` precedes the `module Sib` definition, both at file top level
+    # (no enclosing module): resolution succeeds only via the ResolveOnly retry
+    # of the file-toplevel import statement itself.
+    source = """
+    using .Sib: bar
+    function f()
+        bar()
+    end
+    module Sib
+    bar() = 1
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unrestopsib/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestopsib/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestopsib/src/UnresTopSib.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unrestopsib/src/UnresTopSib.jl"))
+
+    # Late resolution fills the binding: nothing is flagged
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
+end
+
+@testitem "unresolved import: operator names are bound" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresOp"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee30"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresOp
+    import NotARealOpPkg: +, ==
+    using AlsoNotOp: (*)
+    function f(a, b)
+        a + b == a
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresop/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresop/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresop/src/UnresOp.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresop/src/UnresOp.jl"))
+
+    # Operator imports through unresolvable modules are flagged on the module name
+    @test any(d -> d.message == "Failed to resolve `NotARealOpPkg`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test any(d -> d.message == "Failed to resolve `AlsoNotOp`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    # No spurious missing-ref (or crash) from the operator names
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+end
+
 @testitem "missing-refs: default is all (getfield refs checked)" begin
     using JuliaWorkspaces.URIs2: URI
 
