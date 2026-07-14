@@ -6,6 +6,12 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
         ensuremeta(x.args[2], meta_dict)
         if hasbinding(last(x.args[1].args), meta_dict) && CSTParser.isidentifier(x.args[2])
             lhsbinding = bindingof(last(x.args[1].args), meta_dict)
+            # Known accepted limitation: for `import A as B` that resolves only
+            # on a later retry (see ResolveOnly below), this copy is made
+            # *before* the retry fills `lhsbinding` in place, so `B`'s val/type
+            # stay at whatever they were when this `:as` branch first ran
+            # (nothing, for a synthetic binding). No diagnostics are affected;
+            # only hover/goto-def stay degraded for that rare form.
             getmeta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
             setref!(x.args[2], bindingof(x.args[2], meta_dict), meta_dict)
             getmeta(last(x.args[1].args), meta_dict).binding = nothing
@@ -28,6 +34,16 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
             end
         elseif isidentifier(arg) || (i == n && (CSTParser.ismacroname(arg) || isoperator(arg)))
             cand = hasref(arg, meta_dict) ? refof(arg, meta_dict) : _get_field(root, arg, state)
+            if hasref(arg, meta_dict) && is_synthetic_import_binding(cand)
+                # A previous pass bound this name synthetically; retry the real
+                # lookup and, on success, fill the same Binding object in place
+                # so existing references see the real target. On failure the
+                # synthetic binding must stay (uses keep resolving to it).
+                # (The hasref guard ensures `cand` is this arg's own synthetic
+                # binding, not one that `_get_field` fished out of scope.names.)
+                newcand = _get_field(root, arg, state)
+                newcand !== nothing && newcand !== cand && fill_synthetic_import_binding!(cand, newcand, state)
+            end
             if cand === nothing
                 # Cannot resolve now (e.g. sibling not yet defined). Schedule a retry.
                 if state isa Toplevel
@@ -39,6 +55,9 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
                     mod = StaticLint.maybe_get_parent_fexpr(imp, CSTParser.defines_module)
                     #mod !== nothing && push!(state.resolveonly, mod)
                     mod !== nothing && (mod ∈ state.resolveonly || push!(state.resolveonly, mod))
+                    # bind the name this path would have bound so downstream
+                    # references to it resolve (the user asserted it exists)
+                    markfinal && ensure_synthetic_import_binding!(x, state)
                 end
                 return
             end
@@ -65,6 +84,10 @@ function resolve_import(x::EXPR, state::TraverseState, root=getsymbols(state))
                     push!(state.resolveonly, x)
                     mod = StaticLint.maybe_get_parent_fexpr(x, CSTParser.defines_module)
                     mod !== nothing && push!(state.resolveonly, mod)
+                    # bind the explicitly listed names (`using A: b, c as d`)
+                    for i = 2:length(x.args[1].args)
+                        ensure_synthetic_import_binding!(x.args[1].args[i], state)
+                    end
                 end
                 return
             end
@@ -196,4 +219,51 @@ function _get_field(par, arg, state, visited=Base.IdSet{Any}())
         end
     end
     return
+end
+
+"""
+    is_synthetic_import_binding(b)
+
+Is `b` a binding created by `ensure_synthetic_import_binding!` for a name an
+unresolved import statement would bind? Real import bindings created by
+`_mark_import_arg` always carry a non-nothing `val`, so `val === nothing &&
+type === nothing` on a binding whose name sits inside a `using`/`import`
+statement identifies the synthetic ones.
+"""
+is_synthetic_import_binding(b) = b isa Binding && b.val === nothing && b.type === nothing &&
+    b.name isa EXPR && is_in_fexpr(b.name, y -> headof(y) === :using || headof(y) === :import)
+
+# Attach a synthetic binding to the name `block` (an import path) would bind:
+# the alias for `as` blocks, otherwise the last path component. The user has
+# asserted this name exists, so downstream references resolve to the import
+# site instead of being reported as missing.
+function ensure_synthetic_import_binding!(block::EXPR, state)
+    if headof(block) === :as
+        length(block.args) == 2 && _ensure_synthetic_import_binding_on!(block.args[2], state)
+        return
+    end
+    (block.args === nothing || isempty(block.args)) && return
+    _ensure_synthetic_import_binding_on!(last(block.args), state)
+    return
+end
+
+function _ensure_synthetic_import_binding_on!(arg::EXPR, state)
+    meta_dict = state.meta_dict
+    CSTParser.is_id_or_macroname(arg) || return
+    (hasbinding(arg, meta_dict) || hasref(arg, meta_dict)) && return
+    ensuremeta(arg, meta_dict)
+    b = Binding(arg, nothing, nothing, [])
+    getmeta(arg, meta_dict).binding = b
+    setref!(arg, b, meta_dict)
+    return
+end
+
+# Late (ResolveOnly-retry) resolution: fill a synthetic binding in place so
+# every reference already pointing at this Binding object sees the real target.
+function fill_synthetic_import_binding!(b::Binding, val, state)
+    val = maybe_lookup(val, state)
+    val === b && return b # never create a self-referential binding
+    b.val = val
+    b.type = _typeof(val, state)
+    return b
 end
