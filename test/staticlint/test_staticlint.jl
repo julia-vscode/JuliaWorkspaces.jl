@@ -2494,6 +2494,38 @@ end
     end
 end
 
+@testitem "anonymous function kwarg refs: #1312" setup=[shared_static_lint] begin
+    # A `(a; b)` signature with a single positional arg before the `;` collapses
+    # to a bracketed `:block` in the CST (rather than a `:tuple` + `:parameters`),
+    # so binding-marking has to handle that shape or the args resolve to nothing.
+    # Regression for LanguageServer.jl#1312.
+
+    # `function` keyword form
+    @test all(check_resolved("""
+    function (bar; baz)
+        bar + baz
+    end
+    """))
+
+    # arrow form
+    @test all(check_resolved("(bar; baz) -> bar + baz"))
+
+    # a defaulted kwarg is parsed as a plain assignment inside the block
+    @test all(check_resolved("""
+    function (bar; baz=1)
+        bar + baz
+    end
+    """))
+    @test all(check_resolved("(bar; baz=1) -> bar + baz"))
+
+    # a type-annotated kwarg
+    @test all(check_resolved("""
+    function (bar::Int; baz::Int)
+        bar + baz
+    end
+    """))
+end
+
 @testitem "iteration over 1:length(...)" setup=[shared_static_lint] begin
     cst, meta_dict, jw = parse_and_pass("arr = []; [1 for _ in 1:length(arr)]")
     @test isempty(collect_hints(cst, meta_dict, jw))
