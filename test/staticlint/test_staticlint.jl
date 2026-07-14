@@ -1813,6 +1813,75 @@ end
     @test errorof(cst.args[9].args[3], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
 end
 
+@testitem "linting disabled inside @test_throws (#3682)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, haserror, isidentifier, InappropriateUseOfLiteral
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    URIs2 = JuliaWorkspaces.URIs2
+
+    # `@test_throws` is resolved through the environment (like `_points_to_Base_macro`),
+    # and `Test` is not part of the stdlib-only env the bare test harness uses, so we
+    # build an env that additionally contains an exported `Test.@test_throws`.
+    function env_with_test(; with_test::Bool)
+        store = SS.recursive_copy(SS.stdlibs)
+        if with_test
+            tn = Symbol("@test_throws")
+            ref = SS.VarRef(SS.VarRef(nothing, :Test), tn)
+            fs = SS.FunctionStore(ref, SS.MethodStore[], "", ref, true)
+            store[:Test] = SS.ModuleStore(SS.VarRef(nothing, :Test), Dict{Symbol,Any}(tn => fs), "", true, [tn], Symbol[])
+        end
+        return SL.ExternalEnv(store, SS.collect_extended_methods(store), collect(keys(store)))
+    end
+
+    # Run the full semantic + lint pass with a custom env, returning (lint_codes, missing_refs).
+    function lint(src; with_test::Bool=true)
+        uri = URIs2.uri"file://test.jl"
+        env = env_with_test(; with_test)
+        jw = JuliaWorkspaces.JuliaWorkspace()
+        JuliaWorkspaces.add_file!(jw, JuliaWorkspaces.TextFile(uri, JuliaWorkspaces.SourceText(src, "julia")))
+        cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, uri)
+        meta_dict = Dict{UInt64, SL.Meta}()
+        SL.ensuremeta(cst, meta_dict)
+        SL.semantic_pass(uri, cst, env, meta_dict, jw.runtime)
+        SL.check_all(cst, SL.LintOptions(), env, meta_dict)
+
+        codes = SL.LintCodes[]
+        walk(x) = (errorof(x, meta_dict) isa SL.LintCodes && push!(codes, errorof(x, meta_dict)); x.args !== nothing && foreach(walk, x.args))
+        walk(cst)
+        hints = SL.collect_hints(cst, env, Dict{String,Any}(), meta_dict, :all)
+        missing = [x for (_, x) in hints if isidentifier(x) && !haserror(x, meta_dict)]
+        return codes, missing
+    end
+
+    # Deliberately invalid definitions inside `@test_throws` must not be linted - its
+    # body is expected to error. Both the bare and qualified macro forms are covered.
+    for src in ("using Test\n@test_throws ErrorException (@eval primitive type 0 SPJa12023 end)\n",
+                "using Test\nTest.@test_throws ErrorException (@eval primitive type 4294967312 SPJb end)\n")
+        codes, _ = lint(src)
+        @test isempty(codes)
+    end
+
+    # Intentionally undefined references inside `@test_throws` must not be flagged.
+    let (_, missing) = lint("using Test\n@test_throws UndefVarError some_undefined_thing()\n")
+        @test isempty(missing)
+    end
+
+    # A `@test_throws` that does not resolve to `Test` is still linted normally: when
+    # `Test` is not in the environment, and when it is a user's own local macro.
+    let (codes, _) = lint("@test_throws ErrorException (@eval primitive type 0 C end)\n"; with_test=false)
+        @test InappropriateUseOfLiteral in codes
+    end
+    let (codes, _) = lint("macro test_throws(a, b) end\n@test_throws ErrorException (@eval primitive type 0 D end)\n")
+        @test InappropriateUseOfLiteral in codes
+    end
+
+    # The same misuse outside `@test_throws` is still flagged.
+    let (codes, missing) = lint("using Test\nprimitive type 1 8 end\nsome_undefined_thing()\n")
+        @test InappropriateUseOfLiteral in codes
+        @test !isempty(missing)
+    end
+end
+
 @testitem "check_break_continue" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof
 

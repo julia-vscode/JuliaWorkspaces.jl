@@ -198,12 +198,18 @@ function _points_to_Base_macro(x::EXPR, name, env::ExternalEnv, meta_dict)
     (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
 end
 
-function _points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, state)
-    CSTParser.is_getfield_w_quotenode(x) && return _points_to_arbitrary_macro(x.args[2].args[1], module_name, name, state)
-    haskey(getsymbols(state), module_name) || return false
-    haskey(getsymbols(state)[module_name], name) || return false
-    targetmacro = maybe_lookup(getsymbols(state)[module_name][name], state)
-    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x, state.meta_dict)) !== nothing &&
+# `state` carries both the env and meta_dict; delegate to the env + meta_dict
+# variant, which is also usable in the check phase (where no `state` exists).
+_points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, state) =
+    _points_to_arbitrary_macro(x, module_name, name, state.env, state.meta_dict)
+
+function _points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, env::ExternalEnv, meta_dict)
+    CSTParser.is_getfield_w_quotenode(x) && return _points_to_arbitrary_macro(x.args[2].args[1], module_name, name, env, meta_dict)
+    syms = getsymbols(env)
+    haskey(syms, module_name) || return false
+    haskey(syms[module_name], name) || return false
+    targetmacro = maybe_lookup(syms[module_name][name], env)
+    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x, meta_dict)) !== nothing &&
     (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
 end
 
