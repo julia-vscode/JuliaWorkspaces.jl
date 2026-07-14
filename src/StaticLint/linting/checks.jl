@@ -108,6 +108,10 @@ LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
     LintOptions(something.(options, default_options)...)
 
 function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict)
+    # Linting is disabled inside `@test_throws`: its body is expected to error and
+    # may contain invalid code
+    is_test_throws_macrocall(x, env, meta_dict) && return
+
     # Do checks
     opts.call && check_call(x, env, meta_dict)
     opts.iter && check_loop_iter(x, env, meta_dict)
@@ -742,6 +746,21 @@ function is_nospecialize_call(x)
 end
 
 """
+    is_test_throws_macrocall(x::EXPR, env, meta_dict)
+
+True if `x` is a call to `Test.@test_throws`, resolved through the environment
+(so `using Test`, qualified `Test.@test_throws`, and renamed imports are handled,
+while an unrelated user-defined `@test_throws` is not matched). Its body
+deliberately contains code that is expected to error - often intentionally
+invalid - so linting is disabled there (issue #3682).
+"""
+function is_test_throws_macrocall(x::EXPR, env, meta_dict)
+    CSTParser.ismacrocall(x) || return false
+    (x.args !== nothing && length(x.args) > 0) || return false
+    return _points_to_arbitrary_macro(x.args[1], :Test, Symbol("@test_throws"), env, meta_dict)
+end
+
+"""
     in_macrocall_arg(x::EXPR)
 
 True if walking up from `x` we reach a macrocall (with `x` in its argument list,
@@ -776,6 +795,10 @@ Collect hints and errors from an expression. `missingrefs` = (:none, :id, :all) 
 identifiers are marked, the :all option will mark identifiers used in getfield calls."
 """
 function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=:all, isquoted=false, errs=Tuple{Int,EXPR}[], pos=0)
+    # Linting is disabled inside `@test_throws` (see `check_all`), so skip its body
+    # here too - otherwise deliberately undefined references would still be flagged.
+    is_test_throws_macrocall(x, env, meta_dict) && return errs
+
     if quoted(x)
         isquoted = true
     elseif isquoted && unquoted(x)
