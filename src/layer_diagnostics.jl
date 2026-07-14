@@ -102,11 +102,11 @@ function _lint_options_from_config(lint_config::Dict)
 end
 
 function _missingrefs_from_config(lint_config::Dict)
-    val = get(lint_config, "missing-refs", "symbols")
+    val = get(lint_config, "missing-refs", "all")
     val == "none" && return :none
     val == "symbols" && return :id
     val == "all" && return :all
-    return :id  # fallback
+    return :all  # fallback
 end
 
 Salsa.@derived function derived_diagnostics(rt, uri)

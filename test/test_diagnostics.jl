@@ -652,7 +652,7 @@ end
     end
     """
 
-    # With env_ready = true and default missing-refs ("symbols"), missing refs should appear
+    # With env_ready = true and default missing-refs ("all"), missing refs should appear
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(URI("file:///mrt/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///mrt/Manifest.toml"), SourceText(manifest_toml, "toml")))
@@ -1177,4 +1177,51 @@ end
     @test any(d -> d.message == "Missing reference: obvious_typo", diags)
     # Nested module inside Inner3 does NOT inherit the suppression
     @test any(d -> d.message == "Missing reference: nested_typo", diags)
+end
+
+@testitem "missing-refs: default is all (getfield refs checked)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "MissRefAll"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2a"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module MissRefAll
+    using NotARealPackage
+    function f()
+        Base.this_name_surely_does_not_exist_xyz
+    end
+    end
+    """
+
+    # Default config: getfield refs into resolved modules are checked, even
+    # though an unresolved wildcard using suppresses bare missing refs here
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///missrefall/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///missrefall/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///missrefall/src/MissRefAll.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///missrefall/src/MissRefAll.jl"))
+    @test any(d -> d.message == "Missing reference: this_name_surely_does_not_exist_xyz", diags)
+
+    # With missing-refs = "symbols", the getfield ref is not checked
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(URI("file:///missrefall2/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw2, TextFile(URI("file:///missrefall2/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw2, TextFile(URI("file:///missrefall2/src/MissRefAll.jl"), SourceText(source, "julia")))
+    add_file!(jw2, TextFile(URI("file:///missrefall2/JuliaLint.toml"), SourceText("missing-refs = \"symbols\"", "toml")))
+    JuliaWorkspaces.set_input_env_ready!(jw2.runtime, true)
+
+    diags2 = get_diagnostic(jw2, URI("file:///missrefall2/src/MissRefAll.jl"))
+    @test !any(d -> d.message == "Missing reference: this_name_surely_does_not_exist_xyz", diags2)
 end
