@@ -1181,7 +1181,7 @@ function check_unused_binding(b::Binding, scope::Scope, meta_dict)
         if (isempty(refs) || length(refs) == 1 && refs[1] == b.name) &&
                 !is_sig_arg(b.name) && !is_overwritten_in_loop(b.name, meta_dict) &&
                 !is_overwritten_subsequently(b, scope, meta_dict) && !is_kw_of_macrocall(b) &&
-                !captures_outer_local(b, scope)
+                !captures_outer_local(b, scope) && !is_label_binding(b)
             seterror!(b.name, UnusedBinding, meta_dict)
         end
     end
@@ -1206,6 +1206,17 @@ end
 
 function is_kw_of_macrocall(b::Binding)
     b.val isa EXPR && isassignment(b.val) && parentof(b.val) isa EXPR && CSTParser.ismacrocall(parentof(b.val))
+end
+
+# `@label name` introduces a jump target for `@goto`, not a variable, so it
+# should never be reported as an unused binding (julia-vscode#3844).
+function is_label_binding(b::Binding)
+    (b.val isa EXPR && isidentifier(b.val) && parentof(b.val) isa EXPR) || return false
+    p = parentof(b.val)
+    (CSTParser.ismacrocall(p) && length(p.args) == 3 && p.args[3] === b.val) || return false
+    mname = p.args[1]
+    return valof(mname) == "@label" ||
+        (CSTParser.is_getfield_w_quotenode(mname) && valof(rhs_of_getfield(mname)) == "@label")
 end
 
 function is_overwritten_in_loop(x, meta_dict)
