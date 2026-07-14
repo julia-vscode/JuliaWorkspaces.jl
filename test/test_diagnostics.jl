@@ -1094,6 +1094,45 @@ end
     @test !any(d -> startswith(d.message, "Missing reference"), diags)
 end
 
+@testitem "unresolved import: too-many-dots import is not double-diagnosed" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresDots"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2c"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresDots
+    using ....TooDeep
+    function f()
+        obvious_typo_here()
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresdots/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresdots/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresdots/src/UnresDots.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresdots/src/UnresDots.jl"))
+
+    # the dots error is the sole diagnostic for the import statement
+    @test any(d -> d.message == "Relative import has more leading dots than available module nesting.", diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
+    # and it must NOT flip on wildcard suppression: the genuine typo stays flagged
+    @test any(d -> d.message == "Missing reference: obvious_typo_here", diags)
+end
+
 @testitem "unresolved wildcard using: bare missing refs suppressed in scope" begin
     using JuliaWorkspaces.URIs2: URI
 

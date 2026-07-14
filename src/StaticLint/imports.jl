@@ -343,9 +343,10 @@ function first_unresolved_import_component(path::EXPR, meta_dict)
     headof(path) === :as && return first_unresolved_import_component(path.args[1], meta_dict)
     path.args === nothing && return nothing
     for arg in path.args
-        isoperator(arg) && valof(arg) == "." && continue
-        # already diagnosed some other way (e.g. RelativeImportTooManyDots)
+        # already diagnosed some other way (e.g. RelativeImportTooManyDots,
+        # which sits on a leading dot leaf) — don't double-diagnose the path
         haserror(arg, meta_dict) && return nothing
+        isoperator(arg) && valof(arg) == "." && continue
         hasref(arg, meta_dict) || return arg
         is_synthetic_import_binding(refof(arg, meta_dict)) && return arg
     end
