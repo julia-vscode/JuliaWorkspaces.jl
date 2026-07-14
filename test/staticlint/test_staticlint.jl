@@ -2938,6 +2938,40 @@ end
         end""")
 end
 
+@testitem "@label is not an unused binding (julia-vscode#3844)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
+
+    function has_unused(src)
+        cst, meta_dict, jw = parse_and_pass(src)
+        any(errorof(x, meta_dict) === UnusedBinding for (_, x) in collect_hints(cst, meta_dict, jw))
+    end
+
+    # A label targeted by @goto is not an unused variable.
+    @test !has_unused("""
+        function f(n)
+            @label loop
+            n -= 1
+            println(n)
+            n > 0 && @goto loop
+        end""")
+
+    # Labels aren't variables, so even one without a matching @goto isn't
+    # flagged as an unused binding.
+    @test !has_unused("""
+        function f(n)
+            @label out
+            return n
+        end""")
+
+    # An ordinary unused variable next to a label is still flagged.
+    @test has_unused("""
+        function f(n)
+            unused_var = 1
+            @label loop
+            n > 0 && @goto loop
+        end""")
+end
+
 @testitem "function params don't rebind enclosing scope names" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, scopeof, InvalidRedefofConst
     using JuliaWorkspaces.CSTParser: isassignment, EXPR
