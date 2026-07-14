@@ -2344,6 +2344,46 @@ end
     end
 end
 
+@testitem "import A as B binds only the alias in scope" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    cst, meta_dict = parse_and_pass("""import Base as base""")
+    scope = SL.scopeof(cst, meta_dict)
+    @test haskey(scope.names, "base")
+    @test !haskey(scope.names, "Base")
+end
+
+@testitem "import .M as Alias: late resolution fills alias binding" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    cst, meta_dict = parse_and_pass("""
+    import .Sib as S
+    module Sib
+    bar() = 1
+    end
+    """)
+    asblock = cst.args[1].args[1]
+    inner_sib = asblock.args[1].args[2]
+    alias = asblock.args[2]
+    @test !SL.haserror(inner_sib, meta_dict)
+    @test SL.hasbinding(alias, meta_dict)
+    @test SL.bindingof(alias, meta_dict).val !== nothing
+
+    # same for a colon-form alias
+    cst, meta_dict = parse_and_pass("""
+    using .Sib: bar as rebar
+    module Sib
+    bar() = 1
+    end
+    """)
+    asblock = cst.args[1].args[1].args[2]
+    inner_bar = asblock.args[1].args[1]
+    alias = asblock.args[2]
+    @test !SL.haserror(inner_bar, meta_dict)
+    @test SL.hasbinding(alias, meta_dict)
+    @test SL.bindingof(alias, meta_dict).val !== nothing
+end
+
 
 @testitem "#1218" setup=[shared_static_lint] begin
     cst, meta_dict, jw = parse_and_pass("""

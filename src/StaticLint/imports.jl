@@ -6,14 +6,18 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
         ensuremeta(x.args[2], meta_dict)
         if hasbinding(last(x.args[1].args), meta_dict) && CSTParser.isidentifier(x.args[2])
             lhsbinding = bindingof(last(x.args[1].args), meta_dict)
-            # Known accepted limitation: for `import A as B` that resolves only
-            # on a later retry (see ResolveOnly below), this copy is made
-            # *before* the retry fills `lhsbinding` in place, so `B`'s val/type
-            # stay at whatever they were when this `:as` branch first ran
-            # (nothing, for a synthetic binding). No diagnostics are affected;
-            # only hover/goto-def stay degraded for that rare form.
-            getmeta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
-            setref!(x.args[2], bindingof(x.args[2], meta_dict), meta_dict)
+            existing = bindingof(x.args[2], meta_dict)
+            if is_synthetic_import_binding(existing)
+                # A previous pass bound the alias synthetically (as a copy of
+                # the inner component's synthetic binding, or directly for
+                # colon-form aliases). Fill that object in place so references
+                # that already resolved to it see the real target.
+                existing.val = lhsbinding.val
+                existing.type = lhsbinding.type
+            else
+                getmeta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
+                setref!(x.args[2], bindingof(x.args[2], meta_dict), meta_dict)
+            end
             getmeta(last(x.args[1].args), meta_dict).binding = nothing
         end
         return
@@ -137,8 +141,11 @@ function _mark_import_arg(arg, par, state, usinged, meta_dict)
                 add_to_imported_modules(state.scope, Symbol(valofid(arg)), scopeof(par.val.val, meta_dict))
             end
         else
-           # import binds the name in the current scope
-           state.scope.names[valofid(arg)] = bindingof(arg, meta_dict)
+           # import binds the name in the current scope — except under `as`,
+           # where only the alias is bound (the `:as` branch handles it)
+           if !(parentof(arg) isa EXPR && parentof(parentof(arg)) isa EXPR && headof(parentof(parentof(arg))) === :as)
+               state.scope.names[valofid(arg)] = bindingof(arg, meta_dict)
+           end
         end
     end
 end
