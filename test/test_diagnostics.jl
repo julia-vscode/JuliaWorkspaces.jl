@@ -1381,6 +1381,53 @@ end
     @test !any(d -> startswith(d.message, "Missing reference"), diags)
 end
 
+@testitem "unresolved import: imports inside a quote are not flagged" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresQuoted"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee31"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    # Imports inside quoted code are data, not executed imports, so they must not
+    # be diagnosed. The unquoted `using` at module level is the positive control.
+    source = """
+    module UnresQuoted
+    function gen()
+        q1 = quote
+            using NotARealQuotedPkg
+            import AlsoNotRealQuoted: thing
+        end
+        q2 = :(using AnotherQuotedPkg)
+        q1, q2
+    end
+    using ActuallyUnresolved
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresquoted/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresquoted/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresquoted/src/UnresQuoted.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresquoted/src/UnresQuoted.jl"))
+
+    # None of the quoted imports are flagged
+    @test !any(d -> occursin("NotARealQuotedPkg", d.message), diags)
+    @test !any(d -> occursin("AlsoNotRealQuoted", d.message), diags)
+    @test !any(d -> occursin("AnotherQuotedPkg", d.message), diags)
+    # The unquoted import at module level still is
+    @test any(d -> startswith(d.message, "Failed to resolve `ActuallyUnresolved`"), diags)
+end
+
 @testitem "missing-refs: default is all (getfield refs checked)" begin
     using JuliaWorkspaces.URIs2: URI
 
