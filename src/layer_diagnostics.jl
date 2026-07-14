@@ -12,6 +12,7 @@ const _ENV_DEPENDENT_LINT_MESSAGES = Set{String}([
 function _is_env_dependent_diagnostic(d::Diagnostic)
     d.source != "StaticLint.jl" && return false
     startswith(d.message, "Missing reference:") && return true
+    startswith(d.message, "Failed to resolve `") && return true
     return d.message in _ENV_DEPENDENT_LINT_MESSAGES
 end
 

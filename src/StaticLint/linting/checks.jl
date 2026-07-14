@@ -36,6 +36,7 @@
     RelativeImportTooManyDots,
     DuplicateInclude,
     FunctionHasNoMethods,
+    UnresolvedImport,
 )
 
 const LintCodeDescriptions = Dict{LintCodes,String}(
@@ -73,6 +74,7 @@ const LintCodeDescriptions = Dict{LintCodes,String}(
     FileNotAvailable => "File not available.",
     RelativeImportTooManyDots => "Relative import has more leading dots than available module nesting.",
     FunctionHasNoMethods => "Called function has no methods.",
+    UnresolvedImport => "Failed to resolve import.",
 )
 
 haserror(m::Meta) = m.error !== nothing
@@ -779,13 +781,16 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
         # collect parse errors
         push!(errs, (pos, x))
     elseif !isquoted
-        if missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&
+        if haserror(x, meta_dict) && errorof(x, meta_dict) isa StaticLint.LintCodes
+            # collect lint hints
+            push!(errs, (pos, x))
+        elseif missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&
             !(valof(x) == "var" && parentof(x) isa EXPR && isnonstdid(parentof(x))) &&
             !((valof(x) == "stdcall" || valof(x) == "cdecl" || valof(x) == "fastcall" || valof(x) == "thiscall" || valof(x) == "llvmcall") && is_in_fexpr(x, x -> iscall(x) && isidentifier(x.args[1]) && valof(x.args[1]) == "ccall")) &&
-            !in_macrocall_arg(x)
-            push!(errs, (pos, x))
-        elseif haserror(x, meta_dict) && errorof(x, meta_dict) isa StaticLint.LintCodes
-            # collect lint hints
+            !in_macrocall_arg(x) &&
+            # inside using/import statements the UnresolvedImport marking
+            # pass is the sole reporter
+            !is_in_fexpr(x, y -> headof(y) === :using || headof(y) === :import)
             push!(errs, (pos, x))
         end
     elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)

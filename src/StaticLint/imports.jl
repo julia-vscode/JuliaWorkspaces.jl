@@ -267,3 +267,82 @@ function fill_synthetic_import_binding!(b::Binding, val, state)
     b.type = _typeof(val, state)
     return b
 end
+
+"""
+    mark_unresolved_imports!(x::EXPR, meta_dict, isquoted=false)
+
+Post-`semantic_pass` marking of import statements that still failed to
+resolve: the first unresolved component of each import path gets an
+`UnresolvedImport` error. Must run after all resolution retries (i.e.
+alongside `resolve_remaining_getfields!`), because in-pass failures may
+still be retried via `state.resolveonly`.
+"""
+function mark_unresolved_imports!(x::EXPR, meta_dict, isquoted=false)
+    if quoted(x)
+        isquoted = true
+    elseif isquoted && unquoted(x)
+        isquoted = false
+    end
+    if !isquoted && (headof(x) === :using || headof(x) === :import)
+        mark_unresolved_import_stmt!(x, meta_dict)
+        return x
+    end
+    if x.args !== nothing
+        for a in x.args
+            mark_unresolved_imports!(a, meta_dict, isquoted)
+        end
+    end
+    return x
+end
+
+function mark_unresolved_import_stmt!(x::EXPR, meta_dict)
+    x.args === nothing && return
+    if length(x.args) > 0 && isoperator(headof(x.args[1])) && valof(headof(x.args[1])) == ":"
+        colon_expr = x.args[1]
+        failed = first_unresolved_import_component(colon_expr.args[1], meta_dict)
+        if failed !== nothing
+            # the whole module path is unknown; one error there covers the
+            # statement (the listed names carry synthetic bindings)
+            seterror!(failed, UnresolvedImport, meta_dict)
+        else
+            for i = 2:length(colon_expr.args)
+                nfailed = first_unresolved_import_component(colon_expr.args[i], meta_dict)
+                nfailed === nothing && continue
+                seterror!(nfailed, UnresolvedImport, meta_dict)
+            end
+        end
+    else
+        for path in x.args
+            failed = first_unresolved_import_component(path, meta_dict)
+            failed === nothing && continue
+            seterror!(failed, UnresolvedImport, meta_dict)
+        end
+    end
+    return
+end
+
+# First component of an import path that is still unresolved after all
+# passes: module-path components show up as ref-less (they never get
+# synthetic bindings), bound-name components as still-synthetic bindings.
+function first_unresolved_import_component(path::EXPR, meta_dict)
+    headof(path) === :as && return first_unresolved_import_component(path.args[1], meta_dict)
+    path.args === nothing && return nothing
+    for arg in path.args
+        isoperator(arg) && valof(arg) == "." && continue
+        # already diagnosed some other way (e.g. RelativeImportTooManyDots)
+        haserror(arg, meta_dict) && return nothing
+        hasref(arg, meta_dict) || return arg
+        is_synthetic_import_binding(refof(arg, meta_dict)) && return arg
+    end
+    return nothing
+end
+
+# Is `x` a component of a wildcard `using` (no explicit-name colon form)?
+# Decides which UnresolvedImport message the diagnostics layer shows.
+function is_in_wildcard_import(x::EXPR)
+    imp = maybe_get_parent_fexpr(x, y -> headof(y) === :using || headof(y) === :import)
+    imp === nothing && return false
+    headof(imp) === :using || return false
+    return !(imp.args !== nothing && length(imp.args) > 0 &&
+             isoperator(headof(imp.args[1])) && valof(headof(imp.args[1])) == ":")
+end
