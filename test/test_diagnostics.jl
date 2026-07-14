@@ -1428,6 +1428,51 @@ end
     @test any(d -> startswith(d.message, "Failed to resolve `ActuallyUnresolved`"), diags)
 end
 
+@testitem "unresolved import: declared-but-uncacheable dep vs unknown name" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # `DeclaredButUncached` is listed in the manifest (so it's a declared
+    # dependency) but no symbols are cached for it, so it never enters the env.
+    # `TotallyUnknownPkg` is not declared anywhere.
+    project_toml = """
+    name = "UncachedDep"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee41"
+    version = "0.1.0"
+
+    [deps]
+    DeclaredButUncached = "12345678-1234-1234-1234-123456789abc"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [[deps.DeclaredButUncached]]
+    git-tree-sha1 = "0000000000000000000000000000000000000000"
+    uuid = "12345678-1234-1234-1234-123456789abc"
+    version = "1.0.0"
+    """
+    source = """
+    module UncachedDep
+    import DeclaredButUncached: foo
+    using TotallyUnknownPkg
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///uncacheddep/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///uncacheddep/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///uncacheddep/src/UncachedDep.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///uncacheddep/src/UncachedDep.jl"))
+
+    # Declared dependency: message attributes the failure to indexing/caching
+    @test any(d -> d.message == "`DeclaredButUncached` is a declared dependency but its symbols could not be indexed. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    # Undeclared name: keeps the generic "Failed to resolve" wording
+    @test any(d -> d.message == "Failed to resolve `TotallyUnknownPkg`. Missing-reference checks are disabled in this scope and all nested scopes.", diags)
+end
+
 @testitem "missing-refs: default is all (getfield refs checked)" begin
     using JuliaWorkspaces.URIs2: URI
 
