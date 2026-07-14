@@ -178,13 +178,17 @@ if [[ -f "$sweepwork/results.jsonl" ]]; then
 fi
 echo "[regen] this run produced $(wc -l < "$WORK/new_tombstones.txt") tombstone candidates"
 
-# 4d. tombstones' = (MODE=incremental ? old ∪ new : new) minus any key in index'.
+# 4d. tombstones' = (old ∪ new) minus any key in index'.
 #     A version that now has an artifact is no longer a tombstone.
-if [[ "$MODE" == "incremental" ]]; then
-    sort -u "$WORK/tombstones.txt" "$WORK/new_tombstones.txt" > "$WORK/tombstones_combined.txt"
-else
-    cp "$WORK/new_tombstones.txt" "$WORK/tombstones_combined.txt"
-fi
+#     Merging (never replacing) holds in BOTH modes: a full sweep runs as n
+#     sequential shard jobs, each seeing only 1/n of the versions, so
+#     replacing the file would clobber every other shard's tombstones. A
+#     full-mode retry that fails again re-enters via new_tombstones.txt, and
+#     one that now succeeds is in index' and subtracted below; the only keys
+#     the old replace semantics dropped that the union keeps are versions no
+#     longer swept at all (yanked / outside --newest); those entries are
+#     harmless, they only suppress retries of versions nothing asks for.
+sort -u "$WORK/tombstones.txt" "$WORK/new_tombstones.txt" > "$WORK/tombstones_combined.txt"
 
 # Subtract keys present in index_new.txt (graduated from tombstone to artifact).
 comm -23 \

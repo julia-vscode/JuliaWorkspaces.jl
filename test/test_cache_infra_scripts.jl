@@ -232,6 +232,145 @@ $json_lines
     end
 end
 
+@testitem "cache-infra regen: full-mode shard preserves other shards' tombstones" begin
+    using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
+    pkg_root = abspath(joinpath(@__DIR__, ".."))
+    scripts  = joinpath(pkg_root, "scripts")
+
+    function read_tombstones_gz(bucket)
+        gz = joinpath(bucket, "store", V, "_state", "tombstones.txt.gz")
+        isfile(gz) || return String[]
+        raw = read(pipeline(`gzip -dc $gz`), String)
+        filter(!isempty, strip.(split(raw, '\n')))
+    end
+
+    function make_stub_sweep(path, artifacts, results)
+        store_lines = join(["mkdir -p \"\$WORK/store/$a\"; echo x > \"\$WORK/store/$a.jstore\""
+                            for a in artifacts], "\n")
+        json_lines  = join(["echo '{\"uuid\":\"$(r.uuid)\",\"treehash\":\"$(r.treehash)\",\"status\":\"$(r.status)\"}' >> \"\$WORK/results.jsonl\""
+                            for r in results], "\n")
+        write(path, """#!/usr/bin/env bash
+set -euo pipefail
+WORK=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --work) WORK="\$2"; shift 2 ;;
+        *)      shift ;;
+    esac
+done
+[[ -n "\$WORK" ]] || { echo "stub: --work required" >&2; exit 1; }
+mkdir -p "\$WORK/store"
+touch "\$WORK/results.jsonl"
+$store_lines
+$json_lines
+""")
+        chmod(path, 0o755)
+    end
+
+    has_rclone && mktempdir() do tmp
+        bucket = joinpath(tmp, "bucket"); mkpath(bucket)
+        stub   = joinpath(tmp, "stub_sweep.sh")
+        remote = ":local:" * abspath(bucket)
+        regen  = joinpath(scripts, "regen_symbolcache.sh")
+
+        uuid_bad1 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        uuid_bad2 = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        uuid_ok   = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+        # A full sweep runs as n sequential shard jobs, each invoking the regen
+        # script over 1/n of the versions. Simulate two shards of one sweep.
+
+        # --- Shard A: tombstones uuid_bad1/h2 ---
+        workdir1 = joinpath(tmp, "work1"); mkpath(workdir1)
+        make_stub_sweep(stub, String[],
+            [(uuid=uuid_bad1, treehash="h2", status="unsatisfiable")])
+        @test success(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
+        @test "$uuid_bad1/h2" in read_tombstones_gz(bucket)
+
+        # --- Shard B: different partition; never attempts uuid_bad1/h2 ---
+        workdir2 = joinpath(tmp, "work2"); mkpath(workdir2)
+        make_stub_sweep(stub,
+            ["E/Example/$uuid_ok/h1"],
+            [(uuid=uuid_ok,   treehash="h1", status="ok"),
+             (uuid=uuid_bad2, treehash="h3", status="unsatisfiable")])
+        @test success(`bash $regen --remote $remote --mode full --work $workdir2 --sweep-cmd $("bash " * stub)`)
+
+        tombs = read_tombstones_gz(bucket)
+        # KEY ASSERTION: shard A's tombstone survives shard B's upload
+        @test "$uuid_bad1/h2" in tombs
+        @test "$uuid_bad2/h3" in tombs
+        @test !("$uuid_ok/h1" in tombs)
+    end
+end
+
+@testitem "cache-infra regen: full-mode retry graduates a tombstone that now succeeds" begin
+    using JuliaWorkspaces
+    has_rclone = Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
+    pkg_root = abspath(joinpath(@__DIR__, ".."))
+    scripts  = joinpath(pkg_root, "scripts")
+
+    function read_tombstones_gz(bucket)
+        gz = joinpath(bucket, "store", V, "_state", "tombstones.txt.gz")
+        isfile(gz) || return String[]
+        raw = read(pipeline(`gzip -dc $gz`), String)
+        filter(!isempty, strip.(split(raw, '\n')))
+    end
+
+    function make_stub_sweep(path, artifacts, results)
+        store_lines = join(["mkdir -p \"\$WORK/store/$a\"; echo x > \"\$WORK/store/$a.jstore\""
+                            for a in artifacts], "\n")
+        json_lines  = join(["echo '{\"uuid\":\"$(r.uuid)\",\"treehash\":\"$(r.treehash)\",\"status\":\"$(r.status)\"}' >> \"\$WORK/results.jsonl\""
+                            for r in results], "\n")
+        write(path, """#!/usr/bin/env bash
+set -euo pipefail
+WORK=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --work) WORK="\$2"; shift 2 ;;
+        *)      shift ;;
+    esac
+done
+[[ -n "\$WORK" ]] || { echo "stub: --work required" >&2; exit 1; }
+mkdir -p "\$WORK/store"
+touch "\$WORK/results.jsonl"
+$store_lines
+$json_lines
+""")
+        chmod(path, 0o755)
+    end
+
+    has_rclone && mktempdir() do tmp
+        bucket = joinpath(tmp, "bucket"); mkpath(bucket)
+        stub   = joinpath(tmp, "stub_sweep.sh")
+        remote = ":local:" * abspath(bucket)
+        regen  = joinpath(scripts, "regen_symbolcache.sh")
+
+        uuid_bad = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+        # --- Run 1: full, the version fails and is tombstoned ---
+        workdir1 = joinpath(tmp, "work1"); mkpath(workdir1)
+        make_stub_sweep(stub, String[],
+            [(uuid=uuid_bad, treehash="h2", status="unsatisfiable")])
+        @test success(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
+        @test "$uuid_bad/h2" in read_tombstones_gz(bucket)
+
+        # --- Run 2: full retries it and it now succeeds ---
+        workdir2 = joinpath(tmp, "work2"); mkpath(workdir2)
+        make_stub_sweep(stub,
+            ["B/Bad/$uuid_bad/h2"],
+            [(uuid=uuid_bad, treehash="h2", status="ok")])
+        @test success(`bash $regen --remote $remote --mode full --work $workdir2 --sweep-cmd $("bash " * stub)`)
+
+        # Graduated: the key moved from tombstones to the index
+        @test !("$uuid_bad/h2" in read_tombstones_gz(bucket))
+    end
+end
+
 @testitem "cache-infra regen: cancelled status excluded from tombstones" begin
     using JuliaWorkspaces
     has_rclone = Sys.which("rclone") !== nothing
