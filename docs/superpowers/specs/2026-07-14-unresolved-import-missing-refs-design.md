@@ -47,6 +47,19 @@ bare exported names, `MyModule` in `MyModule.foo`, and names from
    uses `MyModule.foo` are already tolerated because
    `should_mark_missing_getfield_ref` returns false when the LHS is unknown.
 
+   In every form, the `UnresolvedImport` diagnostic goes on the first
+   unresolved component of the *module path inside the import statement* —
+   never on downstream uses:
+
+   - `import MyModule` → flag `MyModule` in the import statement;
+     `MyModule.foo` elsewhere is silent.
+   - `using MyModule: MyModule` → flag the `MyModule` *before* the colon
+     (the module path). The `MyModule` after the colon is an explicitly
+     named symbol and gets a synthetic binding like any other, so
+     `MyModule.foo` elsewhere is silent — this self-import pattern must
+     behave exactly like `import MyModule`.
+   - `using A.B.C` where `A` resolves but `B` doesn't → flag `B`.
+
 5. **Timing:** failure marking runs as a post-pass after `semantic_pass`
    (alongside `resolve_remaining_getfields!` in
    `derived_static_lint_meta_for_root`, `src/layer_static_lint.jl`). It
@@ -75,7 +88,12 @@ JuliaWorkspaces test suite additions:
   sibling module scopes are still checked.
 - `using MyModule: foo` / `import MyModule: foo`: bindings created, uses of
   `foo` resolve, statement still flagged.
-- `import MyModule` + `MyModule.foo`: tolerated, statement flagged.
+- `import MyModule` + `MyModule.foo`: the `MyModule` component inside the
+  import statement is flagged with `UnresolvedImport`; the downstream
+  `MyModule.foo` use produces no diagnostic.
+- `using MyModule: MyModule` + `MyModule.foo`: same behavior as
+  `import MyModule` — the module path before the colon is flagged, the
+  explicitly named `MyModule` binds, downstream use is silent.
 - Resolved-module typo `Foo.bar` still flagged at `:all`.
 - New diagnostic suppressed while the environment is not ready.
 - Default lint config now maps to `:all`.
