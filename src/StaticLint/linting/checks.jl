@@ -785,11 +785,8 @@ Collect hints and errors from an expression. `missingrefs` = (:none, :id, :all) 
 identifiers are marked, the :all option will mark identifiers used in getfield calls."
 """
 function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=:all, isquoted=false, errs=Tuple{Int,EXPR}[], pos=0)
-    if quoted(x)
-        isquoted = true
-    elseif isquoted && unquoted(x)
-        isquoted = false
-    end
+    # relies on quoted(x) and unquoted(x) being mutually exclusive
+    isquoted = isquoted ? !unquoted(x) : quoted(x)
     if headof(x) === :errortoken
         # collect parse errors
         push!(errs, (pos, x))
@@ -841,11 +838,8 @@ run while the meta is still being built (e.g. alongside `check_all`), not from t
 read-only diagnostics gathering in `collect_hints`.
 """
 function resolve_remaining_getfields!(x::EXPR, env, workspace_packages, meta_dict, isquoted=false)
-    if quoted(x)
-        isquoted = true
-    elseif isquoted && unquoted(x)
-        isquoted = false
-    end
+    # relies on quoted(x) and unquoted(x) being mutually exclusive
+    isquoted = isquoted ? !unquoted(x) : quoted(x)
     if isquoted
         try_resolve_getfield_ref!(x, env, workspace_packages, meta_dict)
     end

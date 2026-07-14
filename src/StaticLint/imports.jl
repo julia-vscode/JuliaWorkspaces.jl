@@ -295,11 +295,8 @@ alongside `resolve_remaining_getfields!`), because in-pass failures may
 still be retried via `state.resolveonly`.
 """
 function mark_unresolved_imports!(x::EXPR, meta_dict, isquoted=false)
-    if quoted(x)
-        isquoted = true
-    elseif isquoted && unquoted(x)
-        isquoted = false
-    end
+    # relies on quoted(x) and unquoted(x) being mutually exclusive
+    isquoted = isquoted ? !unquoted(x) : quoted(x)
     if !isquoted && (headof(x) === :using || headof(x) === :import)
         mark_unresolved_import_stmt!(x, meta_dict)
         return x
