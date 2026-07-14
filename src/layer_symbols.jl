@@ -191,7 +191,8 @@ end
 
 function _collect_toplevel_bindings_w_loc(x::CSTParser.EXPR, meta_dict::MetaDict, pos=0, bindings=Tuple{UnitRange{Int},StaticLint.Binding}[]; query="")
     b = StaticLint.bindingof(x, meta_dict)
-    if b isa StaticLint.Binding && CSTParser.valof(b.name) isa String && b.val isa CSTParser.EXPR && startswith(CSTParser.valof(b.name), query)
+    if b isa StaticLint.Binding && b.name isa CSTParser.EXPR && _is_valid_binding_name(b.name) &&
+        b.val isa CSTParser.EXPR && startswith(_get_name_of_binding(b.name), query)
         push!(bindings, (pos .+ (0:x.span), b))
     end
     s = StaticLint.scopeof(x, meta_dict)
@@ -248,7 +249,7 @@ function _get_workspace_symbols(runtime, query::String)
         bs = _collect_toplevel_bindings_w_loc(cst, meta_dict, query=query)
         for (rng, b) in bs
             push!(results, WorkspaceSymbolResult(
-                CSTParser.valof(b.name),
+                _get_name_of_binding(b.name),
                 1, # SymbolKind.File (LS uses 1 for all workspace symbols)
                 uri,
                 _offset_to_position(runtime, uri, first(rng)),

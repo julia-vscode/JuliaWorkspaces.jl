@@ -1520,6 +1520,76 @@ end
     @test isempty(get_hints(jw))
 end
 
+@testitem "var\"\" getfield resolution (#3867)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: haserror
+
+    missing_refs(cst, meta_dict, jw) =
+        [x for (_, x) in collect_hints(cst, meta_dict, jw) if !haserror(x, meta_dict)]
+
+    # A var"..." field access resolves to the struct field.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct Foo
+            var"hello world"::Int
+            normal::Int
+        end
+        foo = Foo(1, 2)
+        foo.var"hello world"
+        foo.normal
+        """)
+        @test isempty(missing_refs(cst, meta_dict, jw))
+    end
+
+    # An unresolvable var"..." field must not crash the late getfield
+    # resolution pass (`valof` of a NONSTDIDENTIFIER is `nothing`).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct Foo
+            var"hello world"::Int
+        end
+        foo = Foo(1)
+        foo.var"nope"
+        """)
+        @test !isempty(missing_refs(cst, meta_dict, jw))
+    end
+end
+
+@testitem "var\"\" identifiers in lint checks (#3867)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidModuleName, DuplicateFuncArgName
+
+    # two distinct var"..." module names must not be flagged as InvalidModuleName
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module var"A A"
+        module var"B B"
+        end
+        end
+        """)
+        @test !any(x -> errorof(x[2], meta_dict) === InvalidModuleName, collect_hints(cst, meta_dict, jw))
+    end
+
+    # a nested module with the same var"..." name is still flagged
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module var"A A"
+        module var"A A"
+        end
+        end
+        """)
+        @test any(x -> errorof(x[2], meta_dict) === InvalidModuleName, collect_hints(cst, meta_dict, jw))
+    end
+
+    # duplicated var"..." argument names are diagnosed like plain ones
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        f(var"a b", var"a b") = 1
+        """)
+        @test any(x -> errorof(x[2], meta_dict) === DuplicateFuncArgName, collect_hints(cst, meta_dict, jw))
+    end
+
+    # undefined var"..." references produce a missing-ref hint without crashing
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        x = var"undefined thing"
+        """)
+        @test any(x -> errorof(x[2], meta_dict) === nothing, collect_hints(cst, meta_dict, jw))
+    end
+end
+
 @testitem "quoted getfield" setup=[shared_static_lint] begin
     import CSTParser
     using JuliaWorkspaces.StaticLint: errorof, getmeta, bindingof, get_method

@@ -146,18 +146,18 @@ function resolve_ref_from_module(x1::EXPR, m::SymbolServer.ModuleStore, state::T
             return true
         end
 
-        mn = Symbol(valof(x))
+        mn = Symbol(valofid(x))
         if isexportedby(mn, m)
             setref!(x, maybe_lookup(m[mn], state), meta_dict)
             return true
         end
     elseif isidentifier(x1)
         x = x1
-        if Symbol(valof(x)) == m.name.name
+        if Symbol(valofid(x)) == m.name.name
             setref!(x, m, meta_dict)
             return true
         elseif isexportedby(x, m)
-            setref!(x, maybe_lookup(m[Symbol(valof(x))], state), meta_dict)
+            setref!(x, maybe_lookup(m[Symbol(valofid(x))], state), meta_dict)
             return true
         end
     end
@@ -174,7 +174,7 @@ function resolve_ref_from_module(x::EXPR, scope::Scope, state::TraverseState)::B
     # 1) If the scope is a module, allow resolving the module name itself
     if CSTParser.defines_module(scope.expr)
         n = CSTParser.get_name(scope.expr)
-        if CSTParser.isidentifier(n) && mn == CSTParser.valof(n)
+        if CSTParser.isidentifier(n) && mn == valofid(n)
             b = bindingof(scope.expr, meta_dict)  # module’s binding
             if b isa Binding
                 setref!(x, b, meta_dict)
@@ -221,7 +221,7 @@ function initial_pass_on_exports(x::EXPR, name, state)
     for a in x.args[3] # module block expressions
         if headof(a) === :export
             for i = 1:length(a.args)
-                if isidentifier(a.args[i]) && valof(a.args[i]) == name && !hasref(a.args[i], meta_dict)
+                if isidentifier(a.args[i]) && valofid(a.args[i]) == name && !hasref(a.args[i], meta_dict)
                     process_EXPR(a.args[i], Delayed(scopeof(x, meta_dict), state.env, state.workspace_packages, meta_dict))
                 end
             end
@@ -324,8 +324,8 @@ function resolve_getfield(x::EXPR, m::SymbolServer.ModuleStore, state::TraverseS
         #     return true
         # end
         vr = val.name isa SymbolServer.FakeTypeName ? val.name.name : val.name
-        if haskey(tls.names, valof(x)) && tls.names[valof(x)] isa Binding && tls.names[valof(x)].val isa SymbolServer.FunctionStore
-            setref!(x, tls.names[valof(x)], meta_dict)
+        if haskey(tls.names, valofid(x)) && tls.names[valofid(x)] isa Binding && tls.names[valofid(x)].val isa SymbolServer.FunctionStore
+            setref!(x, tls.names[valofid(x)], meta_dict)
             return true
         elseif tls.overloaded !== nothing && haskey(tls.overloaded, vr)
             setref!(x, tls.overloaded[vr], meta_dict)
@@ -341,8 +341,8 @@ function resolve_getfield(x::EXPR, parent::SymbolServer.DataTypeStore, state::Tr
     meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     resolved = false
-    if isidentifier(x) && Symbol(valof(x)) in parent.fieldnames
-        fi = findfirst(f -> Symbol(valof(x)) == f, parent.fieldnames)
+    if isidentifier(x) && Symbol(valofid(x)) in parent.fieldnames
+        fi = findfirst(f -> Symbol(valofid(x)) == f, parent.fieldnames)
         ft = parent.types[fi]
         val = SymbolServer._lookup(ft, getsymbols(state), true)
         # TODO: Need to handle the case where we get back a FakeUnion, etc.
