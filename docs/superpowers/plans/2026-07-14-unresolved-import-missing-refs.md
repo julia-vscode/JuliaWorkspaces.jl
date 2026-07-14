@@ -13,9 +13,19 @@
 ## Global Constraints
 
 - All paths below are relative to `/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces` (a git submodule; run git commands from inside it). Work on branch `sp/unresolved-import-missing-refs`.
-- Run tests with the repo-root dev environment:
-  `cd /home/pfitzseb/git/julia-vscode && JW_TEST_FILTER="<substring of testitem name>" julia --project=. scripts/packages/JuliaWorkspaces/test/runtests.jl`
-  Julia startup + package load takes ~1–2 minutes; do not kill runs early. An empty `JW_TEST_FILTER` runs the whole suite (very slow — only in Task 5).
+- **Run tests via the julia MCP tool** (`mcp__julia__julia_eval`) with
+  `env_path: /home/pfitzseb/git/julia-vscode/scripts/environments/development` — never via command-line `julia`. The session is persistent with Revise loaded, so source edits are picked up without restarting (use `mcp__julia__julia_restart` only if Revise errors). Pass `timeout: 600` for test runs. Canonical invocation (replace the substring; it overrides any `JW_TEST_FILTER=... julia --project=.` command shown in task steps):
+
+  ```julia
+  using TestItemRunner
+  TestItemRunner.run_tests(
+      "/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces";
+      filter = ti -> !occursin("testdata", ti.filename) && !occursin(joinpath("test", "data"), ti.filename) &&
+                     !(:skip in ti.tags) && occursin("<SUBSTRING OF TESTITEM NAME>", ti.name),
+  )
+  ```
+
+  Omitting the `occursin` name clause runs the whole suite (very slow — only in Task 5). Known pre-existing failures (not regression signals): CloudIndex testitems fail locally; `test_uris2.jl` has 6 broken and `test_staticlint.jl` 1 broken testitem.
 - Diagnostic messages (copy verbatim):
   - Wildcard: `` Failed to resolve `NAME`. Missing-reference checks are disabled in this scope and all nested scopes. ``
   - Non-wildcard: `` Failed to resolve `NAME`. Anything imported through this statement is assumed to exist and will not be checked. ``
