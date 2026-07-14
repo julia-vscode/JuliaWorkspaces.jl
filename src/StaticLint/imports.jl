@@ -278,6 +278,7 @@ end
 # every reference already pointing at this Binding object sees the real target.
 function fill_synthetic_import_binding!(b::Binding, val, state)
     val = maybe_lookup(val, state)
+    val === nothing && return b # lookup failed: keep the synthetic binding so the import stays flagged
     val === b && return b # never create a self-referential binding
     b.val = val
     b.type = _typeof(val, state)
