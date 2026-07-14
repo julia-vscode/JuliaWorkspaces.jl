@@ -325,6 +325,12 @@ function mark_unresolved_import_stmt!(x::EXPR, meta_dict)
             failed = first_unresolved_import_component(path, meta_dict)
             failed === nothing && continue
             seterror!(failed, UnresolvedImport, meta_dict)
+            if headof(x) === :using
+                # wildcard using of an unknown module: suppress bare
+                # missing-ref reporting in this scope (see collect_hints)
+                scope = retrieve_scope(x, meta_dict)
+                scope isa Scope && (scope.unresolved_wildcard_import = true)
+            end
         end
     end
     return

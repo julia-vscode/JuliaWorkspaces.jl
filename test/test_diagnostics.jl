@@ -1093,3 +1093,88 @@ end
     # aliased names are bound; their uses stay silent
     @test !any(d -> startswith(d.message, "Missing reference"), diags)
 end
+
+@testitem "unresolved wildcard using: bare missing refs suppressed in scope" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresWild"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee28"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresWild
+    using NotARealPackage
+    function f(x)
+        some_unknown_export(x) + another_mystery
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unreswild/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreswild/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreswild/src/UnresWild.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unreswild/src/UnresWild.jl"))
+
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+    @test count(d -> startswith(d.message, "Failed to resolve `NotARealPackage`"), diags) == 1
+end
+
+@testitem "unresolved wildcard using: sibling and nested modules" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresWildMod"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee29"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresWildMod
+    module Inner1
+    using NotARealPackage
+    f() = mystery_name()
+    end
+    module Inner2
+    g() = obvious_typo()
+    end
+    module Inner3
+    using NotARealPackage
+    module Nested
+    h() = nested_typo()
+    end
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unreswildmod/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreswildmod/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreswildmod/src/UnresWildMod.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unreswildmod/src/UnresWildMod.jl"))
+
+    # Inner1: suppressed by its own unresolved wildcard using
+    @test !any(d -> d.message == "Missing reference: mystery_name", diags)
+    # Inner2: no unresolved using -> still checked
+    @test any(d -> d.message == "Missing reference: obvious_typo", diags)
+    # Nested module inside Inner3 does NOT inherit the suppression
+    @test any(d -> d.message == "Missing reference: nested_typo", diags)
+end

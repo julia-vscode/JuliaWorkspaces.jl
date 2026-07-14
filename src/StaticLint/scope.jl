@@ -4,7 +4,11 @@ mutable struct Scope
     names::Dict{String,Binding}
     modules::Union{Nothing,Dict{Symbol,Any}}
     overloaded::Union{Dict,Nothing}
+    # a wildcard `using X` in this scope failed to resolve: any unresolved
+    # identifier in this scope could be an export of the unknown module
+    unresolved_wildcard_import::Bool
 end
+Scope(parent, expr, names, modules, overloaded) = Scope(parent, expr, names, modules, overloaded, false)
 Scope(expr) = Scope(nothing, expr, Dict{Symbol,Binding}(), nothing, nothing)
 function Base.show(io::IO, s::Scope)
     printstyled(io, headof(s.expr))
