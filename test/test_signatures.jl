@@ -167,3 +167,48 @@ end
     result = get_signature_help(jw, uri, idx)
     @test !isempty(result.signatures)
 end
+
+@testitem "Signatures: struct constructor with var\"\" field (#3867)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    # a var"..." field must not crash signature help and must be labeled
+    # with its quoted form
+    source = """
+    struct Foo
+        var"hello world"::Int
+        normal::Int
+    end
+    foo = Foo(
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///sigvar/test.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    idx = findfirst("Foo(", source)[end] + 1
+    result = get_signature_help(jw, uri, idx)
+    @test !isempty(result.signatures)
+    sig = first(result.signatures)
+    @test [p.label for p in sig.parameters] == ["var\"hello world\"", "normal"]
+end
+
+@testitem "Signatures: function with var\"\" argument (#3867)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    func(var"weird arg", normal) = 1
+    func(
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///sigvararg/test.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    idx = findfirst("\nfunc(", source)[end] + 1
+    result = get_signature_help(jw, uri, idx)
+    @test !isempty(result.signatures)
+    sig = first(result.signatures)
+    @test [p.label for p in sig.parameters] == ["var\"weird arg\"", "normal"]
+end

@@ -661,9 +661,14 @@ end
 function check_modulename(x::EXPR, meta_dict)
     if CSTParser.defines_module(x) && # x is a module
         scopeof(x, meta_dict) isa Scope && parentof(scopeof(x, meta_dict)) isa Scope && # it has a scope and a parent scope
-        CSTParser.defines_module(parentof(scopeof(x, meta_dict)).expr) && # the parent scope is a module
-        valof(CSTParser.get_name(x)) == valof(CSTParser.get_name(parentof(scopeof(x, meta_dict)).expr)) # their names match
-        seterror!(CSTParser.get_name(x), InvalidModuleName, meta_dict)
+        CSTParser.defines_module(parentof(scopeof(x, meta_dict)).expr) # the parent scope is a module
+        # valofid also covers var"..." names, where valof is nothing (and
+        # would spuriously compare equal for two distinct var"..." names)
+        name = _module_name_or_nothing(CSTParser.get_name(x))
+        parent_name = _module_name_or_nothing(CSTParser.get_name(parentof(scopeof(x, meta_dict)).expr))
+        if name !== nothing && name == parent_name # their names match
+            seterror!(CSTParser.get_name(x), InvalidModuleName, meta_dict)
+        end
     end
 end
 
@@ -714,11 +719,12 @@ function check_farg_unused_(arg, arg_names, meta_dict)
         seterror!(arg, UnusedFunctionArgument, meta_dict)
     end
 
-    if valof(b.name) === nothing
-    elseif valof(b.name) in arg_names
+    argname = b.name isa EXPR && isidentifier(b.name) ? valofid(b.name) : valof(b.name)
+    if argname === nothing
+    elseif argname in arg_names
         seterror!(arg, DuplicateFuncArgName, meta_dict)
     else
-        push!(arg_names, valof(b.name))
+        push!(arg_names, argname)
     end
     true
 end
@@ -854,8 +860,8 @@ function try_resolve_getfield_ref!(x, env, workspace_packages, meta_dict)
             lhsref = get_root_method(lhsref)
             if lhsref isa Binding && lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
                 # We may have infered the lhs type after the semantic pass that was resolving references. Copied from `resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Bool`.
-                if scopehasbinding(scopeof(lhsref.type.val, meta_dict), valof(x))
-                    setref!(x, scopeof(lhsref.type.val, meta_dict).names[valof(x)], meta_dict)
+                if scopehasbinding(scopeof(lhsref.type.val, meta_dict), valofid(x))
+                    setref!(x, scopeof(lhsref.type.val, meta_dict).names[valofid(x)], meta_dict)
                 end
             end
         end
@@ -885,7 +891,7 @@ function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
                 return true
             elseif lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
                 # We may have infered the lhs type after the semantic pass that was resolving references.
-                return !scopehasbinding(scopeof(lhsref.type.val, meta_dict), valof(x))
+                return !scopehasbinding(scopeof(lhsref.type.val, meta_dict), valofid(x))
             end
         end
     end
@@ -1217,9 +1223,12 @@ function is_overwritten_in_loop(x, meta_dict)
     if loop !== nothing
         s = scopeof(loop, meta_dict)
         if s isa Scope && parentof(s) isa Scope
-            s2 = check_parent_scopes_for(s, valof(x))
+            # valofid also covers var"..." names, where valof is nothing
+            xname = isidentifier(x) ? valofid(x) : valof(x)
+            xname === nothing && return false
+            s2 = check_parent_scopes_for(s, xname)
             if s2 isa Scope
-                prev_binding = parentof(s2).names[valof(x)]
+                prev_binding = parentof(s2).names[xname]
                 if prev_binding isa Binding
                     return true
                     # s = ComesBefore(prev_binding.name, s2.expr, 0)
@@ -1288,8 +1297,10 @@ function check_parent_scopes_for(s::Scope, name)
 end
 
 function is_overwritten_subsequently(b::Binding, scope::Scope, meta_dict)
-    valof(b.name) === nothing && return false
-    s = BoundAfter(b.name, valof(b.name), 0, meta_dict)
+    # valofid also covers var"..." names, where valof is nothing
+    bname = b.name isa EXPR && isidentifier(b.name) ? valofid(b.name) : valof(b.name)
+    bname === nothing && return false
+    s = BoundAfter(b.name, bname, 0, meta_dict)
     traverse(scope.expr, s)
     return s.result == 2
 end

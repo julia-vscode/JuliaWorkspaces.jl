@@ -146,13 +146,16 @@ function mark_binding!(x::EXPR, meta_dict, val=x)
     return x
 end
 
+# valofid also covers var"..." parameter names, where valof is nothing
+_param_name(b) = b isa Binding && b.name isa EXPR && isidentifier(b.name) ? valofid(b.name) : nothing
+
 function mark_parameters(sig::EXPR, meta_dict, params = String[])
     if CSTParser.issubtypedecl(sig)
         mark_parameters(sig.args[1], meta_dict, params)
     elseif iswhere(sig)
         for i = 2:length(sig.args)
             x = mark_binding!(sig.args[i], meta_dict)
-            val = valof(bindingof(x, meta_dict).name)
+            val = _param_name(bindingof(x, meta_dict))
             if val isa String
                 push!(params, val)
             end
@@ -161,7 +164,7 @@ function mark_parameters(sig::EXPR, meta_dict, params = String[])
     elseif CSTParser.iscurly(sig)
         for i = 2:length(sig.args)
             x = mark_binding!(sig.args[i], meta_dict)
-            if bindingof(x, meta_dict) isa Binding && valof(bindingof(x, meta_dict).name) in params
+            if bindingof(x, meta_dict) isa Binding && _param_name(bindingof(x, meta_dict)) in params
                 # Don't mark a new binding if a parameter has already been
                 # introduced from a :where
                 getmeta(x, meta_dict).binding = nothing

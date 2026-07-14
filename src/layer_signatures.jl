@@ -135,8 +135,9 @@ function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{
             for i = 2:length(sig.args)
                 argbinding = StaticLint.bindingof(sig.args[i], meta_dict)
                 if argbinding !== nothing
-                    label = CSTParser.valof(argbinding.name) isa String ? CSTParser.valof(argbinding.name) : ""
-                    push!(params, ParameterInfo(label, nothing))
+                    # var"..." argument names keep their quoting
+                    n = argbinding.name isa CSTParser.EXPR ? _name_expr_label(argbinding.name) : nothing
+                    push!(params, ParameterInfo(something(n, ""), nothing))
                 end
             end
             push!(sigs, SignatureInfo(string(CSTParser.to_codeobject(sig)), "", params))
@@ -148,7 +149,11 @@ function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{
                 params = ParameterInfo[]
                 for field in args.args
                     field_name = CSTParser.rem_decl(field)
-                    label = field_name isa CSTParser.EXPR && CSTParser.isidentifier(field_name) ? CSTParser.valof(field_name) : ""
+                    label = ""
+                    if field_name isa CSTParser.EXPR && CSTParser.isidentifier(field_name)
+                        # var"..." field names keep their quoting
+                        label = something(_name_expr_label(field_name), "")
+                    end
                     push!(params, ParameterInfo(label, nothing))
                 end
                 push!(sigs, SignatureInfo(string(CSTParser.to_codeobject(x)), "", params))

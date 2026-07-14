@@ -237,7 +237,7 @@ end
 # ============================================================================
 
 function _texteditfor(state::_CompletionState, partial, new_text)
-    start_off = max(state.start_offset - length(partial), 0)
+    start_off = max(state.start_offset - sizeof(partial), 0)
     CompletionEdit(position_at(state.st, start_off + 1), position_at(state.st, state.end_offset + 1), new_text, nothing)
 end
 
@@ -297,6 +297,92 @@ function _string_macro_altname(s)
     else
         return nothing
     end
+end
+
+# ============================================================================
+# Non-standard (`var"..."`) identifier helpers
+# ============================================================================
+
+"""
+    _var_wrap(n)
+
+Wrap a name in `var"..."` quoting. Names that can't be represented that way
+(containing `"` or `\\`) are returned as is.
+"""
+function _var_wrap(n::AbstractString)
+    if occursin('"', n) || occursin('\\', n)
+        return n
+    end
+    return string("var\"", n, '"')
+end
+
+"""
+    _var_quoted_label(n)
+
+Return the completion label/insert text for a name `n` whose definition syntax
+is unknown (e.g. field names from the symbol store): names that are not plain
+valid identifiers (or that start with `@`) are wrapped in `var"..."` quoting
+so that inserting them produces valid code. Use [`_name_expr_label`](@ref)
+instead when the defining EXPR is available.
+"""
+function _var_quoted_label(n::AbstractString)
+    if isempty(n) || (Base.isidentifier(n) && !startswith(n, '@'))
+        return n
+    end
+    return _var_wrap(n)
+end
+
+"""
+    _name_expr_label(x)
+
+Label/insert text for a name written as expr `x` in the source: names defined
+with `var"..."` syntax always keep their quoting, everything else stays raw
+(in particular macro names). Returns `nothing` if `x` has no name.
+"""
+function _name_expr_label(x::CSTParser.EXPR)
+    n = CSTParser.str_value(x)
+    (n isa AbstractString && !isempty(n)) || return nothing
+    return CSTParser.headof(x) === :NONSTDIDENTIFIER ? _var_wrap(String(n)) : String(n)
+end
+
+_binding_defined_as_var(b) =
+    b isa StaticLint.Binding && b.name isa CSTParser.EXPR &&
+    CSTParser.headof(b.name) === :NONSTDIDENTIFIER
+
+"""
+    _strip_var_partial(s)
+
+Strip the `var"` prefix (and a trailing `"`, if present) from a partially typed
+non-standard identifier so it can be matched against raw names: `var"he` and
+`var"he"` both become `he`. Strings without the prefix are returned unchanged.
+"""
+function _strip_var_partial(s::AbstractString)
+    startswith(s, "var\"") || return s
+    stripped = chop(s, head=4, tail=0)
+    endswith(stripped, '"') && (stripped = chop(stripped))
+    return stripped
+end
+
+"""
+    _var_string_partial(pt, t, offset, content)
+
+If the cursor at byte `offset` is inside a string token `t` that directly
+follows a `var` identifier token `pt` — i.e. a partially typed non-standard
+`var"..."` identifier — return the typed text from the start of `var` up to
+the cursor (e.g. `var"he`), otherwise `nothing`.
+"""
+function _var_string_partial(pt, t, offset, content)
+    (t isa CSTParser.Tokens.Token && pt isa CSTParser.Tokens.Token) || return nothing
+    (pt.kind == Tokens.IDENTIFIER && pt.val == "var") || return nothing
+    pt.endbyte + 1 == t.startbyte || return nothing
+    if t.kind == Tokens.STRING
+        t.startbyte < offset <= t.endbyte + 1 || return nothing
+    elseif t.kind == Tokens.ERROR && t.token_error == Tokens.EOF_STRING
+        t.startbyte < offset || return nothing
+    else
+        return nothing
+    end
+    return content[pt.startbyte+1:offset]
 end
 
 # ============================================================================
@@ -530,6 +616,16 @@ function _relative_dot_depth_at(s::AbstractString, offset::Int)
     return 0
 end
 
+function _module_name_label(name::CSTParser.EXPR)
+    if CSTParser.isidentifier(name)
+        # var"..." module names keep their quoting so inserting them produces
+        # valid code
+        _name_expr_label(name)
+    else
+        String(CSTParser.to_codeobject(name))
+    end
+end
+
 function _child_module_names(x::CSTParser.EXPR)
     names = String[]
     if CSTParser.defines_module(x)
@@ -537,16 +633,16 @@ function _child_module_names(x::CSTParser.EXPR)
         if b isa CSTParser.EXPR && CSTParser.headof(b) === :block && b.args !== nothing
             for a in b.args
                 if a isa CSTParser.EXPR && CSTParser.defines_module(a)
-                    n = CSTParser.isidentifier(a.args[2]) ? CSTParser.valof(a.args[2]) : String(CSTParser.to_codeobject(a.args[2]))
-                    push!(names, String(n))
+                    n = _module_name_label(a.args[2])
+                    n !== nothing && push!(names, n)
                 end
             end
         end
     elseif CSTParser.headof(x) === :file && x.args !== nothing
         for a in x.args
             if a isa CSTParser.EXPR && CSTParser.defines_module(a)
-                n = CSTParser.isidentifier(a.args[2]) ? CSTParser.valof(a.args[2]) : String(CSTParser.to_codeobject(a.args[2]))
-                push!(names, String(n))
+                n = _module_name_label(a.args[2])
+                n !== nothing && push!(names, n)
             end
         end
     end
@@ -678,11 +774,12 @@ function _is_rebinding_of_module(x, meta_dict)
     CSTParser.defines_module(StaticLint.refof(StaticLint.refof(x, meta_dict).val.args[2], meta_dict).val)
 end
 
-# Field names of a workspace struct definition, mirroring the field-marking
-# logic in `mark_bindings!`: skips inner constructors, unwraps `const` and
-# @kwdef defaults.
+# Field `(name, label)`s of a workspace struct definition, mirroring the
+# field-marking logic in `mark_bindings!`: skips inner constructors, unwraps
+# `const` and @kwdef defaults. The label carries the var"..." quoting for
+# fields defined with non-standard names.
 function _struct_field_names(x::CSTParser.EXPR)
-    names = String[]
+    names = Tuple{String,String}[]
     for arg in x.args[3].args
         CSTParser.defines_function(arg) && continue
         if CSTParser.headof(arg) === :const
@@ -694,11 +791,32 @@ function _struct_field_names(x::CSTParser.EXPR)
         if CSTParser.isdeclaration(arg)
             arg = arg.args[1]
         end
-        if CSTParser.isidentifier(arg) && CSTParser.valof(arg) isa String
-            push!(names, CSTParser.valof(arg))
+        if CSTParser.isidentifier(arg)
+            # str_value also covers var"..." fields, where valof is nothing
+            n = CSTParser.str_value(arg)
+            label = _name_expr_label(arg)
+            if n isa AbstractString && !isempty(n) && label !== nothing
+                push!(names, (String(n), label))
+            end
         end
     end
     return names
+end
+
+"""
+    _add_field_completion(state, spartial, name, label=_var_quoted_label(name))
+
+Add a field completion for `name`, inserted as `label` (its var"..."-quoted
+form where required). `spartial` is matched against both the raw name and the
+label, so `foo.he` and `foo.var"he` both complete to `foo.var"hello world"`.
+"""
+function _add_field_completion(state::_CompletionState, spartial, name::String, label::String=_var_quoted_label(name))
+    if is_completion_match(name, _strip_var_partial(spartial)) ||
+        (label != name && is_completion_match(label, spartial))
+        _add_completion_item(state, CompletionResultItem(
+            label, CompletionKinds.Field, nothing, name,
+            _texteditfor(state, spartial, label)))
+    end
 end
 
 function _get_dot_completion(px, spartial, state::_CompletionState) end
@@ -714,31 +832,17 @@ function _get_dot_completion(px::CSTParser.EXPR, spartial, state::_CompletionSta
             _collect_completions(StaticLint.scopeof(StaticLint.refof(r.val.args[2], state.meta_dict).val, state.meta_dict), spartial, state, true)
         elseif r.type isa SymbolServer.DataTypeStore
             for a in r.type.fieldnames
-                a = String(a)
-                if is_completion_match(a, spartial)
-                    _add_completion_item(state, CompletionResultItem(
-                        a, CompletionKinds.Field, nothing, a,
-                        _texteditfor(state, spartial, a)))
-                end
+                _add_field_completion(state, spartial, String(a))
             end
         elseif r.type isa StaticLint.Binding && r.type.val isa SymbolServer.DataTypeStore
             for a in r.type.val.fieldnames
-                a = String(a)
-                if is_completion_match(a, spartial)
-                    _add_completion_item(state, CompletionResultItem(
-                        a, CompletionKinds.Field, nothing, a,
-                        _texteditfor(state, spartial, a)))
-                end
+                _add_field_completion(state, spartial, String(a))
             end
         elseif r.type isa StaticLint.Binding && r.type.val isa CSTParser.EXPR && CSTParser.defines_struct(r.type.val)
             # only the fields: the struct scope also holds type params and
             # inner constructor names
-            for a in _struct_field_names(r.type.val)
-                if is_completion_match(a, spartial)
-                    _add_completion_item(state, CompletionResultItem(
-                        a, CompletionKinds.Field, nothing, a,
-                        _texteditfor(state, spartial, a)))
-                end
+            for (a, label) in _struct_field_names(r.type.val)
+                _add_field_completion(state, spartial, a, label)
             end
         end
     elseif r isa SymbolServer.ModuleStore
@@ -819,7 +923,7 @@ function _import_has_x(expr::CSTParser.EXPR, x::String)
     if length(expr.args) == 1 && length(expr.args[1]) > 1
         for i = 2:length(expr.args[1].args)
             arg = expr.args[1].args[i]
-            if CSTParser.isoperator(arg.head) && length(arg.args) == 1 && CSTParser.isidentifier(arg.args[1]) && CSTParser.valof(arg.args[1]) == x
+            if CSTParser.isoperator(arg.head) && length(arg.args) == 1 && CSTParser.isidentifier(arg.args[1]) && CSTParser.str_value(arg.args[1]) == x
                 return true
             end
         end
@@ -843,11 +947,16 @@ end
 
 function _collect_completions(x::StaticLint.Scope, spartial, state::_CompletionState, inclexported=false, dotcomps=false)
     if x.names !== nothing
+        stripped_partial = _strip_var_partial(spartial)
         possible_names = String[]
         for n in x.names
             resize!(possible_names, 0)
-            if is_completion_match(n[1], spartial) && n[1] != spartial
-                push!(possible_names, n[1])
+            # bindings defined with var"..." syntax keep their quoting; other
+            # names (in particular macros) stay raw
+            label = _binding_defined_as_var(n[2]) ? _var_wrap(n[1]) : n[1]
+            if (is_completion_match(n[1], stripped_partial) ||
+                (label != n[1] && is_completion_match(label, spartial))) && label != spartial
+                push!(possible_names, label)
             end
             if (nn = _string_macro_altname(n[1]); nn !== nothing) && is_completion_match(nn, spartial)
                 push!(possible_names, nn)
@@ -925,7 +1034,11 @@ function _add_using_stmt(x::CSTParser.EXPR, using_stmts, workspace)
         if CSTParser.is_dot(x.args[1].args[1].head) && length(x.args[1].args[1].args) == 1
             loc = get_expr_location(workspace, x)
             if loc !== nothing
-                using_stmts[CSTParser.valof(x.args[1].args[1].args[1])] = (x, (loc.uri, loc.offset))
+                # str_value also covers var"..." module names, where valof is nothing
+                key = CSTParser.str_value(x.args[1].args[1].args[1])
+                if key isa AbstractString
+                    using_stmts[String(key)] = (x, (loc.uri, loc.offset))
+                end
             end
         end
     end
@@ -997,22 +1110,39 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
         Dict{String,Any}()
     end
 
+    ppt, pt, t = _get_toks(st.content, offset)
+    is_at_end = offset == t.endbyte + 1
+
+    # A partially typed `var"..."` identifier (e.g. `foo.var"he`)?
+    var_partial = _var_string_partial(pt, t, offset, st.content)
+    end_offset = offset
+    if var_partial !== nothing && t.kind == Tokens.STRING && offset <= t.endbyte
+        # the string is already terminated (auto-closing quotes): also replace
+        # the closing quote after the cursor
+        end_offset = t.endbyte + 1
+    end
+
     state = _CompletionState(
         offset,
         Dict{String,CompletionResultItem}(),
-        offset, offset,   # start_offset, end_offset (cursor position)
+        offset, end_offset,   # start_offset (cursor), end_offset
         x, cst, uri, st, meta_dict, env,
         completion_mode, using_stmts, workspace
     )
-
-    ppt, pt, t = _get_toks(st.content, offset)
-    is_at_end = offset == t.endbyte + 1
 
     # Update start/end offsets based on cursor position for replacement range
     # We use an immutable struct, so we track this externally in the "partial" length
     # that _texteditfor uses.
 
-    if pt isa CSTParser.Tokens.Token && pt.kind == CSTParser.Tokenize.Tokens.BACKSLASH
+    if var_partial !== nothing
+        if ppt isa CSTParser.Tokens.Token && ppt.kind == Tokens.DOT
+            # anchor on the dot token to find the expression being accessed
+            px = _get_expr(cst, ppt.startbyte)
+            _get_dot_completion(px, var_partial, state)
+        elseif state.x !== nothing
+            _collect_completions(state.x, var_partial, state, false)
+        end
+    elseif pt isa CSTParser.Tokens.Token && pt.kind == CSTParser.Tokenize.Tokens.BACKSLASH
         _latex_completions(string("\\", CSTParser.Tokenize.untokenize(t)), state)
     elseif ppt isa CSTParser.Tokens.Token && ppt.kind == CSTParser.Tokenize.Tokens.BACKSLASH && pt isa CSTParser.Tokens.Token && (pt.kind === CSTParser.Tokens.CIRCUMFLEX_ACCENT || pt.kind === CSTParser.Tokens.COLON)
         _latex_completions(string("\\", CSTParser.Tokenize.untokenize(pt), CSTParser.Tokenize.untokenize(t)), state)

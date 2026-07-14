@@ -147,7 +147,12 @@ function _explicitly_import_used_variables(x::CSTParser.EXPR, runtime, uri::URI,
         if CSTParser.parentof(r) isa CSTParser.EXPR && CSTParser.is_getfield_w_quotenode(CSTParser.parentof(r)) && CSTParser.parentof(r).args[1] == r
             childname = CSTParser.parentof(r).args[2].args[1]
             StaticLint.hasref(childname, meta_dict) && StaticLint.refof(childname, meta_dict) isa StaticLint.Binding && continue
-            !haskey(ref.val.vals, Symbol(CSTParser.valof(childname))) && continue
+            # str_value also covers var"..." names, where valof is nothing;
+            # names written as var"..." keep their quoting in the emitted code
+            cn = CSTParser.str_value(childname)
+            cn isa AbstractString || continue
+            !haskey(ref.val.vals, Symbol(cn)) && continue
+            cn_label = something(_name_expr_label(childname), String(cn))
 
             loc = _get_file_loc(r, runtime)
             loc === nothing && continue
@@ -155,8 +160,8 @@ function _explicitly_import_used_variables(x::CSTParser.EXPR, runtime, uri::URI,
             if !haskey(edits_by_uri, ruri)
                 edits_by_uri[ruri] = TextEditResult[]
             end
-            push!(edits_by_uri[ruri], TextEditResult(_offset_to_position(runtime, ruri, roffset), _offset_to_position(runtime, ruri, roffset + CSTParser.parentof(r).span), CSTParser.valof(childname)))
-            push!(vars, CSTParser.valof(childname))
+            push!(edits_by_uri[ruri], TextEditResult(_offset_to_position(runtime, ruri, roffset), _offset_to_position(runtime, ruri, roffset + CSTParser.parentof(r).span), cn_label))
+            push!(vars, cn_label)
         end
     end
     isempty(edits_by_uri) && return WorkspaceFileEdit[]

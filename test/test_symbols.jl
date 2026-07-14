@@ -101,3 +101,26 @@ end
     results3 = get_workspace_symbols(jw, "nonexistent")
     @test isempty(results3)
 end
+
+@testitem "Symbols: var\"\" bindings are included (#3867)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_workspace_symbols
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    var"top level thing" = 1
+    normal_thing = 2
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///symvar/test.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    results = get_workspace_symbols(jw, "")
+    names = [r.name for r in results]
+    @test "top level thing" in names
+    @test "normal_thing" in names
+
+    # query matching works against the raw name
+    results2 = get_workspace_symbols(jw, "top")
+    @test any(r -> r.name == "top level thing", results2)
+end

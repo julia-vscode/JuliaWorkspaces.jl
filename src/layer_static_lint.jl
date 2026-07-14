@@ -31,7 +31,8 @@ function find_module_binding(cst, name::String, meta_dict::Dict{UInt64,StaticLin
         for arg in cst.args
             if CSTParser.defines_module(arg) && StaticLint.hasbinding(arg, meta_dict)
                 mod_name = CSTParser.get_name(arg)
-                if CSTParser.isidentifier(mod_name) && CSTParser.valof(mod_name) == name
+                # str_value also covers var"..." module names, where valof is nothing
+                if CSTParser.isidentifier(mod_name) && CSTParser.str_value(mod_name) == name
                     return StaticLint.bindingof(arg, meta_dict)
                 end
             end
@@ -333,7 +334,10 @@ Salsa.@derived function derived_test_setup_bindings(rt, package_folder_uri)
             length(mod_expr.args) < 3 && continue
             name_expr = mod_expr.args[2]
             CSTParser.isidentifier(name_expr) || continue
-            mod_name = Symbol(CSTParser.valof(name_expr))
+            # str_value also covers var"..." names, where valof is nothing
+            mod_name_str = CSTParser.str_value(name_expr)
+            mod_name_str isa AbstractString || continue
+            mod_name = Symbol(mod_name_str)
 
             body = _get_body_block(mod_expr)
             body === nothing && continue
@@ -366,7 +370,10 @@ Salsa.@derived function derived_test_setup_bindings(rt, package_folder_uri)
             length(snip_expr.args) < 3 && continue
             name_expr = snip_expr.args[2]
             CSTParser.isidentifier(name_expr) || continue
-            snip_name = Symbol(CSTParser.valof(name_expr))
+            # str_value also covers var"..." names, where valof is nothing
+            snip_name_str = CSTParser.str_value(name_expr)
+            snip_name_str isa AbstractString || continue
+            snip_name = Symbol(snip_name_str)
 
             body = _get_body_block(snip_expr)
             body === nothing && continue

@@ -390,7 +390,7 @@ function _parse_testitem_kwargs(x::EXPR)
                 if kwval isa EXPR && headof(kwval) === :vect && kwval.args !== nothing
                     for s in kwval.args
                         if isidentifier(s)
-                            push!(setup_names, Symbol(valof(s)))
+                            push!(setup_names, Symbol(valofid(s)))
                         end
                     end
                 end
@@ -513,7 +513,9 @@ function _handle_testmodule(x::EXPR, state::Toplevel)
     body === nothing && return
     !isidentifier(name_expr) && return
 
-    mod_name = valof(name_expr)
+    # valofid also covers var"..." names, where valof is nothing
+    mod_name = valofid(name_expr)
+    mod_name isa String || return
 
     # Create a module-like scope
     setscope!(x, Scope(x), meta_dict)

@@ -632,6 +632,139 @@ end
     @test any(item -> item.label == "greet", result.items)
 end
 
+@testitem "Completions: var\"\" identifiers" begin
+    # https://github.com/julia-vscode/julia-vscode/issues/3867
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    # Apply a CompletionEdit to `src` (byte-based, end-exclusive positions).
+    function apply_edit(src, edit)
+        lines = split(src, '\n'; keepempty=true)
+        lineoff(line) = sum(Int[ncodeunits(lines[l]) + 1 for l in 1:(line-1)])
+        s = lineoff(edit.start.line) + edit.start.column
+        e = lineoff(edit.stop.line) + edit.stop.column
+        cu = codeunits(src)
+        return String(vcat(cu[1:s-1], codeunits(edit.new_text), cu[e:end]))
+    end
+
+    struct_def = """
+    struct Foo
+        var"hello world"::Int
+        normal::Int
+    end
+    foo = Foo(1, 2)
+    """
+
+    # `index_str` must end with the newline right after the cursor position
+    function completions_for(trailer, index_str)
+        source = struct_def * trailer
+        uri = URI("file:///compvar/$(hash(trailer)).jl")
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        index = findfirst(index_str, source)[end]
+        return source, get_completions(jw, uri, index)
+    end
+
+    # 1) `foo.` offers the var"" field with proper quoting
+    source, result = completions_for("foo.\n", "foo.\n")
+    @test sort([i.label for i in result.items]) == ["normal", "var\"hello world\""]
+    item = only(filter(i -> i.label == "var\"hello world\"", result.items))
+    @test occursin("foo.var\"hello world\"\n", apply_edit(source, item.text_edit))
+
+    # 2) `foo.var` offers the var"" field, replacing the typed `var`
+    source, result = completions_for("foo.var\n", "foo.var\n")
+    @test any(i -> i.label == "var\"hello world\"", result.items)
+    item = only(filter(i -> i.label == "var\"hello world\"", result.items))
+    @test occursin("foo.var\"hello world\"\n", apply_edit(source, item.text_edit))
+
+    # 3) `foo.var"he` (unterminated string): no duplicated var" prefix
+    source, result = completions_for("foo.var\"he\n", "foo.var\"he\n")
+    @test any(i -> i.label == "var\"hello world\"", result.items)
+    item = only(filter(i -> i.label == "var\"hello world\"", result.items))
+    @test occursin("foo.var\"hello world\"\n", apply_edit(source, item.text_edit))
+
+    # 4) `foo.var"he"` with the cursor before the auto-closed quote: the closing
+    #    quote is part of the replaced range
+    source_t = struct_def * "foo.var\"he\"\n"
+    uri_t = URI("file:///compvar/terminated.jl")
+    jw_t = JuliaWorkspace()
+    add_file!(jw_t, TextFile(uri_t, SourceText(source_t, "julia")))
+    index_t = findfirst("foo.var\"he", source_t)[end] + 1  # cursor after `he`, before `"`
+    result_t = get_completions(jw_t, uri_t, index_t)
+    @test any(i -> i.label == "var\"hello world\"", result_t.items)
+    item_t = only(filter(i -> i.label == "var\"hello world\"", result_t.items))
+    @test occursin("foo.var\"hello world\"\n", apply_edit(source_t, item_t.text_edit))
+
+    # 5) plain fields are unaffected
+    source, result = completions_for("foo.nor\n", "foo.nor\n")
+    @test any(i -> i.label == "normal" && i.text_edit.new_text == "normal", result.items)
+
+    # 6) scope completions quote non-identifier names
+    scope_src = """
+    var"top level thing" = 1
+    top
+    """
+    uri_s = URI("file:///compvar/scope.jl")
+    jw_s = JuliaWorkspace()
+    add_file!(jw_s, TextFile(uri_s, SourceText(scope_src, "julia")))
+    index_s = findfirst("top\n", scope_src)[end]
+    result_s = get_completions(jw_s, uri_s, index_s)
+    @test any(i -> i.label == "var\"top level thing\"", result_s.items)
+    item_s = only(filter(i -> i.label == "var\"top level thing\"", result_s.items))
+    @test occursin("var\"top level thing\"\n", apply_edit(scope_src, item_s.text_edit))
+    @test !any(i -> i.text_edit.new_text == "top level thing", result_s.items)
+
+    # 7) names that are only non-standard because of var"" quoting (macro-like,
+    #    operator-like, or plain) always keep their quoting from the definition
+    at_src = """
+    struct Bar
+        var"@asd"::Int
+        var"+"::Int
+        var"plain"::Int
+    end
+    bar = Bar(1, 2, 3)
+    bar.
+    """
+    uri_at = URI("file:///compvar/atfield.jl")
+    jw_at = JuliaWorkspace()
+    add_file!(jw_at, TextFile(uri_at, SourceText(at_src, "julia")))
+    index_at = findfirst("bar.\n", at_src)[end]
+    result_at = get_completions(jw_at, uri_at, index_at)
+    labels_at = sort([i.label for i in result_at.items])
+    @test labels_at == ["var\"+\"", "var\"@asd\"", "var\"plain\""]
+    item_at = only(filter(i -> i.label == "var\"@asd\"", result_at.items))
+    @test occursin("bar.var\"@asd\"\n", apply_edit(at_src, item_at.text_edit))
+
+    # 8) genuine macros in scope are not var""-wrapped
+    macro_src = """
+    macro mymacroxyz(x)
+        x
+    end
+    @mymacr
+    """
+    uri_m = URI("file:///compvar/macros.jl")
+    jw_m = JuliaWorkspace()
+    add_file!(jw_m, TextFile(uri_m, SourceText(macro_src, "julia")))
+    index_m = findfirst("@mymacr\n", macro_src)[end]
+    result_m = get_completions(jw_m, uri_m, index_m)
+    @test any(i -> i.label == "@mymacroxyz", result_m.items)
+    @test !any(i -> i.label == "var\"@mymacroxyz\"", result_m.items)
+
+    # 9) partially typed var"" identifier in scope completions
+    scope_src2 = """
+    var"top level thing" = 1
+    var"top
+    """
+    uri_s2 = URI("file:///compvar/scope2.jl")
+    jw_s2 = JuliaWorkspace()
+    add_file!(jw_s2, TextFile(uri_s2, SourceText(scope_src2, "julia")))
+    index_s2 = findfirst("var\"top\n", scope_src2)[end]
+    result_s2 = get_completions(jw_s2, uri_s2, index_s2)
+    @test any(i -> i.label == "var\"top level thing\"", result_s2.items)
+    item_s2 = only(filter(i -> i.label == "var\"top level thing\"", result_s2.items))
+    @test occursin("var\"top level thing\"\n", apply_edit(scope_src2, item_s2.text_edit))
+end
+
 @testitem "Completions: unresolvable VarRef does not truncate module symbols" begin
     using JuliaWorkspaces: JuliaWorkspaces, SourceText
     using JuliaWorkspaces.URIs2: @uri_str
@@ -673,4 +806,43 @@ end
         @test g in labels
     end
     @test !("tst_bad" in labels)
+end
+
+@testitem "Completions: var\"\" module names don't crash import completions (#3867)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, CompletionResult
+    using JuliaWorkspaces.URIs2: URI
+
+    # relative-import completion with a var"" child module used to crash in
+    # _child_module_names
+    source = """
+    module Outer
+    module var"weird one" end
+    module Inner end
+    import .
+    end
+    """
+    uri = URI("file:///compvarmod/test.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+    index = findfirst("import .\n", source)[end]
+    result = get_completions(jw, uri, index)
+    labels = [i.label for i in result.items]
+    @test "Inner" in labels
+    @test "var\"weird one\"" in labels
+
+    # a var"" module name in an existing `using .mod: x` statement used to
+    # crash in _add_using_stmt when building import-mode completions
+    source2 = """
+    module Outer
+    module var"weird module" end
+    using .var"weird module": foo
+    somepartialname
+    end
+    """
+    uri2 = URI("file:///compvarmod/test2.jl")
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(uri2, SourceText(source2, "julia")))
+    index2 = findfirst("somepartialname\n", source2)[end]
+    result2 = get_completions(jw2, uri2, index2)
+    @test result2 isa CompletionResult
 end
