@@ -51,8 +51,12 @@ end
 # type. It is typed to exclude `Symbol`, keeping these distinct from the
 # `(s, m, mname::Symbol)` storage method above.
 addmoduletoscope!(s::Scope, m::SymbolServer.ModuleStore, meta_dict::Union{Nothing,AbstractDict}=nothing) = addmoduletoscope!(s, m, m.name.name)
-addmoduletoscope!(s::Scope, m::EXPR, meta_dict::AbstractDict) = CSTParser.defines_module(m) && addmoduletoscope!(s, scopeof(m, meta_dict), Symbol(valof(CSTParser.get_name(m))))
-addmoduletoscope!(s::Scope, s1::Scope, meta_dict::Union{Nothing,AbstractDict}=nothing) = CSTParser.defines_module(s1.expr) && addmoduletoscope!(s, s1, Symbol(valof(CSTParser.get_name(s1.expr))))
+addmoduletoscope!(s::Scope, m::EXPR, meta_dict::AbstractDict) = CSTParser.defines_module(m) && addmoduletoscope!(s, scopeof(m, meta_dict), Symbol(_module_name_or_nothing(CSTParser.get_name(m))))
+addmoduletoscope!(s::Scope, s1::Scope, meta_dict::Union{Nothing,AbstractDict}=nothing) = CSTParser.defines_module(s1.expr) && addmoduletoscope!(s, s1, Symbol(_module_name_or_nothing(CSTParser.get_name(s1.expr))))
+
+# valofid also covers var"..." module names, where valof is nothing; guard
+# against malformed names (e.g. errortokens), for which valofid would throw
+_module_name_or_nothing(n) = n isa EXPR && isidentifier(n) ? valofid(n) : nothing
 
 
 getscopemodule(s::Scope, m::Symbol) = s.modules[m]

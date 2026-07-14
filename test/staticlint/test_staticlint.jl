@@ -1520,6 +1520,76 @@ end
     @test isempty(get_hints(jw))
 end
 
+@testitem "var\"\" getfield resolution (#3867)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: haserror
+
+    missing_refs(cst, meta_dict, jw) =
+        [x for (_, x) in collect_hints(cst, meta_dict, jw) if !haserror(x, meta_dict)]
+
+    # A var"..." field access resolves to the struct field.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct Foo
+            var"hello world"::Int
+            normal::Int
+        end
+        foo = Foo(1, 2)
+        foo.var"hello world"
+        foo.normal
+        """)
+        @test isempty(missing_refs(cst, meta_dict, jw))
+    end
+
+    # An unresolvable var"..." field must not crash the late getfield
+    # resolution pass (`valof` of a NONSTDIDENTIFIER is `nothing`).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct Foo
+            var"hello world"::Int
+        end
+        foo = Foo(1)
+        foo.var"nope"
+        """)
+        @test !isempty(missing_refs(cst, meta_dict, jw))
+    end
+end
+
+@testitem "var\"\" identifiers in lint checks (#3867)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidModuleName, DuplicateFuncArgName
+
+    # two distinct var"..." module names must not be flagged as InvalidModuleName
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module var"A A"
+        module var"B B"
+        end
+        end
+        """)
+        @test !any(x -> errorof(x[2], meta_dict) === InvalidModuleName, collect_hints(cst, meta_dict, jw))
+    end
+
+    # a nested module with the same var"..." name is still flagged
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module var"A A"
+        module var"A A"
+        end
+        end
+        """)
+        @test any(x -> errorof(x[2], meta_dict) === InvalidModuleName, collect_hints(cst, meta_dict, jw))
+    end
+
+    # duplicated var"..." argument names are diagnosed like plain ones
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        f(var"a b", var"a b") = 1
+        """)
+        @test any(x -> errorof(x[2], meta_dict) === DuplicateFuncArgName, collect_hints(cst, meta_dict, jw))
+    end
+
+    # undefined var"..." references produce a missing-ref hint without crashing
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        x = var"undefined thing"
+        """)
+        @test any(x -> errorof(x[2], meta_dict) === nothing, collect_hints(cst, meta_dict, jw))
+    end
+end
+
 @testitem "quoted getfield" setup=[shared_static_lint] begin
     import CSTParser
     using JuliaWorkspaces.StaticLint: errorof, getmeta, bindingof, get_method
@@ -1741,6 +1811,75 @@ end
     @test errorof(cst.args[7].args[2].args[1], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
     @test errorof(cst.args[8].args[2], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
     @test errorof(cst.args[9].args[3], meta_dict) === JuliaWorkspaces.StaticLint.InappropriateUseOfLiteral
+end
+
+@testitem "linting disabled inside @test_throws (#3682)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, haserror, isidentifier, InappropriateUseOfLiteral
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    URIs2 = JuliaWorkspaces.URIs2
+
+    # `@test_throws` is resolved through the environment (like `_points_to_Base_macro`),
+    # and `Test` is not part of the stdlib-only env the bare test harness uses, so we
+    # build an env that additionally contains an exported `Test.@test_throws`.
+    function env_with_test(; with_test::Bool)
+        store = SS.recursive_copy(SS.stdlibs)
+        if with_test
+            tn = Symbol("@test_throws")
+            ref = SS.VarRef(SS.VarRef(nothing, :Test), tn)
+            fs = SS.FunctionStore(ref, SS.MethodStore[], "", ref, true)
+            store[:Test] = SS.ModuleStore(SS.VarRef(nothing, :Test), Dict{Symbol,Any}(tn => fs), "", true, [tn], Symbol[])
+        end
+        return SL.ExternalEnv(store, SS.collect_extended_methods(store), collect(keys(store)))
+    end
+
+    # Run the full semantic + lint pass with a custom env, returning (lint_codes, missing_refs).
+    function lint(src; with_test::Bool=true)
+        uri = URIs2.uri"file://test.jl"
+        env = env_with_test(; with_test)
+        jw = JuliaWorkspaces.JuliaWorkspace()
+        JuliaWorkspaces.add_file!(jw, JuliaWorkspaces.TextFile(uri, JuliaWorkspaces.SourceText(src, "julia")))
+        cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, uri)
+        meta_dict = Dict{UInt64, SL.Meta}()
+        SL.ensuremeta(cst, meta_dict)
+        SL.semantic_pass(uri, cst, env, meta_dict, jw.runtime)
+        SL.check_all(cst, SL.LintOptions(), env, meta_dict)
+
+        codes = SL.LintCodes[]
+        walk(x) = (errorof(x, meta_dict) isa SL.LintCodes && push!(codes, errorof(x, meta_dict)); x.args !== nothing && foreach(walk, x.args))
+        walk(cst)
+        hints = SL.collect_hints(cst, env, Dict{String,Any}(), meta_dict, :all)
+        missing = [x for (_, x) in hints if isidentifier(x) && !haserror(x, meta_dict)]
+        return codes, missing
+    end
+
+    # Deliberately invalid definitions inside `@test_throws` must not be linted - its
+    # body is expected to error. Both the bare and qualified macro forms are covered.
+    for src in ("using Test\n@test_throws ErrorException (@eval primitive type 0 SPJa12023 end)\n",
+                "using Test\nTest.@test_throws ErrorException (@eval primitive type 4294967312 SPJb end)\n")
+        codes, _ = lint(src)
+        @test isempty(codes)
+    end
+
+    # Intentionally undefined references inside `@test_throws` must not be flagged.
+    let (_, missing) = lint("using Test\n@test_throws UndefVarError some_undefined_thing()\n")
+        @test isempty(missing)
+    end
+
+    # A `@test_throws` that does not resolve to `Test` is still linted normally: when
+    # `Test` is not in the environment, and when it is a user's own local macro.
+    let (codes, _) = lint("@test_throws ErrorException (@eval primitive type 0 C end)\n"; with_test=false)
+        @test InappropriateUseOfLiteral in codes
+    end
+    let (codes, _) = lint("macro test_throws(a, b) end\n@test_throws ErrorException (@eval primitive type 0 D end)\n")
+        @test InappropriateUseOfLiteral in codes
+    end
+
+    # The same misuse outside `@test_throws` is still flagged.
+    let (codes, missing) = lint("using Test\nprimitive type 1 8 end\nsome_undefined_thing()\n")
+        @test InappropriateUseOfLiteral in codes
+        @test !isempty(missing)
+    end
 end
 
 @testitem "check_break_continue" setup=[shared_static_lint] begin
@@ -2905,6 +3044,40 @@ end
             let
                 local x = 2
             end
+        end""")
+end
+
+@testitem "@label is not an unused binding (julia-vscode#3844)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
+
+    function has_unused(src)
+        cst, meta_dict, jw = parse_and_pass(src)
+        any(errorof(x, meta_dict) === UnusedBinding for (_, x) in collect_hints(cst, meta_dict, jw))
+    end
+
+    # A label targeted by @goto is not an unused variable.
+    @test !has_unused("""
+        function f(n)
+            @label loop
+            n -= 1
+            println(n)
+            n > 0 && @goto loop
+        end""")
+
+    # Labels aren't variables, so even one without a matching @goto isn't
+    # flagged as an unused binding.
+    @test !has_unused("""
+        function f(n)
+            @label out
+            return n
+        end""")
+
+    # An ordinary unused variable next to a label is still flagged.
+    @test has_unused("""
+        function f(n)
+            unused_var = 1
+            @label loop
+            n > 0 && @goto loop
         end""")
 end
 

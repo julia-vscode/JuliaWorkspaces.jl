@@ -110,6 +110,10 @@ LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
     LintOptions(something.(options, default_options)...)
 
 function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict)
+    # Linting is disabled inside `@test_throws`: its body is expected to error and
+    # may contain invalid code
+    is_test_throws_macrocall(x, env, meta_dict) && return
+
     # Do checks
     opts.call && check_call(x, env, meta_dict)
     opts.iter && check_loop_iter(x, env, meta_dict)
@@ -663,9 +667,14 @@ end
 function check_modulename(x::EXPR, meta_dict)
     if CSTParser.defines_module(x) && # x is a module
         scopeof(x, meta_dict) isa Scope && parentof(scopeof(x, meta_dict)) isa Scope && # it has a scope and a parent scope
-        CSTParser.defines_module(parentof(scopeof(x, meta_dict)).expr) && # the parent scope is a module
-        valof(CSTParser.get_name(x)) == valof(CSTParser.get_name(parentof(scopeof(x, meta_dict)).expr)) # their names match
-        seterror!(CSTParser.get_name(x), InvalidModuleName, meta_dict)
+        CSTParser.defines_module(parentof(scopeof(x, meta_dict)).expr) # the parent scope is a module
+        # valofid also covers var"..." names, where valof is nothing (and
+        # would spuriously compare equal for two distinct var"..." names)
+        name = _module_name_or_nothing(CSTParser.get_name(x))
+        parent_name = _module_name_or_nothing(CSTParser.get_name(parentof(scopeof(x, meta_dict)).expr))
+        if name !== nothing && name == parent_name # their names match
+            seterror!(CSTParser.get_name(x), InvalidModuleName, meta_dict)
+        end
     end
 end
 
@@ -716,11 +725,12 @@ function check_farg_unused_(arg, arg_names, meta_dict)
         seterror!(arg, UnusedFunctionArgument, meta_dict)
     end
 
-    if valof(b.name) === nothing
-    elseif valof(b.name) in arg_names
+    argname = b.name isa EXPR && isidentifier(b.name) ? valofid(b.name) : valof(b.name)
+    if argname === nothing
+    elseif argname in arg_names
         seterror!(arg, DuplicateFuncArgName, meta_dict)
     else
-        push!(arg_names, valof(b.name))
+        push!(arg_names, argname)
     end
     true
 end
@@ -735,6 +745,21 @@ function is_nospecialize_call(x)
     CSTParser.ismacrocall(x) &&
     CSTParser.ismacroname(x.args[1]) &&
     is_nospecialize(x.args[1])
+end
+
+"""
+    is_test_throws_macrocall(x::EXPR, env, meta_dict)
+
+True if `x` is a call to `Test.@test_throws`, resolved through the environment
+(so `using Test`, qualified `Test.@test_throws`, and renamed imports are handled,
+while an unrelated user-defined `@test_throws` is not matched). Its body
+deliberately contains code that is expected to error - often intentionally
+invalid - so linting is disabled there (issue #3682).
+"""
+function is_test_throws_macrocall(x::EXPR, env, meta_dict)
+    CSTParser.ismacrocall(x) || return false
+    (x.args !== nothing && length(x.args) > 0) || return false
+    return _points_to_arbitrary_macro(x.args[1], :Test, Symbol("@test_throws"), env, meta_dict)
 end
 
 """
@@ -785,8 +810,13 @@ Collect hints and errors from an expression. `missingrefs` = (:none, :id, :all) 
 identifiers are marked, the :all option will mark identifiers used in getfield calls."
 """
 function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=:all, isquoted=false, errs=Tuple{Int,EXPR}[], pos=0)
+    # Linting is disabled inside `@test_throws` (see `check_all`), so skip its body
+    # here too - otherwise deliberately undefined references would still be flagged.
+    is_test_throws_macrocall(x, env, meta_dict) && return errs
+
     # relies on quoted(x) and unquoted(x) being mutually exclusive
     isquoted = isquoted ? !unquoted(x) : quoted(x)
+
     if headof(x) === :errortoken
         # collect parse errors
         push!(errs, (pos, x))
@@ -867,8 +897,8 @@ function try_resolve_getfield_ref!(x, env, workspace_packages, meta_dict)
             lhsref = get_root_method(lhsref)
             if lhsref isa Binding && lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
                 # We may have infered the lhs type after the semantic pass that was resolving references. Copied from `resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Bool`.
-                if scopehasbinding(scopeof(lhsref.type.val, meta_dict), valof(x))
-                    setref!(x, scopeof(lhsref.type.val, meta_dict).names[valof(x)], meta_dict)
+                if scopehasbinding(scopeof(lhsref.type.val, meta_dict), valofid(x))
+                    setref!(x, scopeof(lhsref.type.val, meta_dict).names[valofid(x)], meta_dict)
                 end
             end
         end
@@ -898,7 +928,7 @@ function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
                 return true
             elseif lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
                 # We may have infered the lhs type after the semantic pass that was resolving references.
-                return !scopehasbinding(scopeof(lhsref.type.val, meta_dict), valof(x))
+                return !scopehasbinding(scopeof(lhsref.type.val, meta_dict), valofid(x))
             end
         end
     end
@@ -1188,7 +1218,7 @@ function check_unused_binding(b::Binding, scope::Scope, meta_dict)
         if (isempty(refs) || length(refs) == 1 && refs[1] == b.name) &&
                 !is_sig_arg(b.name) && !is_overwritten_in_loop(b.name, meta_dict) &&
                 !is_overwritten_subsequently(b, scope, meta_dict) && !is_kw_of_macrocall(b) &&
-                !captures_outer_local(b, scope)
+                !captures_outer_local(b, scope) && !is_label_binding(b)
             seterror!(b.name, UnusedBinding, meta_dict)
         end
     end
@@ -1215,6 +1245,17 @@ function is_kw_of_macrocall(b::Binding)
     b.val isa EXPR && isassignment(b.val) && parentof(b.val) isa EXPR && CSTParser.ismacrocall(parentof(b.val))
 end
 
+# `@label name` introduces a jump target for `@goto`, not a variable, so it
+# should never be reported as an unused binding (julia-vscode#3844).
+function is_label_binding(b::Binding)
+    (b.val isa EXPR && isidentifier(b.val) && parentof(b.val) isa EXPR) || return false
+    p = parentof(b.val)
+    (CSTParser.ismacrocall(p) && length(p.args) == 3 && p.args[3] === b.val) || return false
+    mname = p.args[1]
+    return valof(mname) == "@label" ||
+        (CSTParser.is_getfield_w_quotenode(mname) && valof(rhs_of_getfield(mname)) == "@label")
+end
+
 function is_overwritten_in_loop(x, meta_dict)
     # Cuts out false positives for check_unused_binding - the linear nature of our
     # semantic passes mean a variable declared at the end of a loop's block but used at
@@ -1230,9 +1271,12 @@ function is_overwritten_in_loop(x, meta_dict)
     if loop !== nothing
         s = scopeof(loop, meta_dict)
         if s isa Scope && parentof(s) isa Scope
-            s2 = check_parent_scopes_for(s, valof(x))
+            # valofid also covers var"..." names, where valof is nothing
+            xname = isidentifier(x) ? valofid(x) : valof(x)
+            xname === nothing && return false
+            s2 = check_parent_scopes_for(s, xname)
             if s2 isa Scope
-                prev_binding = parentof(s2).names[valof(x)]
+                prev_binding = parentof(s2).names[xname]
                 if prev_binding isa Binding
                     return true
                     # s = ComesBefore(prev_binding.name, s2.expr, 0)
@@ -1301,8 +1345,10 @@ function check_parent_scopes_for(s::Scope, name)
 end
 
 function is_overwritten_subsequently(b::Binding, scope::Scope, meta_dict)
-    valof(b.name) === nothing && return false
-    s = BoundAfter(b.name, valof(b.name), 0, meta_dict)
+    # valofid also covers var"..." names, where valof is nothing
+    bname = b.name isa EXPR && isidentifier(b.name) ? valofid(b.name) : valof(b.name)
+    bname === nothing && return false
+    s = BoundAfter(b.name, bname, 0, meta_dict)
     traverse(scope.expr, s)
     return s.result == 2
 end
