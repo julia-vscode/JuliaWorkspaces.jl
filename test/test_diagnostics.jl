@@ -1053,3 +1053,43 @@ end
 
     @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
 end
+
+@testitem "unresolved import: as-aliased imports are flagged" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresAs"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2b"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresAs
+    import NotARealPackageXYZ as NR
+    using Base: not_a_real_base_name_xyz as aliasname
+    function f()
+        NR.foo(aliasname)
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresas/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresas/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresas/src/UnresAs.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresas/src/UnresAs.jl"))
+
+    @test any(d -> d.message == "Failed to resolve `NotARealPackageXYZ`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test any(d -> d.message == "Failed to resolve `not_a_real_base_name_xyz`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve `Base`"), diags)
+    # aliased names are bound; their uses stay silent
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+end

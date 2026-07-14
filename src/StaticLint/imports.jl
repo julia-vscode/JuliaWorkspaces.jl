@@ -37,12 +37,21 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
             if hasref(arg, meta_dict) && is_synthetic_import_binding(cand)
                 # A previous pass bound this name synthetically; retry the real
                 # lookup and, on success, fill the same Binding object in place
-                # so existing references see the real target. On failure the
-                # synthetic binding must stay (uses keep resolving to it).
+                # so existing references see the real target.
                 # (The hasref guard ensures `cand` is this arg's own synthetic
                 # binding, not one that `_get_field` fished out of scope.names.)
                 newcand = _get_field(root, arg, state)
-                newcand !== nothing && newcand !== cand && fill_synthetic_import_binding!(cand, newcand, state)
+                if newcand !== nothing && newcand !== cand
+                    fill_synthetic_import_binding!(cand, newcand, state)
+                else
+                    # Still unresolved: keep the synthetic binding in place and
+                    # stop. Continuing would let `_mark_import_arg` (and the
+                    # `:as` copy logic, which cleared this component's binding)
+                    # wrap the synthetic binding in a new one whose val is
+                    # non-nothing, laundering it past is_synthetic_import_binding
+                    # so the import would never be flagged as unresolved.
+                    return
+                end
             end
             if cand === nothing
                 # Cannot resolve now (e.g. sibling not yet defined). Schedule a retry.
