@@ -204,11 +204,12 @@ end
         @test length(unique(ranges)) == length(ranges)               # no duplicate edits
     end
 
-    # Pre-existing `get_expr1` boundary quirk: with the cursor on the very first
-    # character of a type name right after the `struct` keyword (the `P` of
-    # `Point`, col 8), position resolution misses the identifier and no edits are
-    # produced. One character in it works (covered by the `struct` case above).
-    @test_broken length(get_rename_edits(jw, uri, string_index(source, 4, 8), "Coord")) == 2
+    # Cursor on the very first character of a type name right after the `struct`
+    # keyword (the `P` of `Point`, col 8): a zero-width mutability-flag node sits
+    # at the same offset as the identifier, and `get_expr1` used to resolve to it
+    # (missing the identifier, producing no edits). It now skips the zero-width
+    # node and resolves the identifier.
+    @test length(get_rename_edits(jw, uri, string_index(source, 4, 8), "Coord")) == 2
 end
 
 @testitem "References: rename macro" begin

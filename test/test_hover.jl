@@ -679,3 +679,34 @@ end
     @test result !== nothing
     @test occursin("Datatype field `b` of Foo", result)
 end
+
+@testitem "Hover: keyword parameter in definition signature" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, get_expr1
+    using JuliaWorkspaces: derived_julia_legacy_syntax_tree
+    using JuliaWorkspaces.URIs2: URI
+    import CSTParser
+
+    # CSTParser folds the `;` separator into the preceding positional argument's
+    # `fullspan`, so the `parameters` node directly follows an IDENTIFIER with no
+    # separator token in between. A boundary heuristic in `get_expr1` used to grab
+    # that preceding identifier, so hovering the keyword parameter `y` resolved to
+    # the positional `x` instead.
+    source = "g(x;y)=x+y\n"
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///kwparam/test.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    # Hovering the keyword parameter `y` (index 5) must resolve to `y`, not `x`.
+    result = get_hover_text(jw, uri, 5)
+    @test result !== nothing
+    clean = replace(result, "\r" => "")
+    @test occursin("```julia\ny\n```", clean)
+    @test !occursin("```julia\nx\n```", clean)
+
+    # Direct unit check on the offset lookup: offset 4 (0-based) is the `y` of the
+    # parameters block, offset 2 is the positional `x`.
+    cst = CSTParser.parse(source)
+    @test CSTParser.str_value(get_expr1(cst, 4)) == "y"
+    @test CSTParser.str_value(get_expr1(cst, 2)) == "x"
+end
