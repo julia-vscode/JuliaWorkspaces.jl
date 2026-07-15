@@ -116,13 +116,31 @@ function _get_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vec
     end
 end
 
+# Predicate for `:ss_shorten`: a top-level `Core`/`Base` name that its module
+# exports (e.g. `Core.Any`, `Base.Dict`) can be printed without its qualifier.
+function _sig_shorten_pred(env)
+    syms = StaticLint.getsymbols(env)
+    return function (vr::SymbolServer.VarRef)
+        SymbolServer.isfakeany(vr) && return true
+        p = vr.parent
+        (p isa SymbolServer.VarRef && p.parent === nothing) || return false
+        mod = get(syms, p.name, nothing)
+        mod isa SymbolServer.ModuleStore && vr.name in mod.exportednames
+    end
+end
+
+_sig_type_str(@nospecialize(t), pred) =
+    sprint((io, x) -> show(IOContext(io, :ss_shorten => pred), x), t)
+
 function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
+    pred = _sig_shorten_pred(env)
     StaticLint.iterate_over_ss_methods(b, tls, env, function (m)
-        push!(sigs, SignatureInfo(
-            string(m),
-            "",
-            [ParameterInfo(string(a[1]), string(a[2])) for a in m.sig]
-        ))
+        label = sprint((io, x) -> print(IOContext(io, :ss_shorten => pred, :ss_omit_any => true), x), m)
+        params = [ParameterInfo(
+                string(a[1]),
+                SymbolServer.isfakeany(a[2]) ? "" : _sig_type_str(a[2], pred)
+            ) for a in m.sig]
+        push!(sigs, SignatureInfo(label, "", params))
         return false
     end)
 end

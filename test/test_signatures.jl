@@ -193,6 +193,37 @@ end
     @test [p.label for p in sig.parameters] == ["var\"hello world\"", "normal"]
 end
 
+@testitem "Signatures: stdlib types unqualified and ::Any omitted" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    function sigs_for(call)
+        jw = JuliaWorkspace()
+        uri = URI("file:///sigshort/s.jl")
+        add_file!(jw, TextFile(uri, SourceText(call, "julia")))
+        return get_signature_help(jw, uri, ncodeunits(call)).signatures
+    end
+
+    # `identity(x)` has a single method with an untyped (::Any) argument, so
+    # the `::Any` annotation must be dropped entirely.
+    sigs = sigs_for("identity(")
+    @test !isempty(sigs)
+    s = first(sigs)
+    @test occursin("identity(x) in Base", s.label)
+    @test !occursin("Core.Any", s.label)
+    @test !occursin("::", split(s.label, " in ")[1])
+    @test s.parameters[1].label == "x"
+    @test s.parameters[1].documentation == ""
+
+    # `print(io::IO, ...)` — the exported `IO` type must render without its
+    # `Core.` module qualifier, both in the label and the parameter docs.
+    psigs = sigs_for("print(")
+    @test !isempty(psigs)
+    @test !any(s -> occursin("Core.IO", s.label), psigs)
+    @test any(s -> occursin("io::IO", s.label), psigs)
+    @test any(s -> any(p -> p.documentation == "IO", s.parameters), psigs)
+end
+
 @testitem "Signatures: function with var\"\" argument (#3867)" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI

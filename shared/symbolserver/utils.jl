@@ -327,11 +327,16 @@ const JULIA_DIR = normpath(joinpath(Sys.BINDIR, Base.DATAROOTDIR, "julia"))
 
 function Base.print(io::IO, m::MethodStore)
     print(io, m.name, "(")
+    # An `:ss_omit_any` flag in the IOContext drops the annotation on `::Any`
+    # arguments.
+    omit_any = get(io, :ss_omit_any, false)
     for i = 1:length(m.sig)
         if m.sig[i][1] != Symbol("#unused#")
             print(io, m.sig[i][1])
         end
-        print(io, "::", m.sig[i][2])
+        if !(omit_any && isfakeany(m.sig[i][2]))
+            print(io, "::", m.sig[i][2])
+        end
         i != length(m.sig) && print(io, ", ")
     end
     print(io, ")")

@@ -100,7 +100,21 @@ function _parameter(@nospecialize(p), budget::ExpandBudget=ExpandBudget())
     end
 end
 
-Base.show(io::IO, vr::VarRef) = vr.parent === nothing ? print(io, vr.name) : print(io, vr.parent, ".", vr.name)
+function Base.show(io::IO, vr::VarRef)
+    if vr.parent === nothing
+        print(io, vr.name)
+    else
+        # An `:ss_shorten` predicate in the IOContext may request dropping the
+        # module qualifier (e.g. `Core.Any` -> `Any`) for names it deems
+        # unambiguous
+        pred = get(io, :ss_shorten, nothing)
+        if pred !== nothing && pred(vr)
+            print(io, vr.name)
+        else
+            print(io, vr.parent, ".", vr.name)
+        end
+    end
+end
 function Base.show(io::IO, tn::FakeTypeName)
     print(io, tn.name)
     if !isempty(tn.parameters)
