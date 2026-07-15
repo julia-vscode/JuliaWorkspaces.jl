@@ -203,8 +203,15 @@ shared by references, rename, and highlight.
 """
 function _for_each_ref(f, identifier::CSTParser.EXPR, meta_dict::MetaDict, runtime)
     if StaticLint.hasref(identifier, meta_dict) && StaticLint.refof(identifier, meta_dict) isa StaticLint.Binding
+        # StaticLint can register the same EXPR node more than once (e.g. a macro
+        # definition's name ends up in the binding's `refs` twice), so dedupe by
+        # node identity to avoid emitting duplicate results. Identity
+        # (not structural) equality is required: distinct occurrences such as two
+        # `@add_2` invocations are structurally equal and must be kept separate.
+        seen = Base.IdSet{CSTParser.EXPR}()
         for r in StaticLint.loose_refs(StaticLint.refof(identifier, meta_dict), meta_dict)
-            if r isa CSTParser.EXPR
+            if r isa CSTParser.EXPR && !(r in seen)
+                push!(seen, r)
                 loc = _get_file_loc(r, runtime)
                 if loc !== nothing
                     uri, o = loc
@@ -362,8 +369,15 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
     x = get_expr1(cst, offset)
     x === nothing && return results
 
+    # A macro's definition uses the bare name (`add_2`) while every invocation
+    # carries a leading `@` (`@add_2`). The client may send the new name with or
+    # without the `@`; normalize to the bare form and re-add the `@` only for the
+    # occurrences that had one, so the definition and invocations stay consistent
+    bare_name = startswith(new_name, "@") ? new_name[nextind(new_name, 1):end] : new_name
+
     _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
-        push!(results, RenameEdit(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), new_name))
+        text = startswith(CSTParser.str_value(ref), "@") ? "@" * bare_name : bare_name
+        push!(results, RenameEdit(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), text))
     end
 
     return results
