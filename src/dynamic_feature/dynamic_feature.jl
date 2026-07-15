@@ -300,7 +300,7 @@ Default upstream URL from which precomputed package symbol caches are
 downloaded when `symbolcache_download` is enabled on a [`JuliaWorkspace`](@ref).
 Downloading a cached index avoids having to index a package locally.
 """
-const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://www.julia-vscode.org/symbolcache"
+const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://julia-symbolcache.org"
 
 struct DynamicFeature
     djp_mode::DynamicMode

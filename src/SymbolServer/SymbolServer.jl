@@ -29,7 +29,7 @@ mutable struct SymbolServerInstance
 
     function SymbolServerInstance(depot_path::String="", store_path::Union{String,Nothing}=nothing, julia_exe::Union{NamedTuple{(:path,:version),Tuple{String,VersionNumber}},Nothing}=nothing; symbolcache_upstream = nothing)
         if symbolcache_upstream === nothing
-            symbolcache_upstream = "https://www.julia-vscode.org/symbolcache"
+            symbolcache_upstream = "https://julia-symbolcache.org"
         end
         return new(nothing, depot_path, julia_exe === nothing ? joinpath(Sys.BINDIR, Base.julia_exename()) : julia_exe.path, julia_exe === nothing ? VERSION : julia_exe.version, Set{Process}(), store_path === nothing ? abspath(joinpath(@__DIR__, "..", "store")) : store_path, symbolcache_upstream)
     end
