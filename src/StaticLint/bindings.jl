@@ -136,7 +136,17 @@ function mark_binding!(x::EXPR, meta_dict, val=x)
             mark_binding!(arg, meta_dict, val)
         end
     elseif CSTParser.isbracketed(x)
-        mark_binding!(CSTParser.rem_invis(x), meta_dict, val)
+        inner = CSTParser.rem_invis(x)
+        if headof(inner) === :block
+            # A `(a; b)` signature (e.g. an anonymous `(bar; baz) -> ...`) collapses
+            # into a bracketed `:block` in the CST rather than a tuple+parameters, so
+            # mark each element of the block as its own binding.
+            for arg in inner.args
+                _mark_block_sig_arg!(arg, meta_dict, val)
+            end
+        else
+            mark_binding!(inner, meta_dict, val)
+        end
     elseif CSTParser.issplat(x)
         mark_binding!(x.args[1], meta_dict, x)
     elseif !(isunarysyntax(x) && valof(headof(x)) == "::")
@@ -204,6 +214,20 @@ function _is_nospecialize_macrocall(a::EXPR)
     CSTParser.isidentifier(a.args[1]) && valofid(a.args[1]) == "@nospecialize"
 end
 
+# Mark a single element of a `(a; b)`-style bracketed-block signature. Such a
+# block flattens the positional and keyword args together, and (like macrocalls)
+# represents a defaulted kwarg `b = default` as a plain assignment rather than a
+# `:kw` node, so unwrap that to bind the parameter name.
+function _mark_block_sig_arg!(a::EXPR, meta_dict, val)
+    if _is_nospecialize_macrocall(a)
+        _mark_nospecialize_arg!(a, meta_dict)
+    elseif CSTParser.isassignment(a)
+        mark_binding!(a.args[1], meta_dict, a)
+    else
+        mark_binding!(a, meta_dict, val)
+    end
+end
+
 function mark_sig_args!(x::EXPR, meta_dict)
     if CSTParser.iscall(x) || CSTParser.istuple(x)
         if x.args !== nothing && length(x.args) > 0
@@ -235,6 +259,13 @@ function mark_sig_args!(x::EXPR, meta_dict)
         mark_sig_args!(x.args[1], meta_dict)
     elseif CSTParser.isbracketed(x)
         mark_sig_args!(x.args[1], meta_dict)
+    elseif headof(x) === :block
+        # A `(a; b)` signature (e.g. `function (bar; baz) ... end`) collapses into a
+        # bracketed `:block` in the CST rather than a tuple+parameters; mark each
+        # element of the block as an argument binding.
+        for a in x.args
+            _mark_block_sig_arg!(a, meta_dict, a)
+        end
     elseif CSTParser.isdeclaration(x)
         mark_sig_args!(x.args[1], meta_dict)
     elseif CSTParser.isbinarycall(x)
