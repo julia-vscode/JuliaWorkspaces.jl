@@ -138,13 +138,22 @@ struct _CompletionState
     completion_mode::Symbol
     using_stmts::Dict{String,Any}
     workspace  # JuliaWorkspace — untyped to avoid circular ref
+    item_meta::Dict{String,Tuple{String,Int}}  # label => (query, priority), for ranking
 end
 
-function _add_completion_item(state::_CompletionState, item::CompletionResultItem)
+"""
+    _add_completion_item(state, item, query="", priority=_PRIO_STORE)
+
+Record a completion candidate. `query` is the text the item was matched against
+and `priority` its source rank; both feed the relevance sort in
+[`_finalize_completions`](@ref).
+"""
+function _add_completion_item(state::_CompletionState, item::CompletionResultItem, query::AbstractString="", priority::Int=_PRIO_STORE)
     if haskey(state.completions, item.label) && state.completions[item.label].data === nothing
         return
     end
     state.completions[item.label] = item
+    state.item_meta[item.label] = (String(query), priority)
 end
 
 function _getsymbols(state::_CompletionState)
@@ -230,6 +239,80 @@ function is_completion_match(s::AbstractString, prefix::AbstractString, cutoff=3
         startswith(s, prefix)
     end
     starter || REPL.fuzzyscore(prefix, s) >= cutoff
+end
+
+# ============================================================================
+# Relevance ranking for server-side sorting
+# ============================================================================
+#
+# Clients differ in how they order completion items: VS Code re-sorts by
+# `sort_text` (falling back to the label) rather than trusting server order,
+# while editors that do no client-side sorting at all (e.g. Helix) show items in
+# whatever order the server returns. To get a good, stable order everywhere we
+# compute a relevance key per item and emit a zero-padded `sort_text` reflecting
+# it (see `_finalize_completions`).
+#
+# The key is `(match_rank, source_priority, length, label)`:
+#  - `match_rank`: how well the label matches what the user typed. A
+#    case-matching prefix beats a case-insensitive prefix, so all-lowercase
+#    input surfaces the lowercase symbol first (e.g. `\epsi` ranks `\epsilon`
+#    above `\Epsilon`) without dropping the case-mismatched candidate.
+#  - `source_priority`: nearer lexical scope / more relevant source first.
+#  - `length` then `label`: deterministic tie-breaking, shorter names first.
+
+const _PRIO_FIELD       = 0     # struct fields on a `x.` access (contextual)
+const _PRIO_LOCAL_BASE  = 0     # bindings in the innermost scope; + scope depth
+const _PRIO_MODULE_BASE = 100   # `using`-ed modules visible in a scope; + depth
+const _PRIO_STORE       = 500   # symbols pulled from a SymbolServer store
+const _PRIO_KEYWORD     = 900   # language keywords / snippets
+
+"""
+    _match_rank(label, query)
+
+Rank how well `label` matches the typed `query` (lower is better): exact match
+(0), case-sensitive prefix (1), case-insensitive prefix (2), otherwise fuzzy (3).
+"""
+function _match_rank(label::AbstractString, query::AbstractString)
+    isempty(query) && return 3
+    if label == query
+        return 0
+    elseif startswith(label, query)
+        return 1
+    elseif startswith(lowercase(label), lowercase(query))
+        return 2
+    else
+        return 3
+    end
+end
+
+function _with_sort_text(item::CompletionResultItem, sort_text::String)
+    return CompletionResultItem(
+        item.label, item.kind, item.detail, item.detail_label,
+        item.detail_description, item.documentation, sort_text, item.filter_text,
+        item.insert_text_format, item.text_edit, item.additional_edits, item.data)
+end
+
+"""
+    _finalize_completions(state)
+
+Collect the accumulated completion items, sort them by relevance, and stamp each
+with a zero-padded `sort_text` so the server-chosen order is respected by clients.
+"""
+function _finalize_completions(state)
+    items = collect(values(state.completions))
+    function relevance_key(item)
+        query, priority = get(state.item_meta, item.label, ("", _PRIO_STORE))
+        # match against filter_text when present (e.g. qualify-mode `Mod.foo`
+        # items filter on the bare `foo`)
+        target = item.filter_text === nothing ? item.label : item.filter_text
+        return (_match_rank(target, query), priority, length(item.label), item.label)
+    end
+    sort!(items; by=relevance_key)
+    width = max(ndigits(length(items)), 1)
+    for (i, item) in enumerate(items)
+        items[i] = _with_sort_text(item, lpad(i, width, '0'))
+    end
+    return items
 end
 
 # ============================================================================
@@ -394,7 +477,7 @@ function _latex_completions(partial::String, state::_CompletionState)
         if is_completion_match(string(k), partial)
             _add_completion_item(state, CompletionResultItem(
                 k, CompletionKinds.Unit, nothing, v,
-                _texteditfor(state, partial, v)))
+                _texteditfor(state, partial, v)), partial, _PRIO_STORE)
         end
     end
 end
@@ -475,7 +558,7 @@ function _kw_completion(partial::String, state::_CompletionState)
             _add_completion_item(state, CompletionResultItem(
                 kw, kind, nothing, nothing,
                 _texteditfor(state, partial, comp);
-                insert_text_format=InsertFormats.Snippet))
+                insert_text_format=InsertFormats.Snippet), partial, _PRIO_KEYWORD)
         end
     end
 end
@@ -524,7 +607,7 @@ function _path_completion(t, state::_CompletionState)
                         end
                         edit = CompletionEdit(position_at(state.st, state.offset - sizeof(partial) + 1), position_at(state.st, state.offset + 1), f, nothing)
                         _add_completion_item(state, CompletionResultItem(
-                            f, CompletionKinds.File, f, nothing, edit))
+                            f, CompletionKinds.File, f, nothing, edit), partial, _PRIO_STORE)
                     catch err
                         isa(err, Base.IOError) || isa(err, Base.SystemError) || rethrow()
                     end
@@ -676,7 +759,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                 if isempty(partial) || startswith(n, partial)
                     _add_completion_item(state, CompletionResultItem(
                         n, CompletionKinds.Module, nothing, n,
-                        _texteditfor(state, partial, n)))
+                        _texteditfor(state, partial, n)), partial, _PRIO_MODULE_BASE)
                 end
             end
         end
@@ -698,7 +781,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                         n, _completion_kind(m),
                         _completion_details_description(m),
                         m isa SymbolServer.SymStore ? _sanitize_docstring(m.doc) : n,
-                        _texteditfor(state, t.val, n)))
+                        _texteditfor(state, t.val, n)), t.val, _PRIO_STORE)
                 end
             end
         else
@@ -709,7 +792,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                     n, CompletionKinds.Module,
                     _completion_details_description(m),
                     _sanitize_docstring(m.doc),
-                    CompletionEdit(position_at(state.st, state.start_offset + 1), position_at(state.st, state.end_offset + 1), n, nothing)))
+                    CompletionEdit(position_at(state.st, state.start_offset + 1), position_at(state.st, state.end_offset + 1), n, nothing)), "", _PRIO_MODULE_BASE)
             end
         end
     elseif t.kind == Tokens.DOT && pt.kind == Tokens.IDENTIFIER
@@ -727,7 +810,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                             n, _completion_kind(m),
                             _completion_details_description(m),
                             m isa SymbolServer.SymStore ? _sanitize_docstring(m.doc) : n,
-                            _texteditfor(state, t.val, n)))
+                            _texteditfor(state, t.val, n)), t.val, _PRIO_STORE)
                     end
                 end
             end
@@ -740,7 +823,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                             n, _completion_kind(m),
                             _completion_details_description(m),
                             m isa SymbolServer.SymStore ? _sanitize_docstring(m.doc) : n,
-                            _texteditfor(state, t.val, n)))
+                            _texteditfor(state, t.val, n)), t.val, _PRIO_STORE)
                     end
                 end
             else
@@ -751,7 +834,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                             n, CompletionKinds.Module,
                             _completion_details_description(m),
                             m isa SymbolServer.SymStore ? m.doc : n,
-                            _texteditfor(state, t.val, n)))
+                            _texteditfor(state, t.val, n)), t.val, _PRIO_MODULE_BASE)
                     end
                 end
             end
@@ -815,7 +898,7 @@ function _add_field_completion(state::_CompletionState, spartial, name::String, 
         (label != name && is_completion_match(label, spartial))
         _add_completion_item(state, CompletionResultItem(
             label, CompletionKinds.Field, nothing, name,
-            _texteditfor(state, spartial, label)))
+            _texteditfor(state, spartial, label)), spartial, _PRIO_FIELD)
     end
 end
 
@@ -854,7 +937,7 @@ end
 # Symbol collection (three overloads)
 # ============================================================================
 
-function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_CompletionState, inclexported=false, dotcomps=false)
+function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_CompletionState, inclexported=false, dotcomps=false; priority::Int=_PRIO_STORE)
     possible_names = String[]
     symbols = _getsymbols(state)
     for val in m.vals
@@ -879,7 +962,7 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
                     n, _completion_kind(v),
                     _completion_details_description(v),
                     v isa SymbolServer.SymStore ? _sanitize_docstring(v.doc) : nothing,
-                    _texteditfor(state, spartial, n)))
+                    _texteditfor(state, spartial, n)), spartial, priority)
             end
         elseif dotcomps
             foreach(possible_names) do n
@@ -887,7 +970,7 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
                     n, _completion_kind(v),
                     _completion_details_description(v),
                     v isa SymbolServer.SymStore ? _sanitize_docstring(v.doc) : nothing,
-                    _texteditfor(state, spartial, string(m.name, ".", n))))
+                    _texteditfor(state, spartial, string(m.name, ".", n))), spartial, priority)
             end
         elseif length(spartial) > 3 && !_variable_already_imported(m, canonical_name, state)
             if state.completion_mode === :import
@@ -899,7 +982,7 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
                         detail_description = v isa SymbolServer.SymStore ? _sanitize_docstring(v.doc) : nothing,
                         insert_text_format=InsertFormats.PlainText,
                         additional_edits=_textedit_to_insert_using_stmt(m, canonical_name, state),
-                        data="import"))
+                        data="import"), spartial, priority)
                 end
             elseif state.completion_mode === :qualify
                 foreach(possible_names) do n
@@ -908,7 +991,7 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
                         v isa SymbolServer.SymStore ? _sanitize_docstring(v.doc) : nothing,
                         _texteditfor(state, spartial, string(m.name, ".", n));
                         filter_text=string(n),
-                        insert_text_format=InsertFormats.PlainText))
+                        insert_text_format=InsertFormats.PlainText), spartial, priority)
                 end
             end
         end
@@ -931,21 +1014,24 @@ function _import_has_x(expr::CSTParser.EXPR, x::String)
     return false
 end
 
-function _collect_completions(x::CSTParser.EXPR, spartial, state::_CompletionState, inclexported=false, dotcomps=false)
-    if StaticLint.scopeof(x, state.meta_dict) !== nothing
-        _collect_completions(StaticLint.scopeof(x, state.meta_dict), spartial, state, inclexported, dotcomps)
-        if StaticLint.scopeof(x, state.meta_dict).modules isa Dict
-            for m in StaticLint.scopeof(x, state.meta_dict).modules
-                _collect_completions(m[2], spartial, state, inclexported, dotcomps)
+function _collect_completions(x::CSTParser.EXPR, spartial, state::_CompletionState, inclexported=false, dotcomps=false; depth::Int=0)
+    scope = StaticLint.scopeof(x, state.meta_dict)
+    if scope !== nothing
+        # bindings in the nearest scope rank first; scopes further out (and the
+        # modules they make visible) get progressively lower priority
+        _collect_completions(scope, spartial, state, inclexported, dotcomps; priority=_PRIO_LOCAL_BASE + depth)
+        if scope.modules isa Dict
+            for m in scope.modules
+                _collect_completions(m[2], spartial, state, inclexported, dotcomps; priority=_PRIO_MODULE_BASE + depth)
             end
         end
     end
     if CSTParser.parentof(x) !== nothing && !CSTParser.defines_module(x)
-        return _collect_completions(CSTParser.parentof(x), spartial, state, inclexported, dotcomps)
+        return _collect_completions(CSTParser.parentof(x), spartial, state, inclexported, dotcomps; depth=depth + 1)
     end
 end
 
-function _collect_completions(x::StaticLint.Scope, spartial, state::_CompletionState, inclexported=false, dotcomps=false)
+function _collect_completions(x::StaticLint.Scope, spartial, state::_CompletionState, inclexported=false, dotcomps=false; priority::Int=_PRIO_LOCAL_BASE)
     if x.names !== nothing
         stripped_partial = _strip_var_partial(spartial)
         possible_names = String[]
@@ -974,7 +1060,7 @@ function _collect_completions(x::StaticLint.Scope, spartial, state::_CompletionS
                         _completion_details_description(b),
                         isempty(documentation) ? nothing : documentation,
                         _texteditfor(state, spartial, nn);
-                        detail_label=_completion_details_label(b)))
+                        detail_label=_completion_details_label(b)), spartial, priority)
                 end
             end
         end
@@ -1127,7 +1213,8 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
         Dict{String,CompletionResultItem}(),
         offset, end_offset,   # start_offset (cursor), end_offset
         x, cst, uri, st, meta_dict, env,
-        completion_mode, using_stmts, workspace
+        completion_mode, using_stmts, workspace,
+        Dict{String,Tuple{String,Int}}()
     )
 
     # Update start/end offsets based on cursor position for replacement range
@@ -1184,5 +1271,5 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
         _collect_completions(state.x, "isa", state, false)
     end
 
-    return CompletionResult(true, unique(values(state.completions)))
+    return CompletionResult(true, _finalize_completions(state))
 end
