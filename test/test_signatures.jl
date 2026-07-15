@@ -285,3 +285,32 @@ end
     sig = first(result.signatures)
     @test [p.label for p in sig.parameters] == ["var\"weird arg\"", "normal"]
 end
+
+@testitem "Signatures: methods with 0 positional arguments are not skipped" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    function sigs_for(call)
+        jw = JuliaWorkspace()
+        uri = URI("file:///sigzero/s.jl")
+        add_file!(jw, TextFile(uri, SourceText(call, "julia")))
+        return get_signature_help(jw, uri, ncodeunits(call)).signatures
+    end
+
+    # A function with a positional method and a keyword-only method: at the open
+    # paren all methods are candidates, so both signatures must be offered — the
+    # keyword-only `bar(; x)` has 0 positional parameters and must not be dropped.
+    sigs = sigs_for("bar(x) = x\nbar(; x) = bar(x)\nbar(")
+    labels = [s.label for s in sigs]
+    @test any(l -> occursin("bar(x)", l), labels)
+    @test any(l -> occursin("bar(; x)", l), labels)
+
+    # A sole keyword-only method must still produce a popup (0 positional args).
+    sigs = sigs_for("baz(; x) = x\nbaz(")
+    @test !isempty(sigs)
+    @test any(l -> occursin("baz(; x)", l.label), sigs)
+
+    # A method that takes no arguments at all must also be offered at `(`.
+    sigs = sigs_for("qux() = 1\nqux(")
+    @test !isempty(sigs)
+end

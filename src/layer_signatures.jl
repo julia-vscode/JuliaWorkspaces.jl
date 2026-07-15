@@ -374,6 +374,11 @@ function _get_signature_help(runtime, uri::URI, offset::Int)
 
     arg = _fcall_arg_number(x)
 
-    filtered = filter(s -> length(s.parameters) > arg, sigs)
+    # Once the cursor sits at a positional argument beyond the first (`arg > 0`),
+    # narrow to signatures that actually have a parameter at that position. At the
+    # first position (`arg == 0`) nothing has been committed yet, so every method
+    # remains a candidate — including those with no positional parameters at all
+    # (e.g. `f(; kw)` or `f()`), which must still be offered rather than skipped.
+    filtered = arg == 0 ? sigs : filter(s -> length(s.parameters) > arg, sigs)
     return SignatureResult(filtered, 0, arg)
 end
