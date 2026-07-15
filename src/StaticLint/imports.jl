@@ -214,8 +214,8 @@ function _get_field(par, arg, state, visited=Base.IdSet{Any}())
             for used_module in values(par.modules)
                 if used_module isa SymbolServer.ModuleStore && isexportedby(Symbol(arg_str_rep), used_module)
                     return maybe_lookup(used_module[Symbol(arg_str_rep)], state)
-                elseif used_module isa Scope && scope_exports(used_module, arg_str_rep, state)
-                    return used_module.names[arg_str_rep]
+                elseif used_module isa Scope && (rb = exported_binding(used_module, arg_str_rep, state)) !== nothing
+                    return rb
                 end
             end
         end
