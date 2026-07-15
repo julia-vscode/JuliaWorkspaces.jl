@@ -13,11 +13,13 @@
 
 Describes a single parameter of a function signature in signature help.
 
-- `label::String`: The parameter's textual label as it appears in the signature.
+- `label::Union{String,Tuple{Int,Int}}`: The parameter as it appears in the
+  signature — either the exact substring, or a `[start, end)` UTF-16 offset range
+  into the signature label (LSP `ParameterInformation.label`).
 - `documentation::Union{String,Nothing}`: Optional documentation for the parameter.
 """
 struct ParameterInfo
-    label::String
+    label::Union{String,Tuple{Int,Int}}
     documentation::Union{String,Nothing}
 end
 
@@ -132,14 +134,45 @@ end
 _sig_type_str(@nospecialize(t), pred) =
     sprint((io, x) -> show(IOContext(io, :ss_shorten => pred), x), t)
 
+# Number of UTF-16 code units in `s`. `ParameterInformation` label offsets are
+# counted in UTF-16 code units (LSP spec), matching how the client indexes the
+# signature label.
+_utf16_length(s::AbstractString) = sum(c -> codepoint(c) >= 0x10000 ? 2 : 1, s; init=0)
+
+# Text of a single SymbolServer method parameter exactly as it is rendered in
+# the signature label by `Base.print(io, ::MethodStore)` under the same
+# `:ss_shorten`/`:ss_omit_any` context: `name::type`, `::type` for an unnamed
+# (`#unused#`) argument, or just `name` when the `::Any` annotation is omitted.
+function _ss_param_text(a, pred)
+    buf = IOBuffer()
+    io = IOContext(buf, :ss_shorten => pred)
+    a[1] === Symbol("#unused#") || print(io, a[1])
+    SymbolServer.isfakeany(a[2]) || print(io, "::", a[2])
+    return String(take!(buf))
+end
+
 function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
     pred = _sig_shorten_pred(env)
     StaticLint.iterate_over_ss_methods(b, tls, env, function (m)
         label = sprint((io, x) -> print(IOContext(io, :ss_shorten => pred, :ss_omit_any => true), x), m)
-        params = [ParameterInfo(
-                string(a[1]),
+        # `ParameterInformation.label` is a `[start, end)` UTF-16 offset range
+        # into the signature label (LSP spec). The label starts with `name(` and
+        # joins parameters with `, `, so each parameter's span follows from the
+        # accumulated rendered widths — a positional map, so it can never emit
+        # the `#unused#` placeholder and stays unambiguous even when two
+        # parameters render identically (e.g. `::Any, ::Any`).
+        off = _utf16_length(string(m.name)) + 1  # advance past "name("
+        n = length(m.sig)
+        params = ParameterInfo[]
+        for (i, a) in enumerate(m.sig)
+            w = _utf16_length(_ss_param_text(a, pred))
+            push!(params, ParameterInfo(
+                (off, off + w),
                 SymbolServer.isfakeany(a[2]) ? "" : _sig_type_str(a[2], pred)
-            ) for a in m.sig]
+            ))
+            off += w
+            i == n || (off += 2)  # ", " separator
+        end
         push!(sigs, SignatureInfo(label, "", params))
         return false
     end)

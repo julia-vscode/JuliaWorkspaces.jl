@@ -212,7 +212,7 @@ end
     @test occursin("identity(x) in Base", s.label)
     @test !occursin("Core.Any", s.label)
     @test !occursin("::", split(s.label, " in ")[1])
-    @test s.parameters[1].label == "x"
+    @test s.parameters[1].label == (9, 10)  # the `x` in `identity(x)`
     @test s.parameters[1].documentation == ""
 
     # `print(io::IO, ...)` — the exported `IO` type must render without its
@@ -222,6 +222,48 @@ end
     @test !any(s -> occursin("Core.IO", s.label), psigs)
     @test any(s -> occursin("io::IO", s.label), psigs)
     @test any(s -> any(p -> p.documentation == "IO", s.parameters), psigs)
+end
+
+@testitem "Signatures: parameter labels are offset ranges into the signature" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    # `get` has stdlib methods with unnamed arguments (e.g. `get(::Base.EnvDict,
+    # k, def)`). The LSP spec requires each parameter label to be either a
+    # substring of the signature label or a `[start, end)` UTF-16 offset range
+    # into it — never the internal placeholder `#unused#`. We emit offset ranges,
+    # so each range must select exactly the parameter's text.
+    source = """
+    get(
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///sigunused/test.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    # UTF-16 code-unit slice of `s` for a 0-based `[start, end)` range. The test
+    # signatures are ASCII, so this coincides with a plain character slice.
+    function utf16_slice(s, range)
+        units = Char[]
+        for c in s
+            push!(units, c)
+            codepoint(c) >= 0x10000 && push!(units, c)  # surrogate pair filler
+        end
+        return String(units[(range[1] + 1):range[2]])
+    end
+
+    result = get_signature_help(jw, uri, ncodeunits("get("))
+    @test !isempty(result.signatures)
+    params = [(sig.label, p) for sig in result.signatures for p in sig.parameters]
+    for (label, p) in params
+        @test p.label isa Tuple{Int,Int}
+        start, stop = p.label
+        @test 0 <= start <= stop
+        @test !occursin("#unused#", utf16_slice(label, p.label))
+    end
+    # An unnamed argument selects a leading `::Type`; `get` has such methods
+    # (e.g. `get(::Base.EnvDict, k, def)`), which used to be labeled `#unused#`.
+    @test any(((label, p),) -> startswith(utf16_slice(label, p.label), "::"), params)
 end
 
 @testitem "Signatures: function with var\"\" argument (#3867)" begin
