@@ -323,3 +323,38 @@ end
     @test z !== nothing
     @test z.type === nothing
 end
+
+@testitem "type assertion assignment inference" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof
+
+    cst, meta_dict = parse_and_pass("""
+    abstract type Parent end
+    struct Child1 <: Parent
+        field1::Int
+    end
+
+    function rebind(x::Parent)
+        x = x::Child1
+        x
+    end
+
+    function freshvar(x::Parent)
+        y = x::Child1
+        y
+    end
+
+    function untyped(x)
+        y = x::Child1
+        y
+    end
+    """);
+
+    Child1 = scopeof(cst, meta_dict).names["Child1"]
+
+    # `x = x::Child1` narrows the reassignment binding to Child1.
+    @test scopeof(scopeof(cst, meta_dict).names["rebind"].val, meta_dict).names["x"].type === Child1
+    # `y = x::Child1` gives the fresh binding the asserted type.
+    @test scopeof(scopeof(cst, meta_dict).names["freshvar"].val, meta_dict).names["y"].type === Child1
+    # Works even when the source variable is untyped.
+    @test scopeof(scopeof(cst, meta_dict).names["untyped"].val, meta_dict).names["y"].type === Child1
+end

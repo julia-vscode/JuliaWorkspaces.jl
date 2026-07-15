@@ -973,3 +973,103 @@ end
     result2 = get_completions(jw2, uri2, index2)
     @test result2 isa CompletionResult
 end
+
+@testitem "Completions: getfield via type-asserted assignment" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    structs = """
+    abstract type Parent end
+    struct Child1 <: Parent
+        field1::Int
+    end
+    struct Child2 <: Parent
+        field2::String
+    end
+    """
+
+    function fields_at(source, marker)
+        uri = URI("file:///compassert/test.jl")
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        index = findfirst(marker, source)[end]
+        sort([item.label for item in get_completions(jw, uri, index).items])
+    end
+
+    # Rebinding through an assertion: `x = x::Child1`
+    rebind = structs * """
+    function foo(x::Parent)
+        x = x::Child1
+        x.
+    end
+    """
+    @test fields_at(rebind, "\n    x.\n") == ["field1"]
+
+    # Fresh variable bound to an asserted value: `y = x::Child1`
+    freshvar = structs * """
+    function foo(x::Parent)
+        y = x::Child1
+        y.
+    end
+    """
+    @test fields_at(freshvar, "\n    y.\n") == ["field1"]
+
+    # Untyped parameter still narrows through the assertion.
+    untyped = structs * """
+    function foo(x)
+        y = x::Child1
+        y.
+    end
+    """
+    @test fields_at(untyped, "\n    y.\n") == ["field1"]
+
+    # Partial field text still matches.
+    partial = structs * """
+    function foo(x::Parent)
+        y = x::Child1
+        y.fie
+    end
+    """
+    @test fields_at(partial, "y.fie") == ["field1"]
+
+    # Baseline: an abstract declared type with no assertion yields no fields.
+    baseline = structs * """
+    function foo(x::Parent)
+        x.
+    end
+    """
+    @test fields_at(baseline, "\n    x.\n") == String[]
+end
+
+@testitem "Completions: getfield type assertion narrows per branch" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    abstract type Parent end
+    struct Child1 <: Parent
+        field1::Int
+    end
+    struct Child2 <: Parent
+        field2::String
+    end
+    function f(x::Parent)
+        if x isa Child1
+            y = x::Child1
+            y.
+        else
+            y = x::Child2
+            y.
+        end
+    end
+    """
+    uri = URI("file:///compassertbranch/test.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    dots = collect(findall("y.\n", source))
+    if_fields = sort([i.label for i in get_completions(jw, uri, dots[1][end]).items])
+    else_fields = sort([i.label for i in get_completions(jw, uri, dots[2][end]).items])
+    @test if_fields == ["field1"]
+    @test else_fields == ["field2"]
+end

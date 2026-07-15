@@ -56,6 +56,11 @@ function infer_type_assignment_rhs(binding, state, scope)
         if ref isa Binding && ref.val isa EXPR
             settype!(binding, infer_eltype(ref.val, state))
         end
+    elseif CSTParser.isdeclaration(rhs) && length(rhs.args) == 2 && !is_destructuring
+        # RHS is a type assertion (`y = x::T`, `x = x::T`): the assigned binding
+        # takes the asserted type, the same way a `::T` parameter declaration
+        # does. This lets field completion narrow through a local assertion.
+        infer_type_decl(binding, rhs.args[2], state, scope)
     else
         if CSTParser.is_func_call(rhs)
             if CSTParser.istuple(lhs) && !is_destructuring
