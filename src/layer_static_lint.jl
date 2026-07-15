@@ -194,6 +194,18 @@ Salsa.@derived function derived_static_lint_diagnostics_for_root(rt, root)
     workspace_packages = lint_result.workspace_packages
     env = derived_environment(rt, project_uri)
 
+    # Names the project declares as dependencies. An unresolved import of one of
+    # these is a dependency whose symbols could not be indexed/cached (it would
+    # otherwise be in the env and resolve), as opposed to a name that simply
+    # isn't in the environment (typo / missing dependency).
+    project = derived_project(rt, project_uri)
+    declared_deps = project === nothing ? Set{String}() :
+        Set{String}(Iterators.flatten((
+            keys(project.regular_packages),
+            keys(project.stdlib_packages),
+            keys(project.deved_packages),
+        )))
+
     for uri in derived_include_closure(rt, root)
         current_res = get!(res, uri, Set{Diagnostic}())
 
@@ -210,12 +222,13 @@ Salsa.@derived function derived_static_lint_diagnostics_for_root(rt, root)
                 push!(current_res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
             elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) === StaticLint.UnresolvedImport
                 name = CSTParser.str_value(err[2])
-                msg = if StaticLint.is_in_wildcard_import(err[2])
-                    "Failed to resolve `$name`. Missing-reference checks are disabled in this scope and all nested scopes."
-                else
-                    "Failed to resolve `$name`. Anything imported through this statement is assumed to exist and will not be checked."
-                end
-                push!(current_res, Diagnostic(rng, :warning, msg, nothing, Symbol[], "StaticLint.jl"))
+                cause = name in declared_deps ?
+                    "`$name` is a declared dependency but its symbols could not be indexed." :
+                    "Failed to resolve `$name`."
+                consequence = StaticLint.is_in_wildcard_import(err[2]) ?
+                    "Missing-reference checks are disabled in this scope and all nested scopes." :
+                    "Anything imported through this statement is assumed to exist and will not be checked."
+                push!(current_res, Diagnostic(rng, :warning, "$cause $consequence", nothing, Symbol[], "StaticLint.jl"))
             elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
                 code = StaticLint.errorof(err[2], meta_dict)
                 description = get(StaticLint.LintCodeDescriptions, code, "")
