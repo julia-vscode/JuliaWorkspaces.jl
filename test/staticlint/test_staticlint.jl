@@ -271,6 +271,39 @@ f(arg) = arg
 
 end
 
+@testitem "self-referential anonymous functions" setup=[shared_static_lint] begin
+    # A name bound to an arrow anonymous function is captured by the closure, so
+    # a self-reference in the body is a legitimate (recursive) reference.
+    @test check_resolved("""
+f = x -> f(x)
+""") == [true, true, true, true]
+
+    @test check_resolved("""
+f = x -> begin
+    return x < 3 ? 1 : f(x - 1) + f(x - 2)
+end
+""") == [true, true, true, true, true, true, true]
+
+    # A forward reference to a name bound textually later in the same scope also
+    # resolves through the closure.
+    @test check_resolved("""
+f = x -> g(x)
+g = x -> x
+""") == [true, true, true, true, true, true, true]
+end
+
+@testitem "anonymous function positional arg with default value" setup=[shared_static_lint] begin
+    # A defaulted positional parameter in an arrow function's signature parses as
+    # an assignment (not a `:kw`); it must still be bound as a parameter.
+    @test check_resolved("(x, y = x) -> x + y") == [true, true, true, true, true]
+    @test check_resolved("(y = 1) -> y") == [true, true]
+    @test check_resolved("""
+f = (x, y = x) -> x + y
+""") == [true, true, true, true, true, true]
+    @test check_resolved("map((x, y = x) -> x + y, [1, 2, 3])") ==
+        [true, true, true, true, true, true]
+end
+
 
 
 @testitem "Re-exported names" setup=[shared_static_lint] begin
