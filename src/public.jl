@@ -299,7 +299,18 @@ function remove_file!(jw::JuliaWorkspace, uri::URI)
 
     process_from_dynamic(jw)
     _remove_file!(jw, uri)
+    _evict_derived_for_uris!(jw, (uri,))
     _reconcile!(jw)
+end
+
+# Evict all memoized derived values keyed by any of the given (removed) URIs.
+# Without this they would stay in the Salsa storage for the lifetime of the
+# workspace, since nothing queries a removed URI again.
+function _evict_derived_for_uris!(jw::JuliaWorkspace, uris)
+    uri_set = Set{URI}(uris)
+    Salsa.evict_derived!(jw.runtime) do key
+        any(arg -> arg isa URI && arg in uri_set, key.args)
+    end
 end
 
 # Input-only removal. Does not drain results or reconcile.
@@ -329,13 +340,17 @@ function remove_all_children!(jw::JuliaWorkspace, uri::URI)
 
     uri_as_string = string(uri)
 
+    removed = URI[]
     for file in files
         file_as_string = string(file)
 
         if startswith(file_as_string, uri_as_string)
             _remove_file!(jw, file)
+            push!(removed, file)
         end
     end
+
+    isempty(removed) || _evict_derived_for_uris!(jw, removed)
 
     _reconcile!(jw)
 end
@@ -382,6 +397,7 @@ function clear_indirect_file!(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     _clear_indirect_tracking!(jw, uri)
+    _evict_derived_for_uris!(jw, (uri,))
 
     _reconcile!(jw)
 end
