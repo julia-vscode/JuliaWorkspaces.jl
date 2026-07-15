@@ -400,6 +400,132 @@ end
     @test !is_completion_match("base", "Bas")
 end
 
+@testitem "Completions: relevance ranking unit" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+
+    _match_rank = JuliaWorkspaces._match_rank
+    # exact match beats case-sensitive prefix beats case-insensitive prefix beats fuzzy
+    @test _match_rank("epsilon", "epsilon") < _match_rank("epsilon", "epsi")
+    @test _match_rank("epsilon", "epsi") < _match_rank("Epsilon", "epsi")
+    @test _match_rank("Epsilon", "epsi") < _match_rank("betaepsilon", "epsi")
+    # case-sensitive prefix (uppercase input) is as good as a lowercase prefix match
+    @test _match_rank("Epsilon", "Epsi") == _match_rank("epsilon", "epsi")
+end
+
+@testitem "Completions: latex sort order prioritises case match" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "CompLatexSort"
+    uuid = "a2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module CompLatexSort
+    \\epsi
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///complatexsort/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///complatexsort/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///complatexsort/src/CompLatexSort.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///complatexsort/src/CompLatexSort.jl")
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # after "\epsi" (line 2, col 6)
+    index = string_index(source, 2, 6)
+    result = get_completions(jw, uri, index)
+
+    lower = findfirst(i -> i.label == "\\epsilon", result.items)
+    upper = findfirst(i -> i.label == "\\Epsilon", result.items)
+    @test lower !== nothing
+    @test upper !== nothing
+    # both still offered, but the case-matching lowercase symbol ranks first
+    @test result.items[lower].sort_text !== nothing
+    @test result.items[upper].sort_text !== nothing
+    @test result.items[lower].sort_text < result.items[upper].sort_text
+end
+
+@testitem "Completions: nearer scope sorts first" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "CompScopeSort"
+    uuid = "b2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module CompScopeSort
+    myouter = 1
+    function f()
+        myinner = 2
+        my
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///compscopesort/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///compscopesort/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///compscopesort/src/CompScopeSort.jl"), SourceText(source, "julia")))
+
+    uri = URI("file:///compscopesort/src/CompScopeSort.jl")
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # after "    my" (line 5, col 7)
+    index = string_index(source, 5, 7)
+    result = get_completions(jw, uri, index)
+
+    inner = findfirst(i -> i.label == "myinner", result.items)
+    outer = findfirst(i -> i.label == "myouter", result.items)
+    @test inner !== nothing
+    @test outer !== nothing
+    # the binding in the nearer (function) scope ranks above the module-level one
+    @test result.items[inner].sort_text < result.items[outer].sort_text
+end
+
 @testitem "Completions: empty result for empty file" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, CompletionResult
     using JuliaWorkspaces.URIs2: URI
@@ -795,7 +921,8 @@ end
     cst = JuliaWorkspaces.CSTParser.parse("tst")
     state = JuliaWorkspaces._CompletionState(
         3, Dict{String,JuliaWorkspaces.CompletionResultItem}(), 3, 3, nothing, cst,
-        uri"file:///t.jl", st, JuliaWorkspaces.MetaDict(), env, :normal, Dict{String,Any}(), nothing)
+        uri"file:///t.jl", st, JuliaWorkspaces.MetaDict(), env, :normal, Dict{String,Any}(), nothing,
+        Dict{String,Tuple{String,Int}}())
 
     JuliaWorkspaces._collect_completions(mod, "tst", state, true)
 
