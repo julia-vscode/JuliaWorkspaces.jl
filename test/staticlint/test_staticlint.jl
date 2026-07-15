@@ -292,6 +292,18 @@ g = x -> x
 """) == [true, true, true, true, true, true, true]
 end
 
+@testitem "anonymous function positional arg with default value" setup=[shared_static_lint] begin
+    # A defaulted positional parameter in an arrow function's signature parses as
+    # an assignment (not a `:kw`); it must still be bound as a parameter.
+    @test check_resolved("(x, y = x) -> x + y") == [true, true, true, true, true]
+    @test check_resolved("(y = 1) -> y") == [true, true]
+    @test check_resolved("""
+f = (x, y = x) -> x + y
+""") == [true, true, true, true, true, true]
+    @test check_resolved("map((x, y = x) -> x + y, [1, 2, 3])") ==
+        [true, true, true, true, true, true]
+end
+
 
 
 @testitem "macros" setup=[shared_static_lint] begin

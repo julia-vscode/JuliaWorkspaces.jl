@@ -149,6 +149,15 @@ function mark_binding!(x::EXPR, meta_dict, val=x)
         end
     elseif CSTParser.issplat(x)
         mark_binding!(x.args[1], meta_dict, x)
+    elseif CSTParser.isassignment(x) && isidentifier(x.args[1])
+        # A positional parameter with a default value in an anonymous function's
+        # signature (e.g. `y` in `(x, y = x) -> ...` or `(y = 1) -> ...`) parses
+        # as an assignment rather than a `:kw`. Bind the LHS name; otherwise
+        # `get_name` returns the whole assignment and `add_binding` can't derive
+        # a name from it, so the parameter never enters the function scope. The
+        # `isidentifier` guard keeps function-definition assignments (`f() = 0`,
+        # whose LHS is a call) on the get_name path below.
+        mark_binding!(x.args[1], meta_dict, val)
     elseif !(isunarysyntax(x) && valof(headof(x)) == "::")
         ensuremeta(x, meta_dict)
         getmeta(x, meta_dict).binding = Binding(CSTParser.get_name(x), val, nothing, [])
