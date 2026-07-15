@@ -12,6 +12,7 @@ const _ENV_DEPENDENT_LINT_MESSAGES = Set{String}([
 function _is_env_dependent_diagnostic(d::Diagnostic)
     d.source != "StaticLint.jl" && return false
     startswith(d.message, "Missing reference:") && return true
+    startswith(d.message, "Failed to resolve `") && return true
     return d.message in _ENV_DEPENDENT_LINT_MESSAGES
 end
 
@@ -101,11 +102,11 @@ function _lint_options_from_config(lint_config::Dict)
 end
 
 function _missingrefs_from_config(lint_config::Dict)
-    val = get(lint_config, "missing-refs", "symbols")
+    val = get(lint_config, "missing-refs", "all")
     val == "none" && return :none
     val == "symbols" && return :id
     val == "all" && return :all
-    return :id  # fallback
+    return :all  # fallback
 end
 
 Salsa.@derived function derived_diagnostics(rt, uri)

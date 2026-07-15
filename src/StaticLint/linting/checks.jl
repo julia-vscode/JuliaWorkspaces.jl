@@ -36,6 +36,7 @@
     RelativeImportTooManyDots,
     DuplicateInclude,
     FunctionHasNoMethods,
+    UnresolvedImport,
 )
 
 const LintCodeDescriptions = Dict{LintCodes,String}(
@@ -73,6 +74,7 @@ const LintCodeDescriptions = Dict{LintCodes,String}(
     FileNotAvailable => "File not available.",
     RelativeImportTooManyDots => "Relative import has more leading dots than available module nesting.",
     FunctionHasNoMethods => "Called function has no methods.",
+    UnresolvedImport => "Failed to resolve import.",
 )
 
 haserror(m::Meta) = m.error !== nothing
@@ -788,6 +790,19 @@ function in_macrocall_arg(x::EXPR)
     return false
 end
 
+# Is `x` inside a scope whose missing-ref checks are disabled by an
+# unresolved wildcard `using`? Stops at module boundaries, mirroring
+# `resolve_ref`: a nested `module` does not inherit its parent's usings.
+function in_unresolved_wildcard_import_scope(x::EXPR, meta_dict)
+    sc = retrieve_scope(x, meta_dict)
+    while sc isa Scope
+        sc.unresolved_wildcard_import && return true
+        CSTParser.defines_module(sc.expr) && return false
+        sc = parentof(sc)
+    end
+    return false
+end
+
 """
 collect_hints(x::EXPR, env, missingrefs = :all, isquoted = false, errs = Tuple{Int,EXPR}[], pos = 0)
 
@@ -799,22 +814,24 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
     # here too - otherwise deliberately undefined references would still be flagged.
     is_test_throws_macrocall(x, env, meta_dict) && return errs
 
-    if quoted(x)
-        isquoted = true
-    elseif isquoted && unquoted(x)
-        isquoted = false
-    end
+    # relies on quoted(x) and unquoted(x) being mutually exclusive
+    isquoted = isquoted ? !unquoted(x) : quoted(x)
+
     if headof(x) === :errortoken
         # collect parse errors
         push!(errs, (pos, x))
     elseif !isquoted
-        if missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&
+        if haserror(x, meta_dict) && errorof(x, meta_dict) isa StaticLint.LintCodes
+            # collect lint hints
+            push!(errs, (pos, x))
+        elseif missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&
             !(valof(x) == "var" && parentof(x) isa EXPR && isnonstdid(parentof(x))) &&
             !((valof(x) == "stdcall" || valof(x) == "cdecl" || valof(x) == "fastcall" || valof(x) == "thiscall" || valof(x) == "llvmcall") && is_in_fexpr(x, x -> iscall(x) && isidentifier(x.args[1]) && valof(x.args[1]) == "ccall")) &&
-            !in_macrocall_arg(x)
-            push!(errs, (pos, x))
-        elseif haserror(x, meta_dict) && errorof(x, meta_dict) isa StaticLint.LintCodes
-            # collect lint hints
+            !in_macrocall_arg(x) &&
+            # inside using/import statements the UnresolvedImport marking
+            # pass is the sole reporter
+            !is_in_fexpr(x, y -> headof(y) === :using || headof(y) === :import) &&
+            !in_unresolved_wildcard_import_scope(x, meta_dict)
             push!(errs, (pos, x))
         end
     elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
@@ -851,11 +868,8 @@ run while the meta is still being built (e.g. alongside `check_all`), not from t
 read-only diagnostics gathering in `collect_hints`.
 """
 function resolve_remaining_getfields!(x::EXPR, env, workspace_packages, meta_dict, isquoted=false)
-    if quoted(x)
-        isquoted = true
-    elseif isquoted && unquoted(x)
-        isquoted = false
-    end
+    # relies on quoted(x) and unquoted(x) being mutually exclusive
+    isquoted = isquoted ? !unquoted(x) : quoted(x)
     if isquoted
         try_resolve_getfield_ref!(x, env, workspace_packages, meta_dict)
     end

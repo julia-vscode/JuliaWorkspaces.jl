@@ -162,6 +162,10 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         # run here (while we still own meta_dict) rather than from the read-only
         # diagnostics pass in `collect_hints`.
         StaticLint.resolve_remaining_getfields!(cst2, env, workspace_packages, meta_dict)
+
+        # Late import-failure marking. Runs here (not in-pass) because
+        # resolve_import failures may be retried via state.resolveonly.
+        StaticLint.mark_unresolved_imports!(cst2, meta_dict)
     end
 
     return (meta_dict=meta_dict, workspace_packages=workspace_packages)
@@ -204,6 +208,14 @@ Salsa.@derived function derived_static_lint_diagnostics_for_root(rt, root)
                 # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
             elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
                 push!(current_res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
+            elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) === StaticLint.UnresolvedImport
+                name = CSTParser.str_value(err[2])
+                msg = if StaticLint.is_in_wildcard_import(err[2])
+                    "Failed to resolve `$name`. Missing-reference checks are disabled in this scope and all nested scopes."
+                else
+                    "Failed to resolve `$name`. Anything imported through this statement is assumed to exist and will not be checked."
+                end
+                push!(current_res, Diagnostic(rng, :warning, msg, nothing, Symbol[], "StaticLint.jl"))
             elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
                 code = StaticLint.errorof(err[2], meta_dict)
                 description = get(StaticLint.LintCodeDescriptions, code, "")

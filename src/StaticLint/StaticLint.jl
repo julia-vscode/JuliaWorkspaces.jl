@@ -255,10 +255,14 @@ function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; wo
     if state.resolveonly !== nothing
         unique!(state.resolveonly)
         for x in state.resolveonly
+            # process_EXPR (not traverse) so that resolve_import re-runs on the
+            # scheduled expression itself: for a file-toplevel import statement
+            # there is no enclosing module in resolveonly to revisit it, and
+            # traverse would only descend into its children.
             if hasscope(x, meta_dict)
-                traverse(x, ResolveOnly(scopeof(x, meta_dict), env, workspace_packages, meta_dict))
+                process_EXPR(x, ResolveOnly(scopeof(x, meta_dict), env, workspace_packages, meta_dict))
             else
-                traverse(x, ResolveOnly(retrieve_delayed_scope(x, meta_dict), env, workspace_packages, meta_dict))
+                process_EXPR(x, ResolveOnly(retrieve_delayed_scope(x, meta_dict), env, workspace_packages, meta_dict))
             end
         end
     end

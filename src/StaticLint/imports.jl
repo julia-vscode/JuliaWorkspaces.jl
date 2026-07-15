@@ -6,8 +6,18 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
         ensuremeta(x.args[2], meta_dict)
         if hasbinding(last(x.args[1].args), meta_dict) && CSTParser.isidentifier(x.args[2])
             lhsbinding = bindingof(last(x.args[1].args), meta_dict)
-            getmeta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
-            setref!(x.args[2], bindingof(x.args[2], meta_dict), meta_dict)
+            existing = bindingof(x.args[2], meta_dict)
+            if is_synthetic_import_binding(existing)
+                # A previous pass bound the alias synthetically (as a copy of
+                # the inner component's synthetic binding, or directly for
+                # colon-form aliases). Fill that object in place so references
+                # that already resolved to it see the real target.
+                existing.val = lhsbinding.val
+                existing.type = lhsbinding.type
+            else
+                getmeta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
+                setref!(x.args[2], bindingof(x.args[2], meta_dict), meta_dict)
+            end
             getmeta(last(x.args[1].args), meta_dict).binding = nothing
         end
         return
@@ -28,6 +38,25 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
             end
         elseif isidentifier(arg) || (i == n && (CSTParser.ismacroname(arg) || isoperator(arg)))
             cand = hasref(arg, meta_dict) ? refof(arg, meta_dict) : _get_field(root, arg, state)
+            if hasref(arg, meta_dict) && is_synthetic_import_binding(cand)
+                # A previous pass bound this name synthetically; retry the real
+                # lookup and, on success, fill the same Binding object in place
+                # so existing references see the real target.
+                # (The hasref guard ensures `cand` is this arg's own synthetic
+                # binding, not one that `_get_field` fished out of scope.names.)
+                newcand = _get_field(root, arg, state)
+                if newcand !== nothing && newcand !== cand
+                    fill_synthetic_import_binding!(cand, newcand, state)
+                else
+                    # Still unresolved: keep the synthetic binding in place and
+                    # stop. Continuing would let `_mark_import_arg` (and the
+                    # `:as` copy logic, which cleared this component's binding)
+                    # wrap the synthetic binding in a new one whose val is
+                    # non-nothing, laundering it past is_synthetic_import_binding
+                    # so the import would never be flagged as unresolved.
+                    return
+                end
+            end
             if cand === nothing
                 # Cannot resolve now (e.g. sibling not yet defined). Schedule a retry.
                 if state isa Toplevel
@@ -39,6 +68,9 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
                     mod = StaticLint.maybe_get_parent_fexpr(imp, CSTParser.defines_module)
                     #mod !== nothing && push!(state.resolveonly, mod)
                     mod !== nothing && (mod ∈ state.resolveonly || push!(state.resolveonly, mod))
+                    # bind the name this path would have bound so downstream
+                    # references to it resolve (the user asserted it exists)
+                    markfinal && ensure_synthetic_import_binding!(x, state)
                 end
                 return
             end
@@ -65,6 +97,10 @@ function resolve_import(x::EXPR, state::TraverseState, root=getsymbols(state))
                     push!(state.resolveonly, x)
                     mod = StaticLint.maybe_get_parent_fexpr(x, CSTParser.defines_module)
                     mod !== nothing && push!(state.resolveonly, mod)
+                    # bind the explicitly listed names (`using A: b, c as d`)
+                    for i = 2:length(x.args[1].args)
+                        ensure_synthetic_import_binding!(x.args[1].args[i], state)
+                    end
                 end
                 return
             end
@@ -105,8 +141,11 @@ function _mark_import_arg(arg, par, state, usinged, meta_dict)
                 add_to_imported_modules(state.scope, Symbol(valofid(arg)), scopeof(par.val.val, meta_dict))
             end
         else
-           # import binds the name in the current scope
-           state.scope.names[valofid(arg)] = bindingof(arg, meta_dict)
+           # import binds the name in the current scope — except under `as`,
+           # where only the alias is bound (the `:as` branch handles it)
+           if !(parentof(arg) isa EXPR && parentof(parentof(arg)) isa EXPR && headof(parentof(parentof(arg))) === :as)
+               state.scope.names[valofid(arg)] = bindingof(arg, meta_dict)
+           end
         end
     end
 end
@@ -196,4 +235,135 @@ function _get_field(par, arg, state, visited=Base.IdSet{Any}())
         end
     end
     return
+end
+
+"""
+    is_synthetic_import_binding(b)
+
+Is `b` a binding created by `ensure_synthetic_import_binding!` for a name an
+unresolved import statement would bind? Real import bindings created by
+`_mark_import_arg` always carry a non-nothing `val`, so `val === nothing &&
+type === nothing` on a binding whose name sits inside a `using`/`import`
+statement identifies the synthetic ones.
+"""
+is_synthetic_import_binding(b) = b isa Binding && b.val === nothing && b.type === nothing &&
+    b.name isa EXPR && is_in_fexpr(b.name, y -> headof(y) === :using || headof(y) === :import)
+
+# Attach a synthetic binding to the name `block` (an import path) would bind:
+# the alias for `as` blocks, otherwise the last path component. The user has
+# asserted this name exists, so downstream references resolve to the import
+# site instead of being reported as missing.
+function ensure_synthetic_import_binding!(block::EXPR, state)
+    if headof(block) === :as
+        length(block.args) == 2 && _ensure_synthetic_import_binding_on!(block.args[2], state)
+        return
+    end
+    (block.args === nothing || isempty(block.args)) && return
+    _ensure_synthetic_import_binding_on!(last(block.args), state)
+    return
+end
+
+function _ensure_synthetic_import_binding_on!(arg::EXPR, state)
+    meta_dict = state.meta_dict
+    CSTParser.is_id_or_macroname(arg) || return
+    (hasbinding(arg, meta_dict) || hasref(arg, meta_dict)) && return
+    ensuremeta(arg, meta_dict)
+    b = Binding(arg, nothing, nothing, [])
+    getmeta(arg, meta_dict).binding = b
+    setref!(arg, b, meta_dict)
+    return
+end
+
+# Late (ResolveOnly-retry) resolution: fill a synthetic binding in place so
+# every reference already pointing at this Binding object sees the real target.
+function fill_synthetic_import_binding!(b::Binding, val, state)
+    val = maybe_lookup(val, state)
+    val === nothing && return b # lookup failed: keep the synthetic binding so the import stays flagged
+    val === b && return b # never create a self-referential binding
+    b.val = val
+    b.type = _typeof(val, state)
+    return b
+end
+
+"""
+    mark_unresolved_imports!(x::EXPR, meta_dict, isquoted=false)
+
+Post-`semantic_pass` marking of import statements that still failed to
+resolve: the first unresolved component of each import path gets an
+`UnresolvedImport` error. Must run after all resolution retries (i.e.
+alongside `resolve_remaining_getfields!`), because in-pass failures may
+still be retried via `state.resolveonly`.
+"""
+function mark_unresolved_imports!(x::EXPR, meta_dict, isquoted=false)
+    # relies on quoted(x) and unquoted(x) being mutually exclusive
+    isquoted = isquoted ? !unquoted(x) : quoted(x)
+    if !isquoted && (headof(x) === :using || headof(x) === :import)
+        mark_unresolved_import_stmt!(x, meta_dict)
+        return x
+    end
+    if x.args !== nothing
+        for a in x.args
+            mark_unresolved_imports!(a, meta_dict, isquoted)
+        end
+    end
+    return x
+end
+
+function mark_unresolved_import_stmt!(x::EXPR, meta_dict)
+    x.args === nothing && return
+    if length(x.args) > 0 && isoperator(headof(x.args[1])) && valof(headof(x.args[1])) == ":"
+        colon_expr = x.args[1]
+        failed = first_unresolved_import_component(colon_expr.args[1], meta_dict)
+        if failed !== nothing
+            # the whole module path is unknown; one error there covers the
+            # statement (the listed names carry synthetic bindings)
+            seterror!(failed, UnresolvedImport, meta_dict)
+        else
+            for i = 2:length(colon_expr.args)
+                nfailed = first_unresolved_import_component(colon_expr.args[i], meta_dict)
+                nfailed === nothing && continue
+                seterror!(nfailed, UnresolvedImport, meta_dict)
+            end
+        end
+    else
+        for path in x.args
+            failed = first_unresolved_import_component(path, meta_dict)
+            failed === nothing && continue
+            seterror!(failed, UnresolvedImport, meta_dict)
+            if headof(x) === :using
+                # wildcard using of an unknown module: suppress bare
+                # missing-ref reporting in this scope (see collect_hints)
+                scope = retrieve_scope(x, meta_dict)
+                scope isa Scope && (scope.unresolved_wildcard_import = true)
+            end
+        end
+    end
+    return
+end
+
+# First component of an import path that is still unresolved after all
+# passes: module-path components show up as ref-less (they never get
+# synthetic bindings), bound-name components as still-synthetic bindings.
+function first_unresolved_import_component(path::EXPR, meta_dict)
+    headof(path) === :as && return first_unresolved_import_component(path.args[1], meta_dict)
+    path.args === nothing && return nothing
+    for arg in path.args
+        # already diagnosed some other way (e.g. RelativeImportTooManyDots,
+        # which sits on a leading dot leaf) — don't double-diagnose the path
+        haserror(arg, meta_dict) && return nothing
+        isoperator(arg) && valof(arg) == "." && continue
+        hasref(arg, meta_dict) || return arg
+        is_synthetic_import_binding(refof(arg, meta_dict)) && return arg
+    end
+    return nothing
+end
+
+# Is `x` a component of a wildcard `using` (no explicit-name colon form)?
+# Decides which UnresolvedImport message the diagnostics layer shows.
+function is_in_wildcard_import(x::EXPR)
+    imp = maybe_get_parent_fexpr(x, y -> headof(y) === :using || headof(y) === :import)
+    imp === nothing && return false
+    headof(imp) === :using || return false
+    return !(imp.args !== nothing && length(imp.args) > 0 &&
+             isoperator(headof(imp.args[1])) && valof(headof(imp.args[1])) == ":")
 end

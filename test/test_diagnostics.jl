@@ -652,7 +652,7 @@ end
     end
     """
 
-    # With env_ready = true and default missing-refs ("symbols"), missing refs should appear
+    # With env_ready = true and default missing-refs ("all"), missing refs should appear
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(URI("file:///mrt/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///mrt/Manifest.toml"), SourceText(manifest_toml, "toml")))
@@ -773,4 +773,704 @@ end
     # Both constif and modname diagnostics should be present
     @test any(d -> contains(d.message, "boolean literal") && contains(d.message, "if"), diags)
     @test any(d -> contains(d.message, "matches that of its parent"), diags)
+end
+
+# ──────────────────────────────────────────────────────────────────────
+# unresolved-import tolerance tests
+# ──────────────────────────────────────────────────────────────────────
+
+@testitem "unresolved import: explicit names are bound, uses silent" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresExpl"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee21"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresExpl
+    using NotARealPackage: foo, bar
+    import AlsoNotReal
+    function f()
+        foo(bar) + AlsoNotReal.thing + genuine_typo
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresexpl/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresexpl/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresexpl/src/UnresExpl.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresexpl/src/UnresExpl.jl"))
+
+    # Uses of the explicitly imported names resolve to synthetic bindings
+    @test !any(d -> d.message == "Missing reference: foo", diags)
+    @test !any(d -> d.message == "Missing reference: bar", diags)
+    @test !any(d -> d.message == "Missing reference: AlsoNotReal", diags)
+    # A genuine typo in the same scope is still reported
+    @test any(d -> d.message == "Missing reference: genuine_typo", diags)
+end
+
+@testitem "unresolved import: self-import using M: M tolerates M.foo" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresSelf"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee22"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresSelf
+    using NotARealPackage: NotARealPackage
+    function f()
+        NotARealPackage.foo(1)
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresself/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresself/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresself/src/UnresSelf.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresself/src/UnresSelf.jl"))
+
+    @test !any(d -> d.message == "Missing reference: foo", diags)
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+    @test any(d -> startswith(d.message, "Failed to resolve `NotARealPackage`"), diags)
+end
+
+@testitem "unresolved import: late-resolving sibling module fills binding" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresLate"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee23"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresLate
+    using .Sib: bar
+    function f()
+        bar()
+    end
+    module Sib
+    bar() = 1
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unreslate/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreslate/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreslate/src/UnresLate.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unreslate/src/UnresLate.jl"))
+
+    # Everything resolves after the retry: no missing refs at all
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+end
+
+@testitem "unresolved import: late-resolved module lacking the name stays silent for uses" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresLateMiss"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee24"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresLateMiss
+    using .Sib: baz
+    function f()
+        baz()
+    end
+    module Sib
+    bar() = 1
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unreslatemiss/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreslatemiss/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreslatemiss/src/UnresLateMiss.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unreslatemiss/src/UnresLateMiss.jl"))
+
+    # uses of baz resolve to the (never-filled) synthetic binding
+    @test !any(d -> d.message == "Missing reference: baz", diags)
+end
+
+@testitem "unresolved import: statement flagged with UnresolvedImport" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresFlag"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee25"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresFlag
+    using NotARealPackage
+    import AlsoNotReal: thing
+    using Base: not_a_real_base_name_xyz
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresflag/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresflag/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresflag/src/UnresFlag.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresflag/src/UnresFlag.jl"))
+
+    wildcard = filter(d -> d.message == "Failed to resolve `NotARealPackage`. Missing-reference checks are disabled in this scope and all nested scopes.", diags)
+    @test length(wildcard) == 1
+    @test wildcard[1].severity == :warning
+
+    explicit = filter(d -> d.message == "Failed to resolve `AlsoNotReal`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test length(explicit) == 1
+
+    # module resolvable but name missing: flagged on the name, immediately
+    @test any(d -> startswith(d.message, "Failed to resolve `not_a_real_base_name_xyz`"), diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve `Base`"), diags)
+
+    # no generic missing refs inside the import statements
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+end
+
+@testitem "unresolved import: name missing from late-resolved module is flagged" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresFlagLate"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee26"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresFlagLate
+    using .Sib: baz
+    function f()
+        baz()
+    end
+    module Sib
+    bar() = 1
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresflaglate/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresflaglate/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresflaglate/src/UnresFlagLate.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresflaglate/src/UnresFlagLate.jl"))
+
+    # flagged on `baz` (the name), not on `Sib` (the module resolved)
+    @test any(d -> startswith(d.message, "Failed to resolve `baz`"), diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve `Sib`"), diags)
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+end
+
+@testitem "unresolved import: diagnostic suppressed while env not ready" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresEnv"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee27"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresEnv
+    using NotARealPackage
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresenv/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresenv/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresenv/src/UnresEnv.jl"), SourceText(source, "julia")))
+    # NOTE: env deliberately NOT marked ready
+
+    diags = get_diagnostic(jw, URI("file:///unresenv/src/UnresEnv.jl"))
+
+    @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
+end
+
+@testitem "unresolved import: as-aliased imports are flagged" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresAs"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2b"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresAs
+    import NotARealPackageXYZ as NR
+    using Base: not_a_real_base_name_xyz as aliasname
+    function f()
+        NR.foo(aliasname)
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresas/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresas/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresas/src/UnresAs.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresas/src/UnresAs.jl"))
+
+    @test any(d -> d.message == "Failed to resolve `NotARealPackageXYZ`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test any(d -> d.message == "Failed to resolve `not_a_real_base_name_xyz`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve `Base`"), diags)
+    # aliased names are bound; their uses stay silent
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+end
+
+@testitem "unresolved import: too-many-dots import is not double-diagnosed" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresDots"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2c"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresDots
+    using ....TooDeep
+    function f()
+        obvious_typo_here()
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresdots/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresdots/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresdots/src/UnresDots.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresdots/src/UnresDots.jl"))
+
+    # the dots error is the sole diagnostic for the import statement
+    @test any(d -> d.message == "Relative import has more leading dots than available module nesting.", diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
+    # and it must NOT flip on wildcard suppression: the genuine typo stays flagged
+    @test any(d -> d.message == "Missing reference: obvious_typo_here", diags)
+end
+
+@testitem "unresolved wildcard using: bare missing refs suppressed in scope" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresWild"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee28"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresWild
+    using NotARealPackage
+    function f(x)
+        some_unknown_export(x) + another_mystery
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unreswild/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreswild/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreswild/src/UnresWild.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unreswild/src/UnresWild.jl"))
+
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+    @test count(d -> startswith(d.message, "Failed to resolve `NotARealPackage`"), diags) == 1
+end
+
+@testitem "unresolved wildcard using: sibling and nested modules" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresWildMod"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee29"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresWildMod
+    module Inner1
+    using NotARealPackage
+    f() = mystery_name()
+    end
+    module Inner2
+    g() = obvious_typo()
+    end
+    module Inner3
+    using NotARealPackage
+    module Nested
+    h() = nested_typo()
+    end
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unreswildmod/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreswildmod/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unreswildmod/src/UnresWildMod.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unreswildmod/src/UnresWildMod.jl"))
+
+    # Inner1: suppressed by its own unresolved wildcard using
+    @test !any(d -> d.message == "Missing reference: mystery_name", diags)
+    # Inner2: no unresolved using -> still checked
+    @test any(d -> d.message == "Missing reference: obvious_typo", diags)
+    # Nested module inside Inner3 does NOT inherit the suppression
+    @test any(d -> d.message == "Missing reference: nested_typo", diags)
+end
+
+@testitem "unresolved import: macro-name imports are bound, uses silent" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresMacro"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2d"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresMacro
+    using NotARealPkgQ: @mac
+    import AlsoNotRealQ.@othermac
+    function f()
+        @mac(1)
+        @othermac(2)
+        genuine_typo
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresmacro/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresmacro/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresmacro/src/UnresMacro.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresmacro/src/UnresMacro.jl"))
+
+    # Both unresolvable modules are flagged once, on the module name
+    @test any(d -> d.message == "Failed to resolve `NotARealPkgQ`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test any(d -> d.message == "Failed to resolve `AlsoNotRealQ`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    # The imported macros are bound synthetically; their uses stay silent
+    @test !any(d -> d.message == "Missing reference: @mac", diags)
+    @test !any(d -> d.message == "Missing reference: @othermac", diags)
+    # A genuine typo in the same scope is still reported
+    @test any(d -> d.message == "Missing reference: genuine_typo", diags)
+end
+
+@testitem "unresolved import: file-toplevel using is flagged and binds names" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresTop"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2e"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    # No enclosing module: the import sits at the top level of the file.
+    source = """
+    using NotARealTopPkg: foo
+    foo()
+    genuine_typo_top
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unrestop/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestop/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestop/src/UnresTop.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unrestop/src/UnresTop.jl"))
+
+    @test any(d -> d.message == "Failed to resolve `NotARealTopPkg`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    # The imported name is bound; its use stays silent
+    @test !any(d -> d.message == "Missing reference: foo", diags)
+    # A genuine typo at file top level is still reported
+    @test any(d -> d.message == "Missing reference: genuine_typo_top", diags)
+end
+
+@testitem "unresolved import: file-toplevel late-resolving sibling fills binding" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresTopSib"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2f"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    # `using .Sib` precedes the `module Sib` definition, both at file top level
+    # (no enclosing module): resolution succeeds only via the ResolveOnly retry
+    # of the file-toplevel import statement itself.
+    source = """
+    using .Sib: bar
+    function f()
+        bar()
+    end
+    module Sib
+    bar() = 1
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unrestopsib/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestopsib/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestopsib/src/UnresTopSib.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unrestopsib/src/UnresTopSib.jl"))
+
+    # Late resolution fills the binding: nothing is flagged
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
+end
+
+@testitem "unresolved import: operator names are bound" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresOp"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee30"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module UnresOp
+    import NotARealOpPkg: +, ==
+    using AlsoNotOp: (*)
+    function f(a, b)
+        a + b == a
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresop/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresop/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresop/src/UnresOp.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresop/src/UnresOp.jl"))
+
+    # Operator imports through unresolvable modules are flagged on the module name
+    @test any(d -> d.message == "Failed to resolve `NotARealOpPkg`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    @test any(d -> d.message == "Failed to resolve `AlsoNotOp`. Anything imported through this statement is assumed to exist and will not be checked.", diags)
+    # No spurious missing-ref (or crash) from the operator names
+    @test !any(d -> startswith(d.message, "Missing reference"), diags)
+end
+
+@testitem "unresolved import: imports inside a quote are not flagged" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresQuoted"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee31"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    # Imports inside quoted code are data, not executed imports, so they must not
+    # be diagnosed. The unquoted `using` at module level is the positive control.
+    source = """
+    module UnresQuoted
+    function gen()
+        q1 = quote
+            using NotARealQuotedPkg
+            import AlsoNotRealQuoted: thing
+        end
+        q2 = :(using AnotherQuotedPkg)
+        q1, q2
+    end
+    using ActuallyUnresolved
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unresquoted/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresquoted/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unresquoted/src/UnresQuoted.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unresquoted/src/UnresQuoted.jl"))
+
+    # None of the quoted imports are flagged
+    @test !any(d -> occursin("NotARealQuotedPkg", d.message), diags)
+    @test !any(d -> occursin("AlsoNotRealQuoted", d.message), diags)
+    @test !any(d -> occursin("AnotherQuotedPkg", d.message), diags)
+    # The unquoted import at module level still is
+    @test any(d -> startswith(d.message, "Failed to resolve `ActuallyUnresolved`"), diags)
+end
+
+@testitem "missing-refs: default is all (getfield refs checked)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "MissRefAll"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee2a"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module MissRefAll
+    using NotARealPackage
+    function f()
+        Base.this_name_surely_does_not_exist_xyz
+    end
+    end
+    """
+
+    # Default config: getfield refs into resolved modules are checked, even
+    # though an unresolved wildcard using suppresses bare missing refs here
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///missrefall/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///missrefall/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///missrefall/src/MissRefAll.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///missrefall/src/MissRefAll.jl"))
+    @test any(d -> d.message == "Missing reference: this_name_surely_does_not_exist_xyz", diags)
+
+    # With missing-refs = "symbols", the getfield ref is not checked
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(URI("file:///missrefall2/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw2, TextFile(URI("file:///missrefall2/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw2, TextFile(URI("file:///missrefall2/src/MissRefAll.jl"), SourceText(source, "julia")))
+    add_file!(jw2, TextFile(URI("file:///missrefall2/JuliaLint.toml"), SourceText("missing-refs = \"symbols\"", "toml")))
+    JuliaWorkspaces.set_input_env_ready!(jw2.runtime, true)
+
+    diags2 = get_diagnostic(jw2, URI("file:///missrefall2/src/MissRefAll.jl"))
+    @test !any(d -> d.message == "Missing reference: this_name_surely_does_not_exist_xyz", diags2)
 end
