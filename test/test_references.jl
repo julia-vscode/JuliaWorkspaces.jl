@@ -150,6 +150,125 @@ end
     @test all(e -> e.uri == uri, edits)
 end
 
+@testitem "References: rename locals/structs/globals/consts" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_rename_edits
+    using JuliaWorkspaces.URIs2: URI
+
+    # Guards the common (non-macro) rename path across binding kinds: every edit
+    # must carry the verbatim new name (no stray `@`, no duplicated ranges) and
+    # cover exactly the definition plus each use.
+    source = """
+    module CoverTest
+    const MAX = 100
+    glob = 1
+    struct Point
+        x
+        y
+    end
+    function f()
+        local_var = glob + MAX
+        p = Point(local_var, 2)
+        return local_var + p.x
+    end
+    end
+    """
+    uri = URI("file:///cover/src/CoverTest.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # (kind, line, col-inside-the-identifier, new name, expected occurrence count)
+    cases = [
+        ("const", 2, 8, "LIMIT", 2),   # `MAX`: definition + one use
+        ("global", 3, 2, "gg", 2),     # `glob`: definition + one use
+        ("struct", 4, 10, "Coord", 2), # `Point`: definition + one use
+        ("local", 9, 9, "lv", 3),      # `local_var`: definition + two uses
+    ]
+
+    for (kind, line, col, new_name, expected) in cases
+        idx = string_index(source, line, col)
+        edits = get_rename_edits(jw, uri, idx, new_name)
+        @test length(edits) == expected                              # $kind
+        @test all(e -> e.new_text == new_name, edits)                # verbatim, no `@`
+        @test all(e -> e.uri == uri, edits)
+        ranges = [(e.start.line, e.start.column, e.stop.line, e.stop.column) for e in edits]
+        @test length(unique(ranges)) == length(ranges)               # no duplicate edits
+    end
+
+    # Pre-existing `get_expr1` boundary quirk: with the cursor on the very first
+    # character of a type name right after the `struct` keyword (the `P` of
+    # `Point`, col 8), position resolution misses the identifier and no edits are
+    # produced. One character in it works (covered by the `struct` case above).
+    @test_broken length(get_rename_edits(jw, uri, string_index(source, 4, 8), "Coord")) == 2
+end
+
+@testitem "References: rename macro" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_rename_edits, get_references
+    using JuliaWorkspaces.URIs2: URI
+
+    # A macro definition uses the bare name (`add_2`), while every invocation
+    # carries the leading `@` (`@add_2`). Renaming must keep those consistent:
+    # the definition edit must not gain a stray `@`, invocation edits must keep
+    # it, and the definition must not be emitted twice.
+    source = """
+    module RenMacro
+    macro add_2(x)
+        return :(\$x + 2)
+    end
+    f() = @add_2 1
+    g(x) = @add_2(x)
+    end
+    """
+    uri = URI("file:///renmacro/src/RenMacro.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # Renaming from the definition and from an invocation must behave the same.
+    for (line, col) in ((2, 7), (5, 8))
+        idx = string_index(source, line, col)
+
+        # The macro binding has one definition + two invocations = 3 occurrences,
+        # each emitted exactly once (no duplicate for the definition).
+        refs = get_references(jw, uri, idx)
+        @test length(refs) == 3
+
+        # Client may send the new name with or without the leading `@`.
+        for new_name in ("@sub_2", "sub_2")
+            edits = get_rename_edits(jw, uri, idx, new_name)
+            @test length(edits) == 3
+
+            # Definition edit (line 2): bare name, no `@`.
+            def_edits = filter(e -> e.start.line == 2, edits)
+            @test length(def_edits) == 1
+            @test def_edits[1].new_text == "sub_2"
+
+            # Invocation edits (lines 5 and 6): keep the leading `@`.
+            inv_edits = filter(e -> e.start.line != 2, edits)
+            @test length(inv_edits) == 2
+            @test all(e -> e.new_text == "@sub_2", inv_edits)
+        end
+    end
+end
+
 @testitem "References: highlight basic" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_highlights
     using JuliaWorkspaces.URIs2: URI
