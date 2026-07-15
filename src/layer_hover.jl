@@ -41,28 +41,27 @@ function get_expr1(x, offset, pos=0)
             arg = x[i]
             if pos < offset < (pos + arg.span) # def within span
                 return get_expr1(arg, offset, pos)
+            elseif offset == pos
+                if i > 1 && CSTParser.headof(x[i - 1]) === :IDENTIFIER && x[i - 1].span == x[i - 1].fullspan
+                    # Attribute the position to the preceding identifier only when
+                    # the cursor is flush against its text. The `span == fullspan`
+                    # check excludes an identifier that carries trailing trivia
+                    # (e.g. the `x` in `g(x;y)`, whose fullspan swallows the `;`):
+                    # there the cursor is past the text, so the following node owns
+                    # the position.
+                    return get_expr1(x[i - 1], offset, pos)
+                elseif arg.span != 0 || i == 1
+                    return get_expr1(arg, offset, pos)
+                end
+                # Zero-width node (empty block, mutable/bare-module flag, …) cannot
+                # own the position; fall through to the sibling that begins at this
+                # same offset.
             elseif arg.span == arg.fullspan
-                if offset == pos
-                    if i == 1
-                        return get_expr1(arg, offset, pos)
-                    elseif CSTParser.headof(x[i - 1]) === :IDENTIFIER
-                        return get_expr1(x[i - 1], offset, pos)
-                    else
-                        return get_expr1(arg, offset, pos)
-                    end
-                elseif i == length(x) # offset == pos + arg.fullspan
+                if i == length(x) # offset == pos + arg.fullspan
                     return get_expr1(arg, offset, pos)
                 end
             else
-                if offset == pos
-                    if i == 1
-                        return get_expr1(arg, offset, pos)
-                    elseif CSTParser.headof(x[i - 1]) === :IDENTIFIER
-                        return get_expr1(x[i - 1], offset, pos)
-                    else
-                        return get_expr1(arg, offset, pos)
-                    end
-                elseif offset == pos + arg.span
+                if offset == pos + arg.span
                     return get_expr1(arg, offset, pos)
                 elseif offset == pos + arg.fullspan
                 elseif pos + arg.span < offset < pos + arg.fullspan
