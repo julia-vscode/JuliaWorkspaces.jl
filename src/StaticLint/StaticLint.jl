@@ -127,7 +127,7 @@ function process_EXPR(x::EXPR, state::Toplevel)
     if state.modified_exprs !== nothing && x in state.modified_exprs
         state.in_modified_expr = true
     end
-    if CSTParser.defines_function(x) || CSTParser.defines_macro(x) || headof(x) === :export || headof(x) === :public
+    if CSTParser.defines_function(x) || CSTParser.defines_anon_function(x) || CSTParser.defines_macro(x) || headof(x) === :export || headof(x) === :public
         if state.in_modified_expr
             push!(state.delayed, x)
         else
@@ -364,7 +364,7 @@ function followinclude(x, state::Toplevel)
     # else
     #     path = ""
     # end
-  
+
     # TODO DA FIX
     if derived_has_file(rt, target_uri)
         # Circular- and duplicate-include detection (and the corresponding
@@ -397,7 +397,7 @@ function followinclude(x, state::Toplevel)
         state.uri = old_uri
         pop!(state.included_files)
     # TODO Understand this original code better
-    # elseif !is_in_fexpr(x, CSTParser.defines_function) && !isempty(init_path)    
+    # elseif !is_in_fexpr(x, CSTParser.defines_function) && !isempty(init_path)
     elseif !is_in_fexpr(x, CSTParser.defines_function)
         # MissingFile is likewise reported structurally; nothing to do here.
     end
