@@ -273,6 +273,56 @@ end
 
 
 
+@testitem "Re-exported names" setup=[shared_static_lint] begin
+    # A name brought into a module via `using` and then `export`ed should be
+    # available to code that `using`s that module (re-export).
+    @test check_resolved("""
+module Bar
+bar() = 0
+export bar
+end
+module Foo
+using ..Bar
+export bar
+end
+using .Foo
+bar()
+""") == fill(true, 8)
+
+    # Transitive re-export across three modules.
+    @test check_resolved("""
+module Bar
+bar() = 0
+export bar
+end
+module Foo
+using ..Bar
+export bar
+end
+module Baz
+using ..Foo
+export bar
+end
+using .Baz
+bar()
+""") == fill(true, 11)
+
+    # A name that is `using`'d but not re-exported must NOT leak out.
+    @test check_resolved("""
+module Bar
+bar() = 0
+export bar
+end
+module Foo
+using ..Bar
+end
+using .Foo
+bar()
+""") == [true, true, true, true, true, true, false]
+end
+
+
+
 @testitem "macros" setup=[shared_static_lint] begin
     @test check_resolved("""
         @enum(E,a,b)

@@ -184,8 +184,9 @@ function resolve_ref_from_module(x::EXPR, scope::Scope, state::TraverseState)::B
     end
 
     # 2) Resolve exported names from this module scope
-    if scope_exports(scope, mn, state)
-        setref!(x, scope.names[mn], meta_dict)
+    b = exported_binding(scope, mn, state)
+    if b !== nothing
+        setref!(x, b, meta_dict)
         return true
     end
 
@@ -193,20 +194,51 @@ function resolve_ref_from_module(x::EXPR, scope::Scope, state::TraverseState)::B
 end
 
 """
-    scope_exports(scope::Scope, name::String)
+    scope_exports(scope::Scope, name::String, state)
 
 Does the scope export a variable called `name`?
 """
-function scope_exports(scope::Scope, name::String, state)
+scope_exports(scope::Scope, name::String, state) = exported_binding(scope, name, state) !== nothing
+
+"""
+    exported_binding(scope::Scope, name::String, state)
+
+The binding a module scope makes available under `name` via an `export`
+statement, or `nothing` if `name` isn't exported. Handles both names bound
+directly in the module and names brought in from a `using`'d module and then
+re-exported (`using ..Bar; export bar`).
+"""
+function exported_binding(scope::Scope, name::String, state)
     if scopehasbinding(scope, name) && (b = scope.names[name]) isa Binding
         initial_pass_on_exports(scope.expr, name, state)
         for ref in b.refs
             if ref isa EXPR && parentof(ref) isa EXPR && headof(parentof(ref)) === :export
-                return true
+                return b
             end
         end
     end
-    return false
+    # Re-export: `name` isn't bound locally, but an `export name` statement
+    # names it after a `using`'d module brought it into this scope. The
+    # exported identifier resolves (through the module's used modules) to the
+    # originating binding, which is what callers should point references at.
+    return reexported_binding(scope, name, state)
+end
+
+function reexported_binding(scope::Scope, name::String, state)
+    meta_dict = state.meta_dict
+    CSTParser.defines_module(scope.expr) || return nothing
+    block = scope.expr.args[3]
+    block === nothing && return nothing
+    initial_pass_on_exports(scope.expr, name, state)
+    for a in block.args
+        headof(a) === :export || continue
+        for arg in a.args
+            (isidentifier(arg) && valofid(arg) == name) || continue
+            r = refof(arg, meta_dict)
+            (r isa Binding || r isa SymbolServer.SymStore) && return r
+        end
+    end
+    return nothing
 end
 
 """
