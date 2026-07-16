@@ -445,16 +445,20 @@ function _destructure_names!(names::Vector{String}, x)
 end
 
 # Whether `x` is a tuple-destructuring lhs, possibly wrapped in one or more
-# layers of `:brackets` (`((x, y)) = w` has an OUTER lhs headed `:brackets`,
-# not `:tuple` — confirmed via CST exploration). `_destructure_names!` already
-# unwraps `:brackets` layers as part of its own recursion, but the classifier
-# dispatch below needs to look past them too, or a fully-bracketed tuple lhs
-# never reaches the tuple-destructuring arm at all: it would fall through to
-# the plain-identifier catch-all, which silently drops it (a `:brackets` node
-# isn't an identifier).
+# interleaved layers of `:brackets` and/or a whole-tuple `::` type
+# declaration: `((x, y)) = w` has an OUTER lhs headed `:brackets`, not
+# `:tuple`; `(a, b)::T = w` has an OUTER lhs headed `::` (isdeclaration) —
+# mark_binding!'s own `isdeclaration(x) && istuple(x.args[1])` case
+# (bindings.jl:132); and the two nest either way (`((a, b))::T = w`: `::`
+# wraps `:brackets` wraps `:tuple`) — all confirmed via CST exploration.
+# `_destructure_names!` already unwraps both `:brackets` and `::` layers as
+# part of its own recursion, but the classifier dispatch below needs to look
+# past them too, or such a lhs never reaches the tuple-destructuring arm at
+# all: it would fall through to the plain-identifier catch-all, which
+# silently drops it (neither a `:brackets` nor a `::` node is an identifier).
 function _is_tuple_destructure_lhs(x)
-    while CSTParser.isbracketed(x)
-        x = CSTParser.rem_invis(x)
+    while CSTParser.isbracketed(x) || CSTParser.isdeclaration(x)
+        x = CSTParser.isbracketed(x) ? CSTParser.rem_invis(x) : CSTParser.rem_decl(x)
     end
     return CSTParser.istuple(x)
 end

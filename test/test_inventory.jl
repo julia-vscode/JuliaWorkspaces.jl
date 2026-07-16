@@ -474,6 +474,8 @@ end
     (; ta, tb::T) = cfg2
     (tc::T, td) = w2
     ((bx, by)) = w3
+    (wa, wb)::T = w4
+    ((wc, wd))::T = w5
     """)
 
     # Splat: both the plain and splatted name are bound, sharing the
@@ -528,6 +530,22 @@ end
     by_item = only(filter(i -> i.name == "by", inv.items))
     @test bx_item.id == by_item.id
     @test bx_item.kind === :assignment
+
+    # Whole-tuple type declaration (`(a, b)::T = w`): the OUTER lhs head is
+    # `::` (isdeclaration), wrapping the tuple directly — both names must
+    # still be bound (mark_binding!'s own `isdeclaration(x) &&
+    # istuple(x.args[1])` case, bindings.jl:132).
+    wa_item = only(filter(i -> i.name == "wa", inv.items))
+    wb_item = only(filter(i -> i.name == "wb", inv.items))
+    @test wa_item.id == wb_item.id
+    @test wa_item.kind === :assignment
+
+    # Same, with the tuple additionally bracketed (`((a, b))::T = w`):
+    # `::` wraps `:brackets` wraps `:tuple`.
+    wc_item = only(filter(i -> i.name == "wc", inv.items))
+    wd_item = only(filter(i -> i.name == "wd", inv.items))
+    @test wc_item.id == wd_item.id
+    @test wc_item.kind === :assignment
 end
 
 @testitem "no-op update: identical content re-executes nothing downstream" setup=[InventoryWS] begin
