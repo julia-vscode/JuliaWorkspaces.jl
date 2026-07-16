@@ -26,6 +26,7 @@ include("layer_files.jl")
 include("layer_syntax_trees.jl")
 include("layer_includes.jl")
 include("layer_inventory.jl")
+include("layer_module_tree.jl")
 
 include("StaticLint/StaticLint.jl")
 
