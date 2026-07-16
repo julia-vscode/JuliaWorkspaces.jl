@@ -118,3 +118,39 @@ function module_node(tree::ModuleTree, path::Vector{String})::Union{Nothing,Modu
     end
     return nothing
 end
+
+"""
+    derived_workspace_package_roots(rt) -> Dict{String,URI}
+
+Map each workspace package's name to its entry-file URI (`src/<Name>.jl`),
+for packages whose entry file actually exists.
+
+If two package folders in the workspace claim the same package name, the
+folder with the lexicographically smaller URI (by `string(uri)`) wins; folders
+are iterated in sorted order so later (larger) duplicates are simply skipped.
+"""
+Salsa.@derived function derived_workspace_package_roots(rt)
+    @debug "derived_workspace_package_roots"
+
+    folders = sort(derived_package_folders(rt); by=string)
+
+    claimed = Set{String}()
+    result = Dict{String,URI}()
+    for folder in folders
+        package = derived_package(rt, folder)
+        package === nothing && continue
+
+        # Deterministic tie-break: folders are sorted by URI, so the first
+        # (lexicographically smallest) folder to claim a package name wins;
+        # skip any later folder claiming the same name, even if this folder's
+        # entry file turns out to be missing.
+        package.name in claimed && continue
+        push!(claimed, package.name)
+
+        entry_uri = filepath2uri(joinpath(uri2filepath(folder), "src", "$(package.name).jl"))
+        if derived_has_file(rt, entry_uri)
+            result[package.name] = entry_uri
+        end
+    end
+    return result
+end

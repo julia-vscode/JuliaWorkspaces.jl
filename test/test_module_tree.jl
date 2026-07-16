@@ -16,3 +16,36 @@
     @test module_node(a, ["M"]) !== nothing
     @test module_node(a, ["Nope"]) === nothing
 end
+
+@testitem "workspace package roots: name to entry file" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+
+    function project_toml(name, uuid)
+        """
+        name = "$name"
+        uuid = "$uuid"
+        version = "0.1.0"
+        """
+    end
+
+    jw = JuliaWorkspace()
+
+    # Package A: valid Project.toml + src/A.jl entry file
+    add_file!(jw, TextFile(URI("file:///ws/A/Project.toml"), SourceText(project_toml("A", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/A/src/A.jl"), SourceText("module A\nend\n", "julia")))
+
+    # Package B: valid Project.toml + src/B.jl entry file
+    add_file!(jw, TextFile(URI("file:///ws/B/Project.toml"), SourceText(project_toml("B", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/B/src/B.jl"), SourceText("module B\nend\n", "julia")))
+
+    # Package C: valid Project.toml, but NO src/C.jl entry file
+    add_file!(jw, TextFile(URI("file:///ws/C/Project.toml"), SourceText(project_toml("C", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0003"), "toml")))
+
+    roots = JuliaWorkspaces.derived_workspace_package_roots(jw.runtime)
+
+    @test length(roots) == 2
+    @test roots["A"] == URI("file:///ws/A/src/A.jl")
+    @test roots["B"] == URI("file:///ws/B/src/B.jl")
+    @test !haskey(roots, "C")
+end
