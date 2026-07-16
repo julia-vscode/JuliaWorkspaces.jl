@@ -83,3 +83,132 @@ end
     @test roots["Dup1"] == URI("file:///ws/dup1/b/src/Dup1.jl")
     @test roots["Dup2"] == URI("file:///ws/dup2/a/src/Dup2.jl")
 end
+
+@testsnippet ModuleTreeWS begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: module_node
+    using JuliaWorkspaces.URIs2: URI
+
+    function tree_of(root_src::String; root_uri=URI("file:///t/src/F.jl"), extra_files=Dict{URI,String}())
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(root_uri, SourceText(root_src, "julia")))
+        for (u, s) in extra_files
+            add_file!(jw, TextFile(u, SourceText(s, "julia")))
+        end
+        return JuliaWorkspaces.derived_module_tree(jw.runtime, root_uri), root_uri, jw
+    end
+end
+
+@testitem "module tree: package shape splices includes into the declaring module" setup=[ModuleTreeWS] begin
+    a_uri = URI("file:///t/src/a.jl")
+    b_uri = URI("file:///t/src/b.jl")
+    tree, root_uri, _ = tree_of("""
+    module Pkg
+    include("a.jl")
+    include("b.jl")
+    end
+    """; extra_files=Dict(
+        a_uri => """
+        afunc() = 1
+        module Common
+        x() = 1
+        end
+        """,
+        b_uri => """
+        module Common
+        y() = 2
+        end
+        """,
+    ))
+
+    pkg = module_node(tree, ["Pkg"])
+    @test pkg !== nothing
+    @test haskey(pkg.declared, "afunc")
+    @test haskey(pkg.declared, "Common")
+    @test tree.file_modules[a_uri] == ["Pkg"]
+    @test tree.file_modules[b_uri] == ["Pkg"]
+end
+
+@testitem "module tree: module split across files splices at the nested path" setup=[ModuleTreeWS] begin
+    inner_uri = URI("file:///t/src/inner.jl")
+    tree, root_uri, _ = tree_of("""
+    module Pkg
+    module Sub
+    include("inner.jl")
+    end
+    end
+    """; extra_files=Dict(inner_uri => "z() = 1\n"))
+
+    @test tree.file_modules[inner_uri] == ["Pkg", "Sub"]
+    sub = module_node(tree, ["Pkg", "Sub"])
+    @test sub !== nothing
+    @test haskey(sub.declared, "z")
+end
+
+@testitem "module tree: later declaration wins in include order" setup=[ModuleTreeWS] begin
+    a_uri = URI("file:///t/src/a.jl")
+    b_uri = URI("file:///t/src/b.jl")
+    tree, root_uri, _ = tree_of("""
+    include("a.jl")
+    include("b.jl")
+    """; extra_files=Dict(
+        a_uri => "shared() = 1\n",
+        b_uri => "shared() = 2\n",
+    ))
+
+    root_node = module_node(tree, String[])
+    @test root_node.declared["shared"].file == b_uri
+end
+
+@testitem "module tree: duplicate include of the same file is spliced only once" setup=[ModuleTreeWS] begin
+    a_uri = URI("file:///t/src/a.jl")
+    tree, root_uri, _ = tree_of("""
+    include("a.jl")
+    include("a.jl")
+    """; extra_files=Dict(a_uri => "q() = 1\n"))
+
+    root_node = module_node(tree, String[])
+    @test count(==(a_uri), root_node.files) == 1
+    @test root_node.files == [root_uri, a_uri]
+end
+
+@testitem "module tree: include cycles terminate" setup=[ModuleTreeWS] begin
+    a_uri = URI("file:///t/src/a.jl")
+    b_uri = URI("file:///t/src/b.jl")
+    tree, root_uri, _ = tree_of("""
+    include("a.jl")
+    """; extra_files=Dict(
+        a_uri => "include(\"b.jl\")\n",
+        b_uri => "include(\"a.jl\")\n",
+    ))
+
+    @test tree.file_modules[root_uri] == String[]
+    @test tree.file_modules[a_uri] == String[]
+    @test tree.file_modules[b_uri] == String[]
+    root_node = module_node(tree, String[])
+    @test count(==(a_uri), root_node.files) == 1
+end
+
+@testitem "module tree: missing include target is ignored" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    include("missing.jl")
+    f() = 1
+    """)
+
+    @test length(tree.modules) == 1
+    root_node = module_node(tree, String[])
+    @test root_node.files == [root_uri]
+    @test haskey(root_node.declared, "f")
+end
+
+@testitem "module tree: script shape declares at the synthetic root" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    f() = 1
+    g() = 2
+    """)
+
+    root_node = module_node(tree, String[])
+    @test haskey(root_node.declared, "f")
+    @test haskey(root_node.declared, "g")
+    @test tree.file_modules[root_uri] == String[]
+end

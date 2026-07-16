@@ -154,3 +154,155 @@ Salsa.@derived function derived_workspace_package_roots(rt)
     end
     return result
 end
+
+# Binding-kind item kinds per the splicing spec's rule 5: these enter a
+# node's `declared` dict (later declaration wins). `:opaque_macrocall` and any
+# other item kind are deliberately excluded — they never bind a name at their
+# `parent_module` scope in the tree sense.
+const _BINDING_ITEM_KINDS = (
+    :function, :macro, :struct, :mutable_struct, :abstract, :primitive,
+    :const, :global, :assignment, :enum, :enum_member,
+)
+
+# Mutable node builder used only while assembling a tree in
+# `_build_tree_structure`; frozen into the plain-data `ModuleNode` once pass 1
+# (and, eventually, pass 2) is complete. Field meanings mirror `ModuleNode`
+# exactly (see its docstring) minus `path`, which is the builder's key in the
+# owning `Dict`.
+mutable struct _ModuleNodeBuilder
+    bare::Bool
+    declared_at::Union{Nothing,ItemRef}
+    files::Vector{URI}
+    declared::Dict{String,ItemRef}
+    exports::Vector{String}
+    publics::Vector{String}
+    imports::Vector{ResolvedImport}
+end
+
+_ModuleNodeBuilder() = _ModuleNodeBuilder(
+    false, nothing, URI[], Dict{String,ItemRef}(), String[], String[], ResolvedImport[])
+
+"""
+    _build_tree_structure(rt, root::URI) -> (builders, file_modules)
+
+Pass 1 of `derived_module_tree`: splices `root`'s (transitive) include closure
+into a per-root module structure, per the normative splicing semantics (see
+the milestone design doc / task brief). Returns the raw mutable builders
+(keyed by absolute module path) and the `file → absolute splice path` map;
+`derived_module_tree` freezes the builders into plain-data `ModuleNode`s.
+
+Also collects `using`/`import` statements as `ResolvedImport`s whose target is
+`ImportTarget(:unresolved, path-as-written)` — pass 2 (a later task) replaces
+this classification with real resolution; this pass never inspects import
+targets beyond recording them verbatim.
+"""
+function _build_tree_structure(rt, root::URI)
+    builders = Dict{Vector{String},_ModuleNodeBuilder}()
+    ensure_node!(path::Vector{String}) = get!(_ModuleNodeBuilder, builders, path)
+
+    # Rule 8: the synthetic root node always exists, even for a root file with
+    # no content or no includes.
+    ensure_node!(String[])
+
+    file_modules = Dict{URI,Vector{String}}()
+
+    # Rule 1: BFS worklist, visited-set guarded exactly like
+    # `derived_include_closure` — first include wins, later includes of an
+    # already-visited file are skipped, and cycles terminate.
+    visited = Set{URI}([root])
+    queue = Tuple{URI,Vector{String}}[(root, String[])]
+
+    while !isempty(queue)
+        (F, P) = popfirst!(queue)
+
+        # Rule 7.
+        file_modules[F] = P
+
+        # The file's own top level splices at P; recording F here handles
+        # both the root file (no includer) and included files uniformly —
+        # rule 4's "T appended to that node's files" falls out of this same
+        # bookkeeping once T is actually dequeued and processed.
+        push!(ensure_node!(P).files, F)
+
+        inv = derived_file_inventory(rt, F)
+
+        # Rules 3 & 5 interact on the same `declared` dict (a module's own
+        # name enters its *parent's* declared entries, rule 3, exactly like a
+        # binding item does, rule 5) so within-file overwrite order must
+        # follow true source order, not category order. Ids are globally
+        # sequential within one file's walk (`_foreach_toplevel_item`), so
+        # merging by id and applying in that order reproduces it.
+        declared_events = Tuple{Int,Vector{String},String,ItemRef}[]
+        for item in inv.items
+            if isempty(item.qualifier) && item.kind in _BINDING_ITEM_KINDS
+                push!(declared_events, (item.id, vcat(P, item.parent_module), item.name, (file=F, id=item.id)))
+            end
+        end
+        for m in inv.modules
+            push!(declared_events, (m.id, vcat(P, m.parent_module), m.name, (file=F, id=m.id)))
+        end
+        sort!(declared_events; by=first, alg=Base.Sort.MergeSort)
+        for (_, abs_path, name, ref) in declared_events
+            ensure_node!(abs_path).declared[name] = ref
+        end
+
+        # Rule 3: create/extend each declared module's own node.
+        for m in inv.modules
+            mod_path = vcat(P, m.parent_module, [m.name])
+            node = ensure_node!(mod_path)
+            node.bare = m.bare
+            node.declared_at = (file=F, id=m.id)
+        end
+
+        # Rule 6.
+        for e in inv.exports
+            node = ensure_node!(vcat(P, e.parent_module))
+            append!(e.kind === :export ? node.exports : node.publics, e.names)
+        end
+
+        # Rule 4: enqueue include targets (skipping `nothing`/content-less
+        # targets and — via `visited` — duplicates), splicing at vcat(P, RP).
+        for inc in inv.includes
+            inc.target === nothing && continue
+            newP = vcat(P, inc.parent_module)
+            # The node at newP must exist regardless of whether this
+            # particular include resolves (other items may share RP).
+            ensure_node!(newP)
+            inc.target in visited && continue
+            derived_has_content(rt, inc.target) || continue
+            push!(visited, inc.target)
+            push!(queue, (inc.target, newP))
+        end
+
+        # Pass 2 stub: collect imports unresolved; a later task classifies
+        # `target.sort` for real.
+        for imp in inv.imports
+            node = ensure_node!(vcat(P, imp.parent_module))
+            push!(node.imports, ResolvedImport(
+                imp.kind, ImportTarget(:unresolved, imp.path), imp.symbols, imp.alias, (file=F, id=imp.id)))
+        end
+    end
+
+    return builders, file_modules
+end
+
+"""
+    derived_module_tree(rt, root::URI) -> ModuleTree
+
+The module structure of `root`'s (transitive) include closure: pass 1 splices
+every reachable file's top-level items into the module tree they belong to
+(see `_build_tree_structure`); pass 2 (a later task) resolves `using`/`import`
+targets. `modules` is sorted by path for deterministic structural equality.
+"""
+Salsa.@derived function derived_module_tree(rt, root)
+    @debug "derived_module_tree" root=root
+
+    builders, file_modules = _build_tree_structure(rt, root)
+
+    modules = ModuleNode[
+        ModuleNode(path, b.bare, b.declared_at, b.files, b.declared, b.exports, b.publics, b.imports)
+        for (path, b) in builders]
+    sort!(modules; by=n -> n.path, alg=Base.Sort.MergeSort)
+
+    return ModuleTree(root, modules, file_modules)
+end
