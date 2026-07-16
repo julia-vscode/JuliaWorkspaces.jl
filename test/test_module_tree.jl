@@ -447,6 +447,13 @@ end
     include("inv_a.jl")
     """; extra_files=Dict(a_uri => "f(x) = x + 1\n"))
     rt1 = jw1.runtime
+    # NOTE(trace-baseline): this untraced call performs the full computation
+    # (inventory → tree → probe) once, so it's already in Salsa's memoized
+    # cache. The traced call below only has to re-verify/re-derive after the
+    # edit; without this untraced baseline, the traced call's counts would
+    # include the FIRST-ever computation of everything it touches, not just
+    # what the edit actually invalidated — making the zero-executions
+    # assertions vacuous rather than meaningful.
     @test probe_tree(rt1, root1).declared == ["f"]
 
     recv1 = CountReceiver()

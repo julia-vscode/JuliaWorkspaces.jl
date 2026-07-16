@@ -462,6 +462,104 @@ end
           only(filter(i -> i.name == "b", inv.items)).id
 end
 
+@testitem "inventory parity: destructuring splats, nested tuples, property forms" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    a, b... = f()
+    (x, (y, z)) = w
+    (; f1, f2) = cfg
+    const c, d... = f()
+    const (m, (n, o)) = w
+    const (; f3, f4) = cfg
+    global e, g... = f()
+    """)
+
+    # Splat: both the plain and splatted name are bound, sharing the
+    # statement's single walker id.
+    a_item = only(filter(i -> i.name == "a", inv.items))
+    b_item = only(filter(i -> i.name == "b", inv.items))
+    @test a_item.kind === :assignment
+    @test b_item.kind === :assignment
+    @test a_item.id == b_item.id
+
+    # Nested tuple: all three names bound, sharing the id.
+    x_item = only(filter(i -> i.name == "x", inv.items))
+    y_item = only(filter(i -> i.name == "y", inv.items))
+    z_item = only(filter(i -> i.name == "z", inv.items))
+    @test x_item.id == y_item.id == z_item.id
+
+    # Property destructuring (`:tuple` with a `:parameters` child).
+    f1_item = only(filter(i -> i.name == "f1", inv.items))
+    f2_item = only(filter(i -> i.name == "f2", inv.items))
+    @test f1_item.id == f2_item.id
+    @test f1_item.kind === :assignment
+
+    # `const` variants of all three shapes.
+    for (n, k) in [("c", :const), ("d", :const), ("m", :const), ("n", :const), ("o", :const),
+                   ("f3", :const), ("f4", :const)]
+        item = only(filter(i -> i.name == n, inv.items))
+        @test item.kind === k
+    end
+
+    # `global` variant of the splat shape.
+    e_item = only(filter(i -> i.name == "e", inv.items))
+    g_item = only(filter(i -> i.name == "g", inv.items))
+    @test e_item.kind === :global
+    @test g_item.kind === :global
+end
+
+@testitem "no-op update: identical content re-executes nothing downstream" setup=[InventoryWS] begin
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+    using JuliaWorkspaces: module_node
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    # A downstream consumer one layer above the inventory (mirrors `probe_tree`
+    # in test_module_tree.jl's invalidation testitem), so the assertions below
+    # exercise the whole chain: input → inventory → tree → probe.
+    Salsa.@derived function probe_noop(rt, uri)
+        tree = JuliaWorkspaces.derived_module_tree(rt, uri)
+        node = module_node(tree, String[])
+        return sort(collect(keys(node.declared)))
+    end
+
+    src = "f(x) = x + 1\n"
+    uri = URI("file:///inv/src/F.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    rt = jw.runtime
+
+    # NOTE(trace-baseline): this untraced call performs the full computation
+    # (inventory → tree → probe) once, so it's already in Salsa's memoized
+    # cache before we trace the no-op update below — the pattern relies on
+    # this prior full computation to make the "nothing re-executes" assertion
+    # meaningful rather than vacuous.
+    @test probe_noop(rt, uri) == ["f"]
+
+    recv = CountReceiver()
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    TL.with_tracing(() -> probe_noop(rt, uri), recv)
+
+    # Byte-identical content never even bumps the Salsa input's revision:
+    # `set_input!`'s own "Early Exit Optimization Part 1"
+    # (default_storage.jl:438-442) compares the new value against the cached
+    # one via `isequal` — `TextFile`/`SourceText` are both `@auto_hash_equals`
+    # — and skips the revision bump entirely when they match. So NOTHING
+    # downstream re-executes, not even the inventory's own immediate reader:
+    # a strictly stronger guarantee than the inventory's own early-cutoff
+    # (which needs the input to actually change and the derived VALUE to
+    # compare equal afterwards); confirmed empirically via tracing, not
+    # merely assumed.
+    @test get(recv.counts, "derived_file_inventory", 0) == 0
+    @test get(recv.counts, "derived_module_tree", 0) == 0
+    @test get(recv.counts, "probe_noop", 0) == 0
+end
+
 @testitem "inventory parity: ternaries produce no junk position ids" setup=[InventoryWS] begin
     using JuliaWorkspaces.URIs2: URI
     uri = URI("file:///inv/src/tern.jl")
