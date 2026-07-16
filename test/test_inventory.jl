@@ -68,4 +68,10 @@ end
     @test src[g_off + 1] == 'g'
     # And f's offset is 0.
     @test visited[1].offset == 0
+
+    # Nested-module children: offsets must account for the module keyword
+    # (trivia[1]) — regression guard for the args[1]-vs-trivia[1] fix.
+    @test src[visited[4].offset + 1] == 'h'   # h inside M
+    @test src[visited[6].offset + 1] == 'k'   # k inside M.Inner
+    @test src[visited[7].offset + 1] == 'w'   # sibling after the module block
 end
