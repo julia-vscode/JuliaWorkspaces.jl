@@ -195,3 +195,26 @@ end
     inv4, _ = inventory_of(replace(base("x + 1"), "f(x)" => "f(x, y)"))
     @test !isequal(inv1, inv4)
 end
+
+@testitem "item positions: ids agree with the inventory and offsets track edits" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    src1 = "f() = 1\ng() = 2\n"
+    uri = URI("file:///inv/src/pos.jl")
+    inv1, jw = inventory_of(src1; uri=uri)
+    pos1 = JuliaWorkspaces.derived_item_positions(jw.runtime, uri)
+
+    f_item = only(filter(i -> i.name == "f", inv1.items))
+    g_item = only(filter(i -> i.name == "g", inv1.items))
+    @test pos1[f_item.id].offset == 0
+    @test src1[pos1[g_item.id].offset + 1] == 'g'
+
+    # A body edit above g shifts g's offset but keeps its id (inventory equal).
+    src2 = "f() = 1 + 11111\ng() = 2\n"
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText(src2, "julia")))
+    inv2 = JuliaWorkspaces.derived_file_inventory(jw.runtime, uri)
+    @test isequal(inv1, inv2)                       # firewall holds
+    pos2 = JuliaWorkspaces.derived_item_positions(jw.runtime, uri)
+    @test src2[pos2[g_item.id].offset + 1] == 'g'   # same id, new offset
+    @test pos2[g_item.id].offset != pos1[g_item.id].offset
+end

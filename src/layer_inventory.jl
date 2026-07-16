@@ -393,3 +393,26 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
     end
     return
 end
+
+"""
+    derived_item_positions(rt, uri)
+
+Map each inventory item id to its current syntax node and 0-based byte offset.
+Volatile: recomputes on every reparse (EXPR identities and offsets change),
+which is fine because it is a leaf — semantic layers depend on
+`derived_file_inventory` (position-free) only; this query exists solely for
+request handlers to reattach locations, docstrings, and defining EXPRs at the
+last mile. Depending on this query from any layer-1/2/3 computation is a bug.
+"""
+Salsa.@derived function derived_item_positions(rt, uri)
+    result = Dict{Int,@NamedTuple{expr::CSTParser.EXPR, offset::Int}}()
+
+    derived_has_content(rt, uri) || return result
+    cst = derived_julia_legacy_syntax_tree(rt, uri)
+    (cst isa CSTParser.EXPR && CSTParser.headof(cst) === :file) || return result
+
+    _foreach_toplevel_item(cst) do x, id, parent_module, offset
+        result[id] = (expr=x, offset=offset)
+    end
+    return result
+end
