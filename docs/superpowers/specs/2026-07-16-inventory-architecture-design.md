@@ -146,6 +146,10 @@ for review. LS-facing API of JuliaWorkspaces (`get_completions`, `get_diagnostic
 `get_references`, `get_static_lint_data` consumers, …) keeps its signatures and result
 types; the LanguageServer package is not modified.
 
+**Sanctioned divergence:** a file included from two places is spliced once, at its first
+include site in source order (Julia splices twice); the `DuplicateInclude` diagnostic
+already flags such code.
+
 ## Non-goals
 
 - No staleness/fast-path mechanisms. Requests are always exact.
