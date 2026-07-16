@@ -134,7 +134,10 @@ Salsa.@derived function derived_project(rt, uri)
     project_file = toml_files.project_file
     manifest_file = toml_files.manifest_file
 
-    if manifest_file === nothing || manifest_file.scheme != "file"
+    # A folder without a Project file is not a project, even if it has a
+    # Manifest.toml (e.g. a DJP-created temp project directory whose
+    # Project.toml is missing or was deleted).
+    if project_file === nothing || manifest_file === nothing || manifest_file.scheme != "file"
         return nothing
     end
 
