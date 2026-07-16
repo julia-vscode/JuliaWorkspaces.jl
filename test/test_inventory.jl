@@ -84,9 +84,9 @@ end
     if VERSION > v"1.0"
         compat_f(x) = x
     elseif false
-        elseif_f(x) = x
+        mid_f(x) = x
     else
-        else_f(x) = x
+        tail_f(x) = x
     end
     begin
         block_f(x) = x
@@ -105,9 +105,11 @@ end
     @test [v.id for v in visited] == collect(1:5)
     @test all(v -> v.parent == String[], visited)
 
+    # Names use distinct first letters (compat/mid/tail/block/w) so that a
+    # regression swapping two branches' offsets can't pass by accident.
     @test src[visited[1].offset + 1] == 'c'   # compat_f, inside the `if` branch
-    @test src[visited[2].offset + 1] == 'e'   # elseif_f, inside the `elseif` branch
-    @test src[visited[3].offset + 1] == 'e'   # else_f, inside the `else` branch
+    @test src[visited[2].offset + 1] == 'm'   # mid_f, inside the `elseif` branch
+    @test src[visited[3].offset + 1] == 't'   # tail_f, inside the `else` branch
     @test src[visited[4].offset + 1] == 'b'   # block_f, inside the `begin...end` block
     @test src[visited[5].offset + 1] == 'w'   # sibling after everything
 end
@@ -429,4 +431,85 @@ end
     @test only(filter(i -> i.name == "Color", inv.items)).kind === :enum
     @test only(filter(i -> i.name == "red", inv.items)).kind === :enum_member
     @test only(filter(i -> i.name == "green", inv.items)).kind === :enum_member
+end
+
+@testitem "inventory parity: operator-named function definitions" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    +(a, b) = 1
+    Base.:+(a, b) = 2
+    function Base.:*(a, b) end
+    """)
+    plus_local = only(filter(i -> i.name == "+" && isempty(i.qualifier), inv.items))
+    @test plus_local.kind === :function
+    plus_base = only(filter(i -> i.name == "+" && i.qualifier == ["Base"], inv.items))
+    @test plus_base.kind === :function
+    star = only(filter(i -> i.name == "*", inv.items))
+    @test star.qualifier == ["Base"]
+end
+
+@testitem "inventory parity: tuple-destructuring assignments" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    a, b = 1, 2
+    const x, y = 3, 4
+    """)
+    for (n, k) in [("a", :assignment), ("b", :assignment), ("x", :const), ("y", :const)]
+        item = only(filter(i -> i.name == n, inv.items))
+        @test item.kind === k
+    end
+    # Destructured names share their statement's walker id (position map
+    # resolves the shared id to the whole statement).
+    @test only(filter(i -> i.name == "a", inv.items)).id ==
+          only(filter(i -> i.name == "b", inv.items)).id
+end
+
+@testitem "inventory parity: ternaries produce no junk position ids" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+    uri = URI("file:///inv/src/tern.jl")
+    # The ternary is a BARE top-level statement (not an assignment rhs) so it
+    # actually reaches the walker's `:if` container arm, and its branches are
+    # multi-arg calls so that, unguarded, descending into their `.args` mints
+    # several junk ids (one per call child) instead of the ternary being
+    # treated as a single opaque statement.
+    inv, jw = inventory_of("f() = 1\ncond = true\ncond ? h(1, 2) : k(3, 4)\ng() = 2\n"; uri=uri)
+    pos = JuliaWorkspaces.derived_item_positions(jw.runtime, uri)
+    inv_ids = Set(vcat([i.id for i in inv.items], [m.id for m in inv.modules],
+                       [i.id for i in inv.imports], [e.id for e in inv.exports],
+                       [i.id for i in inv.includes]))
+    # Every position-map id corresponds to a walked statement; none may come
+    # from descending into ternary call arguments.
+    @test Set(keys(pos)) ⊇ inv_ids
+    @test length(pos) <= 4 + 1   # f, cond, the ternary statement itself, g (+1 slack)
+end
+
+@testitem "inventory parity audit: module-level bindables are never invisible" setup=[InventoryWS] begin
+    # Deliberate exceptions (documented, not extracted): names bound inside
+    # scoped constructs (for/while/let/try/function bodies — introduces_scope),
+    # opaque macrocalls, and testitem-family macros (deferred per spec).
+    inv, _ = inventory_of("""
+    if VERSION > v"1.0"
+        cond_f(x) = x
+        begin
+            nested_g() = 1
+        end
+    elseif false
+        alt_f() = 2
+    else
+        other_f() = 3
+    end
+    const C = 1
+    global G = 2
+    +(a, b) = 1
+    p, q = 1, 2
+    @enum Fruit apple banana
+    \"\"\"doc\"\"\"
+    struct DocS end
+    module M
+    m_f() = 1
+    end
+    """)
+    names = Set(i.name for i in inv.items)
+    for expected in ["cond_f", "nested_g", "alt_f", "other_f", "C", "G", "+",
+                     "p", "q", "Fruit", "apple", "banana", "DocS", "m_f"]
+        @test expected in names
+    end
 end

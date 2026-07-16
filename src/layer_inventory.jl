@@ -142,7 +142,18 @@ function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, ne
             item = wrapped
         end
 
-        if CSTParser.headof(item) === :if
+        # A ternary (`cond ? a : b`) also parses with head `:if`, so the
+        # container check alone isn't enough to tell it apart from a real
+        # `if`/`elseif`/`else` chain — and checking whether `args[2]` (the
+        # "then" branch) is `:block`-shaped is NOT a reliable discriminator
+        # either: `cond ? begin ... end : b` gives a ternary an `args[2]` with
+        # head `:block` too (confirmed via CST exploration). What's reliable
+        # is the node's own leading keyword trivia: a real `if`/`elseif` node
+        # has `trivia[1]` headed `:IF`/`:ELSEIF`; a ternary's `trivia[1]` is
+        # its `?` operator token. So only descend when `trivia[1]` is the
+        # real keyword; a ternary falls through to the `else` branch below and
+        # is treated as a single opaque item (no descent into its arms).
+        if CSTParser.headof(item) === :if && CSTParser.headof(item.trivia[1]) === :IF
             _walk_if_chain!(f, item, parent_module, item_offset, next_id)
         elseif CSTParser.headof(item) === :block
             _walk_transparent_block!(f, item, parent_module, item_offset, next_id)
@@ -272,7 +283,12 @@ function _getfield_qualifier(x)
     CSTParser.is_getfield_w_quotenode(x) || return String[]
     parts = String[]
     while CSTParser.is_getfield_w_quotenode(x)
-        nm = _item_name(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
+        # `_symbol_name`, not `_item_name`: the innermost level peeled is the
+        # defined name itself (discarded below via `parts[1:end - 1]`), which
+        # may be an operator for a quoted-operator method extension
+        # (`Base.:+` — confirmed via CST exploration: `rhs_getfield` here is a
+        # quotenode wrapping an OPERATOR node, not an identifier).
+        nm = _symbol_name(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
         nm === nothing && return String[]
         pushfirst!(parts, nm)
         x = x.args[1]
@@ -404,7 +420,12 @@ end
 # include("data.jl")`, Finding 6b) regardless of which arm below fires.
 function _classify_assignment!(acc, x, id, parent_module, kind_override, container_offset, container_fullspan, records)
     if CSTParser.is_func_call(x.args[1])
-        name = _item_name(CSTParser.get_name(x))
+        # `_symbol_name`, not `_item_name`: a function-definition name may be
+        # an operator (`+(a, b) = 1`, or the quoted-operator getfield form
+        # `Base.:+(a, b) = 2` — `get_name` already resolves through the
+        # getfield down to the bare OPERATOR node; confirmed via CST
+        # exploration), which `_item_name` alone silently drops.
+        name = _symbol_name(CSTParser.get_name(x))
         if name !== nothing
             qualifier = _item_qualifier(CSTParser.get_name(x))
             push!(acc.items, InventoryItem(id, name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module))
@@ -416,10 +437,25 @@ function _classify_assignment!(acc, x, id, parent_module, kind_override, contain
         if name !== nothing
             push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
         end
+    elseif CSTParser.headof(x.args[1]) === :tuple
+        # Tuple-destructuring lhs (`a, b = 1, 2`, or `const`/`global`-wrapped
+        # via `kind_override`): one item per identifier, ALL sharing this
+        # statement's single walker `id` — deliberate, not a bug. Ids are the
+        # position-map key and come only from the walker (one per top-level
+        # statement), so minting extra ids here would desync
+        # `derived_item_positions` from the walker's id sequence; the shared
+        # id instead resolves (via the position map) to the whole
+        # destructuring statement, which is exactly what a future goto-def
+        # would want to target anyway.
+        for child in x.args[1].args
+            name = _item_name(child)
+            name === nothing && continue
+            push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
+        end
     elseif !CSTParser.is_getfield(x.args[1])
-        # Plain identifier lhs. (Tuple-destructuring/other lhs shapes that
-        # `mark_binding!` further unwraps are out of scope for this milestone —
-        # `_item_name` returns `nothing` for them and no item is emitted.)
+        # Plain identifier lhs. (Other lhs shapes that `mark_binding!` further
+        # unwraps are out of scope for this milestone — `_item_name` returns
+        # `nothing` for them and no item is emitted.)
         name = _item_name(x.args[1])
         if name !== nothing
             push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
@@ -440,8 +476,10 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
         name === nothing && return
         push!(acc.modules, InventoryModule(id, name, CSTParser.headof(x.args[1]) === :FALSE, parent_module))
     elseif CSTParser.headof(x) === :function || CSTParser.headof(x) === :macro
-        # bindings.jl:83-89
-        name = _item_name(CSTParser.get_name(x))
+        # bindings.jl:83-89. `_symbol_name`, not `_item_name`: covers
+        # `function Base.:*(a, b) end`-style operator definitions, whose name
+        # (after `get_name` resolves through the getfield) is an OPERATOR node.
+        name = _symbol_name(CSTParser.get_name(x))
         name === nothing && return
         kind = CSTParser.headof(x) === :function ? :function : :macro
         qualifier = _item_qualifier(CSTParser.get_name(x))
