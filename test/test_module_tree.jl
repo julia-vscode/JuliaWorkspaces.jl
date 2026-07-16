@@ -1,4 +1,5 @@
 @testitem "module tree types: structural equality across separately built instances" begin
+    using JuliaWorkspaces
     using JuliaWorkspaces: ModuleTree, ModuleNode, ResolvedImport, ImportTarget, ItemRef, module_node
     using JuliaWorkspaces.URIs2: URI
 
