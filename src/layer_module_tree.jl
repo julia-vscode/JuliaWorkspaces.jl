@@ -465,3 +465,152 @@ Salsa.@derived function derived_module_tree(rt, root)
 
     return ModuleTree(root, modules, file_modules)
 end
+
+# --- Layer 2 selector queries: the analysis cutoff seam ---
+#
+# The four `derived_module_*` queries below and `derived_file_module_path`
+# are thin `Salsa.@derived` projections of `derived_module_tree` — the same
+# pattern as `derived_includes`/`derived_include_dict`/`derived_file_include_records`
+# projecting `derived_file_include_data` (layer_includes.jl:1-40): keeping each
+# projection as its own memoized query, rather than having every caller
+# destructure the fused `ModuleTree`/`ModuleNode` directly, is what lets Salsa
+# early-exit independently at EACH projection's own granularity. A tree-level
+# change (e.g. an item's id shifting) can leave one projection's value
+# unchanged while another's changes — see `derived_module_names`'s docstring
+# for why that distinction is the whole point of this layer.
+
+"""
+    _declared_item_kind(rt, name::String, ref::ItemRef) -> Symbol
+
+Look up the item kind for one declared name, at query time, from the
+defining file's inventory (`ref.file`) — matching BOTH `ref.id` AND `name`.
+Id alone is not enough: some inventory items deliberately share one id with
+sibling items (`@enum Color red green blue` — the enum type and every member
+all carry the one `@enum` statement's id, see layer_inventory.jl's
+`_classify_item!`), so an id-only lookup could return a sibling's kind
+instead of the requested name's.
+
+A hit in `inv.modules` means `name` was a submodule declaration — per the
+module-tree splicing rule that a module's own name enters its *parent's*
+`declared` dict exactly like a binding item (rule 3/5 in
+`_build_tree_structure`'s docstring) — so it is reported as kind `:module`
+directly, without ever consulting `inv.items`. Otherwise `name` is a regular
+binding, and its kind comes from the matching `inv.items` entry.
+
+This is the one place `derived_module_names`'s computation touches an id: it
+reads an id-keyed inventory, but the VALUE it hands back (a bare `Symbol`)
+never carries that id forward, which is what keeps the selector's own value
+id-free (see `derived_module_names`).
+"""
+function _declared_item_kind(rt, name::String, ref::ItemRef)::Symbol
+    inv = derived_file_inventory(rt, ref.file)
+
+    for m in inv.modules
+        m.id == ref.id && m.name == name && return :module
+    end
+    for item in inv.items
+        item.id == ref.id && item.name == name && return item.kind
+    end
+
+    # Unreachable in practice: every ItemRef in a ModuleNode.declared dict was
+    # produced (by `_build_tree_structure`) from an item/module that — by
+    # construction — still exists in its defining file's current inventory.
+    return :unknown
+end
+
+"""
+    derived_module_names(rt, root, path::Vector{String}) -> Dict{String,Symbol}
+
+Name → kind for every name declared at `path` in `root`'s module tree.
+Empty `Dict` when `path` names no module in the tree.
+
+**Id-free by construction — this is the cutoff seam the inventories
+milestone rests on.** Downstream analysis resolves names against THIS
+selector, not against `ModuleNode.declared` directly, specifically so that an
+id shift which leaves the name→kind SET unchanged (e.g. reordering two
+adjacent same-kind declarations, which swaps their item ids and so changes
+`derived_module_tree`'s — and `derived_module_declared`'s — own value)
+backdates here: Salsa's `isequal` early-exit sees an unchanged `Dict` and
+never propagates the change to this selector's own consumers, even though
+`derived_module_tree` itself did re-execute.
+
+The computation is NOT id-free — `_declared_item_kind` reads the defining
+file's inventory keyed by `ref.id` — but that id-dependence never escapes
+into the returned value, and the value is all Salsa's cutoff ever compares.
+"""
+Salsa.@derived function derived_module_names(rt, root, path)
+    @debug "derived_module_names" root=root path=path
+
+    tree = derived_module_tree(rt, root)
+    node = module_node(tree, path)
+    node === nothing && return Dict{String,Symbol}()
+
+    return Dict{String,Symbol}(
+        name => _declared_item_kind(rt, name, ref) for (name, ref) in node.declared)
+end
+
+"""
+    derived_module_declared(rt, root, path::Vector{String}) -> Dict{String,ItemRef}
+
+The `name → ItemRef` map for the module at `path` — a straight projection of
+`derived_module_tree`'s `ModuleNode.declared`. Id-carrying (unlike
+`derived_module_names`), for request-time materialization (M4): resolving an
+`ItemRef` back to a position/EXPR in its defining file. Empty `Dict` when
+`path` names no module in the tree.
+"""
+Salsa.@derived function derived_module_declared(rt, root, path)
+    @debug "derived_module_declared" root=root path=path
+
+    tree = derived_module_tree(rt, root)
+    node = module_node(tree, path)
+    node === nothing && return Dict{String,ItemRef}()
+
+    return node.declared
+end
+
+"""
+    derived_module_exports(rt, root, path::Vector{String}) -> @NamedTuple{exports::Vector{String}, publics::Vector{String}}
+
+The `export`/`public` names of the module at `path` — a straight projection of
+`derived_module_tree`. Empty vectors when `path` names no module in the tree.
+"""
+Salsa.@derived function derived_module_exports(rt, root, path)
+    @debug "derived_module_exports" root=root path=path
+
+    tree = derived_module_tree(rt, root)
+    node = module_node(tree, path)
+    node === nothing && return (exports=String[], publics=String[])
+
+    return (exports=node.exports, publics=node.publics)
+end
+
+"""
+    derived_module_imports(rt, root, path::Vector{String}) -> Vector{ResolvedImport}
+
+The resolved `using`/`import` statements declared at `path` — a straight
+projection of `derived_module_tree`. Empty `Vector` when `path` names no
+module in the tree.
+"""
+Salsa.@derived function derived_module_imports(rt, root, path)
+    @debug "derived_module_imports" root=root path=path
+
+    tree = derived_module_tree(rt, root)
+    node = module_node(tree, path)
+    node === nothing && return ResolvedImport[]
+
+    return node.imports
+end
+
+"""
+    derived_file_module_path(rt, root, file::URI) -> Union{Nothing,Vector{String}}
+
+The absolute module path `file`'s top level splices into within `root`'s
+module tree — a straight projection of `derived_module_tree`'s
+`file_modules`. `nothing` when `file` is not part of `root`'s module tree.
+"""
+Salsa.@derived function derived_file_module_path(rt, root, file)
+    @debug "derived_file_module_path" root=root file=file
+
+    tree = derived_module_tree(rt, root)
+    return get(tree.file_modules, file, nothing)
+end

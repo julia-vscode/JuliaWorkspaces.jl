@@ -588,3 +588,169 @@ end
     # like `using A.X, B.Y` (multiple InventoryImports sharing one id).
     @test imp.target == ImportTarget(:workspace_package, ["DevedPkg", "Sub"])
 end
+
+# --- Module selector queries (the analysis cutoff seam) ---
+
+@testitem "module selectors: derived_module_names maps names to kinds, including submodules" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    f() = 1
+    struct S
+        x
+    end
+    module Sub
+    end
+    end
+    """)
+
+    names = JuliaWorkspaces.derived_module_names(jw.runtime, root_uri, ["Pkg"])
+    @test names == Dict("f" => :function, "S" => :struct, "Sub" => :module)
+end
+
+@testitem "module selectors: derived_module_declared is a straight id-carrying projection" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    f() = 1
+    end
+    """)
+
+    declared = JuliaWorkspaces.derived_module_declared(jw.runtime, root_uri, ["Pkg"])
+    node = module_node(tree, ["Pkg"])
+    @test declared == node.declared
+    @test declared["f"].file == root_uri
+end
+
+@testitem "module selectors: derived_module_exports separates export and public names" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    f() = 1
+    g() = 2
+    export f
+    public g
+    end
+    """)
+
+    result = JuliaWorkspaces.derived_module_exports(jw.runtime, root_uri, ["Pkg"])
+    @test result.exports == ["f"]
+    @test result.publics == ["g"]
+end
+
+@testitem "module selectors: derived_module_imports is a straight projection" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    using Base64
+    end
+    """)
+
+    imports = JuliaWorkspaces.derived_module_imports(jw.runtime, root_uri, ["Pkg"])
+    imp = only(imports)
+    @test imp.target == ImportTarget(:external, ["Base64"])
+end
+
+@testitem "module selectors: derived_file_module_path projects file_modules" setup=[ModuleTreeWS] begin
+    a_uri = URI("file:///t/src/a.jl")
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    include("a.jl")
+    end
+    """; extra_files=Dict(a_uri => "x() = 1\n"))
+
+    # The root file's OWN top level is the outer scope even though it wraps
+    # everything in `module Pkg` — `file_modules` tracks the file's own
+    # splice path, not any module it happens to declare.
+    @test JuliaWorkspaces.derived_file_module_path(jw.runtime, root_uri, root_uri) == String[]
+    @test JuliaWorkspaces.derived_file_module_path(jw.runtime, root_uri, a_uri) == ["Pkg"]
+end
+
+@testitem "module selectors: derived_file_module_path returns nothing for a file outside the tree" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    f() = 1
+    """)
+
+    outside = URI("file:///t/src/outside.jl")
+    @test JuliaWorkspaces.derived_file_module_path(jw.runtime, root_uri, outside) === nothing
+end
+
+@testitem "module selectors: missing module path returns empty results, plain data throughout" setup=[ModuleTreeWS] begin
+    using JuliaWorkspaces: ItemRef, ResolvedImport
+
+    tree, root_uri, jw = tree_of("""
+    f() = 1
+    """)
+
+    @test JuliaWorkspaces.derived_module_names(jw.runtime, root_uri, ["Nope"]) == Dict{String,Symbol}()
+    @test JuliaWorkspaces.derived_module_declared(jw.runtime, root_uri, ["Nope"]) == Dict{String,ItemRef}()
+
+    result = JuliaWorkspaces.derived_module_exports(jw.runtime, root_uri, ["Nope"])
+    @test result.exports == String[]
+    @test result.publics == String[]
+
+    @test JuliaWorkspaces.derived_module_imports(jw.runtime, root_uri, ["Nope"]) == ResolvedImport[]
+end
+
+@testitem "module selectors: projections and id-shift survival" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: module_node
+    using JuliaWorkspaces.URIs2: URI
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    # Downstream consumers of each selector, mirroring the tree-invalidation
+    # testitem's `probe_tree` pattern: each recomputes only if the selector's
+    # own VALUE changed (Salsa early-exit on isequal).
+    Salsa.@derived function probe_names(rt, root, path)
+        return JuliaWorkspaces.derived_module_names(rt, root, path)
+    end
+    Salsa.@derived function probe_declared(rt, root, path)
+        return JuliaWorkspaces.derived_module_declared(rt, root, path)
+    end
+
+    jw = JuliaWorkspace()
+    root_uri = URI("file:///t/src/F.jl")
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module Pkg
+    f() = 1
+    g() = 2
+    end
+    """, "julia")))
+    rt = jw.runtime
+
+    # NOTE(trace-baseline): untraced calls so the full computation (inventory
+    # → tree → selector → probe) is already memoized before the traced calls
+    # below — see the module-tree-invalidation testitem's own NOTE for why an
+    # untraced baseline is required for the zero-executions assertions to be
+    # meaningful rather than vacuous.
+    @test probe_names(rt, root_uri, ["Pkg"]) == Dict("f" => :function, "g" => :function)
+    before_declared = probe_declared(rt, root_uri, ["Pkg"])
+    @test Set(keys(before_declared)) == Set(["f", "g"])
+
+    # Reorder f and g: a same-kind adjacent swap. This shifts their item ids
+    # (the tree's, and so `derived_module_declared`'s, VALUE changes — the
+    # ItemRefs for "f" and "g" swap) but the name→kind SET at `declared` is
+    # unchanged, so `derived_module_names`'s VALUE must compare equal.
+    recv = CountReceiver()
+    JuliaWorkspaces.update_file!(jw, TextFile(root_uri, SourceText("""
+    module Pkg
+    g() = 2
+    f() = 1
+    end
+    """, "julia")))
+    names_after, declared_after = TL.with_tracing(recv) do
+        (probe_names(rt, root_uri, ["Pkg"]), probe_declared(rt, root_uri, ["Pkg"]))
+    end
+
+    @test names_after == Dict("f" => :function, "g" => :function)
+    # Sanity: the ids actually did shift.
+    @test declared_after["f"].id != before_declared["f"].id
+    @test declared_after["g"].id != before_declared["g"].id
+
+    @test get(recv.counts, "probe_names", 0) == 0
+    @test get(recv.counts, "probe_declared", 0) == 1
+end
