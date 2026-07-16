@@ -166,9 +166,13 @@ const _BINDING_ITEM_KINDS = (
 
 # Mutable node builder used only while assembling a tree in
 # `_build_tree_structure`; frozen into the plain-data `ModuleNode` once pass 1
-# (and, eventually, pass 2) is complete. Field meanings mirror `ModuleNode`
-# exactly (see its docstring) minus `path`, which is the builder's key in the
-# owning `Dict`.
+# and pass 2 are complete. Field meanings mirror `ModuleNode` exactly (see its
+# docstring) minus `path`, which is the builder's key in the owning `Dict` —
+# except `raw_imports`, which is pass-1-only scratch space: `imports`
+# (verbatim `InventoryImport`s at this node's absolute path, tagged with their
+# declaring file) collected during pass 1, consumed by `_classify_imports!`
+# (pass 2) to populate `imports` with real `ResolvedImport`s. `imports` is
+# empty until pass 2 runs.
 mutable struct _ModuleNodeBuilder
     bare::Bool
     declared_at::Union{Nothing,ItemRef}
@@ -176,11 +180,13 @@ mutable struct _ModuleNodeBuilder
     declared::Dict{String,ItemRef}
     exports::Vector{String}
     publics::Vector{String}
+    raw_imports::Vector{Tuple{URI,InventoryImport}}
     imports::Vector{ResolvedImport}
 end
 
 _ModuleNodeBuilder() = _ModuleNodeBuilder(
-    false, nothing, URI[], Dict{String,ItemRef}(), String[], String[], ResolvedImport[])
+    false, nothing, URI[], Dict{String,ItemRef}(), String[], String[],
+    Tuple{URI,InventoryImport}[], ResolvedImport[])
 
 """
     _build_tree_structure(rt, root::URI) -> (builders, file_modules)
@@ -201,10 +207,11 @@ which includes something deep" resolve exactly like running the code would:
 the deepest, textually-last declaration of a name always wins, and a node's
 `files` list is true depth-first pre-order, not level-order.
 
-Also collects `using`/`import` statements as `ResolvedImport`s whose target is
-`ImportTarget(:unresolved, path-as-written)` — pass 2 (a later task) replaces
-this classification with real resolution; this pass never inspects import
-targets beyond recording them verbatim.
+Also collects `using`/`import` statements verbatim, as `(file, InventoryImport)`
+pairs on the declaring node's `raw_imports`, at their absolute module path —
+this pass never inspects import targets, it only records where each one was
+written; `_classify_imports!` (pass 2) resolves them into real `ResolvedImport`s
+once the whole tree structure (every module in every included file) is known.
 """
 function _build_tree_structure(rt, root::URI)
     builders = Dict{Vector{String},_ModuleNodeBuilder}()
@@ -285,12 +292,11 @@ function _build_tree_structure(rt, root::URI)
                 node = ensure_node!(vcat(P, e.parent_module))
                 append!(e.kind === :export ? node.exports : node.publics, e.names)
             elseif kind === :import
-                # Pass 2 stub: collect imports unresolved; a later task
-                # classifies `target.sort` for real.
+                # Collected verbatim; `_classify_imports!` (pass 2) resolves
+                # `target.sort` once the whole tree structure is final.
                 imp = payload
                 node = ensure_node!(vcat(P, imp.parent_module))
-                push!(node.imports, ResolvedImport(
-                    imp.kind, ImportTarget(:unresolved, imp.path), imp.symbols, imp.alias, (file=F, id=imp.id)))
+                push!(node.raw_imports, (F, imp))
             else # :include
                 # Rule 4: recurse into the include target (skipping
                 # `nothing`/content-less targets and — via `visited` —
@@ -317,17 +323,131 @@ function _build_tree_structure(rt, root::URI)
 end
 
 """
+    _resolve_tree_segments(builders, anchor::Vector{String}, segs::Vector{String},
+                            original_path::Vector{String}) -> ImportTarget
+
+Resolve `segs` as a chain of nested tree-module children starting at `anchor`
+— i.e. `vcat(anchor, segs[1])`, then `vcat(anchor, segs[1:2])`, and so on —
+each of which must already exist as a module path in `builders`
+(`modules_by_path`). Returns `ImportTarget(:tree, vcat(anchor, segs))` if
+every segment resolves; `ImportTarget(:unresolved, original_path)` (rules 1 &
+2's mid-path miss — including a segment that names a declared item which
+isn't itself a module) the moment one doesn't.
+"""
+function _resolve_tree_segments(builders, anchor::Vector{String}, segs::Vector{String},
+                                 original_path::Vector{String})::ImportTarget
+    resolved = copy(anchor)
+    for seg in segs
+        push!(resolved, seg)
+        haskey(builders, resolved) || return ImportTarget(:unresolved, original_path)
+    end
+    return ImportTarget(:tree, resolved)
+end
+
+"""
+    _classify_import(builders, workspace_roots, AP::Vector{String}, imp::InventoryImport) -> ImportTarget
+
+Classify one `InventoryImport` declared in the module at absolute path `AP`,
+per the module-tree import resolution rules (milestone 2, task 5):
+
+1. Relative (`using .X` / `using ..X` / ...): leading `"."` entries in
+   `imp.path` count the relative level — one dot anchors at `AP` itself (0
+   pops), each additional dot pops one enclosing level. Popping past the
+   root (`String[]`) is `:unresolved`. The remaining segments are then
+   resolved from the anchor exactly like rule 2 (`_resolve_tree_segments`);
+   a miss anywhere is `:unresolved`.
+2. Absolute paths anchor like Julia's own module lookup: walk outward from
+   `AP` (AP itself, then each shorter enclosing prefix, down to `String[]`),
+   anchoring at the FIRST enclosing path `M` for which `vcat(M,
+   [imp.path[1]])` is a tree module. Once anchored, every segment (including
+   the first) must resolve as a nested tree module from `M`
+   (`_resolve_tree_segments`) — a mid-path miss is `:unresolved`, NOT
+   `:external`: the anchor already committed this import to the tree.
+3. If no anchor is found (the walk reaches `String[]` with no match) and the
+   first segment names a workspace package (`workspace_roots`), classify as
+   `:workspace_package` with `path=[first_segment]` — deeper segments (e.g.
+   `using DevedPkg.Sub`) are NOT appended to `path`; resolving further into
+   the package's own tree is layer 3's job, starting from that package's own
+   entry point.
+4. Otherwise (Base, a stdlib, or a registry package): `:external`, with
+   `path` = the segments exactly as written.
+
+`symbols`/`alias`/`kind` are not this function's concern — the caller copies
+those through from `imp` verbatim.
+"""
+function _classify_import(builders, workspace_roots, AP::Vector{String}, imp::InventoryImport)::ImportTarget
+    path = imp.path
+    isempty(path) && return ImportTarget(:unresolved, path)
+
+    ndots = 0
+    while ndots < length(path) && path[ndots + 1] == "."
+        ndots += 1
+    end
+
+    if ndots > 0
+        # Rule 1: one dot = 0 pops (anchor at AP itself); each further dot
+        # pops one more enclosing level.
+        pops = ndots - 1
+        pops > length(AP) && return ImportTarget(:unresolved, path)
+        anchor = AP[1:end - pops]
+        segs = path[ndots + 1:end]
+        isempty(segs) && return ImportTarget(:unresolved, path)
+        return _resolve_tree_segments(builders, anchor, segs, path)
+    end
+
+    # Rule 2: walk outward from AP to String[], anchoring at the first
+    # enclosing module that declares `path[1]` as a child.
+    M = copy(AP)
+    while true
+        haskey(builders, vcat(M, [path[1]])) && return _resolve_tree_segments(builders, M, path, path)
+        isempty(M) && break
+        pop!(M)
+    end
+
+    # Rule 3, then rule 4: no tree anchor at all.
+    haskey(workspace_roots, path[1]) && return ImportTarget(:workspace_package, [path[1]])
+    return ImportTarget(:external, path)
+end
+
+"""
+    _classify_imports!(rt, builders)
+
+Pass 2 of `derived_module_tree`: consumes each builder's `raw_imports`
+(collected verbatim by pass 1, `_build_tree_structure`) and fills in its
+`imports` with real, classified `ResolvedImport`s (see `_classify_import`).
+Must run only after pass 1 has fully completed — resolving a `:tree` target,
+or an absolute import's anchor, may depend on a module declared by a file
+spliced in a part of the DFS that hadn't run yet when the import itself was
+collected.
+
+`symbols`/`alias`/`kind` copy through from the `InventoryImport` verbatim;
+`from` is the `ItemRef` of the `InventoryImport` this came from.
+"""
+function _classify_imports!(rt, builders)
+    workspace_roots = derived_workspace_package_roots(rt)
+    for (path, b) in builders
+        for (F, imp) in b.raw_imports
+            target = _classify_import(builders, workspace_roots, path, imp)
+            push!(b.imports, ResolvedImport(imp.kind, target, imp.symbols, imp.alias, (file=F, id=imp.id)))
+        end
+    end
+end
+
+"""
     derived_module_tree(rt, root::URI) -> ModuleTree
 
 The module structure of `root`'s (transitive) include closure: pass 1 splices
 every reachable file's top-level items into the module tree they belong to
-(see `_build_tree_structure`); pass 2 (a later task) resolves `using`/`import`
-targets. `modules` is sorted by path for deterministic structural equality.
+(see `_build_tree_structure`); pass 2 (`_classify_imports!`) resolves every
+`using`/`import` statement's target against the now-complete tree, the
+workspace's packages, and (failing both) the external world. `modules` is
+sorted by path for deterministic structural equality.
 """
 Salsa.@derived function derived_module_tree(rt, root)
     @debug "derived_module_tree" root=root
 
     builders, file_modules = _build_tree_structure(rt, root)
+    _classify_imports!(rt, builders)
 
     modules = ModuleNode[
         ModuleNode(path, b.bare, b.declared_at, b.files, b.declared, b.exports, b.publics, b.imports)

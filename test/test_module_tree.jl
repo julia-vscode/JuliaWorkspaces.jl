@@ -86,7 +86,7 @@ end
 
 @testsnippet ModuleTreeWS begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: module_node
+    using JuliaWorkspaces: module_node, ImportTarget, ResolvedImport, ItemRef
     using JuliaWorkspaces.URIs2: URI
 
     function tree_of(root_src::String; root_uri=URI("file:///t/src/F.jl"), extra_files=Dict{URI,String}())
@@ -252,4 +252,154 @@ end
 
     root_node = module_node(tree, String[])
     @test root_node.declared["foo"].file == root_uri
+end
+
+@testitem "module tree: relative imports resolve against enclosing tree modules" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    module Pkg
+        module Sibling
+        end
+        module Child
+        end
+        using .Child
+        module Sub
+            using ..Sibling
+        end
+    end
+    """)
+
+    pkg = module_node(tree, ["Pkg"])
+    @test pkg !== nothing
+    child_import = only(pkg.imports)
+    @test child_import.target == ImportTarget(:tree, ["Pkg", "Child"])
+
+    sub = module_node(tree, ["Pkg", "Sub"])
+    @test sub !== nothing
+    sibling_import = only(sub.imports)
+    @test sibling_import.target == ImportTarget(:tree, ["Pkg", "Sibling"])
+end
+
+@testitem "module tree: relative import popping beyond the root is unresolved" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    using ..TooFar
+    """)
+
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    @test imp.target == ImportTarget(:unresolved, [".", ".", "TooFar"])
+end
+
+@testitem "module tree: absolute import anchors at the innermost enclosing module walking outward" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    module Pkg
+        module Sub
+        end
+    end
+    module Other
+        using Pkg.Sub
+    end
+    """)
+
+    other = module_node(tree, ["Other"])
+    @test other !== nothing
+    imp = only(other.imports)
+    @test imp.target == ImportTarget(:tree, ["Pkg", "Sub"])
+end
+
+@testitem "module tree: absolute import with a mid-path miss stays committed to unresolved" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    module Pkg
+        module Sub
+        end
+    end
+    using Pkg.NotAModule.Deeper
+    """)
+
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    @test imp.target == ImportTarget(:unresolved, ["Pkg", "NotAModule", "Deeper"])
+end
+
+@testitem "module tree: import naming a declared non-module item is unresolved" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    module Pkg
+        f() = 1
+    end
+    using Pkg.f
+    """)
+
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    @test imp.target == ImportTarget(:unresolved, ["Pkg", "f"])
+end
+
+@testitem "module tree: colon-form import of Base symbols classifies as external" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    import Base: +, map
+    """)
+
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    @test imp.kind == :import
+    @test imp.target == ImportTarget(:external, ["Base"])
+    @test [s.name for s in imp.symbols] == ["+", "map"]
+end
+
+@testitem "module tree: import of an unknown package classifies as external" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    using SomeRegistryPkg
+    """)
+
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    @test imp.target == ImportTarget(:external, ["SomeRegistryPkg"])
+end
+
+@testitem "module tree: statement-level alias is carried through classification" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    import Foo.Bar as FB
+    """)
+
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    @test imp.alias == "FB"
+    @test imp.target == ImportTarget(:external, ["Foo", "Bar"])
+end
+
+@testitem "module tree: per-symbol alias is carried through classification" setup=[ModuleTreeWS] begin
+    tree, root_uri, _ = tree_of("""
+    using SomeRegistryPkg: a as b
+    """)
+
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    @test imp.symbols == [(name="a", alias="b")]
+    @test imp.target == ImportTarget(:external, ["SomeRegistryPkg"])
+end
+
+@testitem "module tree: absolute import of a workspace package classifies as workspace_package" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: ImportTarget, module_node
+    using JuliaWorkspaces.URIs2: URI
+
+    function project_toml(name, uuid)
+        """
+        name = "$name"
+        uuid = "$uuid"
+        version = "0.1.0"
+        """
+    end
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/Main/Project.toml"), SourceText(project_toml("Main", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"), "toml")))
+    root_uri = URI("file:///ws/Main/src/Main.jl")
+    add_file!(jw, TextFile(root_uri, SourceText("using DevedPkg\n", "julia")))
+
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/Project.toml"), SourceText(project_toml("DevedPkg", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/src/DevedPkg.jl"), SourceText("module DevedPkg\nend\n", "julia")))
+
+    tree = JuliaWorkspaces.derived_module_tree(jw.runtime, root_uri)
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    @test imp.target == ImportTarget(:workspace_package, ["DevedPkg"])
 end
