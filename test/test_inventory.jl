@@ -218,3 +218,44 @@ end
     @test src2[pos2[g_item.id].offset + 1] == 'g'   # same id, new offset
     @test pos2[g_item.id].offset != pos1[g_item.id].offset
 end
+
+@testitem "inventory invalidation: body edits backdate, API edits propagate" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    # A downstream consumer of the inventory: recomputes only if the
+    # inventory VALUE changed (Salsa early-exit on isequal).
+    Salsa.@derived function probe_names(rt, uri)
+        inv = JuliaWorkspaces.derived_file_inventory(rt, uri)
+        return sort([i.name for i in inv.items])
+    end
+
+    uri = URI("file:///inv/src/fw.jl")
+    src1 = "f(x) = x + 1\ng() = 2\n"
+    _, jw = inventory_of(src1; uri=uri)
+    rt = jw.runtime
+    @test probe_names(rt, uri) == ["f", "g"]
+
+    # Body edit: inventory re-executes (content changed) but its value is
+    # equal, so the probe must NOT re-execute.
+    recv = CountReceiver()
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText("f(x) = x * 42\ng() = 2\n", "julia")))
+    TL.with_tracing(() -> probe_names(rt, uri), recv)
+    @test get(recv.counts, "derived_file_inventory", 0) == 1
+    @test get(recv.counts, "probe_names", 0) == 0
+
+    # API edit: both re-execute and the probe sees the new name.
+    recv2 = CountReceiver()
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText("f(x) = x * 42\nh() = 2\n", "julia")))
+    result = TL.with_tracing(() -> probe_names(rt, uri), recv2)
+    @test get(recv2.counts, "probe_names", 0) == 1
+    @test result == ["f", "h"]
+end
