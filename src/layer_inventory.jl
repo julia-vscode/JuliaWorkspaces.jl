@@ -83,3 +83,67 @@ end
 
 const EMPTY_FILE_INVENTORY = FileInventory(
     InventoryItem[], InventoryImport[], InventoryExport[], InventoryInclude[], InventoryModule[])
+
+# Detect a doc-macro wrapper: a 4-arg :macrocall whose first arg is the
+# implicit `globalrefdoc` or an explicit `@doc` / `Mod.@doc`. The wrapped item
+# sits at args[4]. Mirrors layer_hover.jl's `_is_doc_expr` shape and
+# layer_navigation.jl:105-109's offset handling.
+function _doc_wrapped_item(x::CSTParser.EXPR)
+    CSTParser.ismacrocall(x) || return nothing
+    x.args !== nothing && length(x.args) == 4 || return nothing
+    _is_doc_macro_name(x.args[1]) || return nothing
+    return x.args[4]
+end
+
+"""
+    _foreach_toplevel_item(f, cst)
+
+Call `f(x, id, parent_module, offset)` for every top-level item-like node of a
+`:file` CST in pre-order: the file's direct children, plus — for
+`module`/`baremodule` declarations — the module node itself and then the
+children of its body block (never the bodies of functions, structs, etc.).
+Ids are sequential in visit order; doc-macro wrappers are transparent (the
+wrapped item is visited, with `offset` pointing at it, not the docstring).
+This walker is the single source of truth for item ids: the inventory
+extractor and the position map both use it, so ids always agree.
+"""
+function _foreach_toplevel_item(f, cst::CSTParser.EXPR)
+    next_id = Ref(0)
+    _walk_toplevel!(f, cst.args, String[], 0, next_id)
+    return nothing
+end
+
+function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+    args === nothing && return offset
+    for a in args
+        item = a
+        item_offset = offset
+        wrapped = _doc_wrapped_item(a)
+        if wrapped !== nothing
+            for j in 1:3
+                item_offset += a.args[j].fullspan
+            end
+            item = wrapped
+        end
+
+        next_id[] += 1
+        f(item, next_id[], parent_module, item_offset)
+
+        if CSTParser.defines_module(item) && item.args !== nothing && length(item.args) >= 3
+            mod_name = CSTParser.isidentifier(item.args[2]) ? StaticLint.valofid(item.args[2]) : nothing
+            if mod_name !== nothing
+                inner_parent = vcat(parent_module, [mod_name])
+                # Offset of the module block's first child: the module node's
+                # offset plus the fullspans of the `module`/`baremodule`
+                # keyword token (held in `.trivia[1]`, NOT `.args[1]` — the
+                # latter is a synthetic bare/non-bare flag with span 0; see
+                # layer_navigation.jl:122) and the name.
+                block_offset = item_offset + item.trivia[1].fullspan + item.args[2].fullspan
+                _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, next_id)
+            end
+        end
+
+        offset += a.fullspan
+    end
+    return offset
+end
