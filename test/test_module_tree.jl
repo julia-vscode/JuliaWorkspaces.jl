@@ -129,6 +129,30 @@ end
     @test tree.file_modules[b_uri] == ["Pkg"]
 end
 
+@testitem "module tree: an import inside an included file lands on its non-root splice path" setup=[ModuleTreeWS] begin
+    # Pass 1 records a raw import at `vcat(P, imp.parent_module)`, where P is
+    # the splice path of the FILE the import is textually written in — not
+    # necessarily the root's own top level. This exercises that with P
+    # nonempty: a.jl is included inside `module Pkg` (so P == ["Pkg"]) and
+    # itself declares a plain, non-nested `using Base64` at its own top level
+    # (imp.parent_module == String[]), so the ResolvedImport must end up on
+    # the ["Pkg"] node, not on the synthetic root.
+    a_uri = URI("file:///t/src/a.jl")
+    tree, root_uri, _ = tree_of("""
+    module Pkg
+    include("a.jl")
+    end
+    """; extra_files=Dict(a_uri => "using Base64\n"))
+
+    pkg = module_node(tree, ["Pkg"])
+    @test pkg !== nothing
+    imp = only(pkg.imports)
+    @test imp.target == ImportTarget(:external, ["Base64"])
+
+    root_node = module_node(tree, String[])
+    @test isempty(root_node.imports)
+end
+
 @testitem "module tree: module split across files splices at the nested path" setup=[ModuleTreeWS] begin
     inner_uri = URI("file:///t/src/inner.jl")
     tree, root_uri, _ = tree_of("""
@@ -252,6 +276,22 @@ end
 
     root_node = module_node(tree, String[])
     @test root_node.declared["foo"].file == root_uri
+end
+
+@testitem "module tree: an assignment-wrapped include's own declaration wins over the included file's same-named one" setup=[ModuleTreeWS] begin
+    # `const DATA = include("data.jl")`: the item (the `const` declaration)
+    # and the include (the splice) share one id, since both come from the
+    # very same top-level statement. Real Julia evaluates the include's
+    # spliced content BEFORE the outer assignment completes, so if data.jl
+    # also declares DATA, the wrapper's own declaration is textually LAST and
+    # must win — not data.jl's.
+    data_uri = URI("file:///t/src/data.jl")
+    tree, root_uri, _ = tree_of("""
+    const DATA = include("data.jl")
+    """; extra_files=Dict(data_uri => "DATA = 1\n"))
+
+    root_node = module_node(tree, String[])
+    @test root_node.declared["DATA"].file == root_uri
 end
 
 @testitem "module tree: relative imports resolve against enclosing tree modules" setup=[ModuleTreeWS] begin
@@ -509,4 +549,34 @@ end
     root_node = module_node(tree, String[])
     imp = only(root_node.imports)
     @test imp.target == ImportTarget(:workspace_package, ["DevedPkg"])
+end
+
+@testitem "module tree: absolute import of a workspace package sub-module keeps the written sub-path" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: ImportTarget, module_node
+    using JuliaWorkspaces.URIs2: URI
+
+    function project_toml(name, uuid)
+        """
+        name = "$name"
+        uuid = "$uuid"
+        version = "0.1.0"
+        """
+    end
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/Main/Project.toml"), SourceText(project_toml("Main", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"), "toml")))
+    root_uri = URI("file:///ws/Main/src/Main.jl")
+    add_file!(jw, TextFile(root_uri, SourceText("using DevedPkg.Sub\n", "julia")))
+
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/Project.toml"), SourceText(project_toml("DevedPkg", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/src/DevedPkg.jl"), SourceText("module DevedPkg\nend\n", "julia")))
+
+    tree = JuliaWorkspaces.derived_module_tree(jw.runtime, root_uri)
+    root_node = module_node(tree, String[])
+    imp = only(root_node.imports)
+    # The "Sub" segment must survive — it's the only place it can, since the
+    # multi-target `from=(file,id)` escape hatch is ambiguous for statements
+    # like `using A.X, B.Y` (multiple InventoryImports sharing one id).
+    @test imp.target == ImportTarget(:workspace_package, ["DevedPkg", "Sub"])
 end

@@ -27,8 +27,10 @@ Resolution information for an import statement's target module.
 - `sort`: `:tree` (module within this root), `:workspace_package` (package in
   the workspace), `:external` (external package), or `:unresolved` (unresolvable)
 - `path`: For `:tree`, the absolute module path within this root; for
-  `:workspace_package`, `[package_name]`; for `:external` or `:unresolved`,
-  the original path segments as written.
+  `:workspace_package`, the full segments as written — `path[1]` is the
+  workspace package name; any further segments are a sub-module path for
+  layer 3 to resolve against that package's own tree; for `:external` or
+  `:unresolved`, the original path segments as written.
 """
 @auto_hash_equals struct ImportTarget
     sort::Symbol            # :tree | :workspace_package | :external | :unresolved
@@ -92,17 +94,6 @@ The complete module structure of a root file (with its includes).
     root::URI
     modules::Vector{ModuleNode}            # sorted by path for deterministic equality
     file_modules::Dict{URI,Vector{String}} # file → absolute path its top level splices into
-end
-
-"""
-    empty_module_tree(root::URI)
-
-Construct an empty module tree with just a synthetic root node.
-"""
-function empty_module_tree(root::URI)
-    ModuleTree(root,
-        [ModuleNode(String[], false, nothing, URI[], Dict{String,ItemRef}(), String[], String[], ResolvedImport[])],
-        Dict{URI,Vector{String}}())
 end
 
 """
@@ -268,7 +259,14 @@ function _build_tree_structure(rt, root::URI)
         for inc in inv.includes
             push!(events, (inc.id, :include, inc))
         end
-        sort!(events; by=first, alg=Base.Sort.MergeSort)
+        # Secondary key: for an assignment-wrapped include (`const DATA =
+        # include("data.jl")`), the item and the include share the SAME id —
+        # both come from the one top-level statement. Real Julia evaluates
+        # the include's spliced content before the outer assignment
+        # completes, so on a tie the `:include` event must be processed
+        # BEFORE the `:item` event, or the wrapper's own (textually later)
+        # declaration would lose to whatever the included file declares.
+        sort!(events; by=e -> (e[1], e[2] === :include ? 0 : 1), alg=Base.Sort.MergeSort)
 
         for (_, kind, payload) in events
             if kind === :item
@@ -365,10 +363,13 @@ per the module-tree import resolution rules (milestone 2, task 5):
    `:external`: the anchor already committed this import to the tree.
 3. If no anchor is found (the walk reaches `String[]` with no match) and the
    first segment names a workspace package (`workspace_roots`), classify as
-   `:workspace_package` with `path=[first_segment]` — deeper segments (e.g.
-   `using DevedPkg.Sub`) are NOT appended to `path`; resolving further into
-   the package's own tree is layer 3's job, starting from that package's own
-   entry point.
+   `:workspace_package` with `path` = the full segments as written (e.g.
+   `using DevedPkg.Sub` → `path=["DevedPkg", "Sub"]`) — the "Sub" segment must
+   be kept here, since it survives nowhere else: the `from=(file,id)` escape
+   hatch is ambiguous for multi-target statements (`using A.X, B.Y` emits
+   multiple `InventoryImport`s sharing one id). `path[1]` is the workspace
+   package name; resolving any further segments into the package's own tree
+   is layer 3's job, starting from that package's own entry point.
 4. Otherwise (Base, a stdlib, or a registry package): `:external`, with
    `path` = the segments exactly as written.
 
@@ -397,6 +398,14 @@ function _classify_import(builders, workspace_roots, AP::Vector{String}, imp::In
 
     # Rule 2: walk outward from AP to String[], anchoring at the first
     # enclosing module that declares `path[1]` as a child.
+    #
+    # NOTE: this is deliberately MORE PERMISSIVE than real Julia — an
+    # absolute (non-relative) `using`/`import` in real Julia never consults
+    # enclosing modules, only loaded top-level module names. This walk
+    # intentionally matches StaticLint's current scope-walk behavior instead,
+    # which does consult enclosing scopes for absolute imports. Do not "fix"
+    # this to real Julia semantics without also updating StaticLint, or the
+    # two will disagree and the compat contract between them regresses.
     M = copy(AP)
     while true
         haskey(builders, vcat(M, [path[1]])) && return _resolve_tree_segments(builders, M, path, path)
@@ -405,7 +414,7 @@ function _classify_import(builders, workspace_roots, AP::Vector{String}, imp::In
     end
 
     # Rule 3, then rule 4: no tree anchor at all.
-    haskey(workspace_roots, path[1]) && return ImportTarget(:workspace_package, [path[1]])
+    haskey(workspace_roots, path[1]) && return ImportTarget(:workspace_package, path)
     return ImportTarget(:external, path)
 end
 
