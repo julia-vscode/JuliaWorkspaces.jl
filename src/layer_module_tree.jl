@@ -191,6 +191,16 @@ the milestone design doc / task brief). Returns the raw mutable builders
 (keyed by absolute module path) and the `file → absolute splice path` map;
 `derived_module_tree` freezes the builders into plain-data `ModuleNode`s.
 
+Traversal is depth-first, matching Julia's `include`: it is an in-place
+textual splice, not a deferred/breadth-first step, so a file's records and its
+`include(...)` calls are processed as ONE interleaved, id-ordered event
+stream — when an `include` event is reached, the target's entire subtree is
+fully spliced (recursively) before the includer's later events run. This is
+what makes `x = 1; include("a.jl"); x = 2` and "two siblings, the second of
+which includes something deep" resolve exactly like running the code would:
+the deepest, textually-last declaration of a name always wins, and a node's
+`files` list is true depth-first pre-order, not level-order.
+
 Also collects `using`/`import` statements as `ResolvedImport`s whose target is
 `ImportTarget(:unresolved, path-as-written)` — pass 2 (a later task) replaces
 this classification with real resolution; this pass never inspects import
@@ -206,82 +216,102 @@ function _build_tree_structure(rt, root::URI)
 
     file_modules = Dict{URI,Vector{String}}()
 
-    # Rule 1: BFS worklist, visited-set guarded exactly like
-    # `derived_include_closure` — first include wins, later includes of an
-    # already-visited file are skipped, and cycles terminate.
+    # Rule 1: visited-set guarded exactly like `derived_include_closure` —
+    # first include wins in true source order (see below), later includes of
+    # an already-visited file are skipped, and cycles terminate. Seeded with
+    # `root` up front so a file including itself is also caught.
     visited = Set{URI}([root])
-    queue = Tuple{URI,Vector{String}}[(root, String[])]
 
-    while !isempty(queue)
-        (F, P) = popfirst!(queue)
-
+    # Recursive DFS splice of one file F at absolute path P. Rules 3 & 5
+    # write into the very same `declared` dict (a module's own name enters
+    # its *parent's* declared entries, rule 3, exactly like a binding item
+    # does, rule 5), and rule 4's include-target recursion can itself mutate
+    # that same dict at the same path — so every record kind is merged into
+    # one event stream ordered by the walker's globally-sequential per-file
+    # `id` and processed in that single pass, `include` events recursing
+    # in-place, to reproduce true textual splice order exactly.
+    function splice_file!(F::URI, P::Vector{String})
         # Rule 7.
         file_modules[F] = P
 
         # The file's own top level splices at P; recording F here handles
         # both the root file (no includer) and included files uniformly —
         # rule 4's "T appended to that node's files" falls out of this same
-        # bookkeeping once T is actually dequeued and processed.
+        # bookkeeping, in true depth-first pre-order, once T is actually
+        # recursed into.
         push!(ensure_node!(P).files, F)
 
         inv = derived_file_inventory(rt, F)
 
-        # Rules 3 & 5 interact on the same `declared` dict (a module's own
-        # name enters its *parent's* declared entries, rule 3, exactly like a
-        # binding item does, rule 5) so within-file overwrite order must
-        # follow true source order, not category order. Ids are globally
-        # sequential within one file's walk (`_foreach_toplevel_item`), so
-        # merging by id and applying in that order reproduces it.
-        declared_events = Tuple{Int,Vector{String},String,ItemRef}[]
+        events = Tuple{Int,Symbol,Any}[]
         for item in inv.items
             if isempty(item.qualifier) && item.kind in _BINDING_ITEM_KINDS
-                push!(declared_events, (item.id, vcat(P, item.parent_module), item.name, (file=F, id=item.id)))
+                push!(events, (item.id, :item, item))
             end
         end
         for m in inv.modules
-            push!(declared_events, (m.id, vcat(P, m.parent_module), m.name, (file=F, id=m.id)))
+            push!(events, (m.id, :module, m))
         end
-        sort!(declared_events; by=first, alg=Base.Sort.MergeSort)
-        for (_, abs_path, name, ref) in declared_events
-            ensure_node!(abs_path).declared[name] = ref
-        end
-
-        # Rule 3: create/extend each declared module's own node.
-        for m in inv.modules
-            mod_path = vcat(P, m.parent_module, [m.name])
-            node = ensure_node!(mod_path)
-            node.bare = m.bare
-            node.declared_at = (file=F, id=m.id)
-        end
-
-        # Rule 6.
         for e in inv.exports
-            node = ensure_node!(vcat(P, e.parent_module))
-            append!(e.kind === :export ? node.exports : node.publics, e.names)
+            push!(events, (e.id, :export, e))
         end
-
-        # Rule 4: enqueue include targets (skipping `nothing`/content-less
-        # targets and — via `visited` — duplicates), splicing at vcat(P, RP).
-        for inc in inv.includes
-            inc.target === nothing && continue
-            newP = vcat(P, inc.parent_module)
-            # The node at newP must exist regardless of whether this
-            # particular include resolves (other items may share RP).
-            ensure_node!(newP)
-            inc.target in visited && continue
-            derived_has_content(rt, inc.target) || continue
-            push!(visited, inc.target)
-            push!(queue, (inc.target, newP))
-        end
-
-        # Pass 2 stub: collect imports unresolved; a later task classifies
-        # `target.sort` for real.
         for imp in inv.imports
-            node = ensure_node!(vcat(P, imp.parent_module))
-            push!(node.imports, ResolvedImport(
-                imp.kind, ImportTarget(:unresolved, imp.path), imp.symbols, imp.alias, (file=F, id=imp.id)))
+            push!(events, (imp.id, :import, imp))
+        end
+        for inc in inv.includes
+            push!(events, (inc.id, :include, inc))
+        end
+        sort!(events; by=first, alg=Base.Sort.MergeSort)
+
+        for (_, kind, payload) in events
+            if kind === :item
+                item = payload
+                ensure_node!(vcat(P, item.parent_module)).declared[item.name] = (file=F, id=item.id)
+            elseif kind === :module
+                # Rule 3: create/extend the module's own node...
+                m = payload
+                mod_path = vcat(P, m.parent_module, [m.name])
+                node = ensure_node!(mod_path)
+                node.bare = m.bare
+                # ...last splice wins (deterministic under DFS) when the same
+                # module path is declared across more than one file.
+                node.declared_at = (file=F, id=m.id)
+                # ...and the module's own name also enters the *parent*
+                # node's `declared`, exactly like a binding item (rule 5).
+                ensure_node!(vcat(P, m.parent_module)).declared[m.name] = (file=F, id=m.id)
+            elseif kind === :export
+                # Rule 6.
+                e = payload
+                node = ensure_node!(vcat(P, e.parent_module))
+                append!(e.kind === :export ? node.exports : node.publics, e.names)
+            elseif kind === :import
+                # Pass 2 stub: collect imports unresolved; a later task
+                # classifies `target.sort` for real.
+                imp = payload
+                node = ensure_node!(vcat(P, imp.parent_module))
+                push!(node.imports, ResolvedImport(
+                    imp.kind, ImportTarget(:unresolved, imp.path), imp.symbols, imp.alias, (file=F, id=imp.id)))
+            else # :include
+                # Rule 4: recurse into the include target (skipping
+                # `nothing`/content-less targets and — via `visited` —
+                # duplicates) BEFORE processing F's later events, splicing at
+                # vcat(P, RP). Recursing here (rather than enqueueing) is
+                # what makes this a true depth-first, in-place splice.
+                inc = payload
+                inc.target === nothing && continue
+                newP = vcat(P, inc.parent_module)
+                # The node at newP must exist regardless of whether this
+                # particular include resolves (other items may share RP).
+                ensure_node!(newP)
+                inc.target in visited && continue
+                derived_has_content(rt, inc.target) || continue
+                push!(visited, inc.target)
+                splice_file!(inc.target, newP)
+            end
         end
     end
+
+    splice_file!(root, String[])
 
     return builders, file_modules
 end

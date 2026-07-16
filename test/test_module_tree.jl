@@ -212,3 +212,44 @@ end
     @test haskey(root_node.declared, "g")
     @test tree.file_modules[root_uri] == String[]
 end
+
+@testitem "module tree: includes splice depth-first, not breadth-first" setup=[ModuleTreeWS] begin
+    # Julia's `include` is an in-place, depth-first splice: root includes
+    # a.jl then b.jl; a.jl itself includes deep.jl before returning to root.
+    # True source order is root, a, deep, b — deep.jl is fully spliced (and
+    # so is anything IT declares) before root's `include("b.jl")` runs.
+    a_uri = URI("file:///t/src/a.jl")
+    b_uri = URI("file:///t/src/b.jl")
+    deep_uri = URI("file:///t/src/deep.jl")
+    tree, root_uri, _ = tree_of("""
+    include("a.jl")
+    include("b.jl")
+    """; extra_files=Dict(
+        a_uri => "include(\"deep.jl\")\n",
+        b_uri => "shared() = 2\n",
+        deep_uri => "shared() = 1\n",
+    ))
+
+    root_node = module_node(tree, String[])
+    # DFS pre-order: root, then a's whole subtree (a, deep), then b.
+    @test root_node.files == [root_uri, a_uri, deep_uri, b_uri]
+    # b.jl runs strictly after deep.jl in true source order, so its
+    # declaration of `shared` must win — a BFS traversal gets this backwards
+    # (it would finish both root-level includes, a and b, before ever
+    # descending into a's own include of deep.jl).
+    @test root_node.declared["shared"].file == b_uri
+end
+
+@testitem "module tree: a file's own later declaration wins over an earlier include" setup=[ModuleTreeWS] begin
+    # root includes a.jl BEFORE declaring its own `foo` — the root's `foo`
+    # is textually later, so it must win, even though the whole included
+    # file logically finishes "instantly" at the include site.
+    a_uri = URI("file:///t/src/a.jl")
+    tree, root_uri, _ = tree_of("""
+    include("a.jl")
+    foo() = 2
+    """; extra_files=Dict(a_uri => "foo() = 1\n"))
+
+    root_node = module_node(tree, String[])
+    @test root_node.declared["foo"].file == root_uri
+end
