@@ -411,7 +411,7 @@ function _wrapped_include_target(records, lo, hi)
 end
 
 # Collect every bound name from a tuple-destructuring lhs (`a, b = ...`, or a
-# nested/splatted/property variant of it), mirroring StaticLint's
+# nested/splatted/property/typed variant of it), mirroring StaticLint's
 # `mark_binding!` recursion (bindings.jl:131-151) restricted to the shapes a
 # destructuring lhs can actually take: `:tuple`/`:parameters` nodes recurse
 # into their children (a nested tuple `(y, z)` and a property-destructuring
@@ -419,8 +419,13 @@ end
 # confirmed via CST exploration — neither wraps in `:brackets`); a
 # `(...)`-bracketed sub-tuple (`((x, y)) = w`) unwraps via `rem_invis`; a
 # splat (`b...`) unwraps to its wrapped name via `x.args[1]`, exactly like
-# `mark_binding!`'s own `issplat` arm. Anything else that isn't a plain
-# identifier is silently skipped, same as `_item_name` elsewhere in this file.
+# `mark_binding!`'s own `issplat` arm; a `::`-typed name (`b::T` in
+# `(; a, b::T) = cfg`, or `a::T` in `(a::T, b) = w`) unwraps via `rem_decl`
+# to its lhs (an identifier, or — for the rarer `(a, b)::T` shape — a tuple
+# that recurses again), mirroring `mark_binding!`'s terminal case, which
+# binds via `get_name` (itself `rem_decl`-equivalent for a plain declared
+# identifier). Anything else that isn't a plain identifier is silently
+# skipped, same as `_item_name` elsewhere in this file.
 function _destructure_names!(names::Vector{String}, x)
     if CSTParser.istuple(x) || CSTParser.isparameters(x)
         for child in something(x.args, CSTParser.EXPR[])
@@ -430,11 +435,28 @@ function _destructure_names!(names::Vector{String}, x)
         _destructure_names!(names, CSTParser.rem_invis(x))
     elseif CSTParser.issplat(x)
         _destructure_names!(names, x.args[1])
+    elseif CSTParser.isdeclaration(x)
+        _destructure_names!(names, CSTParser.rem_decl(x))
     else
         name = _item_name(x)
         name === nothing || push!(names, name)
     end
     return names
+end
+
+# Whether `x` is a tuple-destructuring lhs, possibly wrapped in one or more
+# layers of `:brackets` (`((x, y)) = w` has an OUTER lhs headed `:brackets`,
+# not `:tuple` — confirmed via CST exploration). `_destructure_names!` already
+# unwraps `:brackets` layers as part of its own recursion, but the classifier
+# dispatch below needs to look past them too, or a fully-bracketed tuple lhs
+# never reaches the tuple-destructuring arm at all: it would fall through to
+# the plain-identifier catch-all, which silently drops it (a `:brackets` node
+# isn't an identifier).
+function _is_tuple_destructure_lhs(x)
+    while CSTParser.isbracketed(x)
+        x = CSTParser.rem_invis(x)
+    end
+    return CSTParser.istuple(x)
 end
 
 # Classify one assignment EXPR (bindings.jl:57-66's `isassignment` branches),
@@ -464,7 +486,7 @@ function _classify_assignment!(acc, x, id, parent_module, kind_override, contain
         if name !== nothing
             push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
         end
-    elseif CSTParser.headof(x.args[1]) === :tuple
+    elseif _is_tuple_destructure_lhs(x.args[1])
         # Tuple-destructuring lhs (`a, b = 1, 2`, splats, nested tuples, or
         # property destructuring `(; a, b) = cfg`; any of these `const`/
         # `global`-wrapped via `kind_override`): one item per bound identifier

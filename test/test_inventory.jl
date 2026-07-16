@@ -471,6 +471,9 @@ end
     const (m, (n, o)) = w
     const (; f3, f4) = cfg
     global e, g... = f()
+    (; ta, tb::T) = cfg2
+    (tc::T, td) = w2
+    ((bx, by)) = w3
     """)
 
     # Splat: both the plain and splatted name are bound, sharing the
@@ -505,6 +508,26 @@ end
     g_item = only(filter(i -> i.name == "g", inv.items))
     @test e_item.kind === :global
     @test g_item.kind === :global
+
+    # Typed names (`::`-declared) inside property destructuring and a plain
+    # nested tuple: both the bare and the typed name must be bound (the type
+    # annotation is dropped, mirroring `mark_binding!`'s terminal case).
+    ta_item = only(filter(i -> i.name == "ta", inv.items))
+    tb_item = only(filter(i -> i.name == "tb", inv.items))
+    @test ta_item.id == tb_item.id
+    @test tb_item.kind === :assignment
+
+    tc_item = only(filter(i -> i.name == "tc", inv.items))
+    td_item = only(filter(i -> i.name == "td", inv.items))
+    @test tc_item.id == td_item.id
+    @test tc_item.kind === :assignment
+
+    # Double-bracketed tuple lhs (`((x, y)) = w`): the outer `:brackets` wrap
+    # unwraps to the inner tuple.
+    bx_item = only(filter(i -> i.name == "bx", inv.items))
+    by_item = only(filter(i -> i.name == "by", inv.items))
+    @test bx_item.id == by_item.id
+    @test bx_item.kind === :assignment
 end
 
 @testitem "no-op update: identical content re-executes nothing downstream" setup=[InventoryWS] begin
