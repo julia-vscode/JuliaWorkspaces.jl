@@ -361,3 +361,16 @@ end
     y_imp = only(filter(i -> "Y" in i.path, inv.imports))
     @test y_imp.symbols == [(name="c", alias=nothing)]
 end
+
+@testitem "inventory extraction: _render_sig rethrows InterruptException, swallows other errors" setup=[InventoryWS] begin
+    using JuliaWorkspaces: _render_sig
+    using JuliaWorkspaces: CSTParser
+
+    struct _BoomInterrupt end
+    struct _BoomOther end
+    CSTParser.get_sig(::_BoomInterrupt) = throw(InterruptException())
+    CSTParser.get_sig(::_BoomOther) = error("boom")
+
+    @test_throws InterruptException _render_sig(_BoomInterrupt())
+    @test _render_sig(_BoomOther()) === nothing
+end

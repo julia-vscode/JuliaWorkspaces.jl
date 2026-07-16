@@ -232,7 +232,8 @@ end
 _render_sig(x) = try
     sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
     sig === nothing ? nothing : string(CSTParser.to_codeobject(sig))
-catch
+catch err
+    err isa InterruptException && rethrow()
     nothing
 end
 
