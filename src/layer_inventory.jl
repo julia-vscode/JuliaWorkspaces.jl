@@ -25,6 +25,11 @@ macros, `nothing` otherwise. `field_names` is populated for structs.
     parent_module::Vector{String}
 end
 
+"An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
+`alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
+`name` is always the *source* name, never the bound one."
+const ImportSymbol = @NamedTuple{name::String, alias::Union{Nothing,String}}
+
 """
     InventoryImport
 
@@ -37,7 +42,7 @@ imports); `alias` is the `as` name if present.
     id::Int
     kind::Symbol
     path::Vector{String}
-    symbols::Vector{String}
+    symbols::Vector{ImportSymbol}
     alias::Union{Nothing,String}
     parent_module::Vector{String}
 end
@@ -238,6 +243,16 @@ end
 # elsewhere in this file for the same purpose, e.g. module names).
 _item_name(x) = x isa CSTParser.EXPR && CSTParser.isidentifier(x) ? StaticLint.valofid(x) : nothing
 
+# A symbol usable in a colon-form import list (`using X: a, +`) or an
+# `export`/`public` statement (`export +, f`): a plain identifier OR an
+# *operator* name. `_item_name` alone only accepts identifiers, silently
+# dropping operator names at both call sites — this is Finding 2's fix.
+function _symbol_name(x)
+    nm = _item_name(x)
+    nm !== nothing && return nm
+    return x isa CSTParser.EXPR && CSTParser.isoperator(x) ? CSTParser.valof(x) : nothing
+end
+
 # A struct field's bound name, mirroring the final branch of `mark_binding!`
 # (bindings.jl:161-165) for the two shapes struct fields actually take:
 # `name` (bare) and `name::T` (declared). `rem_decl` is CSTParser's own
@@ -298,7 +313,7 @@ function _walk_import_block(block::CSTParser.EXPR)
         if CSTParser.isoperator(arg) && CSTParser.valof(arg) == "."
             push!(path, ".")
         else
-            nm = _item_name(arg)
+            nm = _symbol_name(arg)
             nm === nothing || push!(path, nm)
         end
     end
@@ -388,7 +403,11 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             end
         end
     elseif CSTParser.headof(x) === :export || CSTParser.headof(x) === :public
-        names = String[StaticLint.valofid(a) for a in x.args if CSTParser.isidentifier(a)]
+        names = String[]
+        for a in x.args
+            nm = _symbol_name(a)
+            nm === nothing || push!(names, nm)
+        end
         isempty(names) || push!(acc.exports, InventoryExport(id, CSTParser.headof(x) === :export ? :export : :public, names, parent_module))
     elseif CSTParser.headof(x) === :using || CSTParser.headof(x) === :import
         # mirror imports.jl's structure walking; emit InventoryImport entries
@@ -397,14 +416,16 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
         if args !== nothing && length(args) > 0 && CSTParser.isoperator(CSTParser.headof(args[1])) &&
            CSTParser.valof(CSTParser.headof(args[1])) == ":"
             # Colon form (`using A: b, c`): one entry per statement, symbols
-            # collected from the remaining colon-node children.
+            # collected from the remaining colon-node children. Each symbol's
+            # OWN alias (`a as b`) is recorded alongside its source name — the
+            # bound name is `alias` when present, never `name` (Finding 3).
             cargs = args[1].args
             if cargs !== nothing && length(cargs) > 0
                 path, alias = _walk_import_block(cargs[1])
-                symbols = String[]
+                symbols = ImportSymbol[]
                 for i in 2:length(cargs)
-                    spath, _ = _walk_import_block(cargs[i])
-                    isempty(spath) || push!(symbols, last(spath))
+                    spath, salias = _walk_import_block(cargs[i])
+                    isempty(spath) || push!(symbols, (name=last(spath), alias=salias))
                 end
                 isempty(path) || push!(acc.imports, InventoryImport(id, kind, path, symbols, alias, parent_module))
             end
@@ -412,7 +433,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             # Non-colon form: each top-level arg (`using A, B`) is its own target.
             for block in something(args, CSTParser.EXPR[])
                 path, alias = _walk_import_block(block)
-                isempty(path) || push!(acc.imports, InventoryImport(id, kind, path, String[], alias, parent_module))
+                isempty(path) || push!(acc.imports, InventoryImport(id, kind, path, ImportSymbol[], alias, parent_module))
             end
         end
     elseif _is_include_call(x)  # call named "include" with one argument

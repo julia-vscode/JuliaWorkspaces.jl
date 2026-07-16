@@ -1,12 +1,12 @@
 @testitem "inventory types: structural equality across separately built instances" begin
     using JuliaWorkspaces: FileInventory, InventoryItem, InventoryImport, InventoryExport,
-        InventoryInclude, InventoryModule
+        InventoryInclude, InventoryModule, ImportSymbol
     using JuliaWorkspaces.URIs2: URI
 
     make() = FileInventory(
         [InventoryItem(1, "f", :function, "f(x)", String[], String[]),
          InventoryItem(2, "S", :struct, nothing, ["a", "b"], ["M"])],
-        [InventoryImport(3, :using, [".", "Sibling"], String[], nothing, ["M"])],
+        [InventoryImport(3, :using, [".", "Sibling"], ImportSymbol[], nothing, ["M"])],
         [InventoryExport(4, :export, ["f"], String[])],
         [InventoryInclude(5, URI("file:///pkg/src/a.jl"), String[])],
         [InventoryModule(6, "M", false, String[])],
@@ -192,7 +192,8 @@ end
     @test any(i -> i.kind === :using && i.path == ["Base64"], us)
     sib = only(filter(i -> "Sibling" in i.path, us))
     @test sib.path == [".", ".", "Sibling"]
-    @test sort(sib.symbols) == ["helper", "other"]
+    @test sort([s.name for s in sib.symbols]) == ["helper", "other"]
+    @test all(s -> s.alias === nothing, sib.symbols)
     fb = only(filter(i -> i.alias !== nothing, us))
     @test fb.kind === :import
     @test fb.path == ["Foo", "Bar"]
@@ -324,4 +325,39 @@ end
     inc = only(inv.includes)
     @test inc.target == a_uri
     @test inc.parent_module == String[]
+end
+
+@testitem "inventory extraction: operator names survive in import symbols and export/public" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    using Base: +, map
+    import Base: *
+    export +, f
+    public *
+    f() = 1
+    """)
+
+    us = inv.imports
+    using_stmt = only(filter(i -> i.kind === :using, us))
+    @test sort([s.name for s in using_stmt.symbols]) == ["+", "map"]
+
+    import_stmt = only(filter(i -> i.kind === :import, us))
+    @test [s.name for s in import_stmt.symbols] == ["*"]
+
+    exp = only(filter(e -> e.kind === :export, inv.exports))
+    @test sort(exp.names) == ["+", "f"]
+    pub = only(filter(e -> e.kind === :public, inv.exports))
+    @test pub.names == ["*"]
+end
+
+@testitem "inventory extraction: using X: a as b records the bound alias, not the source name" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    using X: a as b
+    using Y: c
+    """)
+
+    x_imp = only(filter(i -> "X" in i.path, inv.imports))
+    @test x_imp.symbols == [(name="a", alias="b")]
+
+    y_imp = only(filter(i -> "Y" in i.path, inv.imports))
+    @test y_imp.symbols == [(name="c", alias=nothing)]
 end
