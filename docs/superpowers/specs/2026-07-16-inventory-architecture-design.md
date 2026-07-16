@@ -204,6 +204,33 @@ staged so every milestone compiles and is unit-testable:
    `merge_meta_dict!`, obsolete gating) + suite change-list finalization.
 6. Differential harness + performance acceptance + LS.jl suite gate.
 
+## Future work (explicitly out of scope for this branch, but design-compatible)
+
+- **Full cancellation support.** rust-analyzer treats cancellation as load-bearing: an
+  edit cancels all in-flight queries (salsa unwinds them) and requests re-run against the
+  new revision, so a slow request can never serve — or block — a stale world. The
+  equivalent here: thread a `CancellationTokens.CancellationToken` through every
+  JuliaWorkspaces request entry point (the vendored `CancellationTokens` package and a
+  few token-accepting APIs like `get_diagnostics_blocking` already exist), have Salsa
+  check a runtime-level token at `memoized_lookup` boundaries and unwind via a dedicated
+  cancellation exception, and have the LS cancel outstanding request tokens on every
+  `didChange` (plus honor client-side `$/cancelRequest`). The query decomposition built
+  here is what makes this cheap: query boundaries are natural, frequent cancellation
+  checkpoints, and unwinding is safe because query values are immutable plain data —
+  there is no shared mutable graph to leave half-updated. Design hook honored now: no
+  derived function may swallow a foreign exception class blindly (`catch`-all blocks must
+  rethrow non-local exceptions), so a future cancellation unwind passes through cleanly.
+- **Salsa durability.** rust-analyzer marks slow-changing inputs (sysroot, crates.io
+  sources) as high-durability so revision-validation walks skip entire subgraphs. The
+  analog here: `input_package_metadata`, symbol-store contents, and project/manifest-
+  derived environment data are high-durability (change on env events, not keystrokes),
+  while file contents are low-durability. With durability in Salsa, the per-keystroke
+  verification walk would skip the env/store-dependent subgraph wholesale instead of
+  re-verifying it edge by edge. Design hook honored now: environment-derived data flows
+  through a small number of dedicated query nodes (`derived_module_tree`'s import
+  resolution consults env stores through one seam), so a later durability annotation
+  has a single place to attach.
+
 ## Known risks
 
 - **Macro opacity**: top-level macro calls can generate bindings the inventory can't see.
