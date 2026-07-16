@@ -403,3 +403,30 @@ end
 
     @test only(filter(i -> i.name == "DATA", inv.items)).kind === :const
 end
+
+@testitem "inventory extraction: include inside a nested module (walker/include-record offset join)" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    a_uri = URI("file:///inv/src/nested_inc.jl")
+    inv, _ = inventory_of("""
+    module Outer
+    module Inner
+    include("nested_inc.jl")
+    end
+    end
+    """; extra_files=Dict(a_uri => "q() = 1\n"))
+
+    inc = only(inv.includes)
+    @test inc.target == a_uri
+    @test inc.parent_module == ["Outer", "Inner"]
+end
+
+@testitem "inventory extraction: Base.@enum via the qualified-macro path" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    Base.@enum Color red green
+    """)
+
+    @test only(filter(i -> i.name == "Color", inv.items)).kind === :enum
+    @test only(filter(i -> i.name == "red", inv.items)).kind === :enum_member
+    @test only(filter(i -> i.name == "green", inv.items)).kind === :enum_member
+end
