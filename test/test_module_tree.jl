@@ -49,3 +49,37 @@ end
     @test roots["B"] == URI("file:///ws/B/src/B.jl")
     @test !haskey(roots, "C")
 end
+
+@testitem "workspace package roots: duplicate names tie-break by entry-file validity" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+
+    function project_toml(name, uuid)
+        """
+        name = "$name"
+        uuid = "$uuid"
+        version = "0.1.0"
+        """
+    end
+
+    jw = JuliaWorkspace()
+
+    # Dup1: smaller-URI folder ("dup1/a") has NO entry file; larger-URI folder
+    # ("dup1/b") has a valid entry file. The valid one must win even though it
+    # is not the lexicographically smallest folder.
+    add_file!(jw, TextFile(URI("file:///ws/dup1/a/Project.toml"), SourceText(project_toml("Dup1", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0011"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/dup1/b/Project.toml"), SourceText(project_toml("Dup1", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0012"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/dup1/b/src/Dup1.jl"), SourceText("module Dup1\nend\n", "julia")))
+
+    # Dup2: both folders have valid entry files; the lexicographically smaller
+    # folder URI ("dup2/a") must win.
+    add_file!(jw, TextFile(URI("file:///ws/dup2/a/Project.toml"), SourceText(project_toml("Dup2", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0021"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/dup2/a/src/Dup2.jl"), SourceText("module Dup2\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///ws/dup2/b/Project.toml"), SourceText(project_toml("Dup2", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0022"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/dup2/b/src/Dup2.jl"), SourceText("module Dup2\nend\n", "julia")))
+
+    roots = JuliaWorkspaces.derived_workspace_package_roots(jw.runtime)
+
+    @test roots["Dup1"] == URI("file:///ws/dup1/b/src/Dup1.jl")
+    @test roots["Dup2"] == URI("file:///ws/dup2/a/src/Dup2.jl")
+end
