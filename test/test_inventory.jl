@@ -4,8 +4,8 @@
     using JuliaWorkspaces.URIs2: URI
 
     make() = FileInventory(
-        [InventoryItem(1, "f", :function, "f(x)", String[], String[]),
-         InventoryItem(2, "S", :struct, nothing, ["a", "b"], ["M"])],
+        [InventoryItem(1, "f", String[], :function, "f(x)", String[], String[]),
+         InventoryItem(2, "S", String[], :struct, nothing, ["a", "b"], ["M"])],
         [InventoryImport(3, :using, [".", "Sibling"], ImportSymbol[], nothing, ["M"])],
         [InventoryExport(4, :export, ["f"], String[])],
         [InventoryInclude(5, URI("file:///pkg/src/a.jl"), String[])],
@@ -19,7 +19,7 @@
     @test hash(a) == hash(b)
 
     c = FileInventory(
-        [InventoryItem(1, "g", :function, "g(x)", String[], String[])],
+        [InventoryItem(1, "g", String[], :function, "g(x)", String[], String[])],
         a.imports, a.exports, a.includes, a.modules)
     @test !isequal(a, c)
 end
@@ -373,4 +373,33 @@ end
 
     @test_throws InterruptException _render_sig(_BoomInterrupt())
     @test _render_sig(_BoomOther()) === nothing
+end
+
+@testitem "inventory extraction: qualified method extensions get a qualifier, local bindings don't" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    Base.foo(x) = 1
+    function Base.Iterators.bar() end
+    f(x) = x
+    """)
+
+    byname(n) = only(filter(i -> i.name == n, inv.items))
+    @test byname("foo").qualifier == ["Base"]
+    @test byname("bar").qualifier == ["Base", "Iterators"]
+    @test byname("f").qualifier == String[]
+end
+
+@testitem "inventory extraction: includet and assignment-wrapped includes" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    a_uri = URI("file:///inv/src/inc_a.jl")
+    inv, jw = inventory_of("""
+    includet("inc_a.jl")
+    const DATA = include("inc_a.jl")
+    """; extra_files=Dict(a_uri => "z() = 1\n"))
+
+    @test length(inv.includes) == 2
+    @test all(i -> i.target == a_uri, inv.includes)
+    @test Set(JuliaWorkspaces.derived_includes(jw.runtime, URI("file:///inv/src/F.jl"))) == Set([a_uri])
+
+    @test only(filter(i -> i.name == "DATA", inv.items)).kind === :const
 end

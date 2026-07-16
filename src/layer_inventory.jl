@@ -13,12 +13,17 @@
 One top-level (module-level) item of a file. `parent_module` is the module
 path within this file, outermost→innermost; `String[]` means the file's own
 top level (whatever module the file is spliced into by its includer).
-`signature` is a normalized (re-printed) signature string for functions and
-macros, `nothing` otherwise. `field_names` is populated for structs.
+`qualifier` is the leading module-path of a qualified method extension
+(`Base.foo` → `["Base"]`, `Base.Iterators.bar` → `["Base", "Iterators"]`);
+`String[]` means the name is bound locally (a plain definition, not a method
+extension of an already-existing name elsewhere). `signature` is a normalized
+(re-printed) signature string for functions and macros, `nothing` otherwise.
+`field_names` is populated for structs.
 """
 @auto_hash_equals struct InventoryItem
     id::Int
     name::String
+    qualifier::Vector{String}
     kind::Symbol
     signature::Union{Nothing,String}
     field_names::Vector{String}
@@ -218,13 +223,14 @@ Salsa.@derived function derived_file_inventory(rt, uri)
     cst = derived_julia_legacy_syntax_tree(rt, uri)
     (cst isa CSTParser.EXPR && CSTParser.headof(cst) === :file) || return EMPTY_FILE_INVENTORY
 
+    include_records = derived_file_include_records(rt, uri)
     include_targets_by_offset = Dict{Int,Union{Nothing,URI}}(
-        offset => target for (offset, _, target) in derived_file_include_records(rt, uri))
+        offset => target for (offset, _, target) in include_records)
 
     acc = (items=InventoryItem[], imports=InventoryImport[], exports=InventoryExport[],
            includes=InventoryInclude[], modules=InventoryModule[])
     _foreach_toplevel_item(cst) do x, id, parent_module, offset
-        _classify_item!(acc, x, id, copy(parent_module), offset, include_targets_by_offset)
+        _classify_item!(acc, x, id, copy(parent_module), offset, include_targets_by_offset, include_records)
     end
     return FileInventory(acc.items, acc.imports, acc.exports, acc.includes, acc.modules)
 end
@@ -252,6 +258,51 @@ function _symbol_name(x)
     nm = _item_name(x)
     nm !== nothing && return nm
     return x isa CSTParser.EXPR && CSTParser.isoperator(x) ? CSTParser.valof(x) : nothing
+end
+
+# Split a getfield chain `A.B.c` (parsed as nested binary "." operators, each
+# level's rhs a `quotenode`-wrapped identifier; see `is_getfield_w_quotenode`)
+# into its leading qualifier path `["A", "B"]`, peeling one level at a time —
+# the same shape StaticLint's `resolve_getfield`/`rhs_of_getfield`/
+# `lhs_of_getfield` (references.jl) peel during resolution, but collecting
+# strings instead of resolving. `x` is the FULL chain (i.e. what `get_name`
+# would reduce down to the final identifier); returns `String[]` if the chain
+# doesn't bottom out in a plain identifier.
+function _getfield_qualifier(x)
+    CSTParser.is_getfield_w_quotenode(x) || return String[]
+    parts = String[]
+    while CSTParser.is_getfield_w_quotenode(x)
+        nm = _item_name(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
+        nm === nothing && return String[]
+        pushfirst!(parts, nm)
+        x = x.args[1]
+    end
+    lhs_name = _item_name(x)
+    lhs_name === nothing && return String[]
+    pushfirst!(parts, lhs_name)
+    return parts[1:end - 1]
+end
+
+"""
+    _item_qualifier(name_expr)
+
+The qualifier of a defined name: `String[]` for a local binding, or the
+leading module-path components for a qualified method extension (`Base.foo`
+→ `["Base"]`, `Base.Iterators.bar` → `["Base", "Iterators"]`). `name_expr` is
+`CSTParser.get_name(x)`'s return value — `get_name` already resolves through a
+getfield chain down to the final identifier and discards the qualifier
+(mirrors `name_is_getfield`'s check of the same shape, bindings.jl:473); this
+climbs back up from that identifier via its parent pointers (set because
+inventory parsing always calls `CSTParser.parse(src, true)`, confirmed via CST
+exploration — see the task report) to recover it.
+"""
+function _item_qualifier(name_expr)
+    name_expr === nothing && return String[]
+    p1 = CSTParser.parentof(name_expr)
+    p1 === nothing && return String[]
+    p2 = CSTParser.parentof(p1)
+    (p2 isa CSTParser.EXPR && CSTParser.is_getfield_w_quotenode(p2)) || return String[]
+    return _getfield_qualifier(p2)
 end
 
 # A struct field's bound name, mirroring the final branch of `mark_binding!`
@@ -321,34 +372,68 @@ function _walk_import_block(block::CSTParser.EXPR)
     return (path, nothing)
 end
 
-_is_include_call(x) = CSTParser.iscall(x) && CSTParser.fcall_name(x) == "include" && length(x.args) == 2
+# `includet` (Revise-style hot-reload include) is in the include closure
+# exactly like `include` — `derived_file_include_records`/
+# `_walk_include_calls` (StaticLint/includes.jl:62) already records it, so the
+# inventory must recognize the same call name.
+_is_include_call(x) = CSTParser.iscall(x) &&
+    (CSTParser.fcall_name(x) == "include" || CSTParser.fcall_name(x) == "includet") &&
+    length(x.args) == 2
+
+# Find the resolved target of an include/includet call known to sit inside
+# `[lo, hi)` (an enclosing top-level statement's byte range). Matching by
+# span-containment against the already-computed include records — rather than
+# by replicating CSTParser's trivia arithmetic to compute the rhs's exact
+# offset — is the simpler-but-correct option Finding 6b calls for: a top-level
+# statement's rhs contains at most one include call, so containment is
+# unambiguous.
+function _wrapped_include_target(records, lo, hi)
+    for (off, _, target) in records
+        lo <= off < hi && return target
+    end
+    return nothing
+end
 
 # Classify one assignment EXPR (bindings.jl:57-66's `isassignment` branches),
 # emitting the appropriate `InventoryItem`. `kind_override` lets `:const`/
 # `:global` wrappers reclassify the same shapes without duplicating this logic.
-function _classify_assignment!(acc, x, id, parent_module, kind_override=nothing)
+# `container_offset`/`container_fullspan` bound the enclosing top-level
+# statement (the assignment itself for a direct `isassignment(x)` item, or the
+# outer `:const`/`:global` node for a wrapped one) and, together with
+# `records`, support detecting an assignment-wrapped include (`const DATA =
+# include("data.jl")`, Finding 6b) regardless of which arm below fires.
+function _classify_assignment!(acc, x, id, parent_module, kind_override, container_offset, container_fullspan, records)
     if CSTParser.is_func_call(x.args[1])
         name = _item_name(CSTParser.get_name(x))
-        name === nothing && return
-        push!(acc.items, InventoryItem(id, name, something(kind_override, :function), _render_sig(x), String[], parent_module))
+        if name !== nothing
+            qualifier = _item_qualifier(CSTParser.get_name(x))
+            push!(acc.items, InventoryItem(id, name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module))
+        end
     elseif CSTParser.iscurly(x.args[1])
         # Typealias: `Vector{T} = ...` — name comes from the curly's base
         # identifier, mirroring `mark_typealias_bindings!` (bindings.jl:288-301).
         name = _item_name(CSTParser.get_name(x.args[1]))
-        name === nothing && return
-        push!(acc.items, InventoryItem(id, name, something(kind_override, :assignment), nothing, String[], parent_module))
+        if name !== nothing
+            push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
+        end
     elseif !CSTParser.is_getfield(x.args[1])
         # Plain identifier lhs. (Tuple-destructuring/other lhs shapes that
         # `mark_binding!` further unwraps are out of scope for this milestone —
         # `_item_name` returns `nothing` for them and no item is emitted.)
         name = _item_name(x.args[1])
-        name === nothing && return
-        push!(acc.items, InventoryItem(id, name, something(kind_override, :assignment), nothing, String[], parent_module))
+        if name !== nothing
+            push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
+        end
+    end
+
+    if _is_include_call(x.args[2])
+        target = _wrapped_include_target(records, container_offset, container_offset + container_fullspan)
+        push!(acc.includes, InventoryInclude(id, target, parent_module))
     end
     return
 end
 
-function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_offset)
+function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_offset, include_records)
     if CSTParser.defines_module(x)
         # name/bare per bindings.jl:90-92 and scope.jl:172-181
         name = CSTParser.isidentifier(x.args[2]) ? StaticLint.valofid(x.args[2]) : nothing
@@ -359,7 +444,8 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
         name = _item_name(CSTParser.get_name(x))
         name === nothing && return
         kind = CSTParser.headof(x) === :function ? :function : :macro
-        push!(acc.items, InventoryItem(id, name, kind, _render_sig(x), String[], parent_module))
+        qualifier = _item_qualifier(CSTParser.get_name(x))
+        push!(acc.items, InventoryItem(id, name, qualifier, kind, _render_sig(x), String[], parent_module))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
         name = _item_name(CSTParser.get_name(x))
@@ -387,20 +473,20 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             kind = CSTParser.defines_abstract(x) ? :abstract : :primitive
             field_names = String[]
         end
-        push!(acc.items, InventoryItem(id, name, kind, nothing, field_names, parent_module))
+        push!(acc.items, InventoryItem(id, name, String[], kind, nothing, field_names, parent_module))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;
         # curly lhs → :assignment (typealias); plain identifier lhs → :assignment
-        _classify_assignment!(acc, x, id, parent_module)
+        _classify_assignment!(acc, x, id, parent_module, nothing, offset, x.fullspan, include_records)
     elseif CSTParser.headof(x) === :const || CSTParser.headof(x) === :global
         # unwrap and recurse into the inner assignment with kind override
         kind_override = CSTParser.headof(x) === :const ? :const : :global
         for inner in something(x.args, CSTParser.EXPR[])
             if CSTParser.isassignment(inner)
-                _classify_assignment!(acc, inner, id, parent_module, kind_override)
+                _classify_assignment!(acc, inner, id, parent_module, kind_override, offset, x.fullspan, include_records)
             elseif CSTParser.isidentifier(inner)
                 name = _item_name(inner)
-                name === nothing || push!(acc.items, InventoryItem(id, name, kind_override, nothing, String[], parent_module))
+                name === nothing || push!(acc.items, InventoryItem(id, name, String[], kind_override, nothing, String[], parent_module))
             end
         end
     elseif CSTParser.headof(x) === :export || CSTParser.headof(x) === :public
@@ -437,7 +523,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
                 isempty(path) || push!(acc.imports, InventoryImport(id, kind, path, ImportSymbol[], alias, parent_module))
             end
         end
-    elseif _is_include_call(x)  # call named "include" with one argument
+    elseif _is_include_call(x)  # call named "include"/"includet" with one argument
         push!(acc.includes, InventoryInclude(id, get(include_targets_by_offset, offset, nothing), parent_module))
     elseif CSTParser.ismacrocall(x)
         if _is_enum_macro(x)   # per macros.jl:55-67: name via _points_to_Base_macro-style check on x.args[1]
@@ -448,7 +534,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             margs = x.args
             if margs !== nothing && length(margs) >= 3
                 tname = _enum_item_name(margs[3])
-                tname === nothing || push!(acc.items, InventoryItem(id, tname, :enum, nothing, String[], parent_module))
+                tname === nothing || push!(acc.items, InventoryItem(id, tname, String[], :enum, nothing, String[], parent_module))
                 members = if length(margs) == 4 && CSTParser.headof(margs[4]) === :block
                     margs[4].args
                 else
@@ -456,12 +542,12 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
                 end
                 for member in something(members, CSTParser.EXPR[])
                     mname = _enum_item_name(member)
-                    mname === nothing || push!(acc.items, InventoryItem(id, mname, :enum_member, nothing, String[], parent_module))
+                    mname === nothing || push!(acc.items, InventoryItem(id, mname, String[], :enum_member, nothing, String[], parent_module))
                 end
             end
         else
             mname = _macro_name_string(x.args[1])
-            push!(acc.items, InventoryItem(id, something(mname, ""), :opaque_macrocall, nothing, String[], parent_module))
+            push!(acc.items, InventoryItem(id, something(mname, ""), String[], :opaque_macrocall, nothing, String[], parent_module))
         end
     end
     return
