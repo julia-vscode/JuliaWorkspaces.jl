@@ -377,6 +377,113 @@ end
     @test imp.target == ImportTarget(:external, ["SomeRegistryPkg"])
 end
 
+@testitem "module tree invalidation: body edits backdate the inventory; API edits propagate through the tree's own early-cutoff" setup=[ModuleTreeWS] begin
+    using JuliaWorkspaces.URIs2: URI
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    # A downstream consumer of the tree: recomputes only if the tree VALUE
+    # changed (Salsa early-exit on isequal) — the tree's own backdating
+    # layer, one level above the inventory's.
+    Salsa.@derived function probe_tree(rt, root)
+        tree = JuliaWorkspaces.derived_module_tree(rt, root)
+        node = module_node(tree, String[])
+        return (declared=sort(collect(keys(node.declared))),
+                exports=sort(copy(node.exports)),
+                files=sort(string.(collect(keys(tree.file_modules)))))
+    end
+
+    # --- Assertion 1: a body edit in a spliced (included) file backdates the
+    # inventory (Salsa isequal early-exit); the tree never even re-executes.
+    a_uri = URI("file:///t/src/inv_a.jl")
+    _, root1, jw1 = tree_of("""
+    include("inv_a.jl")
+    """; extra_files=Dict(a_uri => "f(x) = x + 1\n"))
+    rt1 = jw1.runtime
+    @test probe_tree(rt1, root1).declared == ["f"]
+
+    recv1 = CountReceiver()
+    JuliaWorkspaces.update_file!(jw1, TextFile(a_uri, SourceText("f(x) = x * 42\n", "julia")))
+    TL.with_tracing(() -> probe_tree(rt1, root1), recv1)
+    @test get(recv1.counts, "derived_file_inventory", 0) == 1
+    @test get(recv1.counts, "derived_module_tree", 0) == 0
+    @test get(recv1.counts, "probe_tree", 0) == 0
+
+    # --- Assertion 2: appending a QUALIFIED method extension is a genuine
+    # API edit (a brand-new inventory item — the inventory does NOT
+    # backdate), but `_build_tree_structure` only ever feeds unqualified
+    # binding-kind items into a node's `declared` (the
+    # `isempty(item.qualifier) && item.kind in _BINDING_ITEM_KINDS` guard in
+    # layer_module_tree.jl) — a qualified item never touches the tree at
+    # all. So the tree re-executes (its dependency's value changed) but its
+    # own VALUE compares equal: the tree's own early-cutoff layer, distinct
+    # from the inventory's.
+    _, root2, jw2 = tree_of("""
+    f(x) = x + 1
+    g() = 2
+    """)
+    rt2 = jw2.runtime
+    before2 = probe_tree(rt2, root2)
+    @test before2.declared == ["f", "g"]
+
+    recv2 = CountReceiver()
+    JuliaWorkspaces.update_file!(jw2, TextFile(root2, SourceText("""
+    f(x) = x + 1
+    g() = 2
+    Base.foo(x) = 1
+    """, "julia")))
+    after2 = TL.with_tracing(() -> probe_tree(rt2, root2), recv2)
+    @test get(recv2.counts, "derived_module_tree", 0) == 1
+    @test get(recv2.counts, "probe_tree", 0) == 0
+    @test after2 == before2
+
+    # --- Assertion 3: adding an export changes a node's `exports` list, so
+    # the tree's VALUE changes and it propagates all the way to the probe.
+    _, root3, jw3 = tree_of("""
+    f(x) = x + 1
+    """)
+    rt3 = jw3.runtime
+    @test probe_tree(rt3, root3).exports == String[]
+
+    recv3 = CountReceiver()
+    JuliaWorkspaces.update_file!(jw3, TextFile(root3, SourceText("""
+    f(x) = x + 1
+    export f
+    """, "julia")))
+    result3 = TL.with_tracing(() -> probe_tree(rt3, root3), recv3)
+    @test get(recv3.counts, "derived_module_tree", 0) == 1
+    @test get(recv3.counts, "probe_tree", 0) == 1
+    @test result3.exports == ["f"]
+
+    # --- Assertion 4: adding an `include` of a new file changes
+    # `file_modules` (and splices the new file's own declarations in), so it
+    # propagates too.
+    b_uri = URI("file:///t/src/inv_b.jl")
+    _, root4, jw4 = tree_of("""
+    f(x) = x + 1
+    """)
+    rt4 = jw4.runtime
+    @test !(string(b_uri) in probe_tree(rt4, root4).files)
+
+    JuliaWorkspaces.add_file!(jw4, TextFile(b_uri, SourceText("bfun() = 1\n", "julia")))
+    recv4 = CountReceiver()
+    JuliaWorkspaces.update_file!(jw4, TextFile(root4, SourceText("""
+    f(x) = x + 1
+    include("inv_b.jl")
+    """, "julia")))
+    result4 = TL.with_tracing(() -> probe_tree(rt4, root4), recv4)
+    @test get(recv4.counts, "derived_module_tree", 0) == 1
+    @test string(b_uri) in result4.files
+    @test "bfun" in result4.declared
+end
+
 @testitem "module tree: absolute import of a workspace package classifies as workspace_package" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: ImportTarget, module_node
