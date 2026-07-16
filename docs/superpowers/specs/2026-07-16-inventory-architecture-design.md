@@ -60,10 +60,12 @@ inventory recomputes, compares equal, and Salsa backdates — nothing downstream
 This is the same pattern `derived_file_include_data`/`derived_includes` already use for
 the include graph (see the docstring at the top of `layer_includes.jl`).
 
-**Item-id stability**: ids are assigned in top-level tree order (module-level items before
-nested-module items, mirroring rust-analyzer's breadth-first AstId numbering). Editing a
-body never shifts ids. Inserting a new top-level item shifts subsequent ids — which
-changes the inventory and invalidates downstream, correctly, since the item set changed.
+**Item-id stability**: ids are assigned in top-level tree order; the implementation uses
+depth-first pre-order ids (not rust-analyzer's breadth-first AstId numbering as originally
+described here — this is now load-bearing for the module tree's include-splice replay, see
+`layer_module_tree.jl`). Editing a body never shifts ids. Inserting a new top-level item
+shifts subsequent ids — which changes the inventory and invalidates downstream, correctly,
+since the item set changed.
 
 ### Layer 2: `derived_module_tree(rt, root)` — the DefMap analog
 
