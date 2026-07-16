@@ -76,6 +76,42 @@ end
     @test src[visited[7].offset + 1] == 'w'   # sibling after the module block
 end
 
+@testitem "inventory walker: if/elseif/else and begin blocks are transparent containers" begin
+    using JuliaWorkspaces: _foreach_toplevel_item
+    using JuliaWorkspaces: CSTParser
+
+    src = """
+    if VERSION > v"1.0"
+        compat_f(x) = x
+    elseif false
+        elseif_f(x) = x
+    else
+        else_f(x) = x
+    end
+    begin
+        block_f(x) = x
+    end
+    w() = 4
+    """
+    cst = CSTParser.parse(src, true)
+
+    visited = []
+    _foreach_toplevel_item(cst) do x, id, parent_module, offset
+        push!(visited, (id=id, parent=copy(parent_module), offset=offset))
+    end
+
+    # The if/elseif/else/begin containers themselves consume no id — only the
+    # 4 defined functions plus the trailing `w` do.
+    @test [v.id for v in visited] == collect(1:5)
+    @test all(v -> v.parent == String[], visited)
+
+    @test src[visited[1].offset + 1] == 'c'   # compat_f, inside the `if` branch
+    @test src[visited[2].offset + 1] == 'e'   # elseif_f, inside the `elseif` branch
+    @test src[visited[3].offset + 1] == 'e'   # else_f, inside the `else` branch
+    @test src[visited[4].offset + 1] == 'b'   # block_f, inside the `begin...end` block
+    @test src[visited[5].offset + 1] == 'w'   # sibling after everything
+end
+
 @testsnippet InventoryWS begin
     using JuliaWorkspaces
     using JuliaWorkspaces.URIs2: URI
@@ -258,4 +294,34 @@ end
     result = TL.with_tracing(() -> probe_names(rt, uri), recv2)
     @test get(recv2.counts, "probe_names", 0) == 1
     @test result == ["f", "h"]
+end
+
+@testitem "inventory extraction: if/elseif/else/begin containers are transparent" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    a_uri = URI("file:///inv/src/cond_a.jl")
+    inv, _ = inventory_of("""
+    if VERSION > v"1.0"
+        compat_f(x) = x
+        include("cond_a.jl")
+    elseif false
+        elseif_f(x) = x
+    else
+        else_f(x) = x
+    end
+    begin
+        block_f(x) = x
+    end
+    """; extra_files=Dict(a_uri => "w() = 1\n"))
+
+    byname(n) = only(filter(i -> i.name == n, inv.items))
+    @test byname("compat_f").kind === :function
+    @test byname("compat_f").parent_module == String[]
+    @test byname("elseif_f").kind === :function
+    @test byname("else_f").kind === :function
+    @test byname("block_f").kind === :function
+
+    inc = only(inv.includes)
+    @test inc.target == a_uri
+    @test inc.parent_module == String[]
 end

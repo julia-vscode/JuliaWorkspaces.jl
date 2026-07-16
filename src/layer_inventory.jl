@@ -104,6 +104,12 @@ Call `f(x, id, parent_module, offset)` for every top-level item-like node of a
 children of its body block (never the bodies of functions, structs, etc.).
 Ids are sequential in visit order; doc-macro wrappers are transparent (the
 wrapped item is visited, with `offset` pointing at it, not the docstring).
+`if`/`elseif`/`else` and bare `begin...end` blocks are ALSO transparent (they
+introduce no scope — StaticLint's `introduces_scope`, scope.jl:78-107, has no
+arm for `:if`/`:block`, so definitions inside them bind at the enclosing
+level): their statement lists are walked as if they were direct siblings of
+the container, at the same `parent_module` and continuing the same id
+sequence; the container node itself gets no id and is never passed to `f`.
 This walker is the single source of truth for item ids: the inventory
 extractor and the position map both use it, so ids always agree.
 """
@@ -126,26 +132,71 @@ function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, ne
             item = wrapped
         end
 
-        next_id[] += 1
-        f(item, next_id[], parent_module, item_offset)
+        if CSTParser.headof(item) === :if
+            _walk_if_chain!(f, item, parent_module, item_offset, next_id)
+        elseif CSTParser.headof(item) === :block
+            _walk_transparent_block!(f, item, parent_module, item_offset, next_id)
+        else
+            next_id[] += 1
+            f(item, next_id[], parent_module, item_offset)
 
-        if CSTParser.defines_module(item) && item.args !== nothing && length(item.args) >= 3
-            mod_name = CSTParser.isidentifier(item.args[2]) ? StaticLint.valofid(item.args[2]) : nothing
-            if mod_name !== nothing
-                inner_parent = vcat(parent_module, [mod_name])
-                # Offset of the module block's first child: the module node's
-                # offset plus the fullspans of the `module`/`baremodule`
-                # keyword token (held in `.trivia[1]`, NOT `.args[1]` — the
-                # latter is a synthetic bare/non-bare flag with span 0; see
-                # layer_navigation.jl:122) and the name.
-                block_offset = item_offset + item.trivia[1].fullspan + item.args[2].fullspan
-                _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, next_id)
+            if CSTParser.defines_module(item) && item.args !== nothing && length(item.args) >= 3
+                mod_name = CSTParser.isidentifier(item.args[2]) ? StaticLint.valofid(item.args[2]) : nothing
+                if mod_name !== nothing
+                    inner_parent = vcat(parent_module, [mod_name])
+                    # Offset of the module block's first child: the module node's
+                    # offset plus the fullspans of the `module`/`baremodule`
+                    # keyword token (held in `.trivia[1]`, NOT `.args[1]` — the
+                    # latter is a synthetic bare/non-bare flag with span 0; see
+                    # layer_navigation.jl:122) and the name.
+                    block_offset = item_offset + item.trivia[1].fullspan + item.args[2].fullspan
+                    _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, next_id)
+                end
             end
         end
 
         offset += a.fullspan
     end
     return offset
+end
+
+# A `:block` node is CSTParser's uniform wrapper for a statement list. As a
+# bare `if`/`elseif`/`else` branch body it carries no keyword trivia of its
+# own (the branch's statements start exactly at the block's own offset); as an
+# explicit top-level `begin...end` it carries `BEGIN`/`END` keyword trivia, so
+# its statements start after the `begin` keyword's fullspan. Both shapes were
+# confirmed via `CSTParser.parse` exploration (see the task report).
+function _walk_transparent_block!(f, block::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+    if block.trivia !== nothing && !isempty(block.trivia) && CSTParser.headof(block.trivia[1]) === :BEGIN
+        offset += block.trivia[1].fullspan
+    end
+    _walk_toplevel!(f, block.args, parent_module, offset, next_id)
+    return nothing
+end
+
+# Walks an `:if`/`:elseif` chain transparently. Node shape (confirmed via CST
+# exploration): `trivia[1]` is the node's own `IF`/`ELSEIF` keyword; `args` is
+# `[cond, then-block]` or `[cond, then-block, tail]`, where `tail` is either
+# another `:elseif` node (continuing the chain — its own `ELSEIF` keyword is
+# in ITS `trivia[1]`, not this node's) or a plain `:block` (a trailing `else`,
+# whose `ELSE` keyword sits at this node's `trivia[2]`, right after the own
+# keyword).
+function _walk_if_chain!(f, node::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+    offset += node.trivia[1].fullspan  # IF or ELSEIF keyword
+    offset += node.args[1].fullspan    # condition
+    _walk_transparent_block!(f, node.args[2], parent_module, offset, next_id)
+    offset += node.args[2].fullspan
+
+    if length(node.args) >= 3
+        tail = node.args[3]
+        if CSTParser.headof(tail) === :elseif
+            _walk_if_chain!(f, tail, parent_module, offset, next_id)
+        else
+            offset += node.trivia[2].fullspan  # ELSE keyword
+            _walk_transparent_block!(f, tail, parent_module, offset, next_id)
+        end
+    end
+    return nothing
 end
 
 """
