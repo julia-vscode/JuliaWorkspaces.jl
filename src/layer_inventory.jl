@@ -147,3 +147,249 @@ function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, ne
     end
     return offset
 end
+
+"""
+    derived_file_inventory(rt, uri) -> FileInventory
+
+Layer 1 of the inventory architecture: the per-file, position-free API summary
+of `uri`'s top-level items. `EMPTY_FILE_INVENTORY` when the file has no
+content or doesn't parse to a `:file` CST.
+"""
+Salsa.@derived function derived_file_inventory(rt, uri)
+    @debug "derived_file_inventory" uri=uri
+
+    derived_has_content(rt, uri) || return EMPTY_FILE_INVENTORY
+    cst = derived_julia_legacy_syntax_tree(rt, uri)
+    (cst isa CSTParser.EXPR && CSTParser.headof(cst) === :file) || return EMPTY_FILE_INVENTORY
+
+    include_targets_by_offset = Dict{Int,Union{Nothing,URI}}(
+        offset => target for (offset, _, target) in derived_file_include_records(rt, uri))
+
+    acc = (items=InventoryItem[], imports=InventoryImport[], exports=InventoryExport[],
+           includes=InventoryInclude[], modules=InventoryModule[])
+    _foreach_toplevel_item(cst) do x, id, parent_module, offset
+        _classify_item!(acc, x, id, copy(parent_module), offset, include_targets_by_offset)
+    end
+    return FileInventory(acc.items, acc.imports, acc.exports, acc.includes, acc.modules)
+end
+
+_render_sig(x) = try
+    sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
+    sig === nothing ? nothing : string(CSTParser.to_codeobject(sig))
+catch
+    nothing
+end
+
+# Unwrap an identifier (or `var"..."` name) to its String value; `nothing` for
+# anything else. Never uses `CSTParser.valof` directly on an identifier —
+# `var"..."` (NONSTDIDENTIFIER) nodes return `nothing` from `valof`, so we go
+# through `StaticLint.valofid`, which already handles that unwrap (and is used
+# elsewhere in this file for the same purpose, e.g. module names).
+_item_name(x) = x isa CSTParser.EXPR && CSTParser.isidentifier(x) ? StaticLint.valofid(x) : nothing
+
+# A struct field's bound name, mirroring the final branch of `mark_binding!`
+# (bindings.jl:161-165) for the two shapes struct fields actually take:
+# `name` (bare) and `name::T` (declared). `rem_decl` is CSTParser's own
+# declaration-unwrapping helper (interface.jl:135), so this needn't reimplement it.
+_field_name(x) = _item_name(CSTParser.rem_decl(x))
+
+# The macro name as a plain string, handling the `Mod.@macro` qualified form.
+# Mirrors the structure of `layer_hover.jl`'s `_is_doc_macro_name`, returning
+# the name string instead of a boolean match.
+_macro_name_string(x) = nothing
+function _macro_name_string(x::CSTParser.EXPR)
+    if CSTParser.isidentifier(x)
+        return CSTParser.str_value(x)
+    elseif CSTParser.is_getfield_w_quotenode(x)
+        return _macro_name_string(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
+    else
+        return nothing
+    end
+end
+
+# Match by macro *name* rather than `StaticLint._points_to_Base_macro`, which
+# needs resolution state (a `Binding` ref pointing at the real `Base.@enum`)
+# that the inventory must not depend on — see the module docstring's firewall
+# note. A user shadowing `@enum` with an unrelated macro of the same name will
+# misclassify identically to how `mark_bindings!`'s conservatism already
+# accepts false positives elsewhere; this is a deliberate, spec-directed
+# deviation from macros.jl:55, not an oversight.
+_is_enum_macro(x::CSTParser.EXPR) = _macro_name_string(x.args[1]) == "@enum"
+
+# An `@enum` member/type-name argument may be wrapped in an explicit-value
+# assignment (`red = 1`) or a `::T` base-type declaration (only valid on the
+# type-name argument, `@enum Color::UInt8 ...`); mirrors
+# `mark_enum_member_binding!` (macros.jl:147-153) plus the declaration-unwrap
+# that `mark_binding!` itself performs via `get_name` for the non-assignment
+# case.
+function _enum_item_name(x)
+    x isa CSTParser.EXPR || return nothing
+    if CSTParser.isassignment(x)
+        x = x.args[1]
+    end
+    return _field_name(x)
+end
+
+# Mirrors `resolve_import_block` (imports.jl:1-87)'s structure walk of one
+# import path/symbol node, without any resolution: leading `.` tokens become
+# `"."` path entries, identifiers accumulate into `path`, and an `:as` wrapper
+# yields the alias name (recursing into the wrapped path first, exactly as
+# `resolve_import_block`'s `x.head == :as` branch does).
+function _walk_import_block(block::CSTParser.EXPR)
+    if CSTParser.headof(block) === :as
+        (block.args === nothing || length(block.args) != 2) && return (String[], nothing)
+        inner_path, _ = _walk_import_block(block.args[1])
+        return (inner_path, _item_name(block.args[2]))
+    end
+    path = String[]
+    block.args === nothing && return (path, nothing)
+    for arg in block.args
+        if CSTParser.isoperator(arg) && CSTParser.valof(arg) == "."
+            push!(path, ".")
+        else
+            nm = _item_name(arg)
+            nm === nothing || push!(path, nm)
+        end
+    end
+    return (path, nothing)
+end
+
+_is_include_call(x) = CSTParser.iscall(x) && CSTParser.fcall_name(x) == "include" && length(x.args) == 2
+
+# Classify one assignment EXPR (bindings.jl:57-66's `isassignment` branches),
+# emitting the appropriate `InventoryItem`. `kind_override` lets `:const`/
+# `:global` wrappers reclassify the same shapes without duplicating this logic.
+function _classify_assignment!(acc, x, id, parent_module, kind_override=nothing)
+    if CSTParser.is_func_call(x.args[1])
+        name = _item_name(CSTParser.get_name(x))
+        name === nothing && return
+        push!(acc.items, InventoryItem(id, name, something(kind_override, :function), _render_sig(x), String[], parent_module))
+    elseif CSTParser.iscurly(x.args[1])
+        # Typealias: `Vector{T} = ...` — name comes from the curly's base
+        # identifier, mirroring `mark_typealias_bindings!` (bindings.jl:288-301).
+        name = _item_name(CSTParser.get_name(x.args[1]))
+        name === nothing && return
+        push!(acc.items, InventoryItem(id, name, something(kind_override, :assignment), nothing, String[], parent_module))
+    elseif !CSTParser.is_getfield(x.args[1])
+        # Plain identifier lhs. (Tuple-destructuring/other lhs shapes that
+        # `mark_binding!` further unwraps are out of scope for this milestone —
+        # `_item_name` returns `nothing` for them and no item is emitted.)
+        name = _item_name(x.args[1])
+        name === nothing && return
+        push!(acc.items, InventoryItem(id, name, something(kind_override, :assignment), nothing, String[], parent_module))
+    end
+    return
+end
+
+function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_offset)
+    if CSTParser.defines_module(x)
+        # name/bare per bindings.jl:90-92 and scope.jl:172-181
+        name = CSTParser.isidentifier(x.args[2]) ? StaticLint.valofid(x.args[2]) : nothing
+        name === nothing && return
+        push!(acc.modules, InventoryModule(id, name, CSTParser.headof(x.args[1]) === :FALSE, parent_module))
+    elseif CSTParser.headof(x) === :function || CSTParser.headof(x) === :macro
+        # bindings.jl:83-89
+        name = _item_name(CSTParser.get_name(x))
+        name === nothing && return
+        kind = CSTParser.headof(x) === :function ? :function : :macro
+        push!(acc.items, InventoryItem(id, name, kind, _render_sig(x), String[], parent_module))
+    elseif CSTParser.defines_datatype(x)
+        # bindings.jl:96-115
+        name = _item_name(CSTParser.get_name(x))
+        name === nothing && return
+        if CSTParser.defines_struct(x)
+            kind = CSTParser.defines_mutable(x) ? :mutable_struct : :struct
+            field_names = String[]
+            for arg in x.args[3].args
+                CSTParser.defines_function(arg) && continue
+                if CSTParser.headof(arg) === :const
+                    arg = arg.args[1]
+                end
+                # Unconditional kwdef-style unwrap: recording a defaulted
+                # field's name is correct regardless of whether the struct is
+                # actually `@kwdef`-decorated, and the inventory must not
+                # depend on macro-resolution state to tell — a deliberate
+                # deviation from bindings.jl:110's `kwdef &&` guard.
+                if CSTParser.isassignment(arg)
+                    arg = arg.args[1]
+                end
+                fname = _field_name(arg)
+                fname === nothing || push!(field_names, fname)
+            end
+        else
+            kind = CSTParser.defines_abstract(x) ? :abstract : :primitive
+            field_names = String[]
+        end
+        push!(acc.items, InventoryItem(id, name, kind, nothing, field_names, parent_module))
+    elseif CSTParser.isassignment(x)
+        # bindings.jl:57-66: function-call form → :function with signature;
+        # curly lhs → :assignment (typealias); plain identifier lhs → :assignment
+        _classify_assignment!(acc, x, id, parent_module)
+    elseif CSTParser.headof(x) === :const || CSTParser.headof(x) === :global
+        # unwrap and recurse into the inner assignment with kind override
+        kind_override = CSTParser.headof(x) === :const ? :const : :global
+        for inner in something(x.args, CSTParser.EXPR[])
+            if CSTParser.isassignment(inner)
+                _classify_assignment!(acc, inner, id, parent_module, kind_override)
+            elseif CSTParser.isidentifier(inner)
+                name = _item_name(inner)
+                name === nothing || push!(acc.items, InventoryItem(id, name, kind_override, nothing, String[], parent_module))
+            end
+        end
+    elseif CSTParser.headof(x) === :export || CSTParser.headof(x) === :public
+        names = String[StaticLint.valofid(a) for a in x.args if CSTParser.isidentifier(a)]
+        isempty(names) || push!(acc.exports, InventoryExport(id, CSTParser.headof(x) === :export ? :export : :public, names, parent_module))
+    elseif CSTParser.headof(x) === :using || CSTParser.headof(x) === :import
+        # mirror imports.jl's structure walking; emit InventoryImport entries
+        kind = CSTParser.headof(x) === :using ? :using : :import
+        args = x.args
+        if args !== nothing && length(args) > 0 && CSTParser.isoperator(CSTParser.headof(args[1])) &&
+           CSTParser.valof(CSTParser.headof(args[1])) == ":"
+            # Colon form (`using A: b, c`): one entry per statement, symbols
+            # collected from the remaining colon-node children.
+            cargs = args[1].args
+            if cargs !== nothing && length(cargs) > 0
+                path, alias = _walk_import_block(cargs[1])
+                symbols = String[]
+                for i in 2:length(cargs)
+                    spath, _ = _walk_import_block(cargs[i])
+                    isempty(spath) || push!(symbols, last(spath))
+                end
+                isempty(path) || push!(acc.imports, InventoryImport(id, kind, path, symbols, alias, parent_module))
+            end
+        else
+            # Non-colon form: each top-level arg (`using A, B`) is its own target.
+            for block in something(args, CSTParser.EXPR[])
+                path, alias = _walk_import_block(block)
+                isempty(path) || push!(acc.imports, InventoryImport(id, kind, path, String[], alias, parent_module))
+            end
+        end
+    elseif _is_include_call(x)  # call named "include" with one argument
+        push!(acc.includes, InventoryInclude(id, get(include_targets_by_offset, offset, nothing), parent_module))
+    elseif CSTParser.ismacrocall(x)
+        if _is_enum_macro(x)   # per macros.jl:55-67: name via _points_to_Base_macro-style check on x.args[1]
+            # x.args[3] is always the enum type name (args[1]=macro name,
+            # args[2]=the macrocall's parameters placeholder, always `nothing`
+            # for `@enum`'s bare/space-separated call syntax); args[4:end] (or
+            # args[4].args when args[4] is a `begin...end` block) are members.
+            margs = x.args
+            if margs !== nothing && length(margs) >= 3
+                tname = _enum_item_name(margs[3])
+                tname === nothing || push!(acc.items, InventoryItem(id, tname, :enum, nothing, String[], parent_module))
+                members = if length(margs) == 4 && CSTParser.headof(margs[4]) === :block
+                    margs[4].args
+                else
+                    margs[4:end]
+                end
+                for member in something(members, CSTParser.EXPR[])
+                    mname = _enum_item_name(member)
+                    mname === nothing || push!(acc.items, InventoryItem(id, mname, :enum_member, nothing, String[], parent_module))
+                end
+            end
+        else
+            mname = _macro_name_string(x.args[1])
+            push!(acc.items, InventoryItem(id, something(mname, ""), :opaque_macrocall, nothing, String[], parent_module))
+        end
+    end
+    return
+end
