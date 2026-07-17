@@ -1916,3 +1916,48 @@ end
     @test any(r -> r.file == types, mi)
     @test any(r -> r.file == utils, mi)
 end
+
+@testitem "file analysis: a nested local closure shadowing a sibling-file datatype stays local" setup=[FileAnalysisWS] begin
+    # Companion to the outer-constructor regression above: the method-extension
+    # rule for a sibling-file datatype must only fire at MODULE/top-level scope,
+    # not inside a nested function. Here `WatchList` is a datatype declared in a
+    # sibling file, but `WatchList() = 5` is a legitimate LOCAL closure inside
+    # `outer()` that deliberately shadows it. In per-file traversal mode the
+    # method-extension branch (which sees the struct only through the module
+    # tree) must NOT fire for this nested scope — otherwise both the closure
+    # definition and the inner `WatchList()` call would misresolve to the
+    # struct's TreeRef instead of the local function binding, matching neither
+    # Julia's semantics nor the whole-closure pass.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "mutable struct WatchList end\n",
+        B => """
+        function outer()
+            WatchList() = 5
+            return WatchList()
+        end
+        """,
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    struct_ref = JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg"])["WatchList"]
+
+    anns = find_identifiers(cst, "WatchList")
+    @test length(anns) == 2   # the closure definition name and the inner call
+    # No occurrence of the shadowing local `WatchList` may resolve to the
+    # sibling struct's TreeRef.
+    for x in anns
+        r = SL.refof(x, meta_dict)
+        @test !(r isa SL.TreeRef)
+        @test !(r isa SL.TreeRef && r.item == struct_ref)
+    end
+    # The inner call resolves to the LOCAL closure binding.
+    call_id = anns[end]
+    @test SL.refof(call_id, meta_dict) isa SL.Binding
+end

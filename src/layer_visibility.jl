@@ -550,10 +550,15 @@ end
 # on a cycle, memoizing would either Salsa-re-enter an in-progress key
 # (infinite recursion — Salsa has no in-progress guard) or cache a
 # cycle-truncated, entry-dependent value (poisoning), so such packages stay on
-# the plain `visited`-threaded path instead. All edge lookups hit memoized
-# leaf queries (`derived_module_tree`/`derived_module_imports`), and this
-# whole helper runs inside `entry`'s own memoized visible-names computation, so
-# its cost is memoized per package.
+# the plain `visited`-threaded path instead. This helper is NOT memoized as a
+# whole: it is called from `_cross_root_visible_names`, which runs in the
+# CONSUMER's `_visible_names_impl_body` (before the routing decision), so for a
+# package imported by N consumers the cycle DFS re-runs once per consumer, not
+# once total. Only the constituent leaf queries it walks
+# (`derived_module_tree`/`derived_module_imports`, via `_wp_out_roots`) are
+# memoized, and only `entry`'s own out-edge guards additionally run inside
+# `entry`'s memoized visible-names computation. The wp graph is tiny, so the
+# repeated DFS is not a perf concern.
 function _wp_subgraph_has_cycle(rt, entry::URI)
     wp_roots = derived_workspace_package_roots(rt)
     onstack = Set{URI}()

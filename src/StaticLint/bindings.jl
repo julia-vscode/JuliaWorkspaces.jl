@@ -421,11 +421,20 @@ function add_binding(x, state, scope=state.scope)
                     else
                         seterror!(x, CannotDefineFuncAlreadyHasValue, meta_dict)
                     end
-                elseif (ctx = enclosing_tree_context(tls)) !== nothing && tree_context_declares_datatype(ctx, name)
+                elseif is_toplevel_scope(tls) && (ctx = enclosing_tree_context(tls)) !== nothing && tree_context_declares_datatype(ctx, name)
                     # Per-file traversal mode: `name` is a DATATYPE declared in
                     # a SIBLING file of this module — visible only through the
                     # module tree, so the `scopehasbinding(tls, name)` arm above
-                    # missed it. This definition is therefore an outer
+                    # missed it. Guarded on `is_toplevel_scope(tls)` for the same
+                    # scope precision as that arm: only a MODULE/top-level
+                    # definition extends the datatype's methods. A nested
+                    # function scope (`tls` is a closure's enclosing func scope)
+                    # may instead legitimately SHADOW the datatype with a local
+                    # closure of the same name, which must stay a local binding
+                    # (`enclosing_tree_context` walks past the closure to the
+                    # module context, so without this guard the branch would
+                    # wrongly fire for such closures too).
+                    # This definition is therefore an outer
                     # constructor / method extension over that datatype, so
                     # apply the same rule as the `isfunction`/`isdatatype` arm:
                     # do nothing, the name resolves (via
