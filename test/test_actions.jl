@@ -409,3 +409,63 @@ end
     @test (e.start.line, e.start.column) == (3, 5)
     @test (e.stop.line, e.stop.column) == (3, 7)
 end
+
+@testitem "Actions: FixMissingRef module-prefix quickfix is not offered on per-file meta" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Sanctioned narrowing pin (per-file migration): FixMissingRef's
+    # module-prefix suggestion works by scanning the toplevel scope's
+    # `.modules` for a module that defines the missing name. The per-file
+    # analysis scope carries NO `.modules` (the whole-closure pass seeded
+    # Base/Core and sibling-file module scopes there; the per-file pass strips
+    # the `:__tree__` tree context after the pass and does not seed Base/Core
+    # into the file scope), so this quickfix is broadly dead in per-file mode.
+    # This pins the current absence so a future change can't silently alter it.
+    project_toml = """
+    name = "FMRTest"
+    uuid = "e2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    # `checked_abs` is a real but UNEXPORTED Base symbol: the old whole-closure
+    # pass had `tls.modules = [:Base, :Core]` and would offer a `Base.` prefix
+    # quickfix; the per-file pass has no `tls.modules` at all.
+    source = """
+    module FMRTest
+    f() = checked_abs(1)
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///fmr/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///fmr/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    uri = URI("file:///fmr/src/FMRTest.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # On `checked_abs` (line 2, col 7), with the "Missing reference" diagnostic
+    # message the predicate keys off already present.
+    idx = string_index(source, 2, 7)
+    diag_messages = ["Missing reference of `checked_abs`."]
+    actions = get_code_actions(jw, uri, idx, diag_messages)
+    ids = [a.id for a in actions]
+    @test !("FixMissingRef" in ids)
+end
