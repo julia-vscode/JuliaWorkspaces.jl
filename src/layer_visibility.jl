@@ -561,3 +561,51 @@ Salsa.@derived function derived_module_visible_names(rt, root, path)
     @debug "derived_module_visible_names" root=root path=path
     return _visible_names_impl(rt, root, path, Set{URI}())
 end
+
+# The id-free per-name face of a `VisibleName`: everything except the
+# id-carrying `item`. A plain NamedTuple — structural (`isequal`) equality
+# over Symbol/Symbol/Vector{String} is what Salsa's cutoff compares.
+const VisibleNameFace = @NamedTuple{kind::Symbol, origin::Symbol, origin_module::Vector{String}}
+
+"""
+    derived_module_visible_names_idfree(rt, root, path::Vector{String}) -> Dict{String,VisibleNameFace}
+
+The id-free face of `derived_module_visible_names`: the same name set with
+`kind`/`origin`/`origin_module`, minus the id-carrying `item`. This is the
+resolution context per-file analyses hit-test against: an item-id shift
+(e.g. reordering two same-kind declarations) changes the FULL dict's value —
+every `VisibleName.item` of the shifted names — but leaves this projection's
+value untouched, so it backdates and analyses that only need "does this name
+exist, and what kind is it" never re-execute. Analyses that need the
+declaring `ItemRef` for a name they actually reference get it through the
+per-name `derived_visible_item`, which confines the re-execution to exactly
+those names' consumers.
+"""
+Salsa.@derived function derived_module_visible_names_idfree(rt, root, path)
+    @debug "derived_module_visible_names_idfree" root=root path=path
+
+    visible = derived_module_visible_names(rt, root, path)
+    return Dict{String,VisibleNameFace}(
+        name => (kind=vn.kind, origin=vn.origin, origin_module=vn.origin_module)
+        for (name, vn) in visible)
+end
+
+"""
+    derived_visible_item(rt, root, path, name::String) -> Union{Nothing,ItemRef}
+
+The declaring `ItemRef` of one visible name — the per-name projection of
+`derived_module_visible_names`'s `item` field. `nothing` when the name is
+not visible at `path` or carries no item (external/env-backed names).
+Id-carrying by design, but per-NAME: an item-id shift re-executes these
+cheap projections for the names a consumer actually asked about, and all
+except the genuinely shifted ones backdate. One Salsa node exists per
+`(root, path, name)` actually referenced — bounded by real references in
+analyzed files.
+"""
+Salsa.@derived function derived_visible_item(rt, root, path, name)
+    @debug "derived_visible_item" root=root path=path name=name
+
+    visible = derived_module_visible_names(rt, root, path)
+    vn = get(visible, name, nothing)
+    return vn === nothing ? nothing : vn.item
+end

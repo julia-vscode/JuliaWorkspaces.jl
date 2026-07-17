@@ -1,8 +1,9 @@
 # Layer 3 of the inventory architecture: the per-file analysis bridge. This
 # file supplies the RESOLUTION CONTEXT that StaticLint's per-file traversal
 # mode (`semantic_pass(...; module_context=...)`) uses to resolve non-local
-# names through the module tree (`derived_module_visible_names`,
-# layer_visibility.jl) instead of the cross-file scope graph.
+# names through the module tree (`derived_module_visible_names_idfree` +
+# per-name `derived_visible_item`, layer_visibility.jl) instead of the
+# cross-file scope graph.
 #
 # `TreeModuleContext` is a handle, deliberately NOT plain data: it holds the
 # Salsa runtime and lives only inside a running analysis (like
@@ -13,21 +14,51 @@
     TreeModuleContext(rt, root::URI, path::Vector{String})
 
 The module-tree resolution handle for one per-file analysis: names that are
-not local to the analyzed file resolve through
-`derived_module_visible_names(rt, root, path)`. `path` is the module the
-file's code lives in (`derived_file_module_path` for the file's top level; a
-CHILD context — path extended by the module name — for each `module`
-declared inside the analyzed file, see
-`StaticLint.seed_module_scope_context!`).
+not local to the analyzed file resolve through the id-free
+`derived_module_visible_names_idfree(rt, root, path)`, with the declaring
+`ItemRef` filled in per referenced name from `derived_visible_item` (see
+`_tree_ref_for`). `path` is the module the file's code lives in
+(`derived_file_module_path` for the file's top level; a CHILD context —
+path extended by the module name — for each `module` declared inside the
+analyzed file, see `StaticLint.seed_module_scope_context!`).
+
+`item_cache` memoizes the per-name `derived_visible_item` lookups for the
+DURATION of one analysis (keyed by `(path, name)`, shared with child
+contexts): the Salsa dependency is recorded once per distinct name, not once
+per reference site. Never stored in a derived value, like the context itself.
 """
 struct TreeModuleContext{RT} <: StaticLint.AbstractModuleContext
     rt::RT
     root::URI
     path::Vector{String}
+    item_cache::Dict{Tuple{Vector{String},String},Union{Nothing,ItemRef}}
 end
 
+TreeModuleContext(rt, root::URI, path::Vector{String}) =
+    TreeModuleContext(rt, root, path, Dict{Tuple{Vector{String},String},Union{Nothing,ItemRef}}())
+
 StaticLint.child_module_context(ctx::TreeModuleContext, name::String) =
-    TreeModuleContext(ctx.rt, ctx.root, vcat(ctx.path, [name]))
+    TreeModuleContext(ctx.rt, ctx.root, vcat(ctx.path, [name]), ctx.item_cache)
+
+# The declaring ItemRef for `name` visible at `ctx.path`, through the
+# analysis-local cache (one `derived_visible_item` call per distinct name).
+function _cached_visible_item(ctx::TreeModuleContext, name::String)
+    return get!(ctx.item_cache, (ctx.path, name)) do
+        derived_visible_item(ctx.rt, ctx.root, ctx.path, name)
+    end
+end
+
+# The TreeRef for a hit against the id-free visible-names face: the item is
+# filled per-name from `derived_visible_item` — but only for names that can
+# actually carry one. `:external_symbol` names never do (the environment has
+# no ItemRefs), and `:unknown` (a colon-list member the target doesn't
+# declare) never does either; skipping the query for them avoids creating
+# per-name Salsa nodes that could only ever answer `nothing`.
+function _tree_ref_for(ctx::TreeModuleContext, name::String, vnf)
+    item = (vnf.kind === :external_symbol || vnf.kind === :unknown) ? nothing :
+        _cached_visible_item(ctx, name)
+    return StaticLint.TreeRef(name, vnf.kind, item, vnf.origin_module)
+end
 
 # The plain-data stand-in for the module `ctx` denotes — what a reference to
 # the module itself (e.g. an import-path component) gets as its ref.
@@ -45,12 +76,17 @@ StaticLint.setref!(x::CSTParser.EXPR, ctx::TreeModuleContext, meta_dict) =
 """
     StaticLint.resolve_ref_from_module(x, ctx::TreeModuleContext, state) -> Bool
 
-Resolve the identifier `x` through the module tree: look its name up in
-`derived_module_visible_names(ctx.rt, ctx.root, ctx.path)` and, on a hit,
-set a plain-data `TreeRef`. Reached with ZERO changes to `resolve_ref`'s
-scope walk: the per-file pass seeds `:__tree__ => ctx` into the root scope's
-(and each in-file module scope's) `.modules` Dict, whose values `resolve_ref`
-already tries via `resolve_ref_from_module` after file-local names miss.
+Resolve the identifier `x` through the module tree: hit-test its name
+against the id-free `derived_module_visible_names_idfree(ctx.rt, ctx.root,
+ctx.path)` and, on a hit, set a plain-data `TreeRef` whose `item` comes from
+the per-name `derived_visible_item` (via `_tree_ref_for`). The split is the
+invalidation contract: an item-id shift elsewhere backdates the id-free face
+and every per-name item except the genuinely shifted ones, so only analyses
+referencing a shifted name re-execute. Reached with ZERO changes to
+`resolve_ref`'s scope walk: the per-file pass seeds `:__tree__ => ctx` into
+the root scope's (and each in-file module scope's) `.modules` Dict, whose
+values `resolve_ref` already tries via `resolve_ref_from_module` after
+file-local names miss.
 """
 function StaticLint.resolve_ref_from_module(x1::CSTParser.EXPR, ctx::TreeModuleContext, state::StaticLint.TraverseState)::Bool
     meta_dict = state.meta_dict
@@ -62,10 +98,10 @@ function StaticLint.resolve_ref_from_module(x1::CSTParser.EXPR, ctx::TreeModuleC
     # exact-key lookup only: macros are stored WITH the `@` prefix throughout
     # the inventory layers, so a macro reference ("@mymac") hits directly and
     # a bare "mymac" against a macro-only name correctly misses.
-    visible = derived_module_visible_names(ctx.rt, ctx.root, ctx.path)
+    visible = derived_module_visible_names_idfree(ctx.rt, ctx.root, ctx.path)
     vn = get(visible, name, nothing)
     vn === nothing && return false
-    StaticLint.setref!(x1, StaticLint.TreeRef(name, vn.kind, vn.item, vn.origin_module), meta_dict)
+    StaticLint.setref!(x1, _tree_ref_for(ctx, name, vn), meta_dict)
     return true
 end
 
@@ -104,14 +140,14 @@ continue into it); anything else visible resolves to its plain-data
 function StaticLint._get_field(par::TreeModuleContext, arg, state, visited=Base.IdSet{Any}())
     name = CSTParser.str_value(arg)
     (name isa String && !isempty(name)) || return nothing
-    visible = derived_module_visible_names(par.rt, par.root, par.path)
+    visible = derived_module_visible_names_idfree(par.rt, par.root, par.path)
     vn = get(visible, name, nothing)
     vn === nothing && return nothing
     if vn.kind === :module
         child = _denoted_tree_module_path(par, name, vn)
-        child !== nothing && return TreeModuleContext(par.rt, par.root, child)
+        child !== nothing && return TreeModuleContext(par.rt, par.root, child, par.item_cache)
     end
-    return StaticLint.TreeRef(name, vn.kind, vn.item, vn.origin_module)
+    return _tree_ref_for(par, name, vn)
 end
 
 # Import-arg marking for a component that resolved to a module context:

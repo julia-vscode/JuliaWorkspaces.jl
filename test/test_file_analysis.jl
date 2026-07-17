@@ -552,6 +552,68 @@ end
     @test get(recv.counts, "derived_file_analysis", 0) == 0
 end
 
+@testitem "derived_file_analysis: a referenced-name id shift re-runs only the analyses that reference it" setup=[FileAnalysisWS] begin
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    d = URI("file:///t/src/d.jl")
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        include("d.jl")
+        end
+        """,
+        A => """
+        a() = 1
+        b() = 2
+        c() = 3
+        """,
+        B => "uc() = c()\n",
+        d => "ua() = a()\n",
+    ))
+    rt = jw.runtime
+
+    # untraced baseline (see the trace-baseline note in test_module_tree.jl)
+    fa_b0 = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+    @test only(filter(o -> o.name == "c", fa_b0.outbound)).target !== nothing
+    fa_d0 = JuliaWorkspaces.derived_file_analysis(rt, ROOT, d)
+    old_a = only(filter(o -> o.name == "a", fa_d0.outbound)).target
+    @test old_a !== nothing
+
+    # swap `a` and `b`: their (positional) item ids swap, `c`'s id is
+    # untouched
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("""
+    b() = 2
+    a() = 1
+    c() = 3
+    """, "julia")))
+
+    # B references only `c` — its per-name item lookup backdates, so the
+    # analysis must not re-execute
+    recv_b = CountReceiver()
+    TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, ROOT, B), recv_b)
+    @test get(recv_b.counts, "derived_file_analysis", 0) == 0
+
+    # D references `a` — its outbound ItemRef changed, so exactly one
+    # re-execution, with the updated target
+    recv_d = CountReceiver()
+    fa_d1 = TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, ROOT, d), recv_d)
+    @test get(recv_d.counts, "derived_file_analysis", 0) == 1
+    new_a = only(filter(o -> o.name == "a", fa_d1.outbound)).target
+    @test new_a !== nothing
+    @test new_a != old_a
+    @test new_a == JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])["a"]
+end
+
 @testitem "derived_file_analysis: no handles or module stores survive in the frozen value" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """
