@@ -202,10 +202,20 @@ end
 # macrocall opaque (one `:opaque_macrocall` item, no descent). Every OTHER
 # macrocall is walked transparently — matching StaticLint's traversal, which
 # processes macro arguments in the enclosing scope.
+#
+# Qualified forms match STATICLINT'S OWN matchers exactly:
+# `is_scope_introducing_macrocall` unwraps `Module.@testset`-style getfields,
+# so the `@testset` family isolates qualified or bare — but
+# `_is_testmodule_macro`/`_is_testsnippet_macro` (macros.jl:335-336) are
+# bare-identifier-only, so a qualified `X.@testmodule` gets no prebuilt
+# scope there, the old traversal descends into it, and the inventory must
+# descend identically.
 function _is_isolated_scope_macrocall(x::CSTParser.EXPR)
     mname = _macro_name_string(x.args[1])
-    return mname == "@testitem" || mname == "@testset" || mname == "@safetestset" ||
-           mname == "@testmodule" || mname == "@testsnippet"
+    (mname == "@testitem" || mname == "@testset" || mname == "@safetestset") && return true
+    bare = x.args[1] isa CSTParser.EXPR && CSTParser.isidentifier(x.args[1]) ?
+        StaticLint.valofid(x.args[1]) : nothing
+    return bare == "@testmodule" || bare == "@testsnippet"
 end
 
 # Walks a non-isolating macrocall's macro ARGUMENTS as top-level items: the
@@ -555,10 +565,16 @@ function _classify_assignment!(acc, x, id, parent_module, kind_override, contain
             push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
         end
     elseif !CSTParser.is_getfield(x.args[1])
-        # Plain identifier lhs. (Other lhs shapes that `mark_binding!` further
-        # unwraps are out of scope for this milestone — `_item_name` returns
-        # `nothing` for them and no item is emitted.)
-        name = _item_name(x.args[1])
+        # Plain identifier lhs, possibly behind a `::` type declaration
+        # (`x::Int = 1`) and/or brackets (`(x) = 1`) — `mark_binding!`
+        # unwraps both, so the inventory must too (spec rule: no blinder
+        # than `mark_bindings!`). A lhs that unwraps to anything other than
+        # an identifier (e.g. a bracketed getfield) still emits nothing.
+        lhs = x.args[1]
+        while lhs isa CSTParser.EXPR && (CSTParser.isbracketed(lhs) || CSTParser.isdeclaration(lhs))
+            lhs = CSTParser.isbracketed(lhs) ? CSTParser.rem_invis(lhs) : CSTParser.rem_decl(lhs)
+        end
+        name = _item_name(lhs)
         if name !== nothing
             push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
         end

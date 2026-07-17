@@ -745,3 +745,43 @@ end
     # isolating macros (testitem family + testset family) leak nothing
     @test isempty(filter(i -> i.name in ("leaky1", "leaky2", "leaky3", "leaky4", "leaky5"), inv.items))
 end
+
+@testitem "inventory parity: typed and parenthesized assignment lhs emit their identifier" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    x::Int = 1
+    (y) = 1
+    const z::Float64 = 2
+    """)
+
+    byname(n) = only(filter(i -> i.name == n, inv.items))
+    @test byname("x").kind === :assignment
+    @test byname("y").kind === :assignment
+    @test byname("z").kind === :const
+end
+
+@testitem "inventory parity: qualified test macros match StaticLint's bare-only special cases" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    TestItems.@testmodule TM begin
+        tm_f() = 1
+    end
+    TestItems.@testsnippet TS begin
+        ts_f() = 1
+    end
+    TestItems.@testitem "t" begin
+        ti_f() = 1
+    end
+    """)
+
+    # StaticLint's `_is_testmodule_macro`/`_is_testsnippet_macro`
+    # (macros.jl:335-336) are bare-identifier-only: a QUALIFIED
+    # `X.@testmodule` gets no prebuilt isolating scope there, so the old
+    # traversal descends into it and binds its contents at module level —
+    # the inventory must descend identically.
+    names = Set(i.name for i in inv.items)
+    @test "tm_f" in names
+    @test "ts_f" in names
+    # `@testitem` (and `@testset`/`@safetestset`) isolate via
+    # `is_scope_introducing_macrocall` (scope.jl:144-153), which DOES unwrap
+    # the qualified form — those stay opaque.
+    @test !("ti_f" in names)
+end
