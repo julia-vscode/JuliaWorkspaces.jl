@@ -189,6 +189,46 @@ end
 # Workspace symbols collection
 # ============================================================================
 
+# Inventory item `kind` → LSP `SymbolKind` integer. Mirrors the value scheme
+# `_binding_kind` uses for DOCUMENT symbols (Function=12, Struct=23, Module=2,
+# Variable=13, …). The OLD workspace-symbols path hard-coded 1 (File) for every
+# result (the LS never distinguished them); serving a real kind from the
+# inventory is the improvement noted in the Task-8 change-list. The
+# (name, uri, range) parity contract does NOT include kind.
+function _item_symbol_kind(kind::Symbol)
+    if kind === :function || kind === :macro
+        return 12  # Function (LSP has no Macro kind)
+    elseif kind === :struct || kind === :mutable_struct || kind === :abstract || kind === :primitive
+        return 23  # Struct (mirrors _binding_kind's DataType → Struct)
+    elseif kind === :enum
+        return 10  # Enum
+    elseif kind === :enum_member
+        return 22  # EnumMember
+    else
+        # :const / :global / :assignment / anything else: the inventory carries
+        # no inferred value type, so fall to Variable, exactly as _binding_kind
+        # does for a typeless binding.
+        return 13  # Variable
+    end
+end
+
+# Match semantics mirror the OLD `startswith(name, query)` filter: case-SENSITIVE
+# PREFIX (verified against `_collect_toplevel_bindings_w_loc`; NOT the
+# case-insensitive substring the plan text guessed). One addition for the M4
+# `@`-macro convention: macro items are `@`-spelled in the inventory ("@mymac"),
+# whereas the old pass returned the bare name ("mymac"), so a bare query must
+# still match — we additionally test the `@`-stripped name. Net effect: a macro
+# is findable by BOTH "mymac" and "@mymac" (old found it by "mymac" only).
+function _symbol_matches_query(name::AbstractString, query::AbstractString)
+    isempty(query) && return true
+    startswith(name, query) && return true
+    startswith(name, "@") && startswith(SubString(name, 2), query) && return true
+    return false
+end
+
+# Retained until Milestone 5 alongside the rest of the old whole-closure pass:
+# no longer used in production (`_get_workspace_symbols` now reads the inventory
+# directly), but the Task-8 parity tests reproduce the old output through it.
 function _collect_toplevel_bindings_w_loc(x::CSTParser.EXPR, meta_dict::MetaDict, pos=0, bindings=Tuple{UnitRange{Int},StaticLint.Binding}[]; query="")
     b = StaticLint.bindingof(x, meta_dict)
     if b isa StaticLint.Binding && b.name isa CSTParser.EXPR && _is_valid_binding_name(b.name) &&
@@ -221,8 +261,12 @@ function _get_document_symbols(runtime, uri::URI)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return DocumentSymbolResult[]
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    # Per-file analysis meta (the inventories refactor) — the collection walk
+    # below already collects top-level bindings of THIS file only (it stops at
+    # non-file/non-module scopes), so it is already per-file semantics; only the
+    # meta SOURCE changes. The per-file analysis runs over the same memoized CST
+    # as `derived_julia_legacy_syntax_tree`, so objectids line up.
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     st = input_text_file(runtime, uri).content
 
@@ -239,21 +283,46 @@ function _get_workspace_symbols(runtime, query::String)
     files = derived_text_files(runtime)
 
     for uri in files
+        # Keep the OLD file gate (no-root files contribute nothing) — but never
+        # run the whole-root static-lint pass. Re-expressing this over the
+        # per-file inventory + position map is the point of the migration: the
+        # old path executed `derived_static_lint_meta_for_root` (the WHOLE root
+        # closure) once PER FILE, a real many-envs sweep cost.
         root = derived_best_root_for_uri(runtime, uri)
         root === nothing && continue
 
-        lint_result = derived_static_lint_meta_for_root(runtime, root)
-        meta_dict = lint_result.meta_dict
-        cst = derived_julia_legacy_syntax_tree(runtime, uri)
+        inv = derived_file_inventory(runtime, uri)
+        (isempty(inv.items) && isempty(inv.modules)) && continue
+        positions = derived_item_positions(runtime, uri)
 
-        bs = _collect_toplevel_bindings_w_loc(cst, meta_dict, query=query)
-        for (rng, b) in bs
+        for it in inv.items
+            # `:opaque_macrocall` rows stand in for isolated-scope macrocalls
+            # (`@testitem`/`@testset`/…); the old bindingof walk collected no
+            # binding for those, so they are not workspace symbols.
+            it.kind === :opaque_macrocall && continue
+            _symbol_matches_query(it.name, query) || continue
+            entry = get(positions, it.id, nothing)
+            entry === nothing && continue
             push!(results, WorkspaceSymbolResult(
-                _get_name_of_binding(b.name),
-                1, # SymbolKind.File (LS uses 1 for all workspace symbols)
+                it.name,
+                _item_symbol_kind(it.kind),
                 uri,
-                _offset_to_position(runtime, uri, first(rng)),
-                _offset_to_position(runtime, uri, last(rng)),
+                _offset_to_position(runtime, uri, entry.offset),
+                _offset_to_position(runtime, uri, entry.offset + entry.expr.span),
+            ))
+        end
+        # Modules live in `inv.modules`, not `inv.items`; the old bindingof walk
+        # collected module names as symbols, so include them to preserve that.
+        for m in inv.modules
+            _symbol_matches_query(m.name, query) || continue
+            entry = get(positions, m.id, nothing)
+            entry === nothing && continue
+            push!(results, WorkspaceSymbolResult(
+                m.name,
+                2, # Module
+                uri,
+                _offset_to_position(runtime, uri, entry.offset),
+                _offset_to_position(runtime, uri, entry.offset + entry.expr.span),
             ))
         end
     end
