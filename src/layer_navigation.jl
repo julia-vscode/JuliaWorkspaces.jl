@@ -146,14 +146,20 @@ end
 # Get module at position
 # ============================================================================
 
-function _get_module_of(s::StaticLint.Scope, ms=String[])
+# The in-file module nesting (outermost first) enclosing scope `s`, walking the
+# per-file scope chain. Per-file meta strips the cross-file `:__tree__`
+# contexts, so this walk yields ONLY the modules defined within this file that
+# enclose the position — the enclosing package/module path prefix comes from
+# `derived_file_module_path` instead (the old whole-closure chain crossed files
+# and needed no such prefix).
+function _in_file_module_names(s::StaticLint.Scope, ms=String[])
     if CSTParser.defines_module(s.expr) && CSTParser.isidentifier(s.expr.args[2])
         pushfirst!(ms, StaticLint.valofid(s.expr.args[2]))
     end
     if CSTParser.parentof(s) isa StaticLint.Scope
-        return _get_module_of(CSTParser.parentof(s), ms)
+        return _in_file_module_names(CSTParser.parentof(s), ms)
     else
-        return isempty(ms) ? "Main" : join(ms, ".")
+        return ms
     end
 end
 
@@ -185,11 +191,15 @@ function _get_module_at(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return "Main"
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
-
+    # Per-file analysis meta gives the in-file module nesting; the enclosing
+    # module-path prefix (the file's splice point in the module tree) comes from
+    # `derived_file_module_path`. Join both: `file_path` ++ in-file names.
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
     scope = _retrieve_scope(x, meta_dict)
-    scope === nothing && return "Main"
+    in_file = scope === nothing ? String[] : _in_file_module_names(scope)
 
-    return _get_module_of(scope)
+    file_path = derived_file_module_path(runtime, root, uri)
+    names = file_path === nothing ? in_file : vcat(file_path, in_file)
+
+    return isempty(names) ? "Main" : join(names, ".")
 end

@@ -288,6 +288,65 @@ function _get_definitions_from_val(x::CSTParser.EXPR, tls::StaticLint.Scope, env
     end
 end
 
+# Kinds whose go-to-definition offers ALL method items (`derived_method_items`),
+# not just the single declaring item: multi-method callables. Everything else
+# with an ItemRef (const/global/assignment/enum member/module) resolves to its
+# one declaring item.
+const _DEF_METHOD_ITEM_KINDS = (:function, :macro)
+
+# Push the definition location of a single inventory item, materialized
+# request-time from its own file (`derived_item_positions` — the volatile leaf,
+# allowed in a request handler). The range spans the whole defining EXPR,
+# matching the old `get_method`-based rendering.
+function _push_item_definition(ref::ItemRef, results, runtime)
+    entry = get(derived_item_positions(runtime, ref.file), ref.id, nothing)
+    entry === nothing && return
+    o = entry.offset
+    push!(results, DefinitionResult(
+        ref.file,
+        _offset_to_position(runtime, ref.file, o),
+        _offset_to_position(runtime, ref.file, o + entry.expr.span),
+    ))
+    return
+end
+
+# Go-to-definition for a name resolved THROUGH the module tree (a plain-data
+# `TreeRef`): materialize its declaring item(s)' positions at the last mile.
+# A function/macro offers every method item of its origin module
+# (`derived_method_items` — go-to-def on a 2-method function lands on both);
+# any other tree-declared kind resolves to its single declaring item. Env
+# stand-ins (`item === nothing`) resolve their store leaf and reuse the
+# store-backed path.
+function _get_definitions_from_tree_ref(tr::StaticLint.TreeRef, tls, env, results, runtime, root::URI)
+    if tr.item === nothing
+        if tr.kind === :external_symbol && !isempty(tr.origin_module)
+            store = _resolve_external_module(runtime, root, tr.origin_module)
+            if store isa SymbolServer.ModuleStore
+                val = get(store.vals, Symbol(tr.name), nothing)
+                val isa SymbolServer.VarRef && (val = StaticLint.maybe_lookup(val, env))
+                val isa SymbolServer.SymStore && tls isa StaticLint.Scope &&
+                    _get_definitions_from_val(val, tls, env, results, runtime)
+            end
+        end
+        return
+    end
+    if tr.kind in _DEF_METHOD_ITEM_KINDS
+        qroot = _method_items_root(runtime, root, tr.origin_module)
+        rendered = false
+        for ref in derived_method_items(runtime, qroot, tr.origin_module, tr.name)
+            before = length(results)
+            _push_item_definition(ref, results, runtime)
+            rendered |= length(results) > before
+        end
+        # Fall back to the single declaring item when the selector yields
+        # nothing (e.g. the name is not a tree method of its origin path).
+        rendered || _push_item_definition(tr.item, results, runtime)
+    else
+        _push_item_definition(tr.item, results, runtime)
+    end
+    return
+end
+
 """
     _get_definitions(runtime, uri, offset)
 
@@ -300,21 +359,35 @@ function _get_definitions(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    # Per-file analysis meta (the inventory architecture's per-file pass), not
+    # the whole-closure static-lint meta: a name declared in a SIBLING file
+    # resolves here as a plain-data `TreeRef`, which is reattached to its
+    # declaring item's position at the last mile. Same env selection as
+    # `derived_file_analysis`.
     project_uri = derived_project_uri_for_root(runtime, root)
-    env = derived_environment(runtime, project_uri)
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
+    env = project_uri !== nothing ? derived_environment(runtime, project_uri) : derived_stdlib_only_env(runtime)
 
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     x = get_expr1(cst, offset)
 
     if x isa CSTParser.EXPR && StaticLint.hasref(x, meta_dict)
         b = StaticLint.refof(x, meta_dict)
-        b = _resolve_shadow_binding(b)
-        b = _canonical_local_definition(b, meta_dict)
         tls = _retrieve_toplevel_scope(x, meta_dict)
-        tls === nothing && return results
-        _get_definitions_from_val(b, tls, env, results, runtime)
+        # A tree-resolved target (directly, or a file-local import binding whose
+        # `.val` is a `TreeRef`) reattaches through the inventory; everything
+        # else — a file-local `Binding`, or a store-backed `FunctionStore`/… —
+        # keeps the old per-file/env path unchanged.
+        tr = b isa StaticLint.TreeRef ? b :
+            (b isa StaticLint.Binding && b.val isa StaticLint.TreeRef) ? b.val : nothing
+        if tr !== nothing
+            _get_definitions_from_tree_ref(tr, tls, env, results, runtime, root)
+        else
+            b = _resolve_shadow_binding(b)
+            b = _canonical_local_definition(b, meta_dict)
+            tls === nothing && return results
+            _get_definitions_from_val(b, tls, env, results, runtime)
+        end
     end
 
     return unique!(results)

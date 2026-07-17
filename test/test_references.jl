@@ -449,3 +449,155 @@ end
         @test defs[1].start.column == 5    # the `a`
     end
 end
+
+@testsnippet DefCrossWS begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_definitions
+    using JuliaWorkspaces.URIs2: URI
+
+    const DEF_PROJECT_TOML = """
+    name = "DefCross"
+    uuid = "e2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    const DEF_MANIFEST_TOML = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    const DEF_ENTRY_URI = URI("file:///defcross/src/DefCross.jl")
+    const DEF_A_URI = URI("file:///defcross/src/a.jl")
+    const DEF_B_URI = URI("file:///defcross/src/b.jl")
+
+    # A three-file package: `b.jl` references names DECLARED in the sibling
+    # `a.jl`, which per-file mode resolves as plain-data `TreeRef`s.
+    function defcross_workspace(a_src::String, b_src::String)
+        entry = """
+        module DefCross
+        include("a.jl")
+        include("b.jl")
+        end
+        """
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///defcross/Project.toml"), SourceText(DEF_PROJECT_TOML, "toml")))
+        add_file!(jw, TextFile(URI("file:///defcross/Manifest.toml"), SourceText(DEF_MANIFEST_TOML, "toml")))
+        add_file!(jw, TextFile(DEF_ENTRY_URI, SourceText(entry, "julia")))
+        add_file!(jw, TextFile(DEF_A_URI, SourceText(a_src, "julia")))
+        add_file!(jw, TextFile(DEF_B_URI, SourceText(b_src, "julia")))
+        return jw
+    end
+end
+
+@testitem "Definitions: cross-file function lands at all method locations" setup=[DefCrossWS] begin
+    a_src = """
+    greet(name) = 1
+    greet(first, last) = 2
+    struct S
+        x
+    end
+    """
+    b_src = "caller(x) = greet(x)\n"
+    jw = defcross_workspace(a_src, b_src)
+
+    off = findfirst("greet(x)", b_src).start  # 1-based index of `greet`
+    defs = get_definitions(jw, DEF_B_URI, off)
+
+    # Both methods of `greet` are offered, both located in the defining file.
+    @test length(defs) == 2
+    @test all(d -> d.uri == DEF_A_URI, defs)
+
+    # Ground truth: the two method items' offsets via derived_item_positions.
+    rt = jw.runtime
+    root = JuliaWorkspaces.derived_best_root_for_uri(rt, DEF_B_URI)
+    qroot = JuliaWorkspaces._method_items_root(rt, root, ["DefCross"])
+    refs = JuliaWorkspaces.derived_method_items(rt, qroot, ["DefCross"], "greet")
+    pos = JuliaWorkspaces.derived_item_positions(rt, DEF_A_URI)
+    expected = sort([JuliaWorkspaces._offset_to_position(rt, DEF_A_URI, pos[r.id].offset) for r in refs], by = p -> (p.line, p.column))
+    got = sort([d.start for d in defs], by = p -> (p.line, p.column))
+    @test got == expected
+end
+
+@testitem "Definitions: cross-file struct lands at its declaration" setup=[DefCrossWS] begin
+    a_src = """
+    greet(name) = 1
+    struct S
+        x
+    end
+    """
+    b_src = "maker() = S(1)\n"
+    jw = defcross_workspace(a_src, b_src)
+
+    off = findfirst("S(1)", b_src).start
+    defs = get_definitions(jw, DEF_B_URI, off)
+    @test length(defs) == 1
+    @test defs[1].uri == DEF_A_URI
+    @test defs[1].start.line == 2   # `struct S` on line 2 of a.jl
+end
+
+@testitem "Definitions: a file-local binding shadows a sibling name" setup=[DefCrossWS] begin
+    a_src = "greet(name) = 1\n"
+    b_src = """
+    function shadow()
+        greet = 99
+        return greet
+    end
+    """
+    jw = defcross_workspace(a_src, b_src)
+
+    # `greet` in `return greet` resolves to the local assignment, not a.jl.
+    off = findlast("greet", b_src).start
+    defs = get_definitions(jw, DEF_B_URI, off)
+    @test length(defs) == 1
+    @test defs[1].uri == DEF_B_URI
+    @test defs[1].start.line == 2   # `greet = 99` on line 2 of b.jl
+end
+
+@testitem "Definitions: qualified sibling-module member resolves cross-file" setup=[DefCrossWS] begin
+    a_src = """
+    module Sib
+    export f
+    f() = 1
+    end
+    """
+    b_src = """
+    using .Sib
+    g() = Sib.f()
+    """
+    jw = defcross_workspace(a_src, b_src)
+
+    off = findfirst("Sib.f()", b_src).start + 4  # index of `f` in `Sib.f()`
+    defs = get_definitions(jw, DEF_B_URI, off)
+    @test length(defs) == 1
+    @test defs[1].uri == DEF_A_URI
+    @test defs[1].start.line == 3   # `f() = 1` on line 3 of a.jl
+end
+
+@testitem "Definitions: local target resolves through the expr-uri map" setup=[DefCrossWS] begin
+    # Rule 3: per-file meta EXPRs belong to the same CST objects
+    # `derived_expr_uri_map` indexes, so `_get_file_loc` works for local
+    # (same-file, Binding-resolved) targets. Assert both the resolution AND the
+    # map indexing invariant it relies on.
+    a_src = "greet(name) = 1\n"
+    b_src = """
+    function withlocal()
+        v = 10
+        return v
+    end
+    """
+    jw = defcross_workspace(a_src, b_src)
+
+    off = findlast("v", b_src).start
+    defs = get_definitions(jw, DEF_B_URI, off)
+    @test length(defs) == 1
+    @test defs[1].uri == DEF_B_URI
+    @test defs[1].start.line == 2   # `v = 10`
+
+    # The per-file meta's CST root IS the object the expr-uri map indexes.
+    rt = jw.runtime
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(rt, DEF_B_URI)
+    m = JuliaWorkspaces.derived_expr_uri_map(rt)
+    @test get(m, objectid(cst), nothing) == DEF_B_URI
+end
