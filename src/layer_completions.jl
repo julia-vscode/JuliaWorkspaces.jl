@@ -138,6 +138,9 @@ struct _CompletionState
     completion_mode::Symbol
     using_stmts::Dict{String,Any}
     workspace  # JuliaWorkspace — untyped to avoid circular ref
+    rt         # Salsa runtime (nothing in isolated unit tests)
+    root::Union{Nothing,URI}                   # best root for `uri`
+    module_path::Union{Nothing,Vector{String}} # module path the file splices into
     item_meta::Dict{String,Tuple{String,Int}}  # label => (query, priority), for ranking
 end
 
@@ -739,6 +742,52 @@ function _get_import_root(x::CSTParser.EXPR)
     return nothing
 end
 
+# The member source the import path's root component resolved to, from the
+# per-file meta: a `SymbolServer.ModuleStore` for env-backed modules
+# (directly, or through the plain-data `TreeRef` stand-ins the per-file meta
+# stores post-strip), or a `(root, path)` tuple for a module of a workspace
+# tree. `nothing` when the component is unresolved.
+function _import_root_member_source(state::_CompletionState, import_root)
+    import_root === nothing && return nothing
+    r = StaticLint.refof(import_root, state.meta_dict)
+    r isa StaticLint.Binding && (r = r.val)
+    if r isa SymbolServer.ModuleStore
+        return r
+    elseif r isa StaticLint.TreeRef
+        (state.rt === nothing || state.root === nothing) && return nothing
+        rt = state.rt
+        if r.kind === :module
+            return _tree_module_target(rt, state.root, r)
+        elseif r.kind === :external_module
+            return _resolve_external_module(rt, state.root, vcat(r.origin_module, [r.name]))
+        elseif r.kind === :external_symbol && !isempty(r.origin_module)
+            p = r.name == r.origin_module[end] ? r.origin_module : vcat(r.origin_module, [r.name])
+            return _resolve_external_module(rt, state.root, p)
+        end
+    end
+    return nothing
+end
+
+# Member completions for `using`/`import X: <partial>` against the resolved
+# member source (see `_import_root_member_source`).
+function _import_member_completions(src, partial, state::_CompletionState)
+    if src isa SymbolServer.ModuleStore
+        for (n, m) in src.vals
+            n = String(n)
+            if is_completion_match(n, partial) && !startswith(n, "#")
+                _add_completion_item(state, CompletionResultItem(
+                    n, _completion_kind(m),
+                    _completion_details_description(m),
+                    m isa SymbolServer.SymStore ? _sanitize_docstring(m.doc) : n,
+                    _texteditfor(state, partial, n)), partial, _PRIO_STORE)
+            end
+        end
+    else
+        troot, tpath = src
+        _visibility_member_completions(state.rt, troot, tpath, partial, state; priority=_PRIO_STORE)
+    end
+end
+
 function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
     # 1) Relative import completions
     depth = _relative_dot_depth_at(state.st.content, state.offset)
@@ -773,17 +822,9 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
 
     if (t.kind == Tokens.WHITESPACE && pt.kind in (Tokens.USING, Tokens.IMPORT, Tokens.IMPORTALL, Tokens.COMMA, Tokens.COLON)) ||
         (t.kind in (Tokens.COMMA, Tokens.COLON))
-        if import_root !== nothing && StaticLint.refof(import_root, state.meta_dict) isa SymbolServer.ModuleStore
-            for (n, m) in StaticLint.refof(import_root, state.meta_dict).vals
-                n = String(n)
-                if is_completion_match(n, t.val) && !startswith(n, "#")
-                    _add_completion_item(state, CompletionResultItem(
-                        n, _completion_kind(m),
-                        _completion_details_description(m),
-                        m isa SymbolServer.SymStore ? _sanitize_docstring(m.doc) : n,
-                        _texteditfor(state, t.val, n)), t.val, _PRIO_STORE)
-                end
-            end
+        member_source = _import_root_member_source(state, import_root)
+        if member_source !== nothing
+            _import_member_completions(member_source, t.val, state)
         else
             for (n, m) in symbols
                 n = String(n)
@@ -815,17 +856,9 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                 end
             end
         else
-            if import_root !== nothing && StaticLint.refof(import_root, state.meta_dict) isa SymbolServer.ModuleStore
-                for (n, m) in StaticLint.refof(import_root, state.meta_dict).vals
-                    n = String(n)
-                    if is_completion_match(n, t.val) && !startswith(n, "#")
-                        _add_completion_item(state, CompletionResultItem(
-                            n, _completion_kind(m),
-                            _completion_details_description(m),
-                            m isa SymbolServer.SymStore ? _sanitize_docstring(m.doc) : n,
-                            _texteditfor(state, t.val, n)), t.val, _PRIO_STORE)
-                    end
-                end
+            member_source = _import_root_member_source(state, import_root)
+            if member_source !== nothing
+                _import_member_completions(member_source, t.val, state)
             else
                 for (n, m) in symbols
                     n = String(n)
@@ -902,17 +935,266 @@ function _add_field_completion(state::_CompletionState, spartial, name::String, 
     end
 end
 
+# ----------------------------------------------------------------------------
+# Module-tree visibility bridge (per-file meta)
+#
+# The per-file analysis meta (`derived_file_analysis(...).meta`) carries only
+# THIS file's scopes — module contexts are stripped, so the scope-chain walk
+# no longer reaches module-level names from sibling files or `using`/`import`
+# bring-ins. The helpers below bridge that gap from the visibility layer
+# (`derived_module_visible_names`) and resolve the plain-data
+# `StaticLint.TreeRef` stand-ins the per-file meta stores for names resolved
+# through the module tree or the environment.
+# ----------------------------------------------------------------------------
+
+# CompletionKinds value for an inventory/visibility item kind.
+function _completion_kind_for_visible(kind::Symbol)
+    if kind === :module
+        return CompletionKinds.Module
+    elseif kind in (:struct, :mutable_struct, :abstract, :primitive, :enum)
+        return CompletionKinds.Struct
+    elseif kind in (:function, :macro)
+        return CompletionKinds.Method
+    else
+        return CompletionKinds.Variable
+    end
+end
+
+# Label/insert text for a name coming from the inventory layers (raw strings,
+# macros stored WITH their `@`): macro names stay raw, other non-identifier
+# names get var"..." quoting so inserting them produces valid code.
+function _tree_name_label(n::AbstractString)
+    if startswith(n, "@")
+        tail = SubString(n, nextind(n, firstindex(n)))
+        return (!isempty(tail) && Base.isidentifier(tail)) ? String(n) : _var_wrap(n)
+    end
+    return _var_quoted_label(n)
+end
+
+# The (root, path) of the module a module-kinded `TreeRef` denotes: the same
+# two-candidate `origin_module` validation as `module_context_at`
+# (extended path first), then cross-root as a workspace package
+# (mirroring `_workspace_package_context`). `nothing` when the ref denotes no
+# known module.
+function _tree_module_target(rt, root, tr::StaticLint.TreeRef)
+    extended = vcat(tr.origin_module, [tr.name])
+    derived_module_exists(rt, root, extended) && return (root, extended)
+    if !isempty(tr.origin_module) && derived_module_exists(rt, root, tr.origin_module)
+        return (root, tr.origin_module)
+    end
+    roots = derived_workspace_package_roots(rt)
+    for cand in (extended, tr.origin_module)
+        isempty(cand) && continue
+        entry = get(roots, cand[1], nothing)
+        entry === nothing && continue
+        derived_module_exists(rt, entry, cand) && return (entry, cand)
+    end
+    return nothing
+end
+
+# Add one visibility-dict entry as a completion item. For `:external_symbol`
+# names the member store is looked up in the origin module's env store (via
+# `store_cache`, one resolution per origin path) so kind/docs match what the
+# old store-backed path produced.
+function _add_visible_name_completion(state::_CompletionState, rt, root, name::String, vn, spartial, priority::Int, store_cache)
+    label = _tree_name_label(name)
+    stripped_partial = _strip_var_partial(spartial)
+    possible_names = String[]
+    if (is_completion_match(name, stripped_partial) ||
+        (label != name && is_completion_match(label, spartial))) && label != spartial
+        push!(possible_names, label)
+    end
+    if (nn = _string_macro_altname(name); nn !== nothing) && is_completion_match(nn, spartial)
+        push!(possible_names, nn)
+    end
+    isempty(possible_names) && return
+
+    kind = _completion_kind_for_visible(vn.kind)
+    detail = nothing
+    documentation = nothing
+    if vn.kind === :external_symbol
+        store = get!(store_cache, vn.origin_module) do
+            _resolve_external_module(rt, root, vn.origin_module)
+        end
+        val = store isa SymbolServer.ModuleStore ? get(store.vals, Symbol(name), nothing) : nothing
+        if val isa SymbolServer.VarRef
+            val = SymbolServer._lookup(val, _getsymbols(state), true)
+        end
+        if val !== nothing
+            kind = _completion_kind(val)
+            detail = _completion_details_description(val)
+            documentation = val isa SymbolServer.SymStore ? _sanitize_docstring(val.doc) : nothing
+        end
+    end
+    foreach(possible_names) do nn
+        _add_completion_item(state, CompletionResultItem(
+            nn, kind, detail, documentation,
+            _texteditfor(state, spartial, nn)), spartial, priority)
+    end
+end
+
+# All names visible in module `tpath` of `troot`'s tree, as completion items.
+# Used for dot-completion on tree-module refs and for member completions in
+# import statements. NO export gating: the old whole-closure behavior
+# (probe-verified) offered ALL names of a workspace module's scope, and
+# `Mod.name` access works for any name resolvable inside `Mod`.
+function _visibility_member_completions(rt, troot, tpath::Vector{String}, spartial, state::_CompletionState; priority::Int=_PRIO_LOCAL_BASE)
+    visible = derived_module_visible_names(rt, troot, tpath)
+    store_cache = Dict{Vector{String},Any}()
+    for (name, vn) in visible
+        _add_visible_name_completion(state, rt, troot, name, vn, spartial, priority, store_cache)
+    end
+end
+
+# Names spliced into an IN-FILE module from elsewhere (includes inside the
+# module, `using`/`import` bring-ins): merged from the visibility dict on top
+# of the module's own (file-local) scope names.
+function _merge_infile_module_visibility(modexpr::CSTParser.EXPR, spartial, state::_CompletionState)
+    (state.rt === nothing || state.root === nothing || state.module_path === nothing) && return
+    names = _in_file_module_names(modexpr, state.meta_dict)
+    isempty(names) && return
+    _visibility_member_completions(state.rt, state.root, vcat(state.module_path, names), spartial, state)
+end
+
+# The module-level completion append for the unqualified scope-chain walk:
+# names from the visibility dict of the module the cursor's position splices
+# into (rule 1), plus Base/Core exported names from the env stores (the old
+# pass read them from the seeded `scope.modules`; the per-file meta has them
+# stripped), plus the stores of `using`-ed external modules (for the
+# unexported-name completions of `:import`/`:qualify` modes). File-local
+# bindings shadow same-named visibility entries via `_add_completion_item`'s
+# label dedupe — the scope walk has already run. The enclosing module's own
+# self-binding is emitted at most once for the same reason (rule 4).
+function _append_module_level_completions(x::CSTParser.EXPR, spartial, state::_CompletionState; depth::Int=0)
+    (state.rt === nothing || state.root === nothing || state.module_path === nothing) && return
+    rt = state.rt
+    root = state.root
+    path = vcat(state.module_path, _in_file_module_names(x, state.meta_dict))
+
+    visible = derived_module_visible_names(rt, root, path)
+    store_cache = Dict{Vector{String},Any}()
+    ext_origins = Set{Vector{String}}()
+    for (name, vn) in visible
+        vn.origin === :using_external && push!(ext_origins, vn.origin_module)
+        # declared/import-bound names rank like the old module-scope bindings;
+        # `using` bring-ins rank like the old scope.modules stores
+        priority = (vn.origin === :declared || vn.origin === :import_binding) ?
+            _PRIO_LOCAL_BASE + depth : _PRIO_MODULE_BASE + depth
+        _add_visible_name_completion(state, rt, root, name, vn, spartial, priority, store_cache)
+    end
+
+    # Base/Core exported names from the env stores, as before
+    symbols = _getsymbols(state)
+    for mname in (:Base, :Core)
+        if haskey(symbols, mname)
+            _collect_completions(symbols[mname], spartial, state, false; priority=_PRIO_MODULE_BASE + depth)
+        end
+    end
+
+    # `using`-ed external module stores: exported names are already covered by
+    # the visibility entries above (label dedupe drops the duplicates); this
+    # pass contributes the unexported names offered in `:import`/`:qualify`
+    # modes, matching the old scope.modules behavior.
+    for origin in ext_origins
+        store = _resolve_external_module(rt, root, origin)
+        store isa SymbolServer.ModuleStore || continue
+        _collect_completions(store, spartial, state, false; priority=_PRIO_MODULE_BASE + depth)
+    end
+end
+
+# Dot-completion through a plain-data `TreeRef` LHS (the per-file meta's
+# stand-in for module/env-backed refs), mirroring
+# `StaticLint.qualified_module_target`'s kind dispatch:
+# - `:module` — a module of a workspace tree: enumerate its visible names.
+# - `:external_module` — the env-store stand-in (post-strip `Base` etc.):
+#   enumerate the store, as the old ModuleStore refs did.
+# - `:external_symbol` — may denote an env module bound by a whole-module
+#   `using`/`import` (self-named: the origin path IS the module path;
+#   otherwise the name may extend it).
+function _tree_ref_dot_completion(tr::StaticLint.TreeRef, spartial, state::_CompletionState)
+    (state.rt === nothing || state.root === nothing) && return
+    rt = state.rt
+    if tr.kind === :module
+        target = _tree_module_target(rt, state.root, tr)
+        target === nothing && return
+        _visibility_member_completions(rt, target[1], target[2], spartial, state)
+    elseif tr.kind === :external_module
+        store = _resolve_external_module(rt, state.root, vcat(tr.origin_module, [tr.name]))
+        store isa SymbolServer.ModuleStore && _collect_completions(store, spartial, state, true)
+    elseif tr.kind === :external_symbol && !isempty(tr.origin_module)
+        path = tr.name == tr.origin_module[end] ? tr.origin_module : vcat(tr.origin_module, [tr.name])
+        store = _resolve_external_module(rt, state.root, path)
+        store isa SymbolServer.ModuleStore && _collect_completions(store, spartial, state, true)
+    end
+end
+
+# The struct-kind `TreeRef` a binding's declared/inferred type traces to, or
+# `nothing`. The per-file pass cannot carry a `TreeRef` in `Binding.type`
+# (see `declared_type_is_tree_backed`), so the type is read off the binding's
+# defining EXPR: a `::` annotation, a type-asserted assignment RHS, or a
+# constructor-call assignment RHS whose callee resolved to a struct-kind
+# `TreeRef`. Mirrors `declared_type_is_tree_backed`'s annotation unwrapping.
+function _tree_struct_ref_of_binding(b::StaticLint.Binding, meta_dict)
+    v = b.val
+    v isa CSTParser.EXPR || return nothing
+    t = nothing
+    if v.head isa CSTParser.EXPR && CSTParser.valof(v.head) == "::" && v.args !== nothing && length(v.args) == 2
+        t = v.args[2]
+    elseif CSTParser.isassignment(v) && v.args !== nothing && length(v.args) == 2
+        rhs = v.args[2]
+        if rhs isa CSTParser.EXPR && rhs.head isa CSTParser.EXPR && CSTParser.valof(rhs.head) == "::" && rhs.args !== nothing && length(rhs.args) == 2
+            t = rhs.args[2]
+        elseif rhs isa CSTParser.EXPR && CSTParser.iscall(rhs) && rhs.args !== nothing && length(rhs.args) >= 1
+            t = rhs.args[1]
+        end
+    end
+    t === nothing && return nothing
+    if CSTParser.iscurly(t) && t.args !== nothing && length(t.args) >= 1
+        t = t.args[1]
+    end
+    if CSTParser.is_getfield_w_quotenode(t)
+        t = t.args[2].args[1]
+    end
+    r = StaticLint.refof(t, meta_dict)
+    return (r isa StaticLint.TreeRef && r.kind in (:struct, :mutable_struct)) ? r : nothing
+end
+
+# Field completions for a struct-kind `TreeRef`: the field names come from
+# the declaring file's inventory item (matched on BOTH id and name — ids can
+# be shared between sibling items, see `_declared_item_kind`).
+function _tree_struct_field_completions(tr::StaticLint.TreeRef, spartial, state::_CompletionState)
+    state.rt === nothing && return
+    tr.item === nothing && return
+    inv = derived_file_inventory(state.rt, tr.item.file)
+    for item in inv.items
+        if item.id == tr.item.id && item.name == tr.name
+            for f in item.field_names
+                _add_field_completion(state, spartial, f)
+            end
+            return
+        end
+    end
+end
+
 function _get_dot_completion(px, spartial, state::_CompletionState) end
 function _get_dot_completion(px::CSTParser.EXPR, spartial, state::_CompletionState)
     px === nothing && return
     r = StaticLint.refof(px, state.meta_dict)
     if r isa StaticLint.Binding
-        if r.val isa SymbolServer.ModuleStore
+        if r.val isa StaticLint.TreeRef
+            # import-bound module (`import .Sib`) or the stripped stand-in of
+            # an env module store
+            _tree_ref_dot_completion(r.val, spartial, state)
+        elseif r.val isa SymbolServer.ModuleStore
             _collect_completions(r.val, spartial, state, true)
         elseif r.val isa CSTParser.EXPR && CSTParser.defines_module(r.val) && StaticLint.scopeof(r.val, state.meta_dict) isa StaticLint.Scope
             _collect_completions(StaticLint.scopeof(r.val, state.meta_dict), spartial, state, true)
+            # names spliced into the in-file module from other files/imports
+            _merge_infile_module_visibility(r.val, spartial, state)
         elseif _is_rebinding_of_module(px, state.meta_dict)
-            _collect_completions(StaticLint.scopeof(StaticLint.refof(r.val.args[2], state.meta_dict).val, state.meta_dict), spartial, state, true)
+            modexpr = StaticLint.refof(r.val.args[2], state.meta_dict).val
+            _collect_completions(StaticLint.scopeof(modexpr, state.meta_dict), spartial, state, true)
+            _merge_infile_module_visibility(modexpr, spartial, state)
         elseif r.type isa SymbolServer.DataTypeStore
             for a in r.type.fieldnames
                 _add_field_completion(state, spartial, String(a))
@@ -927,7 +1209,13 @@ function _get_dot_completion(px::CSTParser.EXPR, spartial, state::_CompletionSta
             for (a, label) in _struct_field_names(r.type.val)
                 _add_field_completion(state, spartial, a, label)
             end
+        elseif (tsr = _tree_struct_ref_of_binding(r, state.meta_dict)) !== nothing
+            # a variable whose type traces to a struct declared in another
+            # file (a struct-kind TreeRef): fields from the inventory
+            _tree_struct_field_completions(tsr, spartial, state)
         end
+    elseif r isa StaticLint.TreeRef
+        _tree_ref_dot_completion(r, spartial, state)
     elseif r isa SymbolServer.ModuleStore
         _collect_completions(r, spartial, state, true)
     end
@@ -1028,6 +1316,12 @@ function _collect_completions(x::CSTParser.EXPR, spartial, state::_CompletionSta
     end
     if CSTParser.parentof(x) !== nothing && !CSTParser.defines_module(x)
         return _collect_completions(CSTParser.parentof(x), spartial, state, inclexported, dotcomps; depth=depth + 1)
+    end
+    # the walk ended at the file's root scope or an enclosing in-file module:
+    # the per-file meta reaches no further, so module-level names come from
+    # the visibility layer (and Base/Core from the env stores)
+    if !inclexported && !dotcomps
+        _append_module_level_completions(x, spartial, state; depth=depth)
     end
 end
 
@@ -1181,12 +1475,16 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
     root = derived_best_root_for_uri(rt, uri)
     if root !== nothing
         project_uri = derived_project_uri_for_root(rt, root)
-        lint_result = derived_static_lint_meta_for_root(rt, root)
-        meta_dict = lint_result.meta_dict
-        env = project_uri !== nothing ? derived_environment(rt, project_uri) : _stdlib_only_env()
+        # per-file meta: this file's own scopes/bindings/refs only (module
+        # contexts stripped) — module-level names are appended from the
+        # visibility layer, see `_append_module_level_completions`
+        meta_dict = derived_file_analysis(rt, root, uri).meta
+        module_path = derived_file_module_path(rt, root, uri)
+        env = project_uri !== nothing ? derived_environment(rt, project_uri) : derived_stdlib_only_env(rt)
     else
         meta_dict = _empty_hover_meta_dict
         env = _empty_hover_env
+        module_path = nothing
     end
 
     x = _get_expr(cst, offset)
@@ -1214,6 +1512,7 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
         offset, end_offset,   # start_offset (cursor), end_offset
         x, cst, uri, st, meta_dict, env,
         completion_mode, using_stmts, workspace,
+        rt, root, module_path,
         Dict{String,Tuple{String,Int}}()
     )
 
