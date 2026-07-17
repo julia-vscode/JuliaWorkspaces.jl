@@ -860,8 +860,9 @@ end
     # one re-execution
     @test get(recv.counts, "derived_module_tree", 0) == 1
     # `derived_module_names` re-executes (its dependency's value changed) but
-    # BACKDATES: the name→kind set is unchanged, so its consumer early-exits
-    @test get(recv.counts, "derived_module_names", 0) >= 1
+    # BACKDATES: the name→kind set is unchanged, so its consumer early-exits.
+    # Exactly once: only ["MainPkg"]'s names were pulled in this scenario.
+    @test get(recv.counts, "derived_module_names", 0) == 1
     @test get(recv.counts, "probe_names", 0) == 0
 
     # sanity: the ids really did shift (this is the fixture the fix-wave

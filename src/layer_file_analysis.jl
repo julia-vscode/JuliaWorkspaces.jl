@@ -383,6 +383,13 @@ end
 #   binding val carries the tree target. These are counted under the
 #   TreeRef's own (SOURCE) name so M4's "who references X" aggregation sees
 #   them.
+# Aliased names therefore surface under DIFFERENT row names depending on
+# where the use sits relative to the file boundary: uses in a file that
+# imported `f as g` CROSS-FILE (through the tree's visible names) appear as
+# `g` rows, while the import statement's own components in the declaring
+# file appear under the source name `f` — the two rows carry the SAME
+# declaring `ItemRef`, so an M4 "who references X" aggregation must join on
+# `target`, never on the row name.
 # The nameless root-context stand-in (`TreeRef("", :module, ...)`, produced
 # for import components denoting the synthetic tree root) is skipped as
 # noise.

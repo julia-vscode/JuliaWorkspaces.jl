@@ -222,11 +222,14 @@ end
 # `_BringIn`), for an explicit symbol list (`using`/`import X: a, b`) against
 # a fully-resolved (never `:unresolved`) target. A member naming the target
 # module ITSELF (`using Compiler: Compiler as CC`) resolves to the module's
-# self-binding — checked FIRST, since Julia's self-binding precludes any
-# same-named declared member. A member not found in the target's own local
-# names (regardless of sort) still gets bound — real Julia binds the name
-# lexically even when it turns out to be wrong — but with `kind = :unknown,
-# item = nothing`.
+# self-binding — checked FIRST. (Note this is a precedence CHOICE, not an
+# impossibility argument: Julia 1.12+ allows a same-named declaration inside
+# the module — `struct Foo` in `module Foo` — replacing the self-binding.
+# Preferring the module keeps the far more common `X: X as Y` alias pattern
+# working; a same-named inner declaration loses this tiebreak.) A member not
+# found in the target's own local names (regardless of sort) still gets
+# bound — real Julia binds the name lexically even when it turns out to be
+# wrong — but with `kind = :unknown, item = nothing`.
 function _member_lookup(rt, root, target::ImportTarget, member_name::String, visited::Set{URI})
     tp = target.path
     if target.sort === :tree
