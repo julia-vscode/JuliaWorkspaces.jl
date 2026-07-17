@@ -150,6 +150,12 @@ types; the LanguageServer package is not modified.
 include site in source order (Julia splices twice); the `DuplicateInclude` diagnostic
 already flags such code.
 
+**Sanctioned divergence:** a relative wildcard import of an unindexable external module
+(e.g. `using ..AutoHashEquals` where the parent binds the module via its own import)
+suppresses missing-ref hints in scope, exactly like the direct form (`using AutoHashEquals`)
+always has. The old pass never resolved the relative spelling, so the suppression applied
+to one spelling but not the other — an artifact, not a feature (user-ruled 2026-07-17).
+
 ## Non-goals
 
 - No staleness/fast-path mechanisms. Requests are always exact.
