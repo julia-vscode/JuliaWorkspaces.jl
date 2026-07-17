@@ -1632,3 +1632,141 @@ end
     fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
     @test !any(d -> occursin("unique_files", d.message), fa.diagnostics)
 end
+
+# --- derived_new_static_lint_diagnostics: the per-file consumer face --------
+# The uri-level query the diagnostics layer switches onto in M4: for every
+# root the file belongs to, union that root's per-file analysis diagnostics
+# (cross-root dedup = the old `derived_static_lint_diagnostics` behavior).
+
+@testitem "derived_new_static_lint_diagnostics: matches the old per-uri query on a clean fixture" setup=[FileAnalysisWS] begin
+    proj = URI("file:///t/parity/Project.toml")
+    manifest = URI("file:///t/parity/Manifest.toml")
+    src = URI("file:///t/parity/src/ParityPkg.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(proj, SourceText("""
+    name = "ParityPkg"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0011"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(manifest, SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(src, SourceText("""
+    module ParityPkg
+    f(x) = x == nothing
+    g() = undefined_ref_xyz()
+    end
+    """, "julia")))
+    rt = jw.runtime
+
+    new = JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, src)
+    old = JuliaWorkspaces.derived_static_lint_diagnostics(rt, src)
+
+    # both cover the missing ref and the nothing-equality lint hint ...
+    @test any(d -> occursin("undefined_ref_xyz", d.message), new)
+    @test any(d -> occursin("nothing", d.message), new)
+    # ... and the two sets are byte-identical (no sanctioned divergence here)
+    @test new == old
+    @test new isa Set{JuliaWorkspaces.Diagnostic}
+end
+
+@testitem "derived_new_static_lint_diagnostics: a file in two roots unions both roots' analyses" setup=[FileAnalysisWS] begin
+    root1 = URI("file:///t/two/src/R1.jl")
+    root2 = URI("file:///t/two/src/R2.jl")
+    sib1 = URI("file:///t/two/src/sib1.jl")
+    sib2 = URI("file:///t/two/src/sib2.jl")
+    shared = URI("file:///t/two/src/shared.jl")
+    jw = ws_with(Dict(
+        # root1's tree resolves n1 (via sib1) but not n2
+        root1 => """
+        module R1
+        include("sib1.jl")
+        include("shared.jl")
+        end
+        """,
+        # root2's tree resolves n2 (via sib2) but not n1
+        root2 => """
+        module R2
+        include("sib2.jl")
+        include("shared.jl")
+        end
+        """,
+        sib1 => "n1() = 1\n",
+        sib2 => "n2() = 2\n",
+        shared => "use() = n1() + n2()\n",
+    ))
+    rt = jw.runtime
+
+    @test JuliaWorkspaces.derived_roots_for_uri(rt, shared) == Set([root1, root2])
+
+    res = JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, shared)
+
+    d1 = JuliaWorkspaces.derived_file_analysis(rt, root1, shared).diagnostics
+    d2 = JuliaWorkspaces.derived_file_analysis(rt, root2, shared).diagnostics
+
+    # each root sees exactly one of the two names as missing ...
+    @test any(d -> occursin("n2", d.message), d1) && !any(d -> occursin("n1", d.message), d1)
+    @test any(d -> occursin("n1", d.message), d2) && !any(d -> occursin("n2", d.message), d2)
+    # ... and the query is precisely the union across both roots
+    @test res == union(Set(d1), Set(d2))
+    @test any(d -> occursin("n1", d.message), res)
+    @test any(d -> occursin("n2", d.message), res)
+end
+
+@testitem "derived_new_static_lint_diagnostics: a file in no root yields an empty set" setup=[FileAnalysisWS] begin
+    # A mutual include cycle with no external entry: neither file is a root
+    # (both are included), so there are no roots at all.
+    a = URI("file:///t/none/a.jl")
+    b = URI("file:///t/none/b.jl")
+    jw = ws_with(Dict(
+        a => "include(\"b.jl\")\nfa() = 1\n",
+        b => "include(\"a.jl\")\nfb() = 1\n",
+    ))
+    rt = jw.runtime
+
+    @test isempty(JuliaWorkspaces.derived_roots_for_uri(rt, a))
+    res = JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, a)
+    @test res isa Set{JuliaWorkspaces.Diagnostic}
+    @test isempty(res)
+end
+
+@testitem "derived_new_static_lint_diagnostics: a sibling body edit does not re-execute the query for another file" setup=[FileAnalysisWS] begin
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "afunc(x) = x + 1\n",
+        B => "bcaller() = afunc(1)\n",
+    ))
+    rt = jw.runtime
+
+    # untraced baseline (cold-cache fill is not the measurement)
+    JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, A)
+    JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, B)
+
+    # body edit in the sibling B: A's per-file analysis (and its consumer
+    # query) depend on neither B's CST nor anything B's edit backdates
+    JuliaWorkspaces.update_file!(jw, TextFile(B, SourceText("bcaller() = afunc(2)\n", "julia")))
+
+    recv = CountReceiver()
+    TL.with_tracing(() -> JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, A), recv)
+    @test get(recv.counts, "derived_new_static_lint_diagnostics", 0) == 0
+    @test get(recv.counts, "derived_file_analysis", 0) == 0
+end

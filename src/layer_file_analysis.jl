@@ -648,3 +648,33 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
 
     return FileAnalysis(meta_dict, outbound, diagnostics)
 end
+
+"""
+    derived_new_static_lint_diagnostics(rt, uri) -> Set{Diagnostic}
+
+The per-file consumer face of static-lint diagnostics: for every root `uri`
+belongs to (`derived_roots_for_uri`), take that root's per-file analysis
+diagnostics (`derived_file_analysis(rt, root, uri).diagnostics`) and union
+them into a `Set`. The cross-root union/dedup reproduces the old
+`derived_static_lint_diagnostics` behavior exactly — the same diagnostic can
+be produced from multiple roots via includes, and a file in no root yields
+an empty set. The per-file provenance is what makes a per-keystroke edit cost
+one analysis (the edited file's own) instead of a whole-closure re-lint.
+
+Test-setup parity: the whole-closure pass feeds `derived_test_setup_bindings`
+into `semantic_pass(...; test_setups=…)`; the per-file pass
+(`derived_file_analysis`) passes none. This is behavior-identical TODAY
+because test-setup detection has a verified pre-existing off-by-one (the
+`args[2]` line-info placeholder — setups are never recognized on this
+lineage). Do NOT fix the off-by-one here: it re-opens the stale-EXPR channel;
+it is a ledgered follow-up.
+"""
+Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
+    @debug "derived_new_static_lint_diagnostics" uri=uri
+
+    res = Set{Diagnostic}()
+    for root in derived_roots_for_uri(rt, uri)
+        union!(res, derived_file_analysis(rt, root, uri).diagnostics)
+    end
+    return res
+end

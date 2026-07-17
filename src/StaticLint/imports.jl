@@ -411,7 +411,18 @@ function first_unresolved_import_component(path::EXPR, meta_dict)
         haserror(arg, meta_dict) && return nothing
         isoperator(arg) && valof(arg) == "." && continue
         hasref(arg, meta_dict) || return arg
-        is_synthetic_import_binding(refof(arg, meta_dict)) && return arg
+        r = refof(arg, meta_dict)
+        # Per-file traversal mode only: a module-path component that resolved
+        # to the `:external_symbol` tree stand-in (an UNINDEXED external module
+        # brought in only as a bare name — no ItemRef, item === nothing) is
+        # still unresolved for statement-level reporting. Without this, the
+        # colon-import of such a module (`using NotIndexed: (*)`) would look
+        # resolved on its module path and move the UnresolvedImport error onto
+        # a listed member, matching the whole-closure pass's "Failed to resolve
+        # `<module>`" outcome. Only the tree context ever produces `TreeRef`s,
+        # so this clause is inert on the whole-closure pass.
+        r isa TreeRef && r.kind === :external_symbol && return arg
+        is_synthetic_import_binding(r) && return arg
     end
     return nothing
 end

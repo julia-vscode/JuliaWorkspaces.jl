@@ -146,7 +146,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         end
 
         if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "static-lint", true) == true
-            sl = derived_static_lint_diagnostics(rt, uri)
+            sl = derived_new_static_lint_diagnostics(rt, uri)
             env_ready = derived_file_env_ready(rt, uri)
             if env_ready
                 append!(results, sl)
