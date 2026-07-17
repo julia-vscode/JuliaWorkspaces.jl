@@ -754,3 +754,223 @@ end
     @test get(recv.counts, "probe_names", 0) == 0
     @test get(recv.counts, "probe_declared", 0) == 1
 end
+
+# --- Module visibility: names reachable through classified imports ---
+
+@testitem "module visibility: self-and-parents chain walks out to the synthetic root" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Parent
+    module Child
+    end
+    end
+    """)
+
+    chain = JuliaWorkspaces.derived_module_self_and_parents(jw.runtime, root_uri, ["Parent", "Child"])
+    @test chain == [["Parent", "Child"], ["Parent"], String[]]
+
+    @test JuliaWorkspaces.derived_module_self_and_parents(jw.runtime, root_uri, String[]) == [String[]]
+end
+
+@testitem "module visibility: declared name shadows a using'd export" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Parent
+    module Child
+    export f
+    f() = 1
+    end
+    using .Child
+    f() = 2
+    end
+    """)
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent"])
+    vn = visible["f"]
+    @test vn.origin === :declared
+    @test vn.kind === :function
+    @test vn.origin_module == ["Parent"]
+    @test vn.item !== nothing && vn.item.file == root_uri
+end
+
+@testitem "module visibility: using a tree submodule brings in its exports and its own name" setup=[ModuleTreeWS] begin
+    # Sibling (not Parent) is the observer here: in Parent itself, the
+    # `module Child` declaration is a DECLARED binding for "Child", which by
+    # rule 3 shadows the `using`-derived module-name bring-in — so the
+    # `:using_tree` origin for the module's own name is only observable from
+    # a module that doesn't declare it.
+    tree, root_uri, jw = tree_of("""
+    module Parent
+    module Child
+    export g
+    g() = 1
+    end
+    using .Child
+    module Sibling
+    using ..Child
+    end
+    end
+    """)
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent", "Sibling"])
+
+    @test visible["g"].kind === :function
+    @test visible["g"].origin === :using_tree
+    @test visible["g"].origin_module == ["Parent", "Child"]
+    @test visible["g"].item == JuliaWorkspaces.derived_module_declared(jw.runtime, root_uri, ["Parent", "Child"])["g"]
+
+    @test visible["Child"].kind === :module
+    @test visible["Child"].origin === :using_tree
+    @test visible["Child"].origin_module == ["Parent", "Child"]
+
+    # And in the declaring Parent: `g` is using-derived, but "Child" stays
+    # the declared binding (rule 3, matching Julia).
+    parent_visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent"])
+    @test parent_visible["g"].origin === :using_tree
+    @test parent_visible["Child"].origin === :declared
+    @test parent_visible["Child"].kind === :module
+    @test parent_visible["Child"].origin_module == ["Parent"]
+end
+
+@testitem "module visibility: import with a statement alias binds only the alias" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Foo
+    module Bar
+    export g
+    g() = 1
+    end
+    end
+    import Foo.Bar as FB
+    """)
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, String[])
+
+    @test haskey(visible, "FB")
+    @test visible["FB"].kind === :module
+    @test visible["FB"].origin === :import_binding
+    @test visible["FB"].origin_module == ["Foo", "Bar"]
+    @test !haskey(visible, "g")
+    @test !haskey(visible, "Bar")
+end
+
+@testitem "module visibility: workspace package exports are visible cross-root" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+
+    function project_toml(name, uuid)
+        """
+        name = "$name"
+        uuid = "$uuid"
+        version = "0.1.0"
+        """
+    end
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/Main/Project.toml"), SourceText(project_toml("Main", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"), "toml")))
+    root_uri = URI("file:///ws/Main/src/Main.jl")
+    add_file!(jw, TextFile(root_uri, SourceText("using DevedPkg\n", "julia")))
+
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/Project.toml"), SourceText(project_toml("DevedPkg", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/src/DevedPkg.jl"), SourceText("""
+    module DevedPkg
+    export myfunc
+    myfunc() = 1
+    end
+    """, "julia")))
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, String[])
+
+    @test visible["myfunc"].kind === :function
+    @test visible["myfunc"].origin === :using_workspace_package
+    @test visible["myfunc"].origin_module == ["DevedPkg"]
+
+    @test visible["DevedPkg"].kind === :module
+    @test visible["DevedPkg"].origin === :using_workspace_package
+end
+
+@testitem "module visibility: circular dev'ed packages terminate" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+
+    function project_toml(name, uuid)
+        """
+        name = "$name"
+        uuid = "$uuid"
+        version = "0.1.0"
+        """
+    end
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/P1/Project.toml"), SourceText(project_toml("P1", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/P1/src/P1.jl"), SourceText("""
+    module P1
+    using P2
+    end
+    """, "julia")))
+
+    add_file!(jw, TextFile(URI("file:///ws/P2/Project.toml"), SourceText(project_toml("P2", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/P2/src/P2.jl"), SourceText("""
+    module P2
+    using P1
+    end
+    """, "julia")))
+
+    p1_entry = URI("file:///ws/P1/src/P1.jl")
+
+    # The real assertion is that this terminates at all (a naive recursive
+    # expansion of each package's `using` of the other would recurse forever)
+    # — the visited-set guard is what makes this call return rather than hang
+    # or stack-overflow.
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, p1_entry, ["P1"])
+
+    @test visible["P2"].kind === :module
+    @test visible["P2"].origin === :using_workspace_package
+end
+
+@testitem "module visibility: using an external module brings its exports" setup=[ModuleTreeWS] begin
+    # NOTE: the brief suggested `Base64`, but this sandbox's SymbolServer
+    # stdlib cache (`SymbolServer.stdlibs`, built from `Base.loaded_modules_array()`
+    # at JuliaWorkspaces precompile time) only ever contains `Base`/`Core`/`Main`
+    # — verified interactively (`keys(derived_stdlib_only_env(rt).symbols)`).
+    # `Base` itself is an equally valid `:external` target for this test.
+    tree, root_uri, jw = tree_of("""
+    using Base
+    """)
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, String[])
+
+    @test visible["sum"].kind === :external_symbol
+    @test visible["sum"].origin === :using_external
+    @test visible["sum"].origin_module == ["Base"]
+    @test visible["sum"].item === nothing
+
+    @test visible["Base"].kind === :external_symbol
+    @test visible["Base"].origin === :using_external
+end
+
+@testitem "module visibility: unresolved relative import re-resolves through an enclosing using (ledger case)" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Parent
+    using Base
+    module Child
+    using ..Base
+    end
+    end
+    """)
+
+    parent_visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent"])
+    @test parent_visible["Base"].origin === :using_external
+
+    # Confirm the tree layer really left this unresolved (Base isn't a tree
+    # submodule of Parent) — the point of this test is Task 3's re-attempt.
+    child_imports = JuliaWorkspaces.derived_module_imports(jw.runtime, root_uri, ["Parent", "Child"])
+    imp = only(child_imports)
+    @test imp.target.sort === :unresolved
+
+    child_visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent", "Child"])
+
+    @test child_visible["sum"].kind === :external_symbol
+    @test child_visible["sum"].origin === :using_external
+    @test child_visible["sum"].origin_module == ["Base"]
+
+    @test child_visible["Base"].kind === :external_symbol
+    @test child_visible["Base"].origin === :using_external
+end
