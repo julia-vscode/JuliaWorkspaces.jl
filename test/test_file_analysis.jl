@@ -736,6 +736,273 @@ end
     @test leaks == 0
 end
 
+# --- Invalidation acceptance: the milestone's spec-level criteria. The
+# mechanism-level fix-wave testitems above ("an unrelated same-kind reorder
+# does not re-run an import-bearing analysis", "a referenced-name id shift
+# re-runs only the analyses that reference it") pin the id-free import-path
+# selectors, the per-name item granularity, and the shifted-name counterpart
+# (exactly one re-execution with the outbound ItemRef updated); the items
+# below assert the acceptance criteria themselves and reference — rather than
+# re-prove — that coverage.
+
+@testitem "invalidation acceptance: a body edit re-analyzes exactly the edited file" setup=[FileAnalysisWS] begin
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "afunc(x) = x + 1\n",
+        B => "bcaller() = afunc(1)\n",
+    ))
+    rt = jw.runtime
+
+    # untraced baseline (see the trace-baseline note in test_module_tree.jl's
+    # invalidation testitem: cold-cache execution is not what we measure)
+    fa_a0 = JuliaWorkspaces.derived_file_analysis(rt, ROOT, A)
+    @test !isempty(fa_a0.meta)
+    fa_b0 = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+    @test only(filter(o -> o.name == "afunc", fa_b0.outbound)).target !== nothing
+    JuliaWorkspaces.derived_module_tree(rt, ROOT)
+
+    # body edit in A: name/kind sets untouched, only the definition body
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("afunc(x) = x * 42\n", "julia")))
+
+    # the edited file's analysis re-executes (its own CST changed) ...
+    recv_a = CountReceiver()
+    TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, ROOT, A), recv_a)
+    @test get(recv_a.counts, "derived_file_analysis", 0) == 1
+    @test get(recv_a.counts, "derived_module_tree", 0) == 0
+
+    # ... the sibling's analysis and the module tree never do (the inventory
+    # backdates, so everything downstream of it early-exits)
+    recv_b = CountReceiver()
+    fa_b1 = TL.with_tracing(recv_b) do
+        fa = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+        JuliaWorkspaces.derived_module_tree(rt, ROOT)
+        fa
+    end
+    @test get(recv_b.counts, "derived_file_analysis", 0) == 0
+    @test get(recv_b.counts, "derived_module_tree", 0) == 0
+    @test only(filter(o -> o.name == "afunc", fa_b1.outbound)).target !== nothing
+end
+
+@testitem "invalidation acceptance: a same-kind adjacent reorder leaves unshifted-name consumers untouched" setup=[FileAnalysisWS] begin
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    # A consumer of the id-carrying name→kind projection: re-executes only if
+    # `derived_module_names`'s VALUE changed (Salsa early-exit on isequal).
+    Salsa.@derived function probe_names(rt, root)
+        return JuliaWorkspaces.derived_module_names(rt, root, ["MainPkg"])
+    end
+
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        a() = 1
+        b() = 2
+        c() = 3
+        """,
+        B => "uc() = c()\n",
+    ))
+    rt = jw.runtime
+
+    # untraced baseline (see the trace-baseline note in test_module_tree.jl)
+    fa_b0 = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+    @test only(filter(o -> o.name == "c", fa_b0.outbound)).target !== nothing
+    JuliaWorkspaces.derived_module_tree(rt, ROOT)
+    @test probe_names(rt, ROOT)["c"] === :function
+    before_declared = JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])
+
+    # swap the adjacent same-kind `a`/`b`: their item ids swap, the
+    # name/kind SET is identical, `c`'s id is untouched
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("""
+    b() = 2
+    a() = 1
+    c() = 3
+    """, "julia")))
+
+    recv = CountReceiver()
+    TL.with_tracing(recv) do
+        JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+        JuliaWorkspaces.derived_module_tree(rt, ROOT)
+        probe_names(rt, ROOT)
+    end
+
+    # B references only the unshifted `c`: its per-name item backdates, so
+    # the analysis never re-executes
+    @test get(recv.counts, "derived_file_analysis", 0) == 0
+    # the tree's VALUE changed (the ItemRefs for `a`/`b` swapped): exactly
+    # one re-execution
+    @test get(recv.counts, "derived_module_tree", 0) == 1
+    # `derived_module_names` re-executes (its dependency's value changed) but
+    # BACKDATES: the name→kind set is unchanged, so its consumer early-exits
+    @test get(recv.counts, "derived_module_names", 0) >= 1
+    @test get(recv.counts, "probe_names", 0) == 0
+
+    # sanity: the ids really did shift (this is the fixture the fix-wave
+    # testitem "a referenced-name id shift re-runs only the analyses that
+    # reference it" builds on — the counterpart case, a file referencing a
+    # SHIFTED name re-executing exactly once with its outbound ItemRef
+    # updated, is pinned there and not re-proven here)
+    after_declared = JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])
+    @test after_declared["a"] != before_declared["a"]
+    @test after_declared["b"] != before_declared["b"]
+    @test after_declared["c"] == before_declared["c"]
+end
+
+@testitem "invalidation acceptance: a new name/export in a sibling re-analyzes the referencing file and clears its missing-ref diagnostic" setup=[FileAnalysisWS] begin
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    # --- New declared name in a sibling file of the same module.
+    jw1 = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "afunc() = 1\n",
+        B => "bcaller() = brandnew_xyz()\n",
+    ))
+    rt1 = jw1.runtime
+
+    # untraced baseline (see the trace-baseline note in test_module_tree.jl):
+    # the reference is a missing ref before the edit
+    fa_b0 = JuliaWorkspaces.derived_file_analysis(rt1, ROOT, B)
+    @test any(d -> occursin("brandnew_xyz", d.message), fa_b0.diagnostics)
+    @test !any(o -> o.name == "brandnew_xyz", fa_b0.outbound)
+
+    JuliaWorkspaces.update_file!(jw1, TextFile(A, SourceText("""
+    afunc() = 1
+    brandnew_xyz() = 2
+    """, "julia")))
+
+    recv1 = CountReceiver()
+    fa_b1 = TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt1, ROOT, B), recv1)
+    @test get(recv1.counts, "derived_file_analysis", 0) == 1
+    @test !any(d -> occursin("brandnew_xyz", d.message), fa_b1.diagnostics)
+    ob = only(filter(o -> o.name == "brandnew_xyz", fa_b1.outbound))
+    @test ob.target == JuliaWorkspaces.derived_module_declared(rt1, ROOT, ["MainPkg"])["brandnew_xyz"]
+
+    # --- New export in a used tree submodule: `using .Sub` only brings in
+    # exports, so exporting the existing name is what makes it visible.
+    jw2 = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Sub
+        sfunc() = 1
+        end
+        """,
+        B => """
+        using .Sub
+        q() = sfunc()
+        """,
+    ))
+    rt2 = jw2.runtime
+
+    fa_q0 = JuliaWorkspaces.derived_file_analysis(rt2, ROOT, B)
+    @test any(d -> occursin("sfunc", d.message), fa_q0.diagnostics)
+
+    JuliaWorkspaces.update_file!(jw2, TextFile(A, SourceText("""
+    module Sub
+    export sfunc
+    sfunc() = 1
+    end
+    """, "julia")))
+
+    recv2 = CountReceiver()
+    fa_q1 = TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt2, ROOT, B), recv2)
+    @test get(recv2.counts, "derived_file_analysis", 0) == 1
+    @test !any(d -> occursin("sfunc", d.message), fa_q1.diagnostics)
+    @test only(filter(o -> o.name == "sfunc", fa_q1.outbound)).target ==
+        JuliaWorkspaces.derived_module_declared(rt2, ROOT, ["MainPkg", "Sub"])["sfunc"]
+end
+
+@testitem "invalidation acceptance: keystroke cost — a body edit in a 10-file fixture costs exactly one analysis" setup=[FileAnalysisWS] begin
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    # 10 files: the entry file plus f1..f9, each fᵢ (i ≥ 2) referencing a
+    # name declared in fᵢ₋₁ — every file has real cross-file resolution work.
+    file_uris = [URI("file:///t/src/f$i.jl") for i in 1:9]
+    files = Dict{URI,String}(
+        ROOT => "module MainPkg\n" * join(("include(\"f$i.jl\")" for i in 1:9), "\n") * "\nend\n",
+    )
+    files[file_uris[1]] = "fn1() = 1\n"
+    for i in 2:9
+        files[file_uris[i]] = "fn$i() = $i\ng$i() = fn$(i - 1)()\n"
+    end
+    jw = ws_with(files)
+    rt = jw.runtime
+    all_uris = [ROOT; file_uris]
+
+    # untraced baseline over ALL analyses (see the trace-baseline note in
+    # test_module_tree.jl — the cold cache fill is not the measurement)
+    for u in all_uris
+        JuliaWorkspaces.derived_file_analysis(rt, ROOT, u)
+    end
+    fa9 = JuliaWorkspaces.derived_file_analysis(rt, ROOT, file_uris[9])
+    @test only(filter(o -> o.name == "fn8", fa9.outbound)).target !== nothing
+
+    # the keystroke: a body edit in f5 (name/kind sets unchanged)
+    JuliaWorkspaces.update_file!(jw, TextFile(file_uris[5], SourceText("fn5() = 500\ng5() = fn4()\n", "julia")))
+
+    # re-pull every analysis: exactly ONE re-executes (the edited file's own)
+    recv = CountReceiver()
+    TL.with_tracing(recv) do
+        for u in all_uris
+            JuliaWorkspaces.derived_file_analysis(rt, ROOT, u)
+        end
+    end
+    @test get(recv.counts, "derived_file_analysis", 0) == 1
+    @test get(recv.counts, "derived_module_tree", 0) == 0
+end
+
 @testitem "file analysis: local file scope wins over the tree context" setup=[FileAnalysisWS] begin
     # `afunc` is declared both in a sibling file and locally in the analyzed
     # file — the file-local binding must win (resolution order: file-local
