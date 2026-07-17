@@ -169,6 +169,10 @@ mutable struct _ModuleNodeBuilder
     declared_at::Union{Nothing,ItemRef}
     files::Vector{URI}
     declared::Dict{String,ItemRef}
+    # Pass-1-only scratch, dropped at freeze: the current declared winner's
+    # item kind, kept in lockstep with `declared` so `_declare!` can apply
+    # the method-extension rule without re-reading inventories.
+    declared_kinds::Dict{String,Symbol}
     exports::Vector{String}
     publics::Vector{String}
     raw_imports::Vector{Tuple{URI,InventoryImport}}
@@ -176,8 +180,30 @@ mutable struct _ModuleNodeBuilder
 end
 
 _ModuleNodeBuilder() = _ModuleNodeBuilder(
-    false, nothing, URI[], Dict{String,ItemRef}(), String[], String[],
-    Tuple{URI,InventoryImport}[], ResolvedImport[])
+    false, nothing, URI[], Dict{String,ItemRef}(), Dict{String,Symbol}(),
+    String[], String[], Tuple{URI,InventoryImport}[], ResolvedImport[])
+
+_is_datatype_kind(k::Symbol) =
+    k === :struct || k === :mutable_struct || k === :abstract || k === :primitive || k === :enum
+
+# One declared-name write, applying StaticLint `add_binding`'s
+# method-extension rule (bindings.jl:418): a later same-named `:function` (or
+# function-form `:assignment`) definition over a DATATYPE binding is a method
+# extension — "do nothing, the name will resolve to the root method" — so the
+# datatype stays the declared winner (`struct Thing` + `Thing(m::String) =
+# ...` reports `Thing ↦ :struct` with the struct's ItemRef). Every other
+# combination keeps last-splice-wins, including a datatype over a function
+# (real Julia errors there; deterministic last-wins matches the old pass's
+# rebinding path).
+function _declare!(node::_ModuleNodeBuilder, name::String, ref::ItemRef, kind::Symbol)
+    prev = get(node.declared_kinds, name, nothing)
+    if prev !== nothing && _is_datatype_kind(prev) && (kind === :function || kind === :assignment)
+        return
+    end
+    node.declared[name] = ref
+    node.declared_kinds[name] = kind
+    return
+end
 
 """
     _build_tree_structure(rt, root::URI) -> (builders, file_modules)
@@ -271,7 +297,7 @@ function _build_tree_structure(rt, root::URI)
         for (_, kind, payload) in events
             if kind === :item
                 item = payload
-                ensure_node!(vcat(P, item.parent_module)).declared[item.name] = (file=F, id=item.id)
+                _declare!(ensure_node!(vcat(P, item.parent_module)), item.name, (file=F, id=item.id), item.kind)
             elseif kind === :module
                 # Rule 3: create/extend the module's own node...
                 m = payload
@@ -283,7 +309,7 @@ function _build_tree_structure(rt, root::URI)
                 node.declared_at = (file=F, id=m.id)
                 # ...and the module's own name also enters the *parent*
                 # node's `declared`, exactly like a binding item (rule 5).
-                ensure_node!(vcat(P, m.parent_module)).declared[m.name] = (file=F, id=m.id)
+                _declare!(ensure_node!(vcat(P, m.parent_module)), m.name, (file=F, id=m.id), :module)
             elseif kind === :export
                 # Rule 6.
                 e = payload

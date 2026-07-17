@@ -1195,3 +1195,42 @@ end
     @test colon_visible["@mymac"].kind === :macro
     @test colon_visible["@mymac"].origin === :import_binding
 end
+
+@testitem "module tree: a datatype declaration stays the declared winner over its method extensions" setup=[ModuleTreeWS] begin
+    a_uri = URI("file:///t/src/a.jl")
+    tree, root_uri, jw = tree_of("""
+    module M
+    struct Thing
+        a
+    end
+    Thing(m::String) = Thing(1)
+    include("a.jl")
+    end
+    """; extra_files=Dict(
+        a_uri => "Thing(x, y) = Thing(x)\n",
+    ))
+
+    # StaticLint's `add_binding` treats a later same-named function definition
+    # over a datatype binding as a METHOD EXTENSION — the datatype stays the
+    # binding ("do nothing, name will resolve to the root method"). The tree's
+    # declared winner must mirror that, or import-binding consumers see
+    # `Thing ↦ :function` and emit false "non-DataType in type declaration"
+    # lints. The extension may come later in the same file OR from a later
+    # spliced file — both must lose to the struct.
+    node = JuliaWorkspaces.module_node(tree, ["M"])
+    @test node.declared["Thing"].file == root_uri
+    rt = jw.runtime
+    @test JuliaWorkspaces.derived_module_names(rt, root_uri, ["M"])["Thing"] === :struct
+    inv = JuliaWorkspaces.derived_file_inventory(rt, root_uri)
+    struct_item = only(filter(i -> i.name == "Thing" && i.kind === :struct, inv.items))
+    @test node.declared["Thing"].id == struct_item.id
+
+    # The converse (a datatype declared AFTER a plain function) keeps
+    # last-splice-wins: the datatype overwrites.
+    tree2, root2, jw2 = tree_of("""
+    thing2() = 1
+    struct thing2
+    end
+    """)
+    @test JuliaWorkspaces.derived_module_names(jw2.runtime, root2, String[])["thing2"] === :struct
+end
