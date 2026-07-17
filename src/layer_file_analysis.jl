@@ -60,10 +60,26 @@ function StaticLint.resolve_ref_from_module(x1::CSTParser.EXPR, ctx::TreeModuleC
     name === nothing && return false
 
     visible = derived_module_visible_names(ctx.rt, ctx.root, ctx.path)
-    haskey(visible, name) || return false
-    vn = visible[name]
-    StaticLint.setref!(x1, StaticLint.TreeRef(name, vn.kind, vn.item, vn.origin_module), meta_dict)
+    hit = _visible_lookup(visible, name)
+    hit === nothing && return false
+    key, vn = hit
+    StaticLint.setref!(x1, StaticLint.TreeRef(key, vn.kind, vn.item, vn.origin_module), meta_dict)
     return true
+end
+
+# Visible-names lookup bridging the macro-name mismatch: inventory items
+# store macros WITHOUT the `@` ("mymac", kind `:macro`) while a reference
+# site's identifier carries it ("@mymac"); external stores keep the `@`, so
+# the exact key is tried first. Returns `(matched_key, VisibleName)` or
+# `nothing`.
+function _visible_lookup(visible::Dict{String,VisibleName}, name::String)
+    haskey(visible, name) && return (name, visible[name])
+    if startswith(name, "@")
+        stripped = name[2:end]
+        vn = get(visible, stripped, nothing)
+        vn !== nothing && vn.kind === :macro && return (stripped, vn)
+    end
+    return nothing
 end
 
 # The tree path of the module a module-kinded VisibleName DENOTES, or
@@ -99,30 +115,30 @@ function StaticLint._get_field(par::TreeModuleContext, arg, state, visited=Base.
     name = CSTParser.str_value(arg)
     (name isa String && !isempty(name)) || return nothing
     visible = derived_module_visible_names(par.rt, par.root, par.path)
-    haskey(visible, name) || return nothing
-    vn = visible[name]
+    hit = _visible_lookup(visible, name)
+    hit === nothing && return nothing
+    key, vn = hit
     if vn.kind === :module
-        child = _denoted_tree_module_path(par, name, vn)
+        child = _denoted_tree_module_path(par, key, vn)
         child !== nothing && return TreeModuleContext(par.rt, par.root, child)
     end
-    return StaticLint.TreeRef(name, vn.kind, vn.item, vn.origin_module)
+    return StaticLint.TreeRef(key, vn.kind, vn.item, vn.origin_module)
 end
 
 # Import-arg marking for a component that resolved to a module context:
 # mirrors the whole-closure `_mark_import_arg`, minus everything that would
-# leak the handle or another file's objects into meta. The binding's val
-# stays `nothing` (`Binding.val`'s type doesn't admit a TreeRef; the ref on
-# the arg already carries the plain-data target) with `type = Module`, which
-# also keeps it distinct from `is_synthetic_import_binding`'s
-# val-and-type-`nothing` shape. No `scope.modules` entry is added for
-# `using`: a `using` statement is necessarily module-toplevel, so its
-# bring-ins are already part of this module's `derived_module_visible_names`
-# — the seeded context covers them.
+# leak the handle or another file's objects into meta. The binding's val is
+# the context's plain-data `TreeRef` (leaf components that resolve directly
+# to a TreeRef take the GENERIC `_mark_import_arg`, which stores them the
+# same way — `Binding.val` admits `TreeRef`). No `scope.modules` entry is
+# added for `using`: a `using` statement is necessarily module-toplevel, so
+# its bring-ins are already part of this module's
+# `derived_module_visible_names` — the seeded context covers them.
 function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged, meta_dict)
     CSTParser.is_id_or_macroname(arg) || return
     if StaticLint.bindingof(arg, meta_dict) === nothing
         StaticLint.ensuremeta(arg, meta_dict)
-        StaticLint.getmeta(arg, meta_dict).binding = StaticLint.Binding(arg, nothing, StaticLint.CoreTypes.Module, [])
+        StaticLint.getmeta(arg, meta_dict).binding = StaticLint.Binding(arg, _context_tree_ref(par), StaticLint.CoreTypes.Module, [])
         StaticLint.setref!(arg, StaticLint.bindingof(arg, meta_dict), meta_dict)
     end
     if !usinged

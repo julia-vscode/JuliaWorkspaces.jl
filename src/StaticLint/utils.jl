@@ -37,8 +37,11 @@ function clear_scope(x::EXPR, meta_dict)
         if headof(x) === :file && scopeof(x, meta_dict).modules isa Dict && scopehasmodule(scopeof(x, meta_dict), :Base) && scopehasmodule(scopeof(x, meta_dict), :Core)
             m1, m2 = getscopemodule(scopeof(x, meta_dict), :Base), getscopemodule(scopeof(x, meta_dict), :Core)
             # per-file traversal mode: the tree context seeded by semantic_pass
-            # must survive the scope reset
+            # must survive the scope reset (isa-guarded so a user module
+            # literally named `__tree__` is neither preserved here nor able to
+            # impersonate the context)
             ctx = scopehasmodule(scopeof(x, meta_dict), :__tree__) ? getscopemodule(scopeof(x, meta_dict), :__tree__) : nothing
+            ctx isa AbstractModuleContext || (ctx = nothing)
             empty!(scopeof(x, meta_dict).modules)
             addmoduletoscope!(scopeof(x, meta_dict), m1, meta_dict)
             addmoduletoscope!(scopeof(x, meta_dict), m2, meta_dict)

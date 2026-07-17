@@ -321,6 +321,32 @@ function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; wo
             end
         end
     end
+    # The context is a HANDLE (it holds the Salsa runtime) and must not
+    # outlive the pass inside meta_dict — a later layer stores meta_dict in a
+    # derived value, and a runtime handle embedded in a memoized value of
+    # that same runtime is forbidden. Any post-pass step that still needs
+    # tree resolution must re-seed a fresh context first.
+    module_context === nothing || strip_module_contexts!(meta_dict)
+end
+
+"""
+    strip_module_contexts!(meta_dict)
+
+Remove every `:__tree__ => AbstractModuleContext` entry from the scopes
+stored in `meta_dict` (the per-file pass seeds them on the root scope and on
+each in-file module scope). Called at the end of a `semantic_pass` run in
+per-file mode so no runtime handle remains reachable from the returned meta.
+Only context values are removed — a user module that happens to be named
+`__tree__` (a `Scope`/`ModuleStore` value) is left alone.
+"""
+function strip_module_contexts!(meta_dict::Dict{UInt64,Meta})
+    for m in values(meta_dict)
+        s = m.scope
+        s isa Scope || continue
+        s.modules isa Dict || continue
+        get(s.modules, :__tree__, nothing) isa AbstractModuleContext && delete!(s.modules, :__tree__)
+    end
+    return
 end
 
 function check_filesize(x, path, meta_dict)

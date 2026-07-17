@@ -8,7 +8,10 @@ Struct fields:
 """
 mutable struct Binding
     name::EXPR
-    val::Union{Binding,EXPR,SymbolServer.SymStore,Nothing}
+    # `TreeRef`: per-file traversal mode only — an import-statement binding
+    # whose target resolved through the module tree (plain data, never
+    # another file's EXPR/Binding)
+    val::Union{Binding,EXPR,SymbolServer.SymStore,TreeRef,Nothing}
     type::Union{Binding,SymbolServer.SymStore,Nothing}
     refs::Vector{Any}
     is_public::Bool

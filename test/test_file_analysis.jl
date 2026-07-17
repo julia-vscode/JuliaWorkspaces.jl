@@ -213,6 +213,110 @@ end
     @test r.item == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg", "Common"])["cfunc"]
 end
 
+@testitem "file analysis: colon-form and leaf imports of tree names complete the pass" setup=[FileAnalysisWS] begin
+    # The final component of `using .Common: cfunc` / `import .Common.chelper`
+    # resolves through the tree to a plain-data TreeRef — the pass must bind
+    # it like any other import leaf instead of crashing.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Common
+        export cfunc
+        cfunc() = 1
+        chelper() = 2
+        end
+        """,
+        B => """
+        using .Common: cfunc
+        import .Common.chelper
+        u() = cfunc()
+        v() = chelper()
+        """,
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    for name in ("cfunc", "chelper")
+        hits = find_identifiers(cst, name)
+        @test length(hits) == 2
+        # the import statement's own leaf component: bound at the import
+        # site, val carrying the plain-data tree target
+        stmt = SL.refof(hits[1], meta_dict)
+        @test stmt isa SL.Binding
+        @test stmt.val isa SL.TreeRef
+        @test stmt.val.item == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg", "Common"])[name]
+        # the body reference resolves (locally to the import binding or
+        # through the tree — never left dangling)
+        body = SL.refof(hits[2], meta_dict)
+        @test body isa SL.Binding || body isa SL.TreeRef
+    end
+end
+
+@testitem "file analysis: no context handle remains reachable from the returned meta" setup=[FileAnalysisWS] begin
+    # TreeModuleContext holds the Salsa runtime — it may live only inside the
+    # running analysis. After semantic_pass returns, neither the root scope
+    # nor any in-file module scope stored in meta may still hold one.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        module Inner
+        h() = 1
+        end
+        caller() = afunc()
+        end
+        """,
+        A => "afunc() = 1\n",
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, ROOT)
+
+    # tree resolution DID happen during the pass ...
+    r = SL.refof(only(find_identifiers(cst, "afunc")), meta_dict)
+    @test r isa SL.TreeRef
+
+    # ... but no handle survives in any scope reachable from the meta
+    leaked = sum(collect(values(meta_dict))) do m
+        s = m.scope
+        (s isa SL.Scope && s.modules isa Dict) || return 0
+        count(v -> v isa SL.AbstractModuleContext, collect(values(s.modules)))
+    end
+    @test leaked == 0
+end
+
+@testitem "file analysis: a sibling file's macro resolves through the tree" setup=[FileAnalysisWS] begin
+    # inventory item names for macros carry no `@` ("mymac"), while the
+    # reference site's identifier does ("@mymac") — the context lookup must
+    # bridge that.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        macro mymac(x)
+            x
+        end
+        """,
+        B => "w() = @mymac 1\n",
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    x = only(find_identifiers(cst, "@mymac"))
+    r = SL.refof(x, meta_dict)
+    @test r isa SL.TreeRef
+    @test r.kind === :macro
+    @test r.item == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg"])["mymac"]
+end
+
 @testitem "file analysis: local file scope wins over the tree context" setup=[FileAnalysisWS] begin
     # `afunc` is declared both in a sibling file and locally in the analyzed
     # file — the file-local binding must win (resolution order: file-local

@@ -151,6 +151,15 @@ function _typeof(x, state)
         return CoreTypes.DataType
     elseif x isa SymbolServer.FunctionStore
         return CoreTypes.Function
+    elseif x isa TreeRef
+        # per-file traversal mode: map the tree item kind
+        if x.kind === :function || x.kind === :macro
+            return CoreTypes.Function
+        elseif x.kind === :struct || x.kind === :mutable_struct || x.kind === :abstract || x.kind === :primitive
+            return CoreTypes.DataType
+        elseif x.kind === :module
+            return CoreTypes.Module
+        end
     end
 end
 
