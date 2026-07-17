@@ -729,3 +729,149 @@ function item_documentation(rt, ref::ItemRef)
     end
     return nothing
 end
+
+# ============================================================================
+# References aggregation (M4): "who references this item?" as a request-time
+# join over the per-file outbound tables.
+# ============================================================================
+
+# A generic pre-order EXPR walk (request-time only). `f(x)` is called for
+# every node in `x`'s subtree.
+function _walk_exprs(f, x::CSTParser.EXPR)
+    f(x)
+    if length(x) > 0
+        for a in x
+            _walk_exprs(f, a)
+        end
+    end
+    return
+end
+
+# The bare (leading-`@`-stripped) spelling of a name. Macros are `@`-prefixed
+# throughout the inventory/tree, but a macro's DEFINITION identifier and its
+# `Binding` carry the bare form — so occurrences of one logical macro compare
+# equal only on their bare spelling.
+_bare_macro_name(s::AbstractString) = startswith(s, "@") ? s[nextind(s, 1):end] : s
+
+# The declared name of an inventory item, from its file's inventory
+# (`@`-prefixed for macros). `nothing` when the id is absent (stale ref).
+function _inventory_item_name(rt, ref::ItemRef)
+    for it in derived_file_inventory(rt, ref.file).items
+        it.id == ref.id && return it.name
+    end
+    return nothing
+end
+
+# The module-level `Binding` that declares `target` in its OWN file's per-file
+# meta: materialize the item's defining EXPR (`derived_item_positions` — the
+# volatile leaf, request-time only) and find, inside it, the identifier whose
+# bare spelling matches the item's declared name and that carries the binding
+# (directly, or as a self-ref). The name match (rather than "first binding in
+# the subtree") is essential: a function/struct signature also binds its
+# parameters/fields, which must not be mistaken for the declaration. Returns
+# `nothing` when the item has no position or no such binding.
+#
+# The recovered binding drives the old within-file `loose_refs` walk in the
+# DECLARING file (declaration sites + same-file uses), reproducing the
+# whole-closure references behavior for the file that owns the name.
+function _item_declaring_binding(rt, target::ItemRef, meta_dict)
+    name = _inventory_item_name(rt, target)
+    name === nothing && return nothing
+    bare = _bare_macro_name(name)
+    entry = get(derived_item_positions(rt, target.file), target.id, nothing)
+    entry === nothing && return nothing
+
+    result = nothing
+    _walk_exprs(entry.expr) do x
+        result === nothing || return
+        CSTParser.is_id_or_macroname(x) || return
+        _bare_macro_name(CSTParser.str_value(x)) == bare || return
+        if StaticLint.hasbinding(x, meta_dict)
+            result = StaticLint.bindingof(x, meta_dict)
+        elseif StaticLint.hasref(x, meta_dict) && StaticLint.refof(x, meta_dict) isa StaticLint.Binding
+            result = StaticLint.refof(x, meta_dict)
+        end
+        return
+    end
+    return result
+end
+
+"""
+    each_reference(f, rt, target::ItemRef)
+
+Call `f(ref_expr, uri, offset)` once per reference site of the tree-declared
+item `target`, aggregated at request time over the per-file `outbound`
+tables. This is a PLAIN function (never a `Salsa.@derived`): its result is
+keyed on an `ItemRef`, which is volatile by design, so it must not seed a
+derived value.
+
+For every root in the workspace and every file spliced into that root:
+
+- the DECLARING file (`file == target.file`) contributes the old within-file
+  `loose_refs` walk of the item's module-level binding — its declaration
+  site(s) and same-file uses;
+- any OTHER file contributes only when its `outbound` table has a row whose
+  `target == target` — **the join is on the `ItemRef`, never the row name**.
+  Cross-file aliases (`using .Sib: f as g`) surface their uses under the
+  BOUND name (`g`) but carry the SOURCE's `ItemRef` as `target`, so joining
+  on `target` finds the `g`-call sites when asked for references of `f`
+  (which the old whole-closure pass missed). Matching files are walked and
+  every identifier whose `refof` is a `TreeRef` — or a `Binding` whose `.val`
+  is a `TreeRef` (import/alias statement components) — with `item == target`
+  is emitted.
+
+All workspace roots are scanned (not just `derived_roots_for_uri(target.file)`):
+a file references `target` through an `import` of its package, which is NOT an
+`include` edge, so include-reachability alone would miss cross-root consumers
+(the old merged-deved-package behavior). Sites are deduped by
+`(uri, offset, span)`, so a file spliced into several roots contributes each
+occurrence once. Cost is one (mostly backdated) per-file `outbound` check per
+file per root — a cold request-time walk, not a per-keystroke path.
+"""
+function each_reference(f, rt, target::ItemRef)
+    emitted = Set{Tuple{URI,Int,Int}}()
+    emit = function (x::CSTParser.EXPR)
+        loc = _get_file_loc(x, rt)
+        loc === nothing && return
+        uri, o = loc
+        key = (uri, o, x.span)
+        key in emitted && return
+        push!(emitted, key)
+        f(x, uri, o)
+        return
+    end
+
+    for root in derived_roots(rt)
+        for file in derived_tree_files(rt, root)
+            analysis = derived_file_analysis(rt, root, file)
+            if file == target.file
+                b = _item_declaring_binding(rt, target, analysis.meta)
+                b isa StaticLint.Binding || continue
+                # `loose_refs` can list the same node twice (a macro name lands
+                # in the binding's refs twice); dedupe by identity as
+                # `_for_each_ref` does.
+                seen = Base.IdSet{CSTParser.EXPR}()
+                for r in StaticLint.loose_refs(b, analysis.meta)
+                    if r isa CSTParser.EXPR && !(r in seen)
+                        push!(seen, r)
+                        emit(r)
+                    end
+                end
+            else
+                any(o -> o.target == target, analysis.outbound) || continue
+                cst = derived_julia_legacy_syntax_tree(rt, file)
+                cst isa CSTParser.EXPR || continue
+                _walk_exprs(cst) do x
+                    CSTParser.is_id_or_macroname(x) || return
+                    StaticLint.hasref(x, analysis.meta) || return
+                    r = StaticLint.refof(x, analysis.meta)
+                    tr = r isa StaticLint.TreeRef ? r :
+                        (r isa StaticLint.Binding && r.val isa StaticLint.TreeRef) ? r.val : nothing
+                    (tr !== nothing && tr.item == target) && emit(x)
+                    return
+                end
+            end
+        end
+    end
+    return
+end

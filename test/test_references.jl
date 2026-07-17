@@ -632,3 +632,175 @@ end
     m = JuliaWorkspaces.derived_expr_uri_map(rt)
     @test get(m, objectid(cst), nothing) == DEF_B_URI
 end
+
+# ============================================================================
+# References aggregation over per-file outbound tables (M4 Task 7)
+# ============================================================================
+
+@testsnippet RefAggWS begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText,
+        get_references, get_rename_edits, get_highlights
+    using JuliaWorkspaces.URIs2: URI
+
+    const RA_MANIFEST = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    # A single-project package with `files` (uri => src) plus a generated entry
+    # file that `include`s them in order.
+    function refagg_workspace(name::String, uuid::String, entry_body::String, files::Vector{Pair{URI,String}})
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///$name/Project.toml"),
+            SourceText("name = \"$name\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///$name/Manifest.toml"), SourceText(RA_MANIFEST, "toml")))
+        add_file!(jw, TextFile(URI("file:///$name/src/$name.jl"), SourceText(entry_body, "julia")))
+        for (u, s) in files
+            add_file!(jw, TextFile(u, SourceText(s, "julia")))
+        end
+        return jw
+    end
+
+    refset(jw, uri, idx) = sort([(string(r.uri), r.start.line, r.start.column) for r in get_references(jw, uri, idx)])
+    renset(jw, uri, idx, nn) = sort([(string(e.uri), e.start.line, e.start.column, e.new_text) for e in get_rename_edits(jw, uri, idx, nn)])
+end
+
+@testitem "References: sibling-declared function across 3 files (target-join)" setup=[RefAggWS] begin
+    A = URI("file:///RA1/src/a.jl")
+    B = URI("file:///RA1/src/b.jl")
+    C = URI("file:///RA1/src/c.jl")
+    jw = refagg_workspace("RA1", "11111111-1234-1234-1234-123456789abc",
+        "module RA1\ninclude(\"a.jl\")\ninclude(\"b.jl\")\ninclude(\"c.jl\")\nend\n",
+        [A => "greet(name) = 1\ngreet(first, last) = 2\n",
+         B => "caller(x) = greet(x)\n",
+         C => "other() = greet(3)\n"])
+
+    # The exact set (captured from the OLD whole-closure path before the switch):
+    # both method declarations in a.jl + the two cross-file call sites.
+    expected = [("file:///RA1/src/a.jl", 1, 1), ("file:///RA1/src/a.jl", 2, 1),
+                ("file:///RA1/src/b.jl", 1, 13), ("file:///RA1/src/c.jl", 1, 11)]
+    # Same result no matter which occurrence the cursor starts on.
+    @test refset(jw, B, findfirst("greet(x)", "caller(x) = greet(x)\n").start) == expected
+    @test refset(jw, A, 1) == expected                       # from a declaration
+    @test refset(jw, C, findfirst("greet", "other() = greet(3)\n").start) == expected
+end
+
+@testitem "References: alias `f as g` includes the g-call sites (target-join)" setup=[RefAggWS] begin
+    SIB = URI("file:///RA2/src/sib.jl")
+    USE = URI("file:///RA2/src/use.jl")
+    sib = "module Sib\nexport f\nf() = 1\nend\n"
+    use = "using .Sib: f as g\nh() = g() + g()\n"
+    jw = refagg_workspace("RA2", "22222222-1234-1234-1234-123456789abc",
+        "module RA2\ninclude(\"sib.jl\")\ninclude(\"use.jl\")\nend\n",
+        [SIB => sib, USE => use])
+
+    refs = refset(jw, SIB, findfirst("f()", sib).start)
+    # The outbound rows for the `g` uses carry `f`'s ItemRef as target (join on
+    # target, not name), so references of `f` reach the `g`-call sites — which
+    # the old whole-closure pass missed. Declaration + export in sib.jl, and in
+    # use.jl the import source `f`, the alias `g`, and both `g()` calls.
+    @test ("file:///RA2/src/sib.jl", 3, 1) in refs      # f() = 1
+    @test ("file:///RA2/src/sib.jl", 2, 8) in refs      # export f
+    @test ("file:///RA2/src/use.jl", 1, 13) in refs     # `f` in `using .Sib: f as g`
+    @test ("file:///RA2/src/use.jl", 2, 7) in refs      # first g()
+    @test ("file:///RA2/src/use.jl", 2, 13) in refs     # second g()
+    @test length(refs) == 6
+end
+
+@testitem "References: rename a module-level function edits all files, not the alias" setup=[RefAggWS] begin
+    SIB = URI("file:///RA3/src/sib.jl")
+    USE = URI("file:///RA3/src/use.jl")
+    sib = "module Sib\nexport f\nf() = 1\nend\n"
+    use = "using .Sib: f as g\nh() = g() + g()\n"
+    jw = refagg_workspace("RA3", "33333333-1234-1234-1234-123456789abc",
+        "module RA3\ninclude(\"sib.jl\")\ninclude(\"use.jl\")\nend\n",
+        [SIB => sib, USE => use])
+
+    edits = renset(jw, SIB, findfirst("f()", sib).start, "xyz")
+    # Rename edits only the SOURCE-name occurrences (incl. the `as`-alias
+    # statement's `f`), never the alias `g` uses — renaming those would corrupt
+    # the alias. Matches the old rename's source-name-only behavior.
+    @test edits == [("file:///RA3/src/sib.jl", 2, 8, "xyz"),
+                    ("file:///RA3/src/sib.jl", 3, 1, "xyz"),
+                    ("file:///RA3/src/use.jl", 1, 13, "xyz")]
+end
+
+@testitem "References: rename a cross-file function edits every call site" setup=[RefAggWS] begin
+    A = URI("file:///RA4/src/a.jl")
+    B = URI("file:///RA4/src/b.jl")
+    jw = refagg_workspace("RA4", "44444444-1234-1234-1234-123456789abc",
+        "module RA4\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        [A => "greet(name) = 1\n", B => "p() = greet(1)\nq() = greet(2)\n"])
+
+    edits = renset(jw, B, findfirst("greet", "p() = greet(1)\nq() = greet(2)\n").start, "hello")
+    @test all(e -> e[4] == "hello", edits)
+    @test ("file:///RA4/src/a.jl", 1, 1, "hello") in edits
+    @test ("file:///RA4/src/b.jl", 1, 7, "hello") in edits
+    @test ("file:///RA4/src/b.jl", 2, 7, "hello") in edits
+    @test length(edits) == 3
+end
+
+@testitem "References: highlights of a module-level name stay current-file" setup=[RefAggWS] begin
+    A = URI("file:///RA5/src/a.jl")
+    B = URI("file:///RA5/src/b.jl")
+    a = "greet(name) = 1\ncaller() = greet(0)\n"
+    jw = refagg_workspace("RA5", "55555555-1234-1234-1234-123456789abc",
+        "module RA5\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        [A => a, B => "other() = greet(9)\n"])
+
+    # Highlights of `greet` from a.jl show a.jl's declaration + a.jl's use
+    # ONLY — never b.jl's cross-file call (highlights stay current-file).
+    hls = get_highlights(jw, A, findfirst("greet(0)", a).start)
+    @test length(hls) == 2
+    @test all(h -> h.kind in (:read, :write), hls)
+    # And from the referencing file, only that file's own call is highlighted.
+    hlb = get_highlights(jw, B, findfirst("greet", "other() = greet(9)\n").start)
+    @test length(hlb) == 1
+end
+
+@testitem "References: file-local variable references stay current-file" setup=[RefAggWS] begin
+    A = URI("file:///RA6/src/a.jl")
+    B = URI("file:///RA6/src/b.jl")
+    b = "function shadow()\n    greet = 99\n    return greet\nend\n"
+    jw = refagg_workspace("RA6", "66666666-1234-1234-1234-123456789abc",
+        "module RA6\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        [A => "greet(name) = 1\n", B => b])
+
+    # The local `greet` (shadowing the sibling function) resolves only to its
+    # two in-function occurrences — never a.jl's declaration.
+    refs = refset(jw, B, findlast("greet", b).start)
+    @test refs == [("file:///RA6/src/b.jl", 2, 5), ("file:///RA6/src/b.jl", 3, 12)]
+end
+
+@testitem "References: two-root deved package found from both roots" setup=[RefAggWS] begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_references
+    using JuliaWorkspaces.URIs2: URI
+
+    MP = URI("file:///wsp2/Main/src/MainP.jl")
+    BP = URI("file:///wsp2/B/src/B.jl")
+    main = "module MainP\nusing B\nf() = myfunc(1, 2)\ng() = B.myfunc(3, 4)\nend\n"
+    bmod = "module B\nexport myfunc\nmyfunc(alpha, beta) = 1\nend\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsp2/Main/Project.toml"),
+        SourceText("name = \"MainP\"\nuuid = \"77777777-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///wsp2/Main/Manifest.toml"),
+        SourceText("julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc\"\n\n[deps]\n", "toml")))
+    add_file!(jw, TextFile(MP, SourceText(main, "julia")))
+    add_file!(jw, TextFile(URI("file:///wsp2/B/Project.toml"),
+        SourceText("name = \"B\"\nuuid = \"88888888-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n", "toml")))
+    add_file!(jw, TextFile(BP, SourceText(bmod, "julia")))
+
+    rs(uri, idx) = sort([(string(r.uri), r.start.line, r.start.column) for r in get_references(jw, uri, idx)])
+    # A single query returns B's declaration/export AND MainP's use sites — the
+    # consuming root reaches the package by `import`, not `include`, so the
+    # aggregation scans all workspace roots (not just include-reachable ones).
+    expected = [("file:///wsp2/B/src/B.jl", 2, 8), ("file:///wsp2/B/src/B.jl", 3, 1),
+                ("file:///wsp2/Main/src/MainP.jl", 3, 7), ("file:///wsp2/Main/src/MainP.jl", 4, 9)]
+    @test rs(BP, findfirst("myfunc(alpha", bmod).start) == expected      # from B's decl
+    @test rs(MP, findfirst("myfunc(1", main).start) == expected          # from MainP's use
+end

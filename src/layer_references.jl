@@ -222,6 +222,110 @@ function _for_each_ref(f, identifier::CSTParser.EXPR, meta_dict::MetaDict, runti
     end
 end
 
+# The scope that OWNS binding `b` (`b` is registered in its `.names`), found by
+# walking outward from `x`'s scope. Membership is by object identity — matching
+# `b.name`'s string would break for macros, whose binding is filed under the
+# `@`-prefixed key while `b.name` is bare.
+function _home_scope(x::CSTParser.EXPR, b::StaticLint.Binding, meta_dict)
+    s = StaticLint.retrieve_scope(x, meta_dict)
+    while s isa StaticLint.Scope
+        for v in values(s.names)
+            v === b && return s
+        end
+        s = CSTParser.parentof(s)
+    end
+    return nothing
+end
+
+# Classify what the identifier `x` refers to, for the references/rename/highlight
+# entry points. Returns:
+#   (:tree, ItemRef)      — a MODULE-LEVEL name: resolved through the module tree
+#                           (a `TreeRef`, or an import binding whose `.val` is
+#                           one), OR a module-level binding declared in THIS file
+#                           (its item recovered from `derived_module_declared` of
+#                           the file's module path). References of these aggregate
+#                           cross-file via `each_reference`.
+#   (:local, Binding)     — a non-module-level binding (function-local, argument,
+#                           comprehension var, …), OR an external import binding
+#                           with no tree item: references stay CURRENT-FILE
+#                           (`_for_each_ref` on the per-file meta).
+#   nothing               — no ref, or a store-backed leaf with no binding.
+function _reference_target(runtime, root::URI, uri::URI, x::CSTParser.EXPR, meta_dict)
+    StaticLint.hasref(x, meta_dict) || return nothing
+    r = StaticLint.refof(x, meta_dict)
+
+    if r isa StaticLint.TreeRef
+        return r.item === nothing ? nothing : (:tree, r.item)
+    elseif r isa StaticLint.Binding && r.val isa StaticLint.TreeRef
+        return r.val.item === nothing ? (:local, r) : (:tree, r.val.item)
+    elseif r isa StaticLint.Binding
+        cst = derived_julia_legacy_syntax_tree(runtime, uri)
+        fscope = cst isa CSTParser.EXPR ? StaticLint.scopeof(cst, meta_dict) : nothing
+        hs = _home_scope(x, r, meta_dict)
+        is_module_level = hs !== nothing &&
+            (hs === fscope || (hs.expr isa CSTParser.EXPR && CSTParser.defines_module(hs.expr)))
+        if is_module_level
+            path = derived_file_module_path(runtime, root, uri)
+            if path !== nothing
+                p = vcat(path, _in_file_module_names(x, meta_dict))
+                declared = derived_module_declared(runtime, root, p)
+                sv = CSTParser.str_value(x)
+                cand = get(declared, sv, nothing)
+                if cand === nothing && !startswith(sv, "@")
+                    cand = get(declared, "@" * sv, nothing)
+                end
+                cand !== nothing && cand.file == uri && return (:tree, cand)
+            end
+        end
+        return (:local, r)
+    end
+    return nothing
+end
+
+# Current-file-only reference sites of the tree-declared `target`: the declaring
+# file's `loose_refs` (when `uri` owns the item) plus every `TreeRef`-target
+# match within `uri`'s own meta. Used by document highlight, which stays
+# current-file (no cross-root walk). `f(ref_expr, offset)` per site.
+function _each_current_file_ref(f, runtime, uri::URI, target::ItemRef, meta_dict)
+    seen_offsets = Set{Int}()
+    emit = function (x::CSTParser.EXPR)
+        loc = _get_file_loc(x, runtime)
+        loc === nothing && return
+        ref_uri, o = loc
+        ref_uri == uri || return
+        o in seen_offsets && return
+        push!(seen_offsets, o)
+        f(x, o)
+        return
+    end
+
+    if uri == target.file
+        b = _item_declaring_binding(runtime, target, meta_dict)
+        if b isa StaticLint.Binding
+            seen = Base.IdSet{CSTParser.EXPR}()
+            for r in StaticLint.loose_refs(b, meta_dict)
+                if r isa CSTParser.EXPR && !(r in seen)
+                    push!(seen, r)
+                    emit(r)
+                end
+            end
+        end
+    end
+
+    cst = derived_julia_legacy_syntax_tree(runtime, uri)
+    cst isa CSTParser.EXPR || return
+    _walk_exprs(cst) do x
+        CSTParser.is_id_or_macroname(x) || return
+        StaticLint.hasref(x, meta_dict) || return
+        r = StaticLint.refof(x, meta_dict)
+        tr = r isa StaticLint.TreeRef ? r :
+            (r isa StaticLint.Binding && r.val isa StaticLint.TreeRef) ? r.val : nothing
+        (tr !== nothing && tr.item == target) && emit(x)
+        return
+    end
+    return
+end
+
 """
     safe_isfile(s)
 
@@ -414,14 +518,24 @@ function _get_references(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    # Per-file analysis meta (the inventory architecture's per-file pass): a
+    # module-level name resolves to its `ItemRef` and its references are
+    # aggregated cross-file over the outbound tables (`each_reference`); a
+    # file-local binding keeps the old within-file `loose_refs` walk.
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     x = get_expr1(cst, offset)
     x === nothing && return results
 
-    _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
-        push!(results, ReferenceResult(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span)))
+    tgt = _reference_target(runtime, root, uri, x, meta_dict)
+    if tgt !== nothing && tgt[1] === :tree
+        each_reference(runtime, tgt[2]) do ref, ref_uri, o
+            push!(results, ReferenceResult(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span)))
+        end
+    elseif tgt !== nothing && tgt[1] === :local
+        _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
+            push!(results, ReferenceResult(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span)))
+        end
     end
 
     return results
@@ -442,8 +556,7 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     x = get_expr1(cst, offset)
     x === nothing && return results
@@ -454,9 +567,27 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
     # occurrences that had one, so the definition and invocations stay consistent
     bare_name = startswith(new_name, "@") ? new_name[nextind(new_name, 1):end] : new_name
 
-    _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
-        text = startswith(CSTParser.str_value(ref), "@") ? "@" * bare_name : bare_name
-        push!(results, RenameEdit(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), text))
+    tgt = _reference_target(runtime, root, uri, x, meta_dict)
+    if tgt !== nothing && tgt[1] === :tree
+        # References aggregate every target-matching site, INCLUDING alias
+        # occurrences (`g` for `using .Sib: f as g`). Rename must NOT touch the
+        # alias sites — renaming `f` leaves `g` bound to it — so edits are
+        # confined to occurrences spelled with the item's own (bare) name; the
+        # `as`-alias statement's source component still renames, the `g` uses do
+        # not. This preserves the old rename's source-name-only behavior.
+        item_name = _inventory_item_name(runtime, tgt[2])
+        target_bare = item_name === nothing ? nothing : _bare_macro_name(item_name)
+        each_reference(runtime, tgt[2]) do ref, ref_uri, o
+            sv = CSTParser.str_value(ref)
+            (target_bare === nothing || _bare_macro_name(sv) == target_bare) || return
+            text = startswith(sv, "@") ? "@" * bare_name : bare_name
+            push!(results, RenameEdit(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), text))
+        end
+    elseif tgt !== nothing && tgt[1] === :local
+        _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
+            text = startswith(CSTParser.str_value(ref), "@") ? "@" * bare_name : bare_name
+            push!(results, RenameEdit(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), text))
+        end
     end
 
     return results
@@ -503,16 +634,27 @@ function _get_highlights(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     identifier = _get_identifier(cst, offset)
     identifier === nothing && return results
 
-    _for_each_ref(identifier, meta_dict, runtime) do ref, ref_uri, o
-        if ref_uri == uri
+    # Highlights stay CURRENT-FILE: a module-level name uses the same per-file
+    # meta `loose_refs` + outbound-target matches, but confined to this file
+    # (`_each_current_file_ref`), never the cross-root `each_reference` walk; a
+    # file-local binding uses the old within-file `loose_refs`.
+    tgt = _reference_target(runtime, root, uri, identifier, meta_dict)
+    if tgt !== nothing && tgt[1] === :tree
+        _each_current_file_ref(runtime, uri, tgt[2], meta_dict) do ref, o
             kind = StaticLint.hasbinding(ref, meta_dict) ? :write : :read
-            push!(results, HighlightResult(_offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), kind))
+            push!(results, HighlightResult(_offset_to_position(runtime, uri, o), _offset_to_position(runtime, uri, o + ref.span), kind))
+        end
+    elseif tgt !== nothing && tgt[1] === :local
+        _for_each_ref(identifier, meta_dict, runtime) do ref, ref_uri, o
+            if ref_uri == uri
+                kind = StaticLint.hasbinding(ref, meta_dict) ? :write : :read
+                push!(results, HighlightResult(_offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), kind))
+            end
         end
     end
 

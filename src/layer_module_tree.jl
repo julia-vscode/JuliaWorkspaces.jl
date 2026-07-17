@@ -678,6 +678,27 @@ Salsa.@derived function derived_file_module_path(rt, root, file)
     return get(tree.file_modules, file, nothing)
 end
 
+"""
+    derived_tree_files(rt, root::URI) -> Vector{URI}
+
+The files spliced into `root`'s module tree — the keys of
+`derived_module_tree`'s `file_modules`, in a stable (URI-string) order. An
+id-free thin selector: the value changes only when the SET of spliced files
+changes, not when item ids shift within them, so it backdates on ordinary
+edits. Used by the request-time references aggregation (`each_reference`) to
+enumerate the files it must consult for a root; order is not load-bearing
+(the aggregation dedupes and its callers sort), so a deterministic string
+order stands in for the tree's DFS splice order.
+"""
+Salsa.@derived function derived_tree_files(rt, root)
+    @debug "derived_tree_files" root=root
+
+    tree = derived_module_tree(rt, root)
+    files = collect(keys(tree.file_modules))
+    sort!(files; by=string)
+    return files
+end
+
 # Resolve a method-extension qualifier `qual` (a NON-empty, dot-free
 # module-path prefix as written, e.g. `["Base"]` or `["Base", "Iterators"]`)
 # written at absolute module location `loc` to the absolute tree-module path it

@@ -1814,3 +1814,27 @@ end
     @test !any(d -> occursin("Failed to resolve", d.message), fa.diagnostics)
     @test !any(d -> occursin("Missing reference", d.message), fa.diagnostics)
 end
+
+@testitem "references aggregation: each_reference is a plain function, not an ItemRef-keyed derived value" begin
+    import JuliaWorkspaces
+    # The M4 references/rename/highlight aggregation (`each_reference`) is a
+    # request-time function: an `ItemRef` is volatile by design, so it must NOT
+    # seed a Salsa derived value. Guard against a regression that memoizes it.
+    srcdir = joinpath(pkgdir(JuliaWorkspaces), "src")
+    offending = String[]
+    for f in ("layer_file_analysis.jl", "layer_references.jl", "layer_module_tree.jl")
+        for line in eachline(joinpath(srcdir, f))
+            occursin("Salsa.@derived", line) || continue
+            # No `@derived function derived_*reference*` (an aggregation keyed on
+            # who-references-an-item would be an ItemRef-keyed volatile value).
+            occursin(r"derived_\w*reference"i, line) && push!(offending, strip(line))
+        end
+    end
+    @test isempty(offending)
+
+    # `each_reference` exists as a plain function and is not registered as a
+    # derived query.
+    @test JuliaWorkspaces.each_reference isa Function
+    @test !isdefined(JuliaWorkspaces, :derived_each_reference)
+    @test !isdefined(JuliaWorkspaces, :derived_references)
+end
