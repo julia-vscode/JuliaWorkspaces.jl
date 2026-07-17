@@ -372,6 +372,179 @@ end
     @test !SL.hasref(x, meta_dict)
 end
 
+@testitem "derived_file_analysis: sibling + external + undefined references" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        using Base: require
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "afunc() = 1\n",
+        B => """
+        bcaller() = afunc() + totally_undefined_name_xyz()
+        brequire() = require
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test fa isa JuliaWorkspaces.FileAnalysis
+
+    # the frozen meta carries this file's refs
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, B)
+    x = only(find_identifiers(cst, "afunc"))
+    @test SL.refof(x, fa.meta) isa SL.TreeRef
+
+    # outbound: the sibling entry with its declaring ItemRef
+    ob = only(filter(o -> o.name == "afunc", fa.outbound))
+    @test ob.target == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg"])["afunc"]
+    @test ob.origin_module == ["MainPkg"]
+    @test ob.count == 1
+
+    # outbound: the external entry has no ItemRef
+    obr = only(filter(o -> o.name == "require", fa.outbound))
+    @test obr.target === nothing
+    @test obr.origin_module == ["Base"]
+
+    @test issorted(fa.outbound, by=o -> (o.name, o.origin_module))
+
+    # diagnostics: the undefined name is a missing ref; the resolved ones are not
+    @test any(d -> occursin("totally_undefined_name_xyz", d.message), fa.diagnostics)
+    @test !any(d -> occursin("afunc", d.message), fa.diagnostics)
+    @test !any(d -> occursin("require", d.message), fa.diagnostics)
+end
+
+@testitem "derived_file_analysis: repeated references aggregate into one counted entry" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "afunc() = 1\n",
+        B => """
+        f() = afunc()
+        g() = afunc()
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+
+    ob = only(filter(o -> o.name == "afunc", fa.outbound))
+    @test ob.count == 2
+end
+
+@testitem "derived_file_analysis: a file not spliced under the root yields an empty analysis" setup=[FileAnalysisWS] begin
+    other = URI("file:///t/src/other.jl")
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        end
+        """,
+        other => "ofunc() = 1\n",
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, other)
+
+    @test isempty(fa.meta)
+    @test isempty(fa.outbound)
+    @test isempty(fa.diagnostics)
+end
+
+@testitem "derived_file_analysis: `check_all` lint hints reach the diagnostics" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("b.jl")
+        end
+        """,
+        B => "f(x) = x == nothing\n",
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+
+    @test any(d -> d.source == "StaticLint.jl" && occursin("nothing", d.message), fa.diagnostics)
+end
+
+@testitem "derived_file_analysis: unresolved in-file imports are marked and reported" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("b.jl")
+        end
+        """,
+        B => """
+        using .NoSuchModule
+        k() = something_undefined_abc()
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+
+    # `mark_unresolved_imports!` ran: the failed component is reported ...
+    @test any(d -> occursin("NoSuchModule", d.message), fa.diagnostics)
+    # ... and the unresolved wildcard `using` suppresses missing-ref checks
+    # in its scope (parity with the whole-closure pass)
+    @test !any(d -> occursin("something_undefined_abc", d.message), fa.diagnostics)
+end
+
+@testitem "derived_file_analysis: no handles or module stores survive in the frozen value" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "afunc() = 1\n",
+        B => """
+        module Inner
+        h() = 1
+        end
+        usebase() = Base.sqrt(2.0)
+        w() = afunc()
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    MS = JuliaWorkspaces.SymbolServer.ModuleStore
+
+    # tree resolution did happen
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, B)
+    @test SL.refof(only(find_identifiers(cst, "afunc")), fa.meta) isa SL.TreeRef
+
+    # the `Base` module ref survives as plain data, not as the ModuleStore
+    rbase = SL.refof(only(find_identifiers(cst, "Base")), fa.meta)
+    @test rbase isa SL.TreeRef
+    @test rbase.name == "Base"
+    @test rbase.kind === :module
+
+    # ... but never entered the outbound table (it resolved through the env
+    # stores, not through the tree)
+    @test !any(o -> o.name == "Base", fa.outbound)
+
+    # leaf symbol stores are kept: `sqrt` stays resolved
+    @test SL.hasref(only(find_identifiers(cst, "sqrt")), fa.meta)
+
+    leaks = sum(collect(values(fa.meta))) do m
+        n = 0
+        s = m.scope
+        if s isa SL.Scope && s.modules isa Dict
+            n += count(v -> v isa SL.AbstractModuleContext || v isa MS, collect(values(s.modules)))
+        end
+        m.ref isa MS && (n += 1)
+        b = m.binding
+        if b isa SL.Binding
+            b.val isa MS && (n += 1)
+            b.type isa MS && (n += 1)
+        end
+        n
+    end
+    @test leaks == 0
+end
+
 @testitem "file analysis: local file scope wins over the tree context" setup=[FileAnalysisWS] begin
     # `afunc` is declared both in a sibling file and locally in the analyzed
     # file — the file-local binding must win (resolution order: file-local
