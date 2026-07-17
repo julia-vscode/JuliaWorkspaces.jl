@@ -290,6 +290,10 @@ function fill_synthetic_import_binding!(b::Binding, val, state)
     val = maybe_lookup(val, state)
     val === nothing && return b # lookup failed: keep the synthetic binding so the import stays flagged
     val === b && return b # never create a self-referential binding
+    # a module context is a runtime handle and must never be stored in a
+    # Binding — keep the synthetic binding untouched (per-file mode resolves
+    # references through the tree regardless)
+    val isa AbstractModuleContext && return b
     b.val = val
     b.type = _typeof(val, state)
     return b

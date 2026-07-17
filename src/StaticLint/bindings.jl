@@ -396,7 +396,11 @@ function add_binding(x, state, scope=state.scope)
                         overload_method(tls, b, VarRef(lhs_ref.name, Symbol(name))) # Add to overloaded list but not scope.
                     end
                 elseif lhs_ref isa Binding && CoreTypes.ismodule(lhs_ref.type)
-                    if hasscope(lhs_ref.val, meta_dict) && haskey(scopeof(lhs_ref.val, meta_dict).names, name)
+                    # `val isa EXPR` guard: a module-typed binding's val is only
+                    # an EXPR for in-closure module definitions — a per-file-mode
+                    # tree import binds the module name with a TreeRef val (and
+                    # `hasscope` is typed on EXPR)
+                    if lhs_ref.val isa EXPR && hasscope(lhs_ref.val, meta_dict) && haskey(scopeof(lhs_ref.val, meta_dict).names, name)
                         # Don't need to do anything, name will resolve
                     end
                 end

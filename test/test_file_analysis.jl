@@ -257,6 +257,38 @@ end
     end
 end
 
+@testitem "file analysis: a qualified definition on a tree-imported module completes the pass" setup=[FileAnalysisWS] begin
+    # `import .Common` binds "Common" with a module-typed, TreeRef-valued
+    # binding; the qualified definition's `add_binding` module branch must
+    # not assume the binding's val is an EXPR.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Common
+        end
+        """,
+        B => """
+        import .Common
+        Common.newf() = 1
+        """,
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    hits = find_identifiers(cst, "Common")
+    @test length(hits) == 2
+    for x in hits
+        @test SL.hasref(x, meta_dict)
+    end
+    fn = find_first_expr(CST.defines_function, cst)
+    @test SL.bindingof(fn, meta_dict) isa SL.Binding
+end
+
 @testitem "file analysis: no context handle remains reachable from the returned meta" setup=[FileAnalysisWS] begin
     # TreeModuleContext holds the Salsa runtime — it may live only inside the
     # running analysis. After semantic_pass returns, neither the root scope
