@@ -710,3 +710,299 @@ end
     @test CSTParser.str_value(get_expr1(cst, 4)) == "y"
     @test CSTParser.str_value(get_expr1(cst, 2)) == "x"
 end
+
+@testsnippet HoverCrossWS begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, update_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    const PROJECT_TOML = """
+    name = "HoverX"
+    uuid = "a2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    const MANIFEST_TOML = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    const ENTRY_URI = URI("file:///hoverx/src/HoverX.jl")
+    const A_URI = URI("file:///hoverx/src/a.jl")
+    const B_URI = URI("file:///hoverx/src/b.jl")
+
+    # A three-file package: the hovered file `b.jl` references names DECLARED
+    # in the sibling `a.jl` (resolved through the module tree in per-file
+    # mode, so their refs are plain-data `TreeRef`s, not merged Bindings).
+    function hoverx_workspace(a_src::String, b_src::String; entry_extra::String="")
+        entry = """
+        module HoverX
+        $(entry_extra)include("a.jl")
+        include("b.jl")
+        end
+        """
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///hoverx/Project.toml"), SourceText(PROJECT_TOML, "toml")))
+        add_file!(jw, TextFile(URI("file:///hoverx/Manifest.toml"), SourceText(MANIFEST_TOML, "toml")))
+        add_file!(jw, TextFile(ENTRY_URI, SourceText(entry, "julia")))
+        add_file!(jw, TextFile(A_URI, SourceText(a_src, "julia")))
+        add_file!(jw, TextFile(B_URI, SourceText(b_src, "julia")))
+        return jw
+    end
+
+    hover_at(jw, src::String, needle::String; uri=B_URI) =
+        get_hover_text(jw, uri, findfirst(needle, src).stop)
+end
+
+@testitem "Hover: cross-file function shows docstring and signatures" setup=[HoverCrossWS] begin
+    a_src = """
+    \"\"\"
+    greet docs
+    \"\"\"
+    greet(name) = 1
+    greet(first, last) = 2
+    """
+    b_src = "caller(x) = greet(x)\n"
+    jw = hoverx_workspace(a_src, b_src)
+
+    # Byte parity with the old whole-closure rendering (captured by probe):
+    # the docstring, then one signature block per method, in splice order.
+    result = hover_at(jw, b_src, "caller(x) = gree")
+    @test result == "greet docs\n```julia\ngreet(name)\n```\n```julia\ngreet(first, last)\n```\n"
+end
+
+@testitem "Hover: cross-file struct shows docstring and fields" setup=[HoverCrossWS] begin
+    a_src = """
+    "CrossS docs"
+    struct CrossS
+        fielda
+        fieldb
+    end
+    """
+    b_src = "maker() = CrossS(1, 2)\n"
+    jw = hoverx_workspace(a_src, b_src)
+
+    result = hover_at(jw, b_src, "CrossS")
+    @test result !== nothing
+    @test occursin("CrossS docs", result)
+    @test occursin("fielda", result)
+    @test occursin("fieldb", result)
+end
+
+@testitem "Hover: cross-file const and assignment show typed definition and docstring" setup=[HoverCrossWS] begin
+    a_src = """
+    "CONSTX docs"
+    const CONSTX = 42
+
+    "v docs"
+    myglobal = [1, 2]
+    """
+    b_src = """
+    cuse() = CONSTX
+    guse() = myglobal
+    """
+    jw = hoverx_workspace(a_src, b_src)
+
+    # Byte parity with the old rendering (probe-captured): the typed
+    # definition block first, then the docstring.
+    @test hover_at(jw, b_src, "cuse() = CONSTX") ==
+        "\n```julia\nCONSTX::Int64 = 42\n```\n\nCONSTX docs"
+    @test hover_at(jw, b_src, "guse() = myglobal") ==
+        "\n```julia\nmyglobal = [1, 2]\n```\n\nv docs"
+end
+
+@testitem "Hover: external symbol through a sibling file's using is unchanged" setup=[HoverCrossWS] begin
+    # `partition` is brought in by `using Base.Iterators` in the ENTRY file;
+    # in per-file mode the hovered file's ref is a `TreeRef` of kind
+    # `:external_symbol`, which must render the env store docs as before.
+    a_src = "unrelated() = 1\n"
+    b_src = "puse(v) = partition(v, 2)\n"
+    jw = hoverx_workspace(a_src, b_src; entry_extra="using Base.Iterators\n")
+
+    result = hover_at(jw, b_src, "puse(v) = partition")
+    @test result !== nothing
+    @test occursin("Iterate over a collection", result)
+    @test occursin("is a function with", result)
+end
+
+@testitem "Hover: qualified use of a sibling-file module member" setup=[HoverCrossWS] begin
+    a_src = """
+    module SubM
+    "subm fn docs"
+    subfn() = 1
+    end
+    """
+    b_src = """
+    using .SubM
+    moduse() = SubM.subfn()
+    """
+    jw = hoverx_workspace(a_src, b_src)
+
+    # The qualified member renders docstring + signature (old parity).
+    @test hover_at(jw, b_src, "SubM.subfn") == "subm fn docs\n```julia\nsubfn()\n```\n"
+
+    # Hovering the module NAME renders a compact module reference (the old
+    # pass dumped the module's entire body — deliberately NOT preserved; see
+    # the M4 task-5 change-list).
+    result = hover_at(jw, b_src, "moduse() = SubM")
+    @test result !== nothing
+    @test occursin("module SubM", result)
+    @test !occursin("subfn() = ", result)
+end
+
+@testitem "Hover: cross-file operator definition resolves through visibility" setup=[HoverCrossWS] begin
+    # Operators are not resolved through the tree context during the per-file
+    # pass (identifier-gated), so hover's operator fallback must consult the
+    # module's visible names.
+    a_src = "⊕(a, b) = a + b\n"
+    b_src = "opuse() = 1 ⊕ 2\n"
+    jw = hoverx_workspace(a_src, b_src)
+
+    @test hover_at(jw, b_src, "1 ⊕") == "\n```julia\na ⊕ b\n```\n"
+end
+
+@testitem "Hover: cross-file call argument names" setup=[HoverCrossWS] begin
+    a_src = """
+    f5(alpha, beta, gamma, delta, epsilon) = 1
+
+    struct CrossT
+        fa
+        fb
+        fc
+        fd
+    end
+    """
+    b_src = """
+    argname() = f5(1, 2, 3, 4, 5)
+    maker() = CrossT(1, 2, 3, 4)
+    """
+    jw = hoverx_workspace(a_src, b_src)
+
+    # Parameter names come from the cross-file method definition (old parity).
+    result = hover_at(jw, b_src, "f5(1, 2")
+    @test result !== nothing
+    @test occursin("Argument `beta` (2 of 5) in call to `f5`", result)
+
+    # Constructor-call arguments name the struct's fields (old parity: the
+    # datatype-field rendering, reproduced cross-file from the materialized
+    # struct EXPR).
+    result = hover_at(jw, b_src, "CrossT(1, 2")
+    @test result !== nothing
+    @test occursin("Datatype field `fb` of CrossT", result)
+end
+
+@testitem "Hover: local variable rendering is unchanged" setup=[HoverCrossWS] begin
+    a_src = "unrelated() = 1\n"
+    b_src = """
+    function lvar()
+        localx = 3
+        return localx
+    end
+    """
+    jw = hoverx_workspace(a_src, b_src)
+
+    result = hover_at(jw, b_src, "return localx")
+    @test result !== nothing
+    @test occursin("localx", result)
+end
+
+@testitem "Hover: deved workspace-package function resolves cross-root" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    main_project = """
+    name = "MainP"
+    uuid = "b2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    b_project = """
+    name = "B"
+    uuid = "c2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    entry = """
+    module MainP
+    using B
+    f() = myfunc(1)
+    g() = B.myfunc(1)
+    end
+    """
+    b_entry = """
+    module B
+    export myfunc
+    "myfunc docs"
+    myfunc(alpha) = 1
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsph/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsph/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsph/Main/src/MainP.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///wsph/B/Project.toml"), SourceText(b_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsph/B/src/B.jl"), SourceText(b_entry, "julia")))
+
+    uri = URI("file:///wsph/Main/src/MainP.jl")
+
+    # Both the `using`-bring-in reference and the qualified one resolve
+    # through B's OWN root's tree (`_method_items_root` cross-root dispatch).
+    result = get_hover_text(jw, uri, findfirst("f() = myfunc", entry).stop)
+    @test result !== nothing
+    @test occursin("myfunc docs", result)
+    @test occursin("myfunc(alpha)", result)
+
+    result_q = get_hover_text(jw, uri, findfirst("B.myfunc", entry).stop)
+    @test result_q !== nothing
+    @test occursin("myfunc docs", result_q)
+    @test occursin("myfunc(alpha)", result_q)
+end
+
+@testitem "Hover: docstring edit in the defining file re-executes no analysis" setup=[HoverCrossWS] begin
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    a_src = """
+    \"\"\"
+    greet docs
+    \"\"\"
+    greet(name) = 1
+    """
+    b_src = "caller(x) = greet(x)\n"
+    jw = hoverx_workspace(a_src, b_src)
+
+    # Untraced baseline fills the memo caches.
+    idx = findfirst("caller(x) = gree", b_src).stop
+    result = get_hover_text(jw, B_URI, idx)
+    @test occursin("greet docs", result)
+
+    # Edit ONLY the docstring in the DEFINING file. Docs live outside the
+    # inventory by design: the inventory value is equal, every dependent
+    # backdates, and NO per-file analysis re-executes — yet hover serves the
+    # fresh docstring (materialized request-time via `derived_item_positions`).
+    update_file!(jw, TextFile(A_URI, SourceText(replace(a_src, "greet docs" => "greet docs EDITED"), "julia")))
+
+    recv = CountReceiver()
+    result = TL.with_tracing(() -> get_hover_text(jw, B_URI, idx), recv)
+    @test occursin("greet docs EDITED", result)
+    @test get(recv.counts, "derived_file_analysis", 0) == 0
+end

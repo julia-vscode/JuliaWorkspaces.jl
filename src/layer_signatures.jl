@@ -421,6 +421,36 @@ function _resolve_call_arg_name(call::CSTParser.EXPR, x::CSTParser.EXPR, meta_di
     return _pick_call_arg_name(names, arg_i)
 end
 
+"""
+    _resolve_tree_call_arg_name(call, x, tr, rt, root)
+
+Argument-name resolution for a cross-file callee resolved as a `TreeRef`. The
+callee's methods span files (`derived_method_items`); each method's EXPR is
+materialized request-time (`derived_item_positions`) and its parameter names
+read against its OWN file-analysis meta (same memoized CST, so arg bindings
+match by objectid), exactly as `_collect_tree_signatures!` does for signature
+help. Candidates are arity-filtered by `_pick_call_arg_name` only — full
+type-based overload discrimination (which the old merged pass did through
+`find_methods`) is not reproduced across files, a sanctioned narrowing (the
+first arity-compatible method's name wins). Never throws.
+"""
+function _resolve_tree_call_arg_name(call::CSTParser.EXPR, x::CSTParser.EXPR, tr::StaticLint.TreeRef, rt, root)
+    (rt === nothing || root === nothing) && return nothing
+    arg_i = _call_positional_arg_index(call, x)
+    arg_i === nothing && return nothing
+    qroot = _method_items_root(rt, root, tr.origin_module)
+    names = Tuple{Vector{String},Bool}[]
+    for ref in derived_method_items(rt, qroot, tr.origin_module, tr.name)
+        entry = get(derived_item_positions(rt, ref.file), ref.id, nothing)
+        entry === nothing && continue
+        item_meta = derived_file_analysis(rt, qroot, ref.file).meta
+        ns = _method_param_names(entry.expr, item_meta)
+        ns === nothing || push!(names, ns)
+    end
+    isempty(names) && return nothing
+    return _pick_call_arg_name(names, arg_i)
+end
+
 # ============================================================================
 # Top-level entry point
 # ============================================================================

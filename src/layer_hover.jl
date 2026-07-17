@@ -106,13 +106,46 @@ function _has_parent_file(x::CSTParser.EXPR)
     return CSTParser.parentof(x) === nothing && CSTParser.headof(x) === :file
 end
 
-function _resolve_op_ref(x::CSTParser.EXPR, env, meta_dict::MetaDict)
+function _resolve_op_ref(x::CSTParser.EXPR, env, meta_dict::MetaDict, rt=nothing, root=nothing, path=nothing)
     StaticLint.hasref(x, meta_dict) && return true
     !CSTParser.isoperator(x) && return false
     _has_parent_file(x) || return false
     scope = _retrieve_scope(x, meta_dict)
     scope === nothing && return false
-    return _op_resolve_up_scopes(x, CSTParser.str_value(x), scope, env, meta_dict)
+    mn = CSTParser.str_value(x)
+    _op_resolve_up_scopes(x, mn, scope, env, meta_dict) && return true
+    # Per-file mode: the scope's `.modules` (which the walk above consults) are
+    # stripped, so neither a cross-file operator declaration nor a Base/Core
+    # exported operator is visible there. Fall back to (1) the module's visible
+    # names — a hit sets a plain-data `TreeRef` the hover TreeRef arm renders —
+    # then (2) the Base/Core env stores, exactly as the old scope.modules walk
+    # did for exported operators.
+    _op_resolve_from_tree(x, mn, meta_dict, rt, root, path) && return true
+    return _op_resolve_from_env(x, mn, env, meta_dict)
+end
+
+function _op_resolve_from_env(x, mn, env, meta_dict::MetaDict)
+    env === nothing && return false
+    (mn isa AbstractString && !isempty(mn)) || return false
+    sym = Symbol(mn)
+    for modname in (:Base, :Core)
+        m = get(env.symbols, modname, nothing)
+        if m isa SymbolServer.ModuleStore && StaticLint.isexportedby(sym, m)
+            StaticLint.setref!(x, StaticLint.maybe_lookup(m[sym], env), meta_dict)
+            return true
+        end
+    end
+    return false
+end
+
+function _op_resolve_from_tree(x, mn, meta_dict::MetaDict, rt, root, path)
+    (rt === nothing || root === nothing || path === nothing) && return false
+    (mn isa AbstractString && !isempty(mn)) || return false
+    p = vcat(path, _in_file_module_names(x, meta_dict))
+    vn = get(derived_module_visible_names(rt, root, p), mn, nothing)
+    vn === nothing && return false
+    StaticLint.setref!(x, StaticLint.TreeRef(mn, vn.kind, vn.item, vn.origin_module), meta_dict)
+    return true
 end
 
 function _op_resolve_up_scopes(x, mn, scope, env, meta_dict::MetaDict)
@@ -321,18 +354,130 @@ end
 
 _get_hover(x, documentation::String, expr, env, meta_dict) = documentation
 
-function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_dict)
+function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
     if (CSTParser.isidentifier(x) || CSTParser.isoperator(x)) && StaticLint.hasref(x, meta_dict)
         r = StaticLint.refof(x, meta_dict)
-        documentation = if r isa StaticLint.Binding
+        documentation = if r isa StaticLint.Binding && r.val isa StaticLint.TreeRef
+            # A file-local import binding of a tree name (`using .Sib`,
+            # `import X: f`): its `.val` carries the tree target — render it as
+            # a tree ref, not as the (contentless) local binding.
+            _get_tree_ref_hover(r.val, documentation, expr, env, meta_dict, rt, root)
+        elseif r isa StaticLint.Binding
             _get_hover(r, documentation, expr, env, meta_dict)
         elseif r isa SymbolServer.SymStore
             _get_hover(r, documentation, expr, env, meta_dict)
+        elseif r isa StaticLint.TreeRef
+            # A name resolved THROUGH the module tree in per-file mode: render
+            # from the inventory item (+ defining-file docstring) rather than a
+            # merged Binding — the per-file meta never saw the declaring file.
+            _get_tree_ref_hover(r, documentation, expr, env, meta_dict, rt, root)
         else
             documentation
         end
     end
     return documentation
+end
+
+# Hover rendering for a `TreeRef` (module-tree/env resolution stand-in).
+#
+# - function/macro/datatype items: byte-parity with the old merged Binding
+#   rendering, reproduced by materializing every method item's defining EXPR
+#   (`derived_method_items` + `derived_item_positions`) and re-using the same
+#   preceding-docs + signature-block loop the local path runs over `b.refs`.
+#   The method set can span files/roots, so this is done over the tree, not a
+#   single binding.
+# - other tree items (const/global/assignment/enum): the typed-definition +
+#   docstring rendering, recovered by materializing the defining EXPR and its
+#   OWN file-analysis Binding (same memoized CST, so `bindingof` matches by
+#   objectid) and delegating to `_get_tooltip` exactly as the local path would.
+# - `:module`: a compact module reference (the old pass dumped the whole module
+#   body — deliberately not preserved; see the task-5 change-list).
+# - `:external_symbol`/`:external_module` (item === nothing): resolve the env
+#   store and render the SymStore, matching the old store-backed rendering.
+function _get_tree_ref_hover(tr::StaticLint.TreeRef, documentation::String, expr, env, meta_dict, rt, root)
+    (rt === nothing || root === nothing) && return documentation
+
+    if tr.item === nothing
+        # Env-backed stand-ins carry no ItemRef; resolve the store leaf.
+        if tr.kind === :external_symbol && !isempty(tr.origin_module)
+            store = _resolve_external_module(rt, root, tr.origin_module)
+            if store isa SymbolServer.ModuleStore
+                val = get(store.vals, Symbol(tr.name), nothing)
+                val isa SymbolServer.VarRef && (val = StaticLint.maybe_lookup(val, env))
+                val isa SymbolServer.SymStore && return _get_hover(val, documentation, expr, env, meta_dict)
+            end
+        elseif tr.kind === :external_module
+            store = _resolve_external_module(rt, root, vcat(tr.origin_module, [tr.name]))
+            store isa SymbolServer.SymStore && return _get_hover(store, documentation, expr, env, meta_dict)
+        end
+        return documentation
+    end
+
+    if tr.kind === :module
+        return string(_ensure_ends_with(documentation), "```julia\nmodule ", tr.name, "\n```\n")
+    elseif tr.kind in (:function, :macro, :struct, :mutable_struct, :abstract, :primitive, :enum)
+        return _tree_method_items_hover(tr, documentation, rt, root)
+    else
+        return _tree_binding_hover(tr, documentation, expr, env, rt, root)
+    end
+end
+
+# Function/macro/datatype: reproduce `_get_tooltip`'s per-method loop over the
+# inventory method items (which span files and, for deved packages, roots).
+function _tree_method_items_hover(tr::StaticLint.TreeRef, documentation::String, rt, root)
+    qroot = _method_items_root(rt, root, tr.origin_module)
+    rendered = false
+    for ref in derived_method_items(rt, qroot, tr.origin_module, tr.name)
+        entry = get(derived_item_positions(rt, ref.file), ref.id, nothing)
+        entry === nothing && continue
+        method = entry.expr
+        documentation = _get_preceding_docs(method, documentation)
+        if CSTParser.defines_function(method)
+            documentation = string(_ensure_ends_with(documentation), "```julia\n", CSTParser.to_codeobject(CSTParser.get_sig(method)), "\n```\n")
+            rendered = true
+        elseif CSTParser.defines_datatype(method)
+            documentation = string(_ensure_ends_with(documentation), "```julia\n", CSTParser.to_codeobject(method), "\n```\n")
+            rendered = true
+        end
+    end
+    return rendered ? documentation : _tree_item_fallback_hover(tr.item, documentation, rt)
+end
+
+# const/global/assignment/enum: materialize the defining EXPR + its own
+# file-analysis Binding and render exactly like the local path.
+function _tree_binding_hover(tr::StaticLint.TreeRef, documentation::String, expr, env, rt, root)
+    item = tr.item
+    qroot = _method_items_root(rt, root, tr.origin_module)
+    entry = get(derived_item_positions(rt, item.file), item.id, nothing)
+    entry === nothing && return _tree_item_fallback_hover(item, documentation, rt)
+    defmeta = derived_file_analysis(rt, qroot, item.file).meta
+    b = _item_binding(entry.expr, defmeta)
+    b isa StaticLint.Binding || return _tree_item_fallback_hover(item, documentation, rt)
+    return _get_tooltip(b, documentation, defmeta, expr, env; show_definition = true)
+end
+
+# The `Binding` an item's defining node introduces. Item nodes from
+# `derived_item_positions` are the DECLARATION statement (a `const`/`global`
+# wrapper, an assignment, or the name itself); the binding lives on the bound
+# identifier, so unwrap one level for `const`/`global` and read the LHS of an
+# assignment.
+function _item_binding(x::CSTParser.EXPR, meta)
+    b = StaticLint.bindingof(x, meta)
+    b isa StaticLint.Binding && return b
+    if (_is_const_expr(x) || CSTParser.headof(x) === :global) && x.args !== nothing && !isempty(x.args)
+        return _item_binding(x.args[1], meta)
+    elseif CSTParser.isassignment(x) && x.args !== nothing && !isempty(x.args)
+        return StaticLint.bindingof(x.args[1], meta)
+    end
+    return nothing
+end
+
+# Last-resort rendering when the defining EXPR/Binding can't be materialized:
+# the item's docstring alone (still request-time via `item_documentation`).
+function _tree_item_fallback_hover(item::ItemRef, documentation::String, rt)
+    doc = item_documentation(rt, item)
+    doc === nothing && return documentation
+    return string(documentation, doc)
 end
 
 _get_hover(b::StaticLint.Binding, documentation::String, expr, env, meta_dict) =
@@ -497,9 +642,9 @@ end
 # Function call position hover (argument N of M / datatype field)
 # ============================================================================
 
-_get_fcall_position(x, documentation, env, meta_dict) = documentation
+_get_fcall_position(x, documentation, env, meta_dict, rt=nothing, root=nothing) = documentation
 
-function _get_fcall_position(x::CSTParser.EXPR, documentation, env, meta_dict, depth=0)
+function _get_fcall_position(x::CSTParser.EXPR, documentation, env, meta_dict, rt=nothing, root=nothing, depth=0)
     # Guard against infinite loops via depth limit instead of Set{EXPR}
     depth > 100 && return documentation
 
@@ -516,31 +661,40 @@ function _get_fcall_position(x::CSTParser.EXPR, documentation, env, meta_dict, d
 
             # hovering over the function name, so we might as well check the parent
             if arg_i == 0
-                return _get_fcall_position(CSTParser.parentof(x), documentation, env, meta_dict, depth + 1)
+                return _get_fcall_position(CSTParser.parentof(x), documentation, env, meta_dict, rt, root, depth + 1)
             end
 
             minargs < 4 && return documentation
 
             fname = CSTParser.get_name(CSTParser.parentof(x))
-            if StaticLint.hasref(fname, meta_dict) &&
-               (StaticLint.refof(fname, meta_dict) isa StaticLint.Binding && StaticLint.refof(fname, meta_dict).val isa CSTParser.EXPR && CSTParser.defines_struct(StaticLint.refof(fname, meta_dict).val) && StaticLint.struct_nargs(StaticLint.refof(fname, meta_dict).val, env, meta_dict)[1] == minargs)
-                dt_ex = StaticLint.refof(fname, meta_dict).val
+            fref = StaticLint.hasref(fname, meta_dict) ? StaticLint.refof(fname, meta_dict) : nothing
+            # A cross-file callee resolves to a `TreeRef` (directly, or as a
+            # file-local import binding's `.val`); its defining EXPR/method set
+            # is materialized request-time via the inventory.
+            ftree = fref isa StaticLint.TreeRef ? fref :
+                (fref isa StaticLint.Binding && fref.val isa StaticLint.TreeRef) ? fref.val : nothing
+            if fref isa StaticLint.Binding && fref.val isa CSTParser.EXPR && CSTParser.defines_struct(fref.val) && StaticLint.struct_nargs(fref.val, env, meta_dict)[1] == minargs
+                dt_ex = fref.val
                 args = dt_ex.args[3]
                 args.args === nothing || arg_i > length(args.args) && return documentation
                 _fieldname = CSTParser.str_value(CSTParser.get_arg_name(args.args[arg_i]))
                 documentation = string("Datatype field `$_fieldname` of $(CSTParser.str_value(CSTParser.get_name(dt_ex)))", "\n", documentation)
-            elseif StaticLint.hasref(fname, meta_dict) && (StaticLint.refof(fname, meta_dict) isa SymbolServer.DataTypeStore || StaticLint.refof(fname, meta_dict) isa StaticLint.Binding && StaticLint.refof(fname, meta_dict).val isa SymbolServer.DataTypeStore)
-                dts = StaticLint.refof(fname, meta_dict) isa StaticLint.Binding ? StaticLint.refof(fname, meta_dict).val : StaticLint.refof(fname, meta_dict)
+            elseif fref isa SymbolServer.DataTypeStore || (fref isa StaticLint.Binding && fref.val isa SymbolServer.DataTypeStore)
+                dts = fref isa StaticLint.Binding ? fref.val : fref
                 if length(dts.fieldnames) == minargs && arg_i <= length(dts.fieldnames)
                     documentation = string("Datatype field `$(dts.fieldnames[arg_i])`", "\n", documentation)
                 end
+            elseif (fields = _tree_struct_field_hover(ftree, minargs, arg_i, env, rt, root)) !== nothing
+                documentation = string(fields, "\n", documentation)
             else
                 callname = if CSTParser.is_getfield(fname)
                     CSTParser.str_value(fname.args[1]) * "." * CSTParser.str_value(CSTParser.get_rhs_of_getfield(fname))
                 else
                     CSTParser.str_value(fname)
                 end
-                arginfo = _resolve_call_arg_name(CSTParser.parentof(x), x, meta_dict, env)
+                arginfo = ftree === nothing ?
+                    _resolve_call_arg_name(CSTParser.parentof(x), x, meta_dict, env) :
+                    _resolve_tree_call_arg_name(CSTParser.parentof(x), x, ftree, rt, root)
                 if arginfo === nothing
                     documentation = string("Argument $arg_i of $(minargs) in call to `", callname, "`\n", documentation)
                 else
@@ -550,10 +704,31 @@ function _get_fcall_position(x::CSTParser.EXPR, documentation, env, meta_dict, d
             end
             return documentation
         else
-            return _get_fcall_position(CSTParser.parentof(x), documentation, env, meta_dict, depth + 1)
+            return _get_fcall_position(CSTParser.parentof(x), documentation, env, meta_dict, rt, root, depth + 1)
         end
     end
     return documentation
+end
+
+# The datatype-field text for a cross-file struct constructor: materialize the
+# struct's defining EXPR + its own file-analysis meta (so `struct_nargs` reads
+# the declaring file's field bindings) and reproduce the local struct branch.
+# Returns `nothing` when `tr` is not a same-arity tree struct (the caller then
+# falls through to the general arg-name path).
+function _tree_struct_field_hover(tr, minargs, arg_i, env, rt, root)
+    (tr isa StaticLint.TreeRef && tr.item !== nothing && rt !== nothing && root !== nothing) || return nothing
+    tr.kind in (:struct, :mutable_struct) || return nothing
+    qroot = _method_items_root(rt, root, tr.origin_module)
+    entry = get(derived_item_positions(rt, tr.item.file), tr.item.id, nothing)
+    entry === nothing && return nothing
+    dt_ex = entry.expr
+    CSTParser.defines_struct(dt_ex) || return nothing
+    defmeta = derived_file_analysis(rt, qroot, tr.item.file).meta
+    StaticLint.struct_nargs(dt_ex, env, defmeta)[1] == minargs || return nothing
+    args = dt_ex.args[3]
+    (args.args === nothing || arg_i > length(args.args)) && return nothing
+    fieldname = CSTParser.str_value(CSTParser.get_arg_name(args.args[arg_i]))
+    return "Datatype field `$fieldname` of $(CSTParser.str_value(CSTParser.get_name(dt_ex)))"
 end
 
 # ============================================================================
@@ -566,22 +741,28 @@ function _get_hover_text(rt, uri, index)
 
     root = derived_best_root_for_uri(rt, uri)
     if root !== nothing
+        # Per-file analysis meta (the inventory architecture's per-file pass),
+        # not the whole-closure static-lint meta: a name declared in a SIBLING
+        # file is resolved here as a plain-data `TreeRef`, which the hover
+        # rendering re-attaches to its inventory item + defining-file docstring
+        # at the last mile. Same env selection as `derived_file_analysis`.
         project_uri = derived_project_uri_for_root(rt, root)
-        lint_result = derived_static_lint_meta_for_root(rt, root)
-        meta_dict = lint_result.meta_dict
-        env = project_uri !== nothing ? derived_environment(rt, project_uri) : _stdlib_only_env()
+        meta_dict = derived_file_analysis(rt, root, uri).meta
+        env = project_uri !== nothing ? derived_environment(rt, project_uri) : derived_stdlib_only_env(rt)
+        path = derived_file_module_path(rt, root, uri)
     else
         meta_dict = _empty_hover_meta_dict
         env = _empty_hover_env
+        path = nothing
     end
 
     offset = index - 1  # Convert 1-based string index to 0-based CSTParser offset
     x = get_expr1(cst, offset)
 
-    x isa CSTParser.EXPR && CSTParser.isoperator(x) && _resolve_op_ref(x, env, meta_dict)
-    documentation = _get_hover(x, "", x, env, meta_dict)
+    x isa CSTParser.EXPR && CSTParser.isoperator(x) && _resolve_op_ref(x, env, meta_dict, rt, root, path)
+    documentation = _get_hover(x, "", x, env, meta_dict, rt, root)
     documentation = _get_closer_hover(x, documentation)
-    documentation = _get_fcall_position(x, documentation, env, meta_dict)
+    documentation = _get_fcall_position(x, documentation, env, meta_dict, rt, root)
     documentation = _sanitize_docstring(documentation)
 
     return isempty(documentation) ? nothing : documentation

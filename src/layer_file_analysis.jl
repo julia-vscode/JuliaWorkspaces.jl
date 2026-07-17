@@ -690,3 +690,42 @@ Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     end
     return res
 end
+
+"""
+    item_documentation(rt, ref::ItemRef) -> Union{Nothing,String}
+
+The docstring attached to a tree-declared inventory item, materialized at
+request time from the item's DEFINING file. Plain function (never a derived
+value): it reaches `derived_item_positions` — the volatile leaf that nothing
+in layers 1–3 may depend on — to recover the item's syntax node, then walks
+the node's parent chain in the file's CST for a doc-wrapper macrocall (the
+implicit `:globalrefdoc`, an explicit `@doc`, or a `const`-wrapper's docs) and
+reuses the hover layer's docstring extraction on it.
+
+Docs deliberately live OUTSIDE the inventory (spec: a docstring edit must not
+invalidate dependents — the inventory value stays `isequal`, so every
+consumer backdates). This helper is the sanctioned path that re-attaches them
+at the last mile: hovering a file that references `ref` re-runs no analysis
+when only `ref`'s docstring changed, yet serves the fresh text (the
+`derived_item_positions` reparse is a leaf recompute of the defining file
+only).
+
+Returns `nothing` when the item has no position (stale ref) or no docstring.
+"""
+function item_documentation(rt, ref::ItemRef)
+    entry = get(derived_item_positions(rt, ref.file), ref.id, nothing)
+    entry === nothing && return nothing
+    expr = entry.expr
+
+    doc_expr = _maybe_get_doc_expr(expr)
+    if _is_doc_expr(doc_expr)
+        return CSTParser.to_codeobject(_get_doc_payload_expr(doc_expr))
+    end
+    # `const`/`global` wrappers carry the docstring one level up (the item
+    # node is the assignment inside the `const`).
+    p = CSTParser.parentof(expr)
+    if p isa CSTParser.EXPR && _is_const_expr(p) && _expr_has_preceding_docs(p)
+        return CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(p)))
+    end
+    return nothing
+end
