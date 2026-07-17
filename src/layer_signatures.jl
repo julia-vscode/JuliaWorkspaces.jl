@@ -76,28 +76,60 @@ end
 Given an EXPR `x` inside a call, collect all signature information for the
 called function.
 """
-function _collect_signatures(x, meta_dict::MetaDict, env, runtime)
+function _collect_signatures(x, meta_dict::MetaDict, env, runtime, root::URI)
     sigs = SignatureInfo[]
 
-    if x isa CSTParser.EXPR && CSTParser.parentof(x) isa CSTParser.EXPR && CSTParser.iscall(CSTParser.parentof(x))
-        parent_call = CSTParser.parentof(x)
-        if CSTParser.isidentifier(parent_call.args[1])
-            call_name = parent_call.args[1]
-        elseif CSTParser.iscurly(parent_call.args[1]) && CSTParser.isidentifier(parent_call.args[1].args[1])
-            call_name = parent_call.args[1].args[1]
-        elseif CSTParser.is_getfield_w_quotenode(parent_call.args[1])
-            call_name = parent_call.args[1].args[2].args[1]
-        else
-            call_name = nothing
-        end
-        if call_name !== nothing &&
-                (f_binding = StaticLint.refof(call_name, meta_dict)) !== nothing &&
-                (tls = _retrieve_toplevel_scope(call_name, meta_dict)) !== nothing
-            _get_signatures(f_binding, tls, sigs, env, meta_dict)
-        end
+    (x isa CSTParser.EXPR && CSTParser.parentof(x) isa CSTParser.EXPR && CSTParser.iscall(CSTParser.parentof(x))) || return sigs
+    parent_call = CSTParser.parentof(x)
+    if CSTParser.isidentifier(parent_call.args[1])
+        call_name = parent_call.args[1]
+    elseif CSTParser.iscurly(parent_call.args[1]) && CSTParser.isidentifier(parent_call.args[1].args[1])
+        call_name = parent_call.args[1].args[1]
+    elseif CSTParser.is_getfield_w_quotenode(parent_call.args[1])
+        call_name = parent_call.args[1].args[2].args[1]
+    else
+        call_name = nothing
+    end
+    call_name === nothing && return sigs
+
+    f_ref = StaticLint.refof(call_name, meta_dict)
+    f_ref === nothing && return sigs
+
+    # A callee resolved THROUGH the module tree carries a `TreeRef` (directly,
+    # or as a file-local import binding's `.val`): its method set spans files
+    # this per-file meta never merged, so collect the signatures from the
+    # inventory method items of its origin module (`derived_method_items`).
+    # Everything else — a file-local `Binding` (definitions in this very file)
+    # or an env `FunctionStore`/`DataTypeStore` (Base/stdlib callees) — keeps
+    # the old per-file/env path unchanged.
+    tr = f_ref isa StaticLint.TreeRef ? f_ref :
+        (f_ref isa StaticLint.Binding && f_ref.val isa StaticLint.TreeRef) ? f_ref.val : nothing
+    if tr !== nothing
+        _collect_tree_signatures!(sigs, tr, runtime, root)
+    else
+        tls = _retrieve_toplevel_scope(call_name, meta_dict)
+        tls === nothing && return sigs
+        _get_signatures(f_ref, tls, sigs, env, meta_dict)
     end
 
     return sigs
+end
+
+# Signatures for a tree-resolved callee: every inventory method item of `name`
+# in the callee's origin module (`derived_method_items`), rendered from its
+# defining EXPR. The EXPR is materialized request-time from the item's own file
+# (`derived_item_positions`) — allowed in a request handler, never in a derived
+# value — and paired with that file's per-file analysis meta (same memoized
+# CST, so the arg bindings match by objectid), so `_expr_signature!` recovers
+# parameter names (and var"..." quoting) exactly as for a local definition.
+function _collect_tree_signatures!(sigs::Vector{SignatureInfo}, tr::StaticLint.TreeRef, runtime, root::URI)
+    for ref in derived_method_items(runtime, root, tr.origin_module, tr.name)
+        entry = get(derived_item_positions(runtime, ref.file), ref.id, nothing)
+        entry === nothing && continue
+        item_meta = derived_file_analysis(runtime, root, ref.file).meta
+        _expr_signature!(sigs, entry.expr, item_meta)
+    end
+    return
 end
 
 # Fallback
@@ -178,7 +210,17 @@ function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo
     end)
 end
 
-function _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict)
+_get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) =
+    _expr_signature!(sigs, x, meta_dict)
+
+# Build the `SignatureInfo` for a definition EXPR `x` (a function/macro
+# definition or a struct) and push it onto `sigs`. Uses `meta_dict` only to
+# recover argument bindings' names (var"..." quoting) — the struct branch needs
+# no meta. Shared by the local-binding path (`_get_signatures`) and the
+# tree-resolved path (`_collect_tree_signatures!`), which materializes the
+# defining EXPR of a cross-file inventory item and passes that item's own
+# file-analysis meta.
+function _expr_signature!(sigs::Vector{SignatureInfo}, x::CSTParser.EXPR, meta_dict)
     if CSTParser.defines_function(x)
         sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
         params = ParameterInfo[]
@@ -358,15 +400,21 @@ function _get_signature_help(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return empty_result
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    # Per-file analysis meta (the inventory architecture's per-file pass), not
+    # the whole-closure static-lint meta: a callee defined in a SIBLING file is
+    # resolved here as a `TreeRef` (through the module tree), and its method
+    # signatures are collected from the inventory method items rather than from
+    # a merged whole-closure binding. Same env selection as the per-file pass
+    # (`derived_file_analysis`), so env-resolved `FunctionStore` callee refs
+    # match the store the meta was built against.
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
     project_uri = derived_project_uri_for_root(runtime, root)
-    env = derived_environment(runtime, project_uri)
+    env = project_uri === nothing ? derived_stdlib_only_env(runtime) : derived_environment(runtime, project_uri)
 
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     x = _get_expr(cst, offset)
 
-    sigs = _collect_signatures(x, meta_dict, env, runtime)
+    sigs = _collect_signatures(x, meta_dict, env, runtime, root)
 
     if isempty(sigs) || (x isa CSTParser.EXPR && CSTParser.headof(x) === :RPAREN)
         return empty_result

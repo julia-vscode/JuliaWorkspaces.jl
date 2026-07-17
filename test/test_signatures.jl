@@ -314,3 +314,145 @@ end
     sigs = sigs_for("qux() = 1\nqux(")
     @test !isempty(sigs)
 end
+
+@testitem "Signatures: cross-file callee shows all method signatures with parameter names" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "SigCross"
+    uuid = "42345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    entry = """
+    module SigCross
+    include("a.jl")
+    include("b.jl")
+    caller() = greet(
+    end
+    """
+    a_src = "greet(name) = 1\n"
+    b_src = "greet(first, last) = 2\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///sigcross/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///sigcross/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///sigcross/src/SigCross.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///sigcross/src/a.jl"), SourceText(a_src, "julia")))
+    add_file!(jw, TextFile(URI("file:///sigcross/src/b.jl"), SourceText(b_src, "julia")))
+
+    uri = URI("file:///sigcross/src/SigCross.jl")
+    idx = findfirst("greet(", entry)[end] + 1
+    result = get_signature_help(jw, uri, idx)
+
+    labels = [s.label for s in result.signatures]
+    @test any(l -> occursin("greet(name)", l), labels)
+    @test any(l -> occursin("greet(first, last)", l), labels)
+    # Parameter names are carried through from the cross-file definitions.
+    allparams = [p.label for s in result.signatures for p in s.parameters]
+    @test "name" in allparams
+    @test "first" in allparams && "last" in allparams
+end
+
+@testitem "Signatures: Base.println through the env store is unchanged" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "SigBase"
+    uuid = "62345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    # Inside a package module (the migrated per-file meta path), an env-store
+    # callee — unqualified `println(` and qualified `Base.println(` — keeps
+    # the old SymbolServer signature rendering.
+    entry = """
+    module SigBase
+    f() = println(
+    g() = Base.println(
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///sigbase/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///sigbase/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///sigbase/src/SigBase.jl"), SourceText(entry, "julia")))
+
+    uri = URI("file:///sigbase/src/SigBase.jl")
+
+    idx = findfirst("println(", entry)[end] + 1
+    result = get_signature_help(jw, uri, idx)
+    @test !isempty(result.signatures)
+    @test any(s -> occursin("println(", s.label) && occursin(" in Base", s.label), result.signatures)
+
+    idx_q = findlast("println(", entry)[end] + 1
+    result_q = get_signature_help(jw, uri, idx_q)
+    @test !isempty(result_q.signatures)
+    @test any(s -> occursin("println(", s.label) && occursin(" in Base", s.label), result_q.signatures)
+end
+
+@testitem "Signatures: cross-file struct constructor shows field-based signature" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "SigXStruct"
+    uuid = "52345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    entry = """
+    module SigXStruct
+    include("t.jl")
+    caller() = T(
+    end
+    """
+    t_src = """
+    struct T
+        a
+        b
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///sigxstruct/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///sigxstruct/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///sigxstruct/src/SigXStruct.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///sigxstruct/src/t.jl"), SourceText(t_src, "julia")))
+
+    uri = URI("file:///sigxstruct/src/SigXStruct.jl")
+    idx = findfirst("T(", entry)[end] + 1
+    result = get_signature_help(jw, uri, idx)
+    @test !isempty(result.signatures)
+    sig = first(result.signatures)
+    @test [p.label for p in sig.parameters] == ["a", "b"]
+end

@@ -1234,3 +1234,78 @@ end
     """)
     @test JuliaWorkspaces.derived_module_names(jw2.runtime, root2, String[])["thing2"] === :struct
 end
+
+@testitem "module selectors: derived_method_items collects methods across files in splice order" setup=[ModuleTreeWS] begin
+    a_uri = URI("file:///t/src/a.jl")
+    b_uri = URI("file:///t/src/b.jl")
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    include("a.jl")
+    include("b.jl")
+    Base.foo(z) = 3
+    end
+    """; extra_files=Dict(
+        a_uri => "foo(x) = 1\n",
+        b_uri => "foo(x, y) = 2\n",
+    ))
+
+    items = JuliaWorkspaces.derived_method_items(jw.runtime, root_uri, ["Pkg"], "foo")
+    # Both plain methods, in include (splice) order; the `Base.foo` extension's
+    # qualifier resolves to Base, not Pkg, so it is excluded.
+    @test [r.file for r in items] == [a_uri, b_uri]
+    @test all(r -> r isa ItemRef, items)
+end
+
+@testitem "module selectors: derived_method_items includes qualified self-extensions, excludes foreign ones" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    foo(x) = 1
+    Pkg.foo(y) = 2
+    Base.foo(z) = 3
+    end
+    """)
+
+    items = JuliaWorkspaces.derived_method_items(jw.runtime, root_uri, ["Pkg"], "foo")
+    # foo(x) (unqualified in Pkg) + Pkg.foo (qualifier resolves to Pkg); the
+    # Base.foo extension is excluded.
+    @test length(items) == 2
+    @test all(r -> r.file == root_uri, items)
+    # The Base extension resolves to no tree module, so it is in NO path.
+    @test isempty(JuliaWorkspaces.derived_method_items(jw.runtime, root_uri, ["Base"], "foo"))
+end
+
+@testitem "module selectors: derived_method_items returns the struct and its outer constructors" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    struct Thing
+        a
+        b
+    end
+    Thing(x::Int) = Thing(x, x)
+    end
+    """)
+
+    items = JuliaWorkspaces.derived_method_items(jw.runtime, root_uri, ["Pkg"], "Thing")
+    kinds = Set{Symbol}()
+    for r in items
+        inv = JuliaWorkspaces.derived_file_inventory(jw.runtime, r.file)
+        for it in inv.items
+            it.id == r.id && it.name == "Thing" && push!(kinds, it.kind)
+        end
+    end
+    # The struct stays the declared winner (F1 rule) AND the outer constructor
+    # is returned alongside as a separate item.
+    @test :struct in kinds
+    @test :function in kinds
+end
+
+@testitem "module selectors: derived_method_items is empty for an unknown name or module" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Pkg
+    foo(x) = 1
+    end
+    """)
+
+    @test isempty(JuliaWorkspaces.derived_method_items(jw.runtime, root_uri, ["Pkg"], "nope"))
+    @test isempty(JuliaWorkspaces.derived_method_items(jw.runtime, root_uri, ["Nope"], "foo"))
+end

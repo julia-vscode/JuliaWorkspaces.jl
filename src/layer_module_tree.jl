@@ -677,3 +677,113 @@ Salsa.@derived function derived_file_module_path(rt, root, file)
     tree = derived_module_tree(rt, root)
     return get(tree.file_modules, file, nothing)
 end
+
+# Resolve a method-extension qualifier `qual` (a NON-empty, dot-free
+# module-path prefix as written, e.g. `["Base"]` or `["Base", "Iterators"]`)
+# written at absolute module location `loc` to the absolute tree-module path it
+# denotes, or `nothing` when it names no module of this tree. Mirrors
+# `_classify_import`'s rule-2 absolute anchor walk (deliberately the same
+# StaticLint-compatible enclosing-scope walk): step outward from `loc`
+# (`loc` itself, then each shorter enclosing prefix, down to `String[]`),
+# anchoring at the FIRST prefix `M` for which `vcat(M, [qual[1]])` is a tree
+# module, then requiring every remaining segment to resolve as a nested tree
+# module from `M`. A `Base.foo` qualifier never anchors (Base is not a tree
+# module), so it resolves to `nothing` and belongs to NO tree path — exactly
+# what keeps a `Base.foo` extension out of a `Pkg.foo` method set.
+function _resolve_extension_qualifier(modpaths::Set{Vector{String}}, loc::Vector{String}, qual::Vector{String})
+    isempty(qual) && return nothing
+    M = copy(loc)
+    while true
+        if vcat(M, [qual[1]]) in modpaths
+            resolved = copy(M)
+            for seg in qual
+                push!(resolved, seg)
+                resolved in modpaths || return nothing
+            end
+            return resolved
+        end
+        isempty(M) && break
+        pop!(M)
+    end
+    return nothing
+end
+
+# Depth-first splice walk (mirroring `_build_tree_structure`'s file/include
+# interleaving) that appends, in true splice order, every item named `name`
+# whose module resolves to `target`: an unqualified item whose absolute module
+# (`vcat(P, item.parent_module)`) equals `target`, or a qualified extension
+# whose qualifier resolves to `target` (`_resolve_extension_qualifier`). Item
+# and include events are merged and processed in id order (include-first on an
+# id tie, matching `_build_tree_structure`), so an include's subtree is spliced
+# before the includer's later items.
+function _collect_method_items!(rt, F::URI, P::Vector{String}, target::Vector{String},
+                                name::String, modpaths::Set{Vector{String}},
+                                result::Vector{ItemRef}, visited::Set{URI})
+    inv = derived_file_inventory(rt, F)
+
+    events = Tuple{Int,Symbol,Any}[]
+    for item in inv.items
+        # Same kind gate as `_build_tree_structure`'s declared handling:
+        # only binding kinds declare (or, qualified, extend) a name —
+        # an `:opaque_macrocall` row named `@foo` is a top-level USAGE of
+        # the macro, not a method of it. Qualified extensions are
+        # `:function`/`:macro` items, both in the set.
+        if item.name == name && item.kind in _BINDING_ITEM_KINDS
+            push!(events, (item.id, :item, item))
+        end
+    end
+    for inc in inv.includes
+        push!(events, (inc.id, :include, inc))
+    end
+    sort!(events; by=e -> (e[1], e[2] === :include ? 0 : 1), alg=Base.Sort.MergeSort)
+
+    for (_, kind, payload) in events
+        if kind === :item
+            item = payload
+            loc = vcat(P, item.parent_module)
+            resolved = isempty(item.qualifier) ? loc :
+                _resolve_extension_qualifier(modpaths, loc, item.qualifier)
+            resolved == target && push!(result, (file=F, id=item.id))
+        else
+            inc = payload
+            inc.target === nothing && continue
+            newP = vcat(P, inc.parent_module)
+            inc.target in visited && continue
+            derived_has_content(rt, inc.target) || continue
+            push!(visited, inc.target)
+            _collect_method_items!(rt, inc.target, newP, target, name, modpaths, result, visited)
+        end
+    end
+    return
+end
+
+"""
+    derived_method_items(rt, root, path::Vector{String}, name::String) -> Vector{ItemRef}
+
+All inventory items that declare or extend `name` in the module at `path` of
+`root`'s tree, in splice order: the unqualified declarations/methods of `name`
+whose module is `path` (a struct, its outer constructors, and every method of a
+function all surface as separate items — the F1 datatype-wins rule keeps the
+struct the *declared* winner in the tree, but this selector returns the method
+extensions alongside it), plus every qualified method extension
+(`Mod.name(...)`) whose qualifier resolves to `path`
+(`_resolve_extension_qualifier`). A `Base.name` extension is excluded from a
+workspace module's set — its qualifier resolves to Base, not the tree.
+
+Id-carrying (an `ItemRef` per matching item), for request-time materialization
+of the defining EXPR via `derived_item_positions`. A thin projection of
+`derived_module_tree` + the per-file inventories; plain data throughout.
+Empty when `path` names no module in the tree or `name` is declared nowhere in
+it.
+"""
+Salsa.@derived function derived_method_items(rt, root, path, name)
+    @debug "derived_method_items" root=root path=path name=name
+
+    tree = derived_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    result = ItemRef[]
+    path in modpaths || return result
+
+    _collect_method_items!(rt, root, String[], path, name, modpaths, result, Set{URI}([root]))
+    return result
+end
