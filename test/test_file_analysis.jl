@@ -1138,6 +1138,141 @@ end
     @test any(d -> occursin("another_undefined_name", d.message), fa_b.diagnostics)
 end
 
+@testitem "derived_file_analysis: relative-dot imports at the analyzed file's own top level resolve through tree parents" setup=[FileAnalysisWS] begin
+    # Shape 1: single-dot colon-form whose module component was ALREADY bound
+    # by a preceding `import .URIs2` (the binding's val is a plain-data
+    # TreeRef) — the colon members must continue the walk through the
+    # denoted tree module, not dead-end on the Binding.
+    u2 = URI("file:///t/src/URIs2.jl")
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("URIs2.jl")
+        include("a.jl")
+        end
+        """,
+        u2 => """
+        module URIs2
+        struct URI
+            s
+        end
+        uri2filepath(u) = u.s
+        macro uri_str(s) end
+        export URI, uri2filepath, @uri_str
+        end
+        """,
+        A => """
+        import .URIs2
+        using .URIs2: uri2filepath
+        using .URIs2: URI, @uri_str
+        u() = uri2filepath(URI("file:///x"))
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, A)
+    @test !any(d -> occursin("Failed to resolve", d.message), fa.diagnostics)
+    @test !any(d -> occursin("Missing reference", d.message), fa.diagnostics)
+    @test only(filter(o -> o.name == "uri2filepath", fa.outbound)).target !== nothing
+
+    # Shape 2: a multi-dot relative import at the analyzed file's own top
+    # level — the dot-walk must continue past the parentless file scope into
+    # the tree context's PARENT modules.
+    proto = URI("file:///t/src/proto.jl")
+    jw2 = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        module Inner
+        include("proto.jl")
+        end
+        end
+        """,
+        A => """
+        module Sib
+        export sfunc
+        sfunc() = 1
+        end
+        """,
+        proto => """
+        using ..Sib: sfunc
+        caller() = sfunc()
+        """,
+    ))
+    fa2 = JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, proto)
+    @test !any(d -> occursin("Relative import", d.message), fa2.diagnostics)
+    @test !any(d -> occursin("Failed to resolve", d.message), fa2.diagnostics)
+    @test !any(d -> occursin("Missing reference", d.message), fa2.diagnostics)
+    @test only(filter(o -> o.name == "sfunc", fa2.outbound)).target !== nothing
+
+    # Shape 3: the relative path lands on a name bound by the parent module's
+    # own import of a WORKSPACE PACKAGE — the walk continues cross-root into
+    # the package's tree (this is the protocol.jl `using ..JSONRPC: ...`
+    # pattern from the real-workspace differential).
+    wp_proj = URI("file:///t/pkgs/WP/Project.toml")
+    wp_entry = URI("file:///t/pkgs/WP/src/WP.jl")
+    proto_wp = URI("file:///t/src/proto_wp.jl")
+    jw_wp = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        import WP
+        module Inner
+        include("proto_wp.jl")
+        end
+        end
+        """,
+        wp_entry => """
+        module WP
+        macro dict_readable(x) end
+        struct RequestType
+            x
+        end
+        export @dict_readable, RequestType
+        end
+        """,
+        proto_wp => """
+        using ..WP: @dict_readable, RequestType
+        r(x::RequestType) = x
+        """,
+    ))
+    add_file!(jw_wp, TextFile(wp_proj, SourceText("""
+    name = "WP"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0009"
+    version = "0.1.0"
+    """, "toml")))
+    fa_wp = JuliaWorkspaces.derived_file_analysis(jw_wp.runtime, ROOT, proto_wp)
+    @test !any(d -> occursin("Failed to resolve", d.message), fa_wp.diagnostics)
+    @test !any(d -> occursin("Missing reference", d.message), fa_wp.diagnostics)
+
+    # Shape 4: an ABSOLUTE import of a workspace package in the analyzed
+    # file itself — the whole-closure pass resolves it through its
+    # `workspace_packages` dict; per-file mode must reach the same package
+    # through the tree (the script-root `using JuliaWorkspaces` pattern).
+    abs_wp = URI("file:///t/src/abs_wp.jl")
+    JuliaWorkspaces.add_file!(jw_wp, TextFile(abs_wp, SourceText("""
+    using WP
+    import WP: RequestType
+    r2(x::RequestType) = x
+    """, "julia")))
+    fa_abs = JuliaWorkspaces.derived_file_analysis(jw_wp.runtime, abs_wp, abs_wp)
+    @test !any(d -> occursin("could not be indexed", d.message), fa_abs.diagnostics)
+    @test !any(d -> occursin("Failed to resolve", d.message), fa_abs.diagnostics)
+    @test !any(d -> occursin("Missing reference", d.message), fa_abs.diagnostics)
+
+    # Too many dots is still an error: three levels up from Inner does not exist.
+    proto3 = URI("file:///t/src/proto3.jl")
+    jw3 = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        module Inner
+        include("proto3.jl")
+        end
+        end
+        """,
+        proto3 => "using ....Nowhere: nope\n",
+    ))
+    fa3 = JuliaWorkspaces.derived_file_analysis(jw3.runtime, ROOT, proto3)
+    @test any(d -> occursin("Relative import has more leading dots", d.message), fa3.diagnostics)
+end
+
 @testitem "derived_file_analysis: the tree context resolves before global stores" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """
@@ -1224,4 +1359,28 @@ end
     # `check_all` path takes no tree-visibility predicate at all.
     old = JuliaWorkspaces.derived_static_lint_diagnostics_for_root(rt, ROOT)
     @test !any(d -> occursin("method", d.message), Iterators.flatten(values(old)))
+
+    # The gate is scope-aware: a call inside a module DECLARED IN the
+    # analyzed file checks visibility at that module's path, not the file's
+    # splice path (the real-workspace StaticLint.jl shape — the module's
+    # other files hold the wider method set).
+    sl = URI("file:///t/src/sl.jl")
+    scope2 = URI("file:///t/src/scope2.jl")
+    jw3 = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("sl.jl")
+        end
+        """,
+        sl => """
+        module Lint
+        include("scope2.jl")
+        hs(m) = 1
+        caller() = hs(1, 2)
+        end
+        """,
+        scope2 => "hs(a, b) = 2\n",
+    ))
+    fa_sl = JuliaWorkspaces.derived_file_analysis(jw3.runtime, ROOT, sl)
+    @test !any(d -> occursin("Possible method call error", d.message), fa_sl.diagnostics)
 end

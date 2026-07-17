@@ -92,6 +92,28 @@ function seed_module_scope_context!(x::EXPR, state)
 end
 
 """
+    enclosing_tree_context(s) -> Union{Nothing,AbstractModuleContext}
+
+The `:__tree__` module context governing scope `s` (per-file traversal mode
+only; `nothing` in the whole-closure pass): `s`'s own entry, or — walking up
+the scope chain — the nearest ancestor's. Stops at a module scope without a
+context, exactly like `seed_module_scope_context!`'s walk: module scopes
+only ever get `:__tree__` through seeding, so a bare one means we are not in
+per-file mode (or `s` sits outside the seeded region).
+"""
+function enclosing_tree_context(s)
+    while s isa Scope
+        if s.modules isa Dict
+            ctx = get(s.modules, :__tree__, nothing)
+            ctx isa AbstractModuleContext && return ctx
+        end
+        CSTParser.defines_module(s.expr) && return nothing
+        s = parentof(s)
+    end
+    return nothing
+end
+
+"""
     scopehasbinding(s::Scope, n::String)
 
 Checks whether s has a binding for variable named `n`.

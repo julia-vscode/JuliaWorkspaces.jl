@@ -40,6 +40,46 @@ TreeModuleContext(rt, root::URI, path::Vector{String}) =
 StaticLint.child_module_context(ctx::TreeModuleContext, name::String) =
     TreeModuleContext(ctx.rt, ctx.root, vcat(ctx.path, [name]), ctx.item_cache)
 
+StaticLint.parent_module_context(ctx::TreeModuleContext) =
+    isempty(ctx.path) ? nothing :
+    TreeModuleContext(ctx.rt, ctx.root, ctx.path[1:end - 1], ctx.item_cache)
+
+# The context a module-kinded TreeRef denotes: same two-candidate validation
+# as `_denoted_tree_module_path` (extended path first — `origin_module` is
+# the declaring module for `:declared` names but the target module itself
+# for whole-module import bindings), through the id-free
+# `derived_module_exists` selector.
+function StaticLint.module_context_at(ctx::TreeModuleContext, ref::StaticLint.TreeRef)
+    ref.kind === :module || return nothing
+    extended = vcat(ref.origin_module, [ref.name])
+    if derived_module_exists(ctx.rt, ctx.root, extended)
+        return TreeModuleContext(ctx.rt, ctx.root, extended, ctx.item_cache)
+    elseif !isempty(ref.origin_module) && derived_module_exists(ctx.rt, ctx.root, ref.origin_module)
+        return TreeModuleContext(ctx.rt, ctx.root, ref.origin_module, ctx.item_cache)
+    end
+    return nothing
+end
+
+StaticLint.context_tree_ref(ctx::TreeModuleContext) = _context_tree_ref(ctx)
+
+# The names of the modules DECLARED IN the analyzed file that enclose `x`,
+# outermost-first, read off the scope chain (works after
+# `strip_module_contexts!` — module nesting survives the handle strip).
+# `vcat(splice_path, this)` is `x`'s absolute module path.
+function _in_file_module_names(x, meta_dict)
+    names = String[]
+    s = StaticLint.retrieve_scope(x, meta_dict)
+    while s isa StaticLint.Scope
+        if s.expr isa CSTParser.EXPR && CSTParser.defines_module(s.expr)
+            mn = CSTParser.get_name(s.expr)
+            nm = mn isa CSTParser.EXPR && CSTParser.isidentifier(mn) ? StaticLint.valofid(mn) : nothing
+            nm !== nothing && pushfirst!(names, nm)
+        end
+        s = CSTParser.parentof(s)
+    end
+    return names
+end
+
 # The declaring ItemRef for `name` visible at `ctx.path`, through the
 # analysis-local cache (one `derived_visible_item` call per distinct name).
 function _cached_visible_item(ctx::TreeModuleContext, name::String)
@@ -146,8 +186,51 @@ function StaticLint._get_field(par::TreeModuleContext, arg, state, visited=Base.
     if vn.kind === :module
         child = _denoted_tree_module_path(par, name, vn)
         child !== nothing && return TreeModuleContext(par.rt, par.root, child, par.item_cache)
+        # Not a module of THIS root's tree: a module-kinded visible name may
+        # denote a WORKSPACE PACKAGE the origin module imported (the
+        # `using ..JSONRPC: ...` pattern — the parent binds `JSONRPC` via its
+        # own `import JSONRPC`). Continue the walk CROSS-ROOT into the
+        # package's tree. Fresh item cache: the cache is keyed (path, name)
+        # without a root, so sharing it across roots could alias entries.
+        wp = _workspace_package_context(par, name, vn)
+        wp !== nothing && return wp
     end
     return _tree_ref_for(par, name, vn)
+end
+
+# The cross-root context for a module-kinded visible name that denotes a
+# workspace package (validated against `derived_workspace_package_roots` and
+# the package root's own tree). Both denoted-path candidates are tried, in
+# the same order as `_denoted_tree_module_path`: `origin_module` is the
+# TARGET path for whole-module import bindings (`["JSONRPC"]`, or
+# `["JSONRPC", "JSON"]` for a continued sub-path) but the declaring module
+# for other origins, where extending by the name itself may be the match.
+function _workspace_package_context(ctx::TreeModuleContext, name::String, vn)
+    roots = derived_workspace_package_roots(ctx.rt)
+    for cand in (vcat(vn.origin_module, [name]), vn.origin_module)
+        isempty(cand) && continue
+        entry = get(roots, cand[1], nothing)
+        entry === nothing && continue
+        # tolerate alias/self-binding shapes: `["JSONRPC"]` and the packaged
+        # module path coincide for whole-module bindings
+        if derived_module_exists(ctx.rt, entry, cand)
+            return TreeModuleContext(ctx.rt, entry, cand,
+                Dict{Tuple{Vector{String},String},Union{Nothing,ItemRef}}())
+        end
+    end
+    return nothing
+end
+
+# Absolute-import entry point (`workspace_package_context` interface): the
+# context for the workspace package named `name` itself. Fresh item cache —
+# see `_workspace_package_context` for why the cache never crosses roots.
+function StaticLint.workspace_package_context(ctx::TreeModuleContext, name::String)
+    roots = derived_workspace_package_roots(ctx.rt)
+    entry = get(roots, name, nothing)
+    entry === nothing && return nothing
+    derived_module_exists(ctx.rt, entry, [name]) || return nothing
+    return TreeModuleContext(ctx.rt, entry, [name],
+        Dict{Tuple{Vector{String},String},Union{Nothing,ItemRef}}())
 end
 
 # Import-arg marking for a component that resolved to a module context:
@@ -481,11 +564,17 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # through the tree context provably has a method set this file only
     # partially sees (forward declarations, methods in sibling files), so
     # those checks decline rather than false-positive — see `check_all`'s
-    # docs; the analysis already depends on the id-free visible-names face,
-    # so this adds no new invalidation edge.
+    # docs. Visibility is checked at the CALL SITE's module path (the file's
+    # splice path extended by any modules declared in the file around the
+    # call), read off the scope chain — the `:__tree__` handles are already
+    # stripped at check time, but the module NESTING is still in the scopes.
+    # The id-free visible-names faces are dependencies the analysis frame
+    # already takes for the modules it touches.
     lint_config = derived_lint_configuration(rt, file)
-    visible_names = derived_module_visible_names_idfree(rt, root, path)
-    tree_visible = name -> haskey(visible_names, name)
+    tree_visible = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        haskey(derived_module_visible_names_idfree(rt, root, p), name)
+    end
     StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible)
 
     # Late getfield reference resolution — mutates meta_dict, so it must run

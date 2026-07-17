@@ -42,6 +42,52 @@ when the per-file traversal enters a `module` declared in the analyzed file
 function child_module_context end
 
 """
+    parent_module_context(ctx::AbstractModuleContext) -> Union{Nothing,AbstractModuleContext}
+
+The context of the module ENCLOSING `ctx`'s module; `nothing` at the root.
+Used by `resolve_import_block`'s leading-dot walk: in per-file traversal
+mode the analyzed file's top-level scope has no scope parent, so relative
+dots past it continue through the module tree instead. Implemented by the
+concrete context type.
+"""
+function parent_module_context end
+
+"""
+    module_context_at(ctx::AbstractModuleContext, ref::TreeRef) -> Union{Nothing,AbstractModuleContext}
+
+The context of the module a module-kinded `ref` DENOTES within `ctx`'s root,
+or `nothing` when `ref` doesn't denote a module of that tree (external /
+workspace-package stand-ins chain no further). Used to continue an
+import-path walk through a name that was already bound as a plain-data
+`TreeRef` (e.g. a preceding `import .M` whose binding a later
+`using .M: a, b` re-resolves through). Implemented by the concrete context
+type; `ctx` only supplies the root — its own path is irrelevant.
+"""
+function module_context_at end
+
+"""
+    context_tree_ref(ctx::AbstractModuleContext) -> TreeRef
+
+The plain-data `TreeRef` stand-in for the module `ctx` denotes — the value
+safe to store in a `Binding.val`/`Meta.ref` slot (a context is a runtime
+handle and must never be stored in meta). Implemented by the concrete
+context type.
+"""
+function context_tree_ref end
+
+"""
+    workspace_package_context(ctx::AbstractModuleContext, name::String) -> Union{Nothing,AbstractModuleContext}
+
+The (cross-root) context of the workspace package named `name`, or `nothing`
+when no such package exists. Used for ABSOLUTE imports of workspace packages
+in per-file traversal mode — the whole-closure pass resolves those through
+its populated `workspace_packages` dict, which per-file mode doesn't carry.
+`ctx` only supplies the runtime; its own root/path are irrelevant.
+Implemented by the concrete context type.
+"""
+function workspace_package_context end
+
+"""
     TreeRef
 
 Plain-data reference target for a name resolved through the module tree in

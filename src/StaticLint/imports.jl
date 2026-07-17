@@ -31,6 +31,22 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
                 root = state.scope
             elseif root isa Scope && parentof(root) !== nothing
                 root = parentof(root)
+            elseif root isa Scope && (ctx = enclosing_tree_context(root)) !== nothing
+                # per-file traversal mode: the parentless top-level scope IS
+                # the module the analyzed file splices into — further dots
+                # continue through the module tree's parents instead of a
+                # (nonexistent) cross-file scope chain.
+                root = parent_module_context(ctx)
+                if root === nothing
+                    seterror!(arg, RelativeImportTooManyDots, meta_dict)
+                    return
+                end
+            elseif root isa AbstractModuleContext
+                root = parent_module_context(root)
+                if root === nothing
+                    seterror!(arg, RelativeImportTooManyDots, meta_dict)
+                    return
+                end
             else
                 # Too many dots
                 seterror!(arg, RelativeImportTooManyDots, meta_dict)
@@ -196,6 +212,17 @@ function _get_field(par, arg, state, visited=Base.IdSet{Any}())
                 return par[Symbol(arg_str_rep)]
             end
         end
+        # per-file traversal mode: absolute imports of WORKSPACE PACKAGES
+        # (the whole-closure pass resolves these through its populated
+        # `state.workspace_packages`; per-file mode passes an empty dict)
+        # resolve through the tree — cross-root, via the seeded context.
+        if (arg_scope = retrieve_scope(arg, meta_dict)) !== nothing
+            ctx = enclosing_tree_context(arg_scope)
+            if ctx !== nothing
+                wp = workspace_package_context(ctx, arg_str_rep)
+                wp !== nothing && return wp
+            end
+        end
     elseif par isa SymbolServer.ModuleStore # imported module
         if Symbol(arg_str_rep) === par.name.name
             return par
@@ -232,6 +259,18 @@ function _get_field(par, arg, state, visited=Base.IdSet{Any}())
     elseif par isa Binding
         if par.val isa Binding
             return _get_field(par.val, arg, state, visited)
+        elseif par.val isa TreeRef
+            # per-file traversal mode: a name bound by a previous import
+            # statement stores its target as a plain-data TreeRef (a context
+            # handle must never live in a Binding). Re-derive the module the
+            # ref denotes through the scope's seeded context and continue the
+            # walk there — this is what lets `using .M: a` re-resolve through
+            # an `M` that an earlier `import .M` already bound.
+            ctx = enclosing_tree_context(retrieve_scope(arg, meta_dict))
+            if ctx !== nothing
+                target = module_context_at(ctx, par.val)
+                target !== nothing && return _get_field(target, arg, state, visited)
+            end
         elseif par.val isa EXPR && CSTParser.defines_module(par.val) && scopeof(par.val, meta_dict) isa Scope
             return _get_field(scopeof(par.val, meta_dict), arg, state, visited)
         elseif par.val isa EXPR && isassignment(par.val)
@@ -291,9 +330,14 @@ function fill_synthetic_import_binding!(b::Binding, val, state)
     val === nothing && return b # lookup failed: keep the synthetic binding so the import stays flagged
     val === b && return b # never create a self-referential binding
     # a module context is a runtime handle and must never be stored in a
-    # Binding — keep the synthetic binding untouched (per-file mode resolves
-    # references through the tree regardless)
-    val isa AbstractModuleContext && return b
+    # Binding — store the plain-data TreeRef it denotes instead (the
+    # TreeRef-continuation arm of `_get_field` re-derives the context when
+    # the walk needs to continue through this binding)
+    if val isa AbstractModuleContext
+        b.val = context_tree_ref(val)
+        b.type = CoreTypes.Module
+        return b
+    end
     b.val = val
     b.type = _typeof(val, state)
     return b

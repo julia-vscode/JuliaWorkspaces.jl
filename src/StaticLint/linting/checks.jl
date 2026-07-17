@@ -110,14 +110,17 @@ LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
     LintOptions(something.(options, default_options)...)
 
 # `tree_visible` (per-file traversal mode only, `nothing` in the
-# whole-closure pass): a `name::String -> Bool` predicate over the analyzed
-# file's tree-context visible names. When the callee of a call is ALSO
-# visible through the tree context, the file provably sees only a partial
-# method set (other files of the module may add methods, forward
-# declarations get their methods elsewhere), so the method-set lints
-# (`FunctionHasNoMethods`/`IncorrectCallArgs`) must decline — the lost
-# true-positive direction (a genuinely method-less module-level function) is
-# sanctioned conservatism of the per-file architecture.
+# whole-closure pass): a `(name::String, x::EXPR) -> Bool` predicate over
+# the tree-context visible names AT THE CALL SITE `x` (the site matters:
+# a call inside a module declared in the analyzed file resolves against
+# that module's visibility, not the file's own splice path). When the
+# callee of a call is ALSO visible through the tree context, the file
+# provably sees only a partial method set (other files of the module may
+# add methods, forward declarations get their methods elsewhere), so the
+# method-set lints (`FunctionHasNoMethods`/`IncorrectCallArgs`) must
+# decline — the lost true-positive direction (a genuinely method-less
+# module-level function) is sanctioned conservatism of the per-file
+# architecture.
 function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing)
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
@@ -361,7 +364,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing)
             name = CSTParser.get_name(x)
             if name isa EXPR && isidentifier(name)
                 n = valofid(name)
-                n !== nothing && tree_visible(n) && return
+                n !== nothing && tree_visible(n, x) && return
             end
         end
 
