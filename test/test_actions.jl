@@ -348,3 +348,64 @@ end
         @test any(occursin("SPDX-License-Identifier: MIT", e.new_text) for e in edits[1].edits)
     end
 end
+
+@testitem "Actions: unused-binding action works on per-file analysis meta" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UBTest"
+    uuid = "c2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module UBTest
+    function f()
+        yy = 1
+        return 2
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ub/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///ub/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    uri = URI("file:///ub/src/UBTest.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # On the unused local `yy` (line 3, col 6 — inside the identifier)
+    idx = string_index(source, 3, 6)
+
+    # Predicate: the unused-binding quickfix must be offered on the per-file meta.
+    actions = get_code_actions(jw, uri, idx, String[])
+    ids = [a.id for a in actions]
+    @test "ReplaceUnusedAssignmentName" in ids
+
+    # Handler: executing it replaces the unused name `yy` with `_`.
+    edits = execute_code_action(jw, "ReplaceUnusedAssignmentName", uri, idx)
+    @test length(edits) == 1
+    @test edits[1].uri == uri
+    e = only(edits[1].edits)
+    @test e.new_text == "_"
+    @test (e.start.line, e.start.column) == (3, 5)
+    @test (e.stop.line, e.stop.column) == (3, 7)
+end

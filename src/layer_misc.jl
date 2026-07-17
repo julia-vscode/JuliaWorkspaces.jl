@@ -187,8 +187,14 @@ function _get_inlay_hints(runtime, uri::URI, start_offset::Int, end_offset::Int,
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return hints
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    # Per-file analysis meta (inventory architecture), not the whole-closure
+    # static-lint meta: inlay hints render binding-type hints on THIS file's
+    # assignments and parameter-name hints on calls in THIS file. Type hints
+    # read `bindingof` of local assignment bindings; parameter hints resolve
+    # the callee via `find_methods`, which is `isa`-guarded and yields no
+    # methods for a `TreeRef` (sibling-file callees get no parameter hint,
+    # matching signature help's cross-file narrowing).
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
 
     project_uri = derived_project_uri_for_root(runtime, root)
     env = derived_environment(runtime, project_uri)

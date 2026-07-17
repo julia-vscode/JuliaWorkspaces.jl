@@ -807,8 +807,13 @@ function _get_code_actions(runtime, uri::URI, offset::Int, diagnostic_messages::
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return actions
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    # Per-file analysis meta (inventory architecture), not the whole-closure
+    # static-lint meta: action predicates fire at a cursor position in THIS
+    # file, and the per-file meta carries this file's refs/bindings and the
+    # `check_all`/`collect_hints` error annotations the lint-driven predicates
+    # test. A sibling-file name resolves as a `TreeRef`; predicates that
+    # dispatch on `refof`/`.val` are `isa`-guarded and fall through on it.
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
 
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     cst === nothing && return actions
@@ -844,8 +849,9 @@ function _execute_code_action(runtime, action_id::String, uri::URI, offset::Int,
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return WorkspaceFileEdit[]
 
-    lint_result = derived_static_lint_meta_for_root(runtime, root)
-    meta_dict = lint_result.meta_dict
+    # Per-file analysis meta (see `_get_code_actions`): the handler runs on the
+    # same current-file meta its predicate matched against.
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
 
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     cst === nothing && return WorkspaceFileEdit[]
