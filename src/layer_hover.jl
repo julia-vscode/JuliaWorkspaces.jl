@@ -180,8 +180,9 @@ _ensure_ends_with(s, c = "\n") = endswith(s, c) ? s : string(s, c)
 
 # Compact `module <name>` hover rendering, shared by the cross-file (`TreeRef`)
 # and same-file (local `Binding` whose `.val` is a module EXPR) paths so both
-# agree byte-for-byte. The old whole-module-body dump is intentionally gone
-# (user-approved 2026-07-17).
+# agree byte-for-byte. Any `documentation` prefix (the module's own docstring)
+# is rendered above the compact block; an undocumented module renders just the
+# block. Only the old whole-module-body dump is gone (user-approved 2026-07-17).
 _module_ref_hover(documentation::String, name) =
     string(_ensure_ends_with(documentation), "```julia\nmodule ", name, "\n```\n")
 
@@ -421,6 +422,12 @@ function _get_tree_ref_hover(tr::StaticLint.TreeRef, documentation::String, expr
     end
 
     if tr.kind === :module
+        # Cross-file module name: the module's docstring is materialized
+        # request-time from its defining file (same helper functions/structs
+        # use), rendered above the compact block — byte-identical to the
+        # same-file path.
+        doc = item_documentation(rt, tr.item)
+        doc !== nothing && (documentation = string(documentation, doc))
         return _module_ref_hover(documentation, tr.name)
     elseif tr.kind in (:function, :macro, :struct, :mutable_struct, :abstract, :primitive, :enum)
         return _tree_method_items_hover(tr, documentation, rt, root)
@@ -495,9 +502,14 @@ function _get_tooltip(b::StaticLint.Binding, documentation::String, meta_dict::M
         documentation = _get_hover(b.val, documentation, expr, env, meta_dict)
     elseif b.val isa CSTParser.EXPR
         if CSTParser.defines_module(b.val)
-            # Same-file module name: render the SAME compact `module <name>` the
-            # cross-file `TreeRef` path produces, not the whole module body
-            # (user-approved 2026-07-17; see `_module_ref_hover`).
+            # Same-file module name: render the module's OWN docstring (if any)
+            # above the SAME compact `module <name>` block the cross-file
+            # `TreeRef` path produces. Only the whole-module-body dump is gone
+            # (user-approved 2026-07-17; see `_module_ref_hover`). The docstring
+            # is surfaced exactly as the old `else` branch did.
+            if _binding_has_preceding_docs(b)
+                documentation = string(documentation, CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(b.val))))
+            end
             documentation = _module_ref_hover(documentation, CSTParser.str_value(CSTParser.get_name(b.val)))
         elseif CSTParser.defines_function(b.val) || CSTParser.defines_datatype(b.val)
             documentation = _get_func_hover(b, documentation, expr, env, meta_dict)

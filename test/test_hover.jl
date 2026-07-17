@@ -889,6 +889,45 @@ end
     @test !occursin("sharedfn", cross)
 end
 
+@testitem "Hover: documented module renders its docstring above the compact block" setup=[HoverCrossWS] begin
+    # A DOCUMENTED module: the module's own docstring is preserved (rendered
+    # above the compact `module <name>` block) on BOTH the cross-file (`TreeRef`)
+    # and same-file (local `Binding`) paths — only the whole-module-body dump was
+    # dropped (user-approved 2026-07-17).
+    a_src = """
+    "shared module docs"
+    module SharedMod
+    sharedfn() = 1
+    end
+    """
+    b_src = """
+    "local module docs"
+    module LocalMod
+    localfn() = 1
+    end
+    using .SharedMod
+    crossref() = SharedMod
+    localref() = LocalMod
+    """
+    jw = hoverx_workspace(a_src, b_src)
+
+    # docstring, then the compact block (byte-for-byte, differing only by the
+    # docstring text and the module name).
+    expected(doc, name) = "$doc\n```julia\nmodule $name\n```\n"
+
+    cross = hover_at(jw, b_src, "crossref() = SharedMod")
+    localm = hover_at(jw, b_src, "localref() = LocalMod")
+
+    @test cross == expected("shared module docs", "SharedMod")
+    @test localm == expected("local module docs", "LocalMod")
+
+    # docstring present, body dump still gone.
+    @test occursin("local module docs", localm)
+    @test occursin("shared module docs", cross)
+    @test !occursin("localfn", localm)
+    @test !occursin("sharedfn", cross)
+end
+
 @testitem "Hover: cross-file operator definition resolves through visibility" setup=[HoverCrossWS] begin
     # Operators are not resolved through the tree context during the per-file
     # pass (identifier-gated), so hover's operator fallback must consult the
