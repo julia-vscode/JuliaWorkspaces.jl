@@ -113,6 +113,17 @@ _tier(origin::Symbol) = origin === :declared ? 3 : origin === :import_binding ? 
 
 # --- internal helpers: bringing in a resolved import's names ----------------
 
+# One visibility entry: the bound name, its `VisibleName`, and — when the
+# binding is module-valued — the `ImportTarget` the name DENOTES (full sort +
+# full path of the denoted module), `nothing` otherwise. The third slot feeds
+# pass 1's module-target ledger (`_visible_names_pass1`), which is what the
+# `:unresolved` re-attempt chases: recording the underlying target sort at
+# binding time is what keeps an import-bound workspace package
+# `:workspace_package` (and an import-bound external module `:external`)
+# through a pass-2 extension, instead of guessing the sort from the binding's
+# `origin` (which is `:import_binding` for all of them).
+const _BringIn = Tuple{String,VisibleName,Union{Nothing,ImportTarget}}
+
 # Bring in the names for one fully-resolved (never `:unresolved`)
 # `ImportTarget` — rule 2's `:tree`/`:workspace_package`/`:external` bullets.
 # `kind` (`:using`/`:import`) and `alias` come from the owning `ResolvedImport`
@@ -121,8 +132,8 @@ _tier(origin::Symbol) = origin === :declared ? 3 : origin === :import_binding ? 
 # `:workspace_package` targets (workspace packages can circularly dev each
 # other) — it already contains every root on the current resolution chain,
 # INCLUDING this call's own `root`.
-function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, visited::Set{URI})::Vector{Pair{String,VisibleName}}
-    entries = Pair{String,VisibleName}[]
+function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, visited::Set{URI})::Vector{_BringIn}
+    entries = _BringIn[]
     tp = target.path
     isempty(tp) && return entries
 
@@ -134,11 +145,12 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
             declared = derived_module_declared(rt, root, tp)
             for name in exports
                 haskey(names, name) || continue
-                push!(entries, name => VisibleName(names[name], :using_tree, declared[name], tp))
+                mt = names[name] === :module ? ImportTarget(:tree, vcat(tp, [name])) : nothing
+                push!(entries, (name, VisibleName(names[name], :using_tree, declared[name], tp), mt))
             end
         end
         bound = alias !== nothing ? alias : tp[end]
-        push!(entries, bound => VisibleName(:module, origin, _module_declared_at(rt, root, tp), tp))
+        push!(entries, (bound, VisibleName(:module, origin, _module_declared_at(rt, root, tp), tp), target))
 
     elseif target.sort === :workspace_package
         roots = derived_workspace_package_roots(rt)
@@ -158,11 +170,15 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
             for name in exports
                 haskey(sub_visible, name) || continue
                 vn = sub_visible[name]
-                push!(entries, name => VisibleName(vn.kind, :using_workspace_package, vn.item, tp))
+                # Optimistic ledger entry for an exported submodule —
+                # `_extend_target` re-validates against the package's tree
+                # before any re-attempt actually uses it.
+                mt = vn.kind === :module ? ImportTarget(:workspace_package, name == tp[end] ? tp : vcat(tp, [name])) : nothing
+                push!(entries, (name, VisibleName(vn.kind, :using_workspace_package, vn.item, tp), mt))
             end
         end
         bound = alias !== nothing ? alias : tp[end]
-        push!(entries, bound => VisibleName(:module, origin, _module_declared_at(rt, entry, tp), tp))
+        push!(entries, (bound, VisibleName(:module, origin, _module_declared_at(rt, entry, tp), tp), target))
 
     elseif target.sort === :external
         store = _resolve_external_module(rt, root, tp)
@@ -170,42 +186,64 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
         origin = kind === :using ? :using_external : :import_binding
         if kind === :using
             for en in store.exportednames
-                push!(entries, String(en) => VisibleName(:external_symbol, :using_external, nothing, tp))
+                name = String(en)
+                mt = if name == tp[end]
+                    target   # a module's own name in its export list denotes the module itself
+                elseif haskey(store, en) && store[en] isa SymbolServer.ModuleStore
+                    ImportTarget(:external, vcat(tp, [name]))
+                else
+                    nothing
+                end
+                push!(entries, (name, VisibleName(:external_symbol, :using_external, nothing, tp), mt))
             end
         end
         bound = alias !== nothing ? alias : tp[end]
-        push!(entries, bound => VisibleName(:external_symbol, origin, nothing, tp))
+        push!(entries, (bound, VisibleName(:external_symbol, origin, nothing, tp), target))
     end
     return entries
 end
 
-# One member's kind/item/origin_module, for an explicit symbol list
-# (`using`/`import X: a, b`) against a fully-resolved (never `:unresolved`)
-# target. A member not found in the target's own local names (regardless of
-# sort) still gets bound — real Julia binds the name lexically even when it
-# turns out to be wrong — but with `kind = :unknown, item = nothing`.
+# One member's kind/item/origin_module (plus module-target ledger entry, see
+# `_BringIn`), for an explicit symbol list (`using`/`import X: a, b`) against
+# a fully-resolved (never `:unresolved`) target. A member naming the target
+# module ITSELF (`using Compiler: Compiler as CC`) resolves to the module's
+# self-binding — checked FIRST, since Julia's self-binding precludes any
+# same-named declared member. A member not found in the target's own local
+# names (regardless of sort) still gets bound — real Julia binds the name
+# lexically even when it turns out to be wrong — but with `kind = :unknown,
+# item = nothing`.
 function _member_lookup(rt, root, target::ImportTarget, member_name::String, visited::Set{URI})
     tp = target.path
     if target.sort === :tree
+        if member_name == tp[end] && module_node(derived_module_tree(rt, root), tp) !== nothing
+            return (:module, _module_declared_at(rt, root, tp), tp, target)
+        end
         names = derived_module_names(rt, root, tp)
-        haskey(names, member_name) || return (:unknown, nothing, tp)
-        return (names[member_name], derived_module_declared(rt, root, tp)[member_name], tp)
+        haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
+        mt = names[member_name] === :module ? ImportTarget(:tree, vcat(tp, [member_name])) : nothing
+        return (names[member_name], derived_module_declared(rt, root, tp)[member_name], tp, mt)
     elseif target.sort === :workspace_package
         roots = derived_workspace_package_roots(rt)
         pkg = tp[1]
-        haskey(roots, pkg) || return (:unknown, nothing, tp)
+        haskey(roots, pkg) || return (:unknown, nothing, tp, nothing)
         entry = roots[pkg]
-        entry in visited && return (:unknown, nothing, tp)
+        entry in visited && return (:unknown, nothing, tp, nothing)
+        if member_name == tp[end] && module_node(derived_module_tree(rt, entry), tp) !== nothing
+            return (:module, _module_declared_at(rt, entry, tp), tp, target)
+        end
         names = derived_module_names(rt, entry, tp)
-        haskey(names, member_name) || return (:unknown, nothing, tp)
-        return (names[member_name], derived_module_declared(rt, entry, tp)[member_name], tp)
+        haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
+        mt = names[member_name] === :module ? ImportTarget(:workspace_package, vcat(tp, [member_name])) : nothing
+        return (names[member_name], derived_module_declared(rt, entry, tp)[member_name], tp, mt)
     elseif target.sort === :external
         store = _resolve_external_module(rt, root, tp)
-        store === nothing && return (:unknown, nothing, tp)
-        haskey(store, Symbol(member_name)) || return (:unknown, nothing, tp)
-        return (:external_symbol, nothing, tp)
+        store === nothing && return (:unknown, nothing, tp, nothing)
+        member_name == tp[end] && return (:external_symbol, nothing, tp, target)
+        haskey(store, Symbol(member_name)) || return (:unknown, nothing, tp, nothing)
+        mt = store[Symbol(member_name)] isa SymbolServer.ModuleStore ? ImportTarget(:external, vcat(tp, [member_name])) : nothing
+        return (:external_symbol, nothing, tp, mt)
     else
-        return (:unknown, nothing, tp)
+        return (:unknown, nothing, tp, nothing)
     end
 end
 
@@ -215,13 +253,16 @@ end
 # identically for name-resolution purposes (the using/import distinction only
 # affects method-extension permissions, not what's visible), so this
 # deliberately covers both — a documented generalization of the literal
-# bullet, folded into the same `:import_binding` origin either way.
-function _explicit_symbol_bring_ins(rt, root, ri::ResolvedImport, visited::Set{URI})::Vector{Pair{String,VisibleName}}
-    entries = Pair{String,VisibleName}[]
-    for sym in ri.symbols
+# bullet, folded into the same `:import_binding` origin either way. `target`
+# is passed separately from the symbol list so the pass-2 re-attempt can
+# route a colon-list against a formerly-`:unresolved` target through the same
+# member lookup.
+function _explicit_symbol_bring_ins(rt, root, target::ImportTarget, symbols, visited::Set{URI})::Vector{_BringIn}
+    entries = _BringIn[]
+    for sym in symbols
         bound = sym.alias !== nothing ? sym.alias : sym.name
-        kind, item, origin_module = _member_lookup(rt, root, ri.target, sym.name, visited)
-        push!(entries, bound => VisibleName(kind, :import_binding, item, origin_module))
+        kind, item, origin_module, mt = _member_lookup(rt, root, target, sym.name, visited)
+        push!(entries, (bound, VisibleName(kind, :import_binding, item, origin_module), mt))
     end
     return entries
 end
@@ -284,27 +325,69 @@ function _deepest_tree_prefix(rt, root, anchor::Vector{String}, segs::Vector{Str
 end
 
 # Continue resolving `rest` (possibly empty) starting from a module-valued
-# `VisibleName` (`vn.kind in (:module, :external_symbol)`), producing a
-# synthesized `ImportTarget` — or `nothing` if `rest` doesn't resolve any
-# further. With `rest` empty this just re-expresses `vn`'s own origin as a
-# target (the whole ledger match WAS the target); the branches are written to
-# handle both uniformly.
-function _extend_target(rt, root, vn::VisibleName, rest::Vector{String})
-    if vn.origin === :using_external
-        full = vcat(vn.origin_module, rest)
+# binding's ledgered target (`base`, from pass 1's module-target ledger — see
+# `_BringIn`), producing a synthesized `ImportTarget` — or `nothing` if the
+# extension doesn't validate. With `rest` empty this just re-validates `base`
+# itself (the whole ledger match WAS the target). The sort is `base`'s
+# RECORDED sort, never guessed from a `VisibleName`'s `origin` (an
+# `:import_binding` origin says nothing about whether the bound module was a
+# tree, workspace-package, or external target). Every sort validates the full
+# extended path — `:workspace_package` against the PACKAGE's own tree
+# (`path[1]` is the package name and its top module path in that tree, per
+# `ImportTarget`'s docstring), `:tree` against `root`'s tree (a `:tree`
+# target's path is only meaningful in the root it was ledgered in — the
+# workspace-package branch re-expresses any tree result from ITS root as
+# `:workspace_package` before returning, see below).
+#
+# When the tree walk gets stuck mid-`rest`, the extension continues through
+# ONE ledgered binding at the stuck module (`_extend_through_binding`) — the
+# `import ..JSONRPC.JSON` pattern, where JSON is not a tree module inside the
+# JSONRPC package but is BOUND there by JSONRPC's own `import JSON`. This
+# recursion is bounded: every step strictly shrinks `rest`, and `visited`
+# blocks package cycles.
+function _extend_target(rt, root, base::ImportTarget, rest::Vector{String}, visited::Set{URI})
+    full = vcat(base.path, rest)
+    if base.sort === :external
         _resolve_external_module(rt, root, full) === nothing && return nothing
         return ImportTarget(:external, full)
-    elseif vn.origin === :using_workspace_package
-        return ImportTarget(:workspace_package, vcat(vn.origin_module, rest))
-    else
-        # A tree-valued origin (`:declared` or `:using_tree`/`:import_binding`
-        # binding a tree submodule) — `rest` must resolve as nested tree
-        # modules from `vn.origin_module`, in the SAME root (tree targets
-        # never cross roots).
-        k = _deepest_tree_prefix(rt, root, vn.origin_module, rest)
-        k < length(rest) && return nothing
-        return ImportTarget(:tree, vcat(vn.origin_module, rest))
+    elseif base.sort === :workspace_package
+        roots = derived_workspace_package_roots(rt)
+        haskey(roots, full[1]) || return nothing
+        entry = roots[full[1]]
+        entry in visited && return nothing
+        module_node(derived_module_tree(rt, entry), full) === nothing || return ImportTarget(:workspace_package, full)
+        cont = _extend_through_binding(rt, entry, base.path, rest, union(visited, Set([entry])))
+        cont === nothing && return nothing
+        if cont.sort === :tree
+            # A tree target in the PACKAGE's root is a workspace-package
+            # target from the caller's perspective (the package's tree paths
+            # start with the package's own name).
+            (isempty(cont.path) || cont.path[1] != full[1]) && return nothing
+            return ImportTarget(:workspace_package, cont.path)
+        end
+        return cont
+    elseif base.sort === :tree
+        module_node(derived_module_tree(rt, root), full) === nothing || return ImportTarget(:tree, full)
+        return _extend_through_binding(rt, root, base.path, rest, visited)
     end
+    return nothing
+end
+
+# The stuck-mid-`rest` continuation for `_extend_target`: walk the deepest
+# tree prefix of `rest` below `base_path` in `croot`'s tree, look the next
+# segment up in the stuck module's pass-1 module-target ledger, and continue
+# extending from THAT target with whatever remains. `rest` strictly shrinks
+# on every hop (at least the chased segment is consumed), so this terminates
+# even through chains of bindings.
+function _extend_through_binding(rt, croot, base_path::Vector{String}, rest::Vector{String}, visited::Set{URI})
+    isempty(rest) && return nothing
+    k = _deepest_tree_prefix(rt, croot, base_path, rest)
+    k >= length(rest) && return nothing
+    stuck_at = vcat(base_path, rest[1:k])
+    module_node(derived_module_tree(rt, croot), stuck_at) === nothing && return nothing
+    _, modtargets = _visible_names_pass1(rt, croot, stuck_at, visited)
+    haskey(modtargets, rest[k + 1]) || return nothing
+    return _extend_target(rt, croot, modtargets[rest[k + 1]], rest[k + 2:end], visited)
 end
 
 # The task-3 brief's rule 2 `:unresolved` bullet — the M2 ledger case: a
@@ -335,31 +418,47 @@ function _reattempt_unresolved(rt, root, path::Vector{String}, ri::ResolvedImpor
     cand_name = segs[k + 1]
     rest = segs[k + 2:end]
 
-    visible_stuck = _visible_names_pass1(rt, root, stuck_at, visited)
-    haskey(visible_stuck, cand_name) || return nothing
-    vn = visible_stuck[cand_name]
-    vn.kind in (:module, :external_symbol) || return nothing
+    _, modtargets = _visible_names_pass1(rt, root, stuck_at, visited)
+    haskey(modtargets, cand_name) || return nothing
 
-    return _extend_target(rt, root, vn, rest)
+    return _extend_target(rt, root, modtargets[cand_name], rest, visited)
 end
 
 # --- pass 1 + pass 2 assembly ------------------------------------------------
+
+# One lockstep write to pass 1's two dicts: `result` (the visibility result)
+# and `modtargets` (the module-target ledger: bound name → the `ImportTarget`
+# the name denotes, for module-valued bindings only — see `_BringIn`). A
+# non-module binding overwriting a module-valued one must DROP the stale
+# ledger entry, so the two dicts are only ever written through here.
+function _record!(result, modtargets, name::String, vn::VisibleName, mt::Union{Nothing,ImportTarget})
+    result[name] = vn
+    if mt === nothing
+        delete!(modtargets, name)
+    else
+        modtargets[name] = mt
+    end
+    return nothing
+end
 
 # Pass 1: rules 1-2 for every `ResolvedImport` whose target already resolved
 # at the module-tree layer (`:tree`/`:workspace_package`/`:external`) —
 # `:unresolved` targets contribute nothing here (that's pass 2's job, in
 # `_visible_names_impl`). Tiers applied in precedence order (rule 3): using
 # 'bring-ins (whole-module `using`) < import_binding (whole-module `import`,
-# and any explicit colon-list, either `kind`) < declared.
-function _visible_names_pass1(rt, root, path::Vector{String}, visited::Set{URI})::Dict{String,VisibleName}
+# and any explicit colon-list, either `kind`) < declared. Returns
+# `(result, modtargets)` — the module-target ledger is what pass 2's
+# re-attempt chases through an anchor module.
+function _visible_names_pass1(rt, root, path::Vector{String}, visited::Set{URI})
     result = Dict{String,VisibleName}()
+    modtargets = Dict{String,ImportTarget}()
 
     # Tier 1: using-derived (whole-module `using` — explicit colon-lists are
     # tier 2 regardless of `kind`, see `_explicit_symbol_bring_ins`).
     for ri in derived_module_imports(rt, root, path)
         (ri.kind === :using && isempty(ri.symbols) && ri.target.sort !== :unresolved) || continue
-        for (name, vn) in _target_bring_ins(rt, root, ri.kind, ri.target, ri.alias, visited)
-            result[name] = vn
+        for (name, vn, mt) in _target_bring_ins(rt, root, ri.kind, ri.target, ri.alias, visited)
+            _record!(result, modtargets, name, vn, mt)
         end
     end
 
@@ -367,23 +466,39 @@ function _visible_names_pass1(rt, root, path::Vector{String}, visited::Set{URI})
     for ri in derived_module_imports(rt, root, path)
         ri.target.sort === :unresolved && continue
         if !isempty(ri.symbols)
-            for (name, vn) in _explicit_symbol_bring_ins(rt, root, ri, visited)
-                result[name] = vn
+            for (name, vn, mt) in _explicit_symbol_bring_ins(rt, root, ri.target, ri.symbols, visited)
+                _record!(result, modtargets, name, vn, mt)
             end
         elseif ri.kind === :import
-            for (name, vn) in _target_bring_ins(rt, root, ri.kind, ri.target, ri.alias, visited)
-                result[name] = vn
+            for (name, vn, mt) in _target_bring_ins(rt, root, ri.kind, ri.target, ri.alias, visited)
+                _record!(result, modtargets, name, vn, mt)
             end
         end
     end
 
-    # Tier 3: declared — explicit bindings shadow everything `using` brings in.
+    # Tier 3: declared — explicit bindings shadow everything `using` brings
+    # in. First the module's SELF-binding (Julia binds a module's own name
+    # inside that module: `Foo.Foo === Foo`) — this is what a nested module's
+    # relative `using ..Foo: x` resolves through in pass 2. Its
+    # `origin_module` is the DECLARING module's path (the parent), consistent
+    # with every other `:declared` binding, which is exactly why the ledger
+    # entry records the denoted module's FULL path separately.
+    node = module_node(derived_module_tree(rt, root), path)
+    if node !== nothing && !isempty(path)
+        _record!(result, modtargets, path[end],
+            VisibleName(:module, :declared, node.declared_at, path[1:end - 1]),
+            ImportTarget(:tree, path))
+    end
     declared = derived_module_declared(rt, root, path)
     for (name, kind) in derived_module_names(rt, root, path)
-        result[name] = VisibleName(kind, :declared, declared[name], path)
+        # A `:declared` submodule binding's `origin_module` is `path` (the
+        # declaring module), NOT the submodule's own path — the ledger entry
+        # carries the denoted module's full path instead.
+        mt = kind === :module ? ImportTarget(:tree, vcat(path, [name])) : nothing
+        _record!(result, modtargets, name, VisibleName(kind, :declared, declared[name], path), mt)
     end
 
-    return result
+    return (result, modtargets)
 end
 
 # The full (pass 1 + pass 2) computation, threaded with the cross-root
@@ -399,22 +514,31 @@ function _visible_names_impl(rt, root, path::Vector{String}, visited::Set{URI}):
     root in visited && return Dict{String,VisibleName}()
     visited = union(visited, Set([root]))
 
-    result = _visible_names_pass1(rt, root, path, visited)
+    result, _ = _visible_names_pass1(rt, root, path, visited)
 
-    # Pass 2: the ledger re-attempt, scoped to whole-module bring-ins
-    # (`isempty(ri.symbols)`) — see `_reattempt_unresolved`'s docstring for
-    # why this stays a single bounded pass. An explicit colon-list against an
-    # `:unresolved` target is left unresolved (no visibility contribution);
-    # this is a documented scope limit, not covered by any required fixture.
+    # Pass 2: the ledger re-attempt — see `_reattempt_unresolved`'s docstring
+    # for why this stays a single bounded pass. Both statement forms are
+    # re-attempted: whole-module bring-ins go through `_target_bring_ins`,
+    # explicit colon-lists through `_explicit_symbol_bring_ins` (the target
+    # re-resolution is identical; only what gets bound differs).
     for ri in derived_module_imports(rt, root, path)
         ri.target.sort === :unresolved || continue
-        isempty(ri.symbols) || continue
         target = _reattempt_unresolved(rt, root, path, ri, visited)
         target === nothing && continue
 
-        tier = ri.kind === :using ? 1 : 2
-        for (name, vn) in _target_bring_ins(rt, root, ri.kind, target, ri.alias, visited)
+        if !isempty(ri.symbols)
+            entries = _explicit_symbol_bring_ins(rt, root, target, ri.symbols, visited)
+            tier = 2   # colon-lists are `:import_binding`-tier regardless of `kind`, matching pass 1
+        else
+            entries = _target_bring_ins(rt, root, ri.kind, target, ri.alias, visited)
+            tier = ri.kind === :using ? 1 : 2
+        end
+        for (name, vn, _) in entries
             existing = get(result, name, nothing)
+            # On an EQUAL tier the existing binding wins (first-wins), unlike
+            # pass 1's within-tier last-wins — deliberate: a re-attempted
+            # resolution never displaces an equally-ranked binding that
+            # resolved without a re-attempt (nor an earlier re-attempt's).
             existing !== nothing && _tier(existing.origin) >= tier && continue
             result[name] = vn
         end

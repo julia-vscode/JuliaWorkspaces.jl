@@ -974,3 +974,190 @@ end
     @test child_visible["Base"].kind === :external_symbol
     @test child_visible["Base"].origin === :using_external
 end
+
+@testitem "module visibility: unresolved relative import of an import-bound workspace package keeps the workspace-package sort" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+
+    function project_toml(name, uuid)
+        """
+        name = "$name"
+        uuid = "$uuid"
+        version = "0.1.0"
+        """
+    end
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/MainPkg/Project.toml"), SourceText(project_toml("MainPkg", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"), "toml")))
+    root_uri = URI("file:///ws/MainPkg/src/MainPkg.jl")
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module MainPkg
+    import DevedPkg
+    module Inner
+    using ..DevedPkg
+    import ..DevedPkg.Sub
+    using ..DevedPkg: DevedPkg as DP
+    import ..DevedPkg.ThirdPkg
+    end
+    end
+    """, "julia")))
+
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/Project.toml"), SourceText(project_toml("DevedPkg", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/src/DevedPkg.jl"), SourceText("""
+    module DevedPkg
+    import ThirdPkg
+    export myfunc
+    myfunc() = 1
+    module Sub
+    export subfunc
+    subfunc() = 2
+    end
+    end
+    """, "julia")))
+
+    add_file!(jw, TextFile(URI("file:///ws/ThirdPkg/Project.toml"), SourceText(project_toml("ThirdPkg", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0003"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/ThirdPkg/src/ThirdPkg.jl"), SourceText("""
+    module ThirdPkg
+    end
+    """, "julia")))
+
+    # All four Inner imports are relative-dot references to a name the
+    # PARENT binds via its own `import DevedPkg` — the tree layer must have
+    # left every one of them `:unresolved` (DevedPkg is not a tree module in
+    # this root); resolving them is pass 2's job.
+    inner_imports = JuliaWorkspaces.derived_module_imports(jw.runtime, root_uri, ["MainPkg", "Inner"])
+    @test length(inner_imports) == 4
+    @test all(ri -> ri.target.sort === :unresolved, inner_imports)
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["MainPkg", "Inner"])
+
+    # `using ..DevedPkg`: the re-attempt must recover the WORKSPACE-PACKAGE
+    # sort of the parent's import binding (not fall back to a bogus same-root
+    # tree target) — the package's exports come in cross-root.
+    @test visible["myfunc"].kind === :function
+    @test visible["myfunc"].origin === :using_workspace_package
+    @test visible["myfunc"].origin_module == ["DevedPkg"]
+    @test visible["DevedPkg"].kind === :module
+    @test visible["DevedPkg"].origin === :using_workspace_package
+    @test visible["DevedPkg"].origin_module == ["DevedPkg"]
+
+    # `import ..DevedPkg.Sub`: the extension continues INTO the package's own
+    # tree — and must validate there.
+    @test visible["Sub"].kind === :module
+    @test visible["Sub"].origin === :import_binding
+    @test visible["Sub"].origin_module == ["DevedPkg", "Sub"]
+    @test !haskey(visible, "subfunc")
+
+    # `using ..DevedPkg: DevedPkg as DP`: a colon-list against an unresolved
+    # target (re-attempted in pass 2), whose member is the package module's
+    # own self-binding.
+    @test visible["DP"].kind === :module
+    @test visible["DP"].origin === :import_binding
+    @test visible["DP"].origin_module == ["DevedPkg"]
+
+    # `import ..DevedPkg.ThirdPkg`: ThirdPkg is NOT in DevedPkg's tree —
+    # DevedPkg binds it via its own `import ThirdPkg` — so the extension
+    # continues through the PACKAGE's binding ledger to the ThirdPkg
+    # workspace package (the `import ..JSONRPC.JSON` pattern).
+    @test visible["ThirdPkg"].kind === :module
+    @test visible["ThirdPkg"].origin === :import_binding
+    @test visible["ThirdPkg"].origin_module == ["ThirdPkg"]
+end
+
+@testitem "module visibility: colon-list against an unresolved target re-resolves in pass 2" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    module Parent
+    import Base.Iterators as It
+    module Child
+    using ..It: partition, take as tk
+    end
+    end
+    """)
+
+    # `..It` is no tree module — the tree layer left the colon-list import
+    # unresolved; the parent binds `It` via an ALIASED whole-module import of
+    # a nested external module.
+    imp = only(JuliaWorkspaces.derived_module_imports(jw.runtime, root_uri, ["Parent", "Child"]))
+    @test imp.target.sort === :unresolved
+    @test !isempty(imp.symbols)
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent", "Child"])
+
+    @test visible["partition"].kind === :external_symbol
+    @test visible["partition"].origin === :import_binding
+    @test visible["partition"].origin_module == ["Base", "Iterators"]
+
+    # Per-symbol alias binds the alias, not the member name.
+    @test visible["tk"].kind === :external_symbol
+    @test visible["tk"].origin === :import_binding
+    @test visible["tk"].origin_module == ["Base", "Iterators"]
+    @test !haskey(visible, "take")
+end
+
+@testitem "module visibility: module self-binding resolves relative imports of the enclosing module's own name" setup=[ModuleTreeWS] begin
+    # The vendored-package pattern: `using ..Vendored: vfunc` from a module
+    # INSIDE Vendored goes through Vendored's own name in Vendored itself —
+    # Julia binds a module's name inside that module (`Vendored.Vendored`).
+    tree, root_uri, jw = tree_of("""
+    module Outer
+    module Vendored
+    export vfunc
+    vfunc() = 1
+    module Cache
+    using ..Vendored: vfunc
+    end
+    end
+    using .Vendored: Vendored as VD
+    module User
+    using ..VD: vfunc
+    end
+    end
+    """)
+
+    # Self-binding is a visible name in its own right.
+    vendored_visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Outer", "Vendored"])
+    @test vendored_visible["Vendored"].kind === :module
+    @test vendored_visible["Vendored"].origin === :declared
+
+    # The tree layer can't see either relative import (neither `..Vendored`
+    # from Cache nor `..VD` from User names a tree submodule of Outer/Vendored).
+    @test only(JuliaWorkspaces.derived_module_imports(jw.runtime, root_uri, ["Outer", "Vendored", "Cache"])).target.sort === :unresolved
+    @test only(JuliaWorkspaces.derived_module_imports(jw.runtime, root_uri, ["Outer", "User"])).target.sort === :unresolved
+
+    # `using ..Vendored: vfunc` re-resolves through the self-binding.
+    cache_visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Outer", "Vendored", "Cache"])
+    @test cache_visible["vfunc"].kind === :function
+    @test cache_visible["vfunc"].origin === :import_binding
+    @test cache_visible["vfunc"].origin_module == ["Outer", "Vendored"]
+    @test cache_visible["vfunc"].item == JuliaWorkspaces.derived_module_declared(jw.runtime, root_uri, ["Outer", "Vendored"])["vfunc"]
+
+    # The `const CC = ...`-free alias-chain pattern (`using Compiler:
+    # Compiler as CC` then `using .CC: ...`): the colon-bound SELF-MEMBER
+    # alias `VD` is module-valued, and a later relative colon-list chases it.
+    outer_visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Outer"])
+    @test outer_visible["VD"].kind === :module
+    @test outer_visible["VD"].origin === :import_binding
+    @test outer_visible["VD"].origin_module == ["Outer", "Vendored"]
+
+    user_visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Outer", "User"])
+    @test user_visible["vfunc"].kind === :function
+    @test user_visible["vfunc"].origin === :import_binding
+    @test user_visible["vfunc"].origin_module == ["Outer", "Vendored"]
+end
+
+@testitem "module visibility: using a nested external module walks the environment store" setup=[ModuleTreeWS] begin
+    tree, root_uri, jw = tree_of("""
+    using Base.Iterators
+    """)
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, String[])
+
+    @test visible["partition"].kind === :external_symbol
+    @test visible["partition"].origin === :using_external
+    @test visible["partition"].origin_module == ["Base", "Iterators"]
+    @test visible["partition"].item === nothing
+
+    @test visible["Iterators"].kind === :external_symbol
+    @test visible["Iterators"].origin === :using_external
+    @test visible["Iterators"].origin_module == ["Base", "Iterators"]
+end
