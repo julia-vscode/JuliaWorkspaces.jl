@@ -1138,6 +1138,39 @@ end
     @test any(d -> occursin("another_undefined_name", d.message), fa_b.diagnostics)
 end
 
+@testitem "derived_file_analysis: the tree context resolves before global stores" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "filter(x) = x\n",
+        B => """
+        u() = filter(1)
+        v() = sum([1])
+        """,
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    # `filter` is declared at module level in a sibling: the module-declared
+    # name SHADOWS Base's export (Julia semantics), so the reference must
+    # resolve through the `:__tree__` context — by explicit rule, not by
+    # Symbol-hash iteration order over `scope.modules`.
+    fx = only(find_identifiers(cst, "filter"))
+    fr = SL.refof(fx, meta_dict)
+    @test fr isa SL.TreeRef
+    @test fr.item !== nothing
+
+    # A non-shadowed Base export still falls through to the store.
+    sx = only(find_identifiers(cst, "sum"))
+    sr = SL.refof(sx, meta_dict)
+    @test !(sr isa SL.TreeRef)
+    @test sr !== nothing
+end
+
 @testitem "derived_file_analysis: method-set lints decline for tree-visible callees" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """

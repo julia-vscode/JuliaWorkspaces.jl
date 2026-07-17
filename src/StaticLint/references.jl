@@ -129,7 +129,18 @@ function resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
         setref!(x, scope.names[mn], meta_dict)
         resolved = true
     elseif scope.modules isa Dict && length(scope.modules) > 0
-        for m in values(scope.modules)
+        # Explicit rule: the `:__tree__` context (per-file traversal mode)
+        # resolves BEFORE the global stores. A module-level declared name
+        # shadows a Base/Core export in Julia, and the old whole-closure pass
+        # got the same precedence from its merged scope `names`; iterating
+        # `values(scope.modules)` alone reached the tree handle before
+        # `:Base` only by Symbol-hash iteration-order accident.
+        tree_ctx = get(scope.modules, :__tree__, nothing)
+        if tree_ctx !== nothing
+            resolve_ref_from_module(x, tree_ctx, state) && return true
+        end
+        for (k, m) in scope.modules
+            k === :__tree__ && continue
             resolved = resolve_ref_from_module(x, m, state)
             resolved && return true
         end
