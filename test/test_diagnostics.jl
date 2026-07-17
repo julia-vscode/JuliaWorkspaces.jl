@@ -1519,3 +1519,70 @@ end
     diags2 = get_diagnostic(jw2, URI("file:///missrefall2/src/MissRefAll.jl"))
     @test !any(d -> d.message == "Missing reference: this_name_surely_does_not_exist_xyz", diags2)
 end
+
+@testitem "static-lint: a project-less root publishes no diagnostics (parity with old)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # A loose file with NO project and no active project (the LS-startup
+    # no-active-project window). The old whole-closure query bails empty in
+    # this case; the migrated per-file consumer must too — otherwise every
+    # real-package import flashes a "Failed to resolve …" false positive.
+    script = URI("file:///loose/script.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(script, SourceText("import JSON\nf(x) = x == nothing\n", "julia")))
+    rt = jw.runtime
+
+    @test JuliaWorkspaces.derived_project_uri_for_root(rt, script) === nothing
+
+    new = JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, script)
+    old = JuliaWorkspaces.derived_static_lint_diagnostics(rt, script)
+    @test isempty(old)          # old query bails empty (project_uri === nothing)
+    @test new == old            # migrated query matches
+    @test isempty(new)
+
+    # ... and the per-file analysis itself still runs (stdlib fallback), so
+    # the suppression lives in the consumer query, not the analysis — the
+    # analysis would otherwise carry the false-positive flash
+    fa = JuliaWorkspaces.derived_file_analysis(rt, script, script)
+    @test any(d -> startswith(d.message, "Failed to resolve"), fa.diagnostics)
+
+    # published diagnostics carry no static-lint flash
+    diags = get_diagnostic(jw, script)
+    @test !any(d -> d.source == "StaticLint.jl", diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
+end
+
+@testitem "static-lint: setting the active project restores diagnostics (new == old)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Same loose file, but now an active project is set: the root's project
+    # URI is non-nothing, so the migrated consumer stops suppressing and
+    # matches the old query exactly.
+    env_dir = URI("file:///env")
+    script = URI("file:///loose/script.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///env/Project.toml"), SourceText("""
+    name = "Env"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0012"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///env/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(script, SourceText("import JSON\nf(x) = x == nothing\n", "julia")))
+    JuliaWorkspaces.set_active_project!(jw, env_dir)
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+    rt = jw.runtime
+
+    @test JuliaWorkspaces.derived_project_uri_for_root(rt, script) !== nothing
+
+    new = JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, script)
+    old = JuliaWorkspaces.derived_static_lint_diagnostics(rt, script)
+    @test new == old            # parity restored
+    @test !isempty(new)         # diagnostics now appear
+    @test any(d -> occursin("JSON", d.message), new)  # the real-package import now flags
+end

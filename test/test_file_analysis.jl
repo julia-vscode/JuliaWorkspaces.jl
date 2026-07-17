@@ -1699,6 +1699,19 @@ end
         sib2 => "n2() = 2\n",
         shared => "use() = n1() + n2()\n",
     ))
+    # a project so both roots pass the consumer's project-less-root gate
+    add_file!(jw, TextFile(URI("file:///t/two/Project.toml"), SourceText("""
+    name = "Two"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0013"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///t/two/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
     rt = jw.runtime
 
     @test JuliaWorkspaces.derived_roots_for_uri(rt, shared) == Set([root1, root2])
@@ -1769,4 +1782,35 @@ end
     TL.with_tracing(() -> JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, A), recv)
     @test get(recv.counts, "derived_new_static_lint_diagnostics", 0) == 0
     @test get(recv.counts, "derived_file_analysis", 0) == 0
+end
+
+@testitem "derived_file_analysis: a colon import of an INDEXED external is never swept into UnresolvedImport" setup=[FileAnalysisWS] begin
+    # Regression guard for the imports.jl `first_unresolved_import_component`
+    # clause that treats an `:external_symbol` module-path component as
+    # unresolved: it must fire ONLY for the unindexed stand-in. A module that
+    # is actually in the env (Base) resolves its path to a ModuleStore (not a
+    # TreeRef), and its members to store leaves — neither can hit the new
+    # unresolved arm, so no spurious "Failed to resolve" appears.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("b.jl")
+        end
+        """,
+        B => """
+        using Base: sqrt
+        import Base: floor
+        r(x) = sqrt(x) + floor(x)
+        """,
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+    # both `sqrt` sites (the colon-import component and the use) resolved
+    # through the env store; likewise `floor`
+    @test all(x -> SL.hasref(x, meta_dict), find_identifiers(cst, "sqrt"))
+    @test all(x -> SL.hasref(x, meta_dict), find_identifiers(cst, "floor"))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("Failed to resolve", d.message), fa.diagnostics)
+    @test !any(d -> occursin("Missing reference", d.message), fa.diagnostics)
 end

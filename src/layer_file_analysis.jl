@@ -661,6 +661,15 @@ be produced from multiple roots via includes, and a file in no root yields
 an empty set. The per-file provenance is what makes a per-keystroke edit cost
 one analysis (the edited file's own) instead of a whole-closure re-lint.
 
+A root with no project (`derived_project_uri_for_root === nothing`) publishes
+NOTHING — matching the old `derived_static_lint_diagnostics_for_root`, which
+bails empty in that case. The per-file ANALYSIS still runs against the
+stdlib-only env fallback (so other consumers keep working), but its
+diagnostics are suppressed here: while a root has no project (e.g. a loose
+file during the LS-startup no-active-project window), every real-package
+import would otherwise flash a "Failed to resolve …" false positive. Once a
+project is active, `new == old` again.
+
 Test-setup parity: the whole-closure pass feeds `derived_test_setup_bindings`
 into `semantic_pass(...; test_setups=…)`; the per-file pass
 (`derived_file_analysis`) passes none. This is behavior-identical TODAY
@@ -674,6 +683,9 @@ Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
 
     res = Set{Diagnostic}()
     for root in derived_roots_for_uri(rt, uri)
+        # A project-less root contributes no diagnostics (parity with the old
+        # per-root query, layer_static_lint.jl).
+        derived_project_uri_for_root(rt, root) === nothing && continue
         union!(res, derived_file_analysis(rt, root, uri).diagnostics)
     end
     return res
