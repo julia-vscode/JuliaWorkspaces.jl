@@ -76,6 +76,20 @@ context type.
 function context_tree_ref end
 
 """
+    qualified_module_target(ctx::AbstractModuleContext, ref::TreeRef)
+
+The resolvable stand-in for the module a getfield LHS `ref` denotes — used
+by `resolve_getfield`'s `TreeRef` arm (per-file traversal mode only) to
+resolve qualified uses like `Sib.f()`. Returns an `AbstractModuleContext`
+for modules of `ctx`'s tree (and, cross-root, for workspace-package
+modules), the env `SymbolServer.ModuleStore` for external stand-ins, or
+`nothing` when `ref` doesn't denote a module at all. `ctx` only supplies the
+runtime/root; its own path is irrelevant. Implemented by the concrete
+context type.
+"""
+function qualified_module_target end
+
+"""
     workspace_package_context(ctx::AbstractModuleContext, name::String) -> Union{Nothing,AbstractModuleContext}
 
 The (cross-root) context of the workspace package named `name`, or `nothing`

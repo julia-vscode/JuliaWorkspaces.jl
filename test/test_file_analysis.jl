@@ -1385,3 +1385,250 @@ end
     fa_sl = JuliaWorkspaces.derived_file_analysis(jw3.runtime, ROOT, sl)
     @test !any(d -> occursin("Possible method call error", d.message), fa_sl.diagnostics)
 end
+
+@testitem "qualified use through a tree-module lhs resolves members to TreeRefs" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Sib
+        export f
+        f() = 1
+        struct T
+            x::Int
+        end
+        end
+        """,
+        B => """
+        using .Sib
+        q() = Sib.f()
+        w() = Sib.T
+        bad() = Sib.nope()
+        """,
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+    declared = JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg", "Sib"])
+
+    # `Sib.f` — the member resolves through the module's visible names to a
+    # TreeRef carrying the declaring ItemRef
+    rf = SL.refof(only(find_identifiers(cst, "f")), meta_dict)
+    @test rf isa SL.TreeRef
+    @test rf.kind === :function
+    @test rf.item == declared["f"]
+    @test rf.origin_module == ["MainPkg", "Sib"]
+
+    # `Sib.T` — a struct member resolves the same way
+    rt_ = SL.refof(only(find_identifiers(cst, "T")), meta_dict)
+    @test rt_ isa SL.TreeRef
+    @test rt_.kind === :struct
+    @test rt_.item == declared["T"]
+    @test rt_.origin_module == ["MainPkg", "Sib"]
+
+    # a member the module does not declare gets no ref (missing-ref parity
+    # with the old pass's getfield behavior for source-module lhs)
+    @test !SL.hasref(only(find_identifiers(cst, "nope")), meta_dict)
+end
+
+@testitem "qualified use members flow into the outbound table" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Sib
+        export f
+        f() = 1
+        struct T
+            x::Int
+        end
+        end
+        """,
+        B => """
+        using .Sib
+        q() = Sib.f()
+        w() = Sib.T
+        bad() = Sib.nope()
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    declared = JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg", "Sib"])
+
+    # the file gets BOTH a `Sib` row (the lhs) and member rows with targets
+    ob_sib = only(filter(o -> o.name == "Sib", fa.outbound))
+    @test ob_sib.target == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg"])["Sib"]
+    # the `using .Sib` component plus the three qualified lhs uses
+    @test ob_sib.count == 4
+
+    ob_f = only(filter(o -> o.name == "f", fa.outbound))
+    @test ob_f.target == declared["f"]
+    @test ob_f.origin_module == ["MainPkg", "Sib"]
+    @test ob_f.count == 1
+
+    ob_t = only(filter(o -> o.name == "T", fa.outbound))
+    @test ob_t.target == declared["T"]
+
+    # the unresolved member contributes no row
+    @test !any(o -> o.name == "nope", fa.outbound)
+end
+
+@testitem "qualified use through an import-bound tree module lhs resolves" setup=[FileAnalysisWS] begin
+    # `import .Sib` binds `Sib` in the file's scope as a Binding whose val is
+    # the plain-data TreeRef — member resolution must continue through it.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Sib
+        f() = 1
+        end
+        """,
+        B => """
+        import .Sib
+        q() = Sib.f()
+        """,
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    rf = SL.refof(only(find_identifiers(cst, "f")), meta_dict)
+    @test rf isa SL.TreeRef
+    @test rf.kind === :function
+    @test rf.item == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg", "Sib"])["f"]
+end
+
+@testitem "qualified use through an external module stand-in lhs resolves via the env store" setup=[FileAnalysisWS] begin
+    # The SIBLING file binds `Iterators` (an env module) at module level; the
+    # analyzed file's `Iterators` lhs therefore resolves through the tree to
+    # an env-module stand-in TreeRef, and the member must resolve through the
+    # env `ModuleStore` like the old getfield path.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "using Base.Iterators\n",
+        B => """
+        t(x) = Iterators.take(x, 1)
+        miss(x) = Iterators.surely_not_a_member_xyz(x)
+        """,
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    # the lhs is a tree-resolved env stand-in, not a ModuleStore
+    rit = SL.refof(first(find_identifiers(cst, "Iterators")), meta_dict)
+    @test rit isa SL.TreeRef
+    @test rit.kind === :external_symbol
+    @test rit.origin_module == ["Base", "Iterators"]
+
+    # the member resolved through the store (leaf SymStore ref, no TreeRef —
+    # matching what direct `Base.Iterators.take` gets)
+    tk = only(find_identifiers(cst, "take"))
+    @test SL.hasref(tk, meta_dict)
+    @test SL.refof(tk, meta_dict) isa JuliaWorkspaces.SymbolServer.SymStore
+
+    # a name the store does not have stays unresolved
+    @test !SL.hasref(only(find_identifiers(cst, "surely_not_a_member_xyz")), meta_dict)
+end
+
+@testitem "qualified use still resolves external chains through the store path" setup=[FileAnalysisWS] begin
+    # `Base.Iterators.take` never touches the tree: `Base` is the seeded root
+    # ModuleStore and the whole chain resolves through the old getfield arms.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("b.jl")
+        end
+        """,
+        B => "t(x) = Base.Iterators.take(x, 1)\n",
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    @test SL.hasref(only(find_identifiers(cst, "take")), meta_dict)
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    # env-resolved chains never masquerade as tree-resolved outbound rows
+    @test !any(o -> o.name in ("Base", "Iterators", "take"), fa.outbound)
+end
+
+@testitem "qualified use through a workspace-package module lhs resolves cross-root" setup=[FileAnalysisWS] begin
+    wp_proj = URI("file:///t/pkgs/WP/Project.toml")
+    wp_entry = URI("file:///t/pkgs/WP/src/WP.jl")
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        import WP
+        include("b.jl")
+        end
+        """,
+        wp_entry => """
+        module WP
+        wpfunc() = 1
+        end
+        """,
+        B => "c() = WP.wpfunc()\n",
+    ))
+    add_file!(jw, TextFile(wp_proj, SourceText("""
+    name = "WP"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0010"
+    version = "0.1.0"
+    """, "toml")))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    rf = SL.refof(only(find_identifiers(cst, "wpfunc")), meta_dict)
+    @test rf isa SL.TreeRef
+    @test rf.kind === :function
+    @test rf.item == JuliaWorkspaces.derived_module_declared(jw.runtime, wp_entry, ["WP"])["wpfunc"]
+    @test rf.origin_module == ["WP"]
+
+    # ... and the member flows into the outbound table with its target
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    ob = only(filter(o -> o.name == "wpfunc", fa.outbound))
+    @test ob.target == rf.item
+end
+
+@testitem "regression guard: instance-field access through a tree-annotated lhs stays unflagged" setup=[FileAnalysisWS] begin
+    # The M3 differential's JDAP only-old class (`framecode.unique_files`,
+    # `frame.world`, ...): getfield through a VARIABLE whose type annotation
+    # resolved to a TreeRef. The old pass's hints on this class are partly
+    # cross-vintage false positives (old is not gold); pin the new behavior —
+    # no ref, and no missing-ref hint — so the qualified-module work never
+    # accidentally turns this class into new diagnostics.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        struct FrameCode
+            scope
+            src
+        end
+        """,
+        B => "g(framecode::FrameCode) = framecode.unique_files\n",
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+    @test !SL.hasref(only(find_identifiers(cst, "unique_files")), meta_dict)
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("unique_files", d.message), fa.diagnostics)
+end

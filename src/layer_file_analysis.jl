@@ -221,6 +221,50 @@ function _workspace_package_context(ctx::TreeModuleContext, name::String, vn)
     return nothing
 end
 
+# Qualified-use entry point (`qualified_module_target` interface): the
+# resolvable stand-in for the module a getfield LHS `tr` denotes.
+#
+# - `:module` — a module of a workspace tree: this root first
+#   (`module_context_at`, the same two-candidate `origin_module` validation
+#   used everywhere), then cross-root as a workspace package
+#   (`_workspace_package_context` reads only `tr.origin_module`, which
+#   `TreeRef` carries just like `VisibleName`).
+# - `:external_symbol` — MAY denote an env module (a whole-module
+#   `using`/`import` bring-in binds the module under kind
+#   `:external_symbol`): for a self-named binding (`name == origin_module`'s
+#   last segment — whole-module `using JSON`/`using Base.Iterators` shapes)
+#   the origin path IS the module path; otherwise the name may be an
+#   exported/member submodule extending it. `_resolve_external_module`
+#   returns `nothing` unless the walk lands on an actual `ModuleStore`, so
+#   non-module names (`parse` from `using JSON: parse`) can never leak a
+#   parent store. Known miss: an ALIAS of an external module bound in a
+#   SIBLING file (`import JSON as J` there, `J.parse` here) is not
+#   recognizable from the TreeRef alone (name matches neither shape) and
+#   stays unresolved.
+# - `:external_module` — the post-strip stand-in shape (origin_module
+#   EXCLUDES the name); handled for completeness, unreachable during the
+#   pass (the strip runs after all resolution steps).
+#
+# The returned `ModuleStore` is consumed transiently by `resolve_getfield`'s
+# ModuleStore arm and never stored (leaf member stores in refs are fine,
+# module-store refs are rewritten by `_strip_module_stores!` — both exactly
+# as the env-backed paths already behave).
+function StaticLint.qualified_module_target(ctx::TreeModuleContext, tr::StaticLint.TreeRef)
+    if tr.kind === :module
+        target = StaticLint.module_context_at(ctx, tr)
+        target !== nothing && return target
+        return _workspace_package_context(ctx, tr.name, tr)
+    elseif tr.kind === :external_module
+        return _resolve_external_module(ctx.rt, ctx.root, vcat(tr.origin_module, [tr.name]))
+    elseif tr.kind === :external_symbol && !isempty(tr.origin_module)
+        if tr.name == tr.origin_module[end]
+            return _resolve_external_module(ctx.rt, ctx.root, tr.origin_module)
+        end
+        return _resolve_external_module(ctx.rt, ctx.root, vcat(tr.origin_module, [tr.name]))
+    end
+    return nothing
+end
+
 # Absolute-import entry point (`workspace_package_context` interface): the
 # context for the workspace package named `name` itself. Fresh item cache —
 # see `_workspace_package_context` for why the cache never crosses roots.
