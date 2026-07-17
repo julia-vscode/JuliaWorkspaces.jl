@@ -14,6 +14,14 @@ function setref!(x::EXPR, binding::Nothing, meta_dict)
     getmeta(x, meta_dict).ref = nothing
 end
 
+# Per-file traversal mode: a name resolved through the module tree. Plain
+# data — deliberately no `Binding.refs` push (the cross-file reference table
+# is aggregated from these refs separately, not through shared mutation).
+function setref!(x::EXPR, tr::TreeRef, meta_dict)
+    ensuremeta(x, meta_dict)
+    getmeta(x, meta_dict).ref = tr
+end
+
 # Main function to be called. Given the `state` tries to determine what `x`
 # refers to. If it remains unresolved and is in a delayed evaluation scope
 # (i.e. a function) it gets pushed to list (.urefs) to be resolved after we've

@@ -31,6 +31,7 @@ include("layer_visibility.jl")
 
 include("StaticLint/StaticLint.jl")
 
+include("layer_file_analysis.jl")
 include("layer_static_lint.jl")
 include("layer_projects.jl")
 include("layer_environment.jl")

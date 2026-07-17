@@ -1081,7 +1081,9 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
 end
 
 function is_mask_binding_of_datatype(b::Binding, meta_dict)
-    b.val isa EXPR && CSTParser.isassignment(b.val) && (rhsref = refof(b.val.args[2], meta_dict)) !== nothing && (rhsref isa SymbolServer.DataTypeStore || (rhsref.val isa EXPR && rhsref.val isa SymbolServer.DataTypeStore) || (rhsref.val isa EXPR && CSTParser.defines_datatype(rhsref.val)))
+    # the `isa Binding` guard keeps the `.val` accesses off ref types without
+    # that field (e.g. a per-file-mode TreeRef)
+    b.val isa EXPR && CSTParser.isassignment(b.val) && (rhsref = refof(b.val.args[2], meta_dict)) !== nothing && (rhsref isa SymbolServer.DataTypeStore || (rhsref isa Binding && ((rhsref.val isa EXPR && rhsref.val isa SymbolServer.DataTypeStore) || (rhsref.val isa EXPR && CSTParser.defines_datatype(rhsref.val)))))
 end
 
 # check whether a and b are in all the same :if blocks and in the same branches

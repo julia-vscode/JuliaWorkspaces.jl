@@ -62,6 +62,36 @@ _module_name_or_nothing(n) = n isa EXPR && isidentifier(n) ? valofid(n) : nothin
 getscopemodule(s::Scope, m::Symbol) = s.modules[m]
 
 """
+    seed_module_scope_context!(x::EXPR, state)
+
+Per-file traversal mode only (a no-op in the whole-closure pass): when a
+`module` declared in the analyzed file gets its scope, seed that scope's
+`.modules` with `:__tree__ =>` a CHILD module context (the enclosing
+context's path extended by this module's name), so names inside the nested
+module resolve through the module tree at the nested path. The enclosing
+context is found by walking up the scope chain; a module scope without a
+tree context means we are not in per-file mode (module scopes only ever get
+`:__tree__` through this function), so the walk stops there.
+"""
+function seed_module_scope_context!(x::EXPR, state)
+    state.scope.modules isa Dict{Symbol,Any} || return
+    name = _module_name_or_nothing(CSTParser.get_name(x))
+    name === nothing && return
+    s = parentof(state.scope)
+    while s isa Scope
+        if s.modules isa Dict && haskey(s.modules, :__tree__)
+            ctx = s.modules[:__tree__]
+            ctx isa AbstractModuleContext || return
+            state.scope.modules[:__tree__] = child_module_context(ctx, name)
+            return
+        end
+        CSTParser.defines_module(s.expr) && return
+        s = parentof(s)
+    end
+    return
+end
+
+"""
     scopehasbinding(s::Scope, n::String)
 
 Checks whether s has a binding for variable named `n`.
@@ -173,6 +203,7 @@ function scopes(x::EXPR, state)
             state.scope.modules = Dict{Symbol,Any}() # TODO: only create new Dict if not assigned?
             state.scope.modules[:Base] = getsymbols(state)[:Base]
             state.scope.modules[:Core] = getsymbols(state)[:Core]
+            seed_module_scope_context!(x, state)
             add_eval_method(x, state)
         elseif headof(x) === :module && headof(x.args[1]) === :FALSE
             state.scope.modules = Dict{String,Any}()

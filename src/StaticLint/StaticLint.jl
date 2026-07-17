@@ -3,6 +3,9 @@ module StaticLint
 import ..derived_has_file
 import ..derived_julia_legacy_syntax_tree
 import ..derived_include_dict
+import ..ItemRef
+
+using AutoHashEquals: @auto_hash_equals
 
 function hasfile end
 
@@ -18,6 +21,45 @@ using ..SymbolServer: VarRef
 
 const noname = EXPR(:noname, nothing, nothing, 0, 0, nothing, nothing, nothing)
 
+"""
+    AbstractModuleContext
+
+Marker supertype for the per-file traversal's module-resolution handles.
+StaticLint itself only ever routes values of this type around (seeded root
+scope `.modules`, `resolve_ref_from_module`, `_get_field`); the concrete
+`TreeModuleContext` — and every method that actually consults the module
+tree — lives outside StaticLint, in `layer_file_analysis.jl`.
+"""
+abstract type AbstractModuleContext end
+
+"""
+    child_module_context(ctx::AbstractModuleContext, name::String)
+
+The context for a module named `name` declared inside `ctx`'s module. Used
+when the per-file traversal enters a `module` declared in the analyzed file
+(see `seed_module_scope_context!`). Implemented by the concrete context type.
+"""
+function child_module_context end
+
+"""
+    TreeRef
+
+Plain-data reference target for a name resolved through the module tree in
+the per-file traversal mode: what `Meta.ref` points at instead of a `Binding`
+or `SymbolServer.SymStore` when the resolution came from
+`derived_module_visible_names`. Deliberately carries no `Binding`/`EXPR`
+(they would alias other files' syntax trees) and no runtime handle — only
+the resolved name, its item kind (or `:module`/`:external_symbol`), the
+declaring `ItemRef` (when the name traces back to a tree declaration), and
+the origin module path.
+"""
+@auto_hash_equals struct TreeRef
+    name::String
+    kind::Symbol
+    item::Union{Nothing,ItemRef}
+    origin_module::Vector{String}
+end
+
 include("coretypes.jl")
 include("bindings.jl")
 include("scope.jl")
@@ -30,7 +72,7 @@ const LARGE_FILE_LIMIT = 2_000_000 # bytes
 mutable struct Meta
     binding::Union{Nothing,Binding}
     scope::Union{Nothing,Scope}
-    ref::Union{Nothing,Binding,SymbolServer.SymStore}
+    ref::Union{Nothing,Binding,SymbolServer.SymStore,TreeRef}
     error
 end
 Meta() = Meta(nothing, nothing, nothing, nothing)
@@ -103,6 +145,10 @@ mutable struct Toplevel{RT} <: TraverseState
     workspace_packages::Dict{String,Any}
     test_setups::Dict{Symbol,TestSetupInfo}
     self_package_name::Union{Nothing,String}
+    # Whether `followinclude` traverses into included files (the whole-closure
+    # pass) or returns immediately (the per-file traversal mode, where included
+    # files' names come from the module tree instead).
+    follow_includes::Bool
     flags::Int
     meta_dict::Dict{UInt64,Meta}
     runtime::RT
@@ -111,7 +157,7 @@ end
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
 Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, runtime) =
-    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, 0, meta_dict, runtime)
+    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, true, 0, meta_dict, runtime)
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -228,10 +274,19 @@ end
     semantic_pass(file, modified_expr=nothing)
 
 Performs a semantic pass across a project from the entry point `file`. A first pass traverses the top-level scope after which secondary passes handle delayed scopes (e.g. functions). These secondary passes can be, optionally, very light and only seek to resovle references (e.g. link symbols to bindings). This can be done by supplying a list of expressions on which the full secondary pass should be made (`modified_expr`), all others will receive the light-touch version.
+
+With `module_context` given, the pass runs in per-file traversal mode: the
+seeded root scope's `.modules` contains `:__tree__ => module_context` in
+addition to the Base/Core stores — so `resolve_ref`'s existing scope.modules
+loop resolves non-local names through the module tree, after file-local
+scopes and the Base/Core stores — and includes are NOT followed
+(`follow_includes = false`; included files' names come from the tree).
 """
-function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing)
-    setscope!(cst, Scope(nothing, cst, Dict(), Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core]), nothing), meta_dict)
-    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, 0, meta_dict, rt)
+function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing)
+    root_modules = Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core])
+    module_context !== nothing && (root_modules[:__tree__] = module_context)
+    setscope!(cst, Scope(nothing, cst, Dict(), root_modules, nothing), meta_dict)
+    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, module_context === nothing, 0, meta_dict, rt)
     process_EXPR(cst, state)
     unique!(state.delayed)
     for x in state.delayed
@@ -292,6 +347,10 @@ or a file exists on the disc that can be loaded.
 If this is successful it traverses the code associated with the loaded file.
 """
 function followinclude(x, state::Toplevel)
+    # per-file traversal mode: included files are analyzed separately, their
+    # names resolve through the module tree context
+    state.follow_includes || return
+
     meta_dict = state.meta_dict
     rt = state.runtime
     include_dict = derived_include_dict(state.runtime, state.uri)

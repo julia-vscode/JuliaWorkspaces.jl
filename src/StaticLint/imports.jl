@@ -78,7 +78,12 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
             setref!(arg, root, meta_dict)
             if i == n
                 markfinal && _mark_import_arg(arg, root, state, usinged, meta_dict)
-                return refof(arg, meta_dict)
+                # `root`, not `refof(arg)`: identical on this (markfinal=false)
+                # consumer's path for Binding/SymStore roots — setref! stored
+                # exactly `root` — but a module context (per-file mode) is
+                # setref!'d as its plain-data TreeRef, and the colon-form
+                # caller needs the resolvable context itself as its new root.
+                return root
             end
         else
             return
@@ -216,6 +221,11 @@ function _get_field(par, arg, state, visited=Base.IdSet{Any}())
                     return maybe_lookup(used_module[Symbol(arg_str_rep)], state)
                 elseif used_module isa Scope && (rb = exported_binding(used_module, arg_str_rep, state)) !== nothing
                     return rb
+                elseif used_module isa AbstractModuleContext
+                    # per-file traversal mode: the scope's `:__tree__` context
+                    # resolves the name through the module tree
+                    r = _get_field(used_module, arg, state, visited)
+                    r !== nothing && return r
                 end
             end
         end
