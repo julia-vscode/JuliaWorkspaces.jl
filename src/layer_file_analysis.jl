@@ -204,8 +204,9 @@ The frozen result of one per-file semantic analysis (`derived_file_analysis`).
 - `meta`: StaticLint meta (local scopes/bindings/refs), for THIS file's
   EXPRs only — the per-file pass follows no includes and merges no other
   file's meta, so no foreign `EXPR`/`Binding` is reachable from it.
-- `outbound`: the plain-data outbound-reference table, sorted by
-  `(name, origin_module)`.
+- `outbound`: the plain-data outbound-reference table (direct tree-resolved
+  refs AND import-bound sites whose binding val is a tree target, see
+  `_collect_outbound`), sorted by `(name, origin_module)`.
 - `diagnostics`: the file's lint diagnostics (`check_all` + `collect_hints`).
 
 Deliberately NOT `@auto_hash_equals` (unlike `OutboundRef`): `meta` is keyed
@@ -243,12 +244,15 @@ function _var_ref_path(vr::SymbolServer.VarRef)
 end
 
 # The plain-data stand-in for a `ModuleStore` that must not survive in a
-# frozen meta: a module-kinded `TreeRef` with the store's own path (no
-# `ItemRef` — the environment has none), mirroring the shape
-# `_context_tree_ref` produces for tree modules.
+# frozen meta: a `TreeRef` with the store's own path (no `ItemRef` — the
+# environment has none). Kind `:external_module`, NOT `:module`, so
+# env-store stand-ins stay distinguishable from tree-resolved module refs
+# (which carry `:module` and usually an ItemRef); nothing dispatches on the
+# stand-in's kind during the pass — it is only created after all lint steps
+# and the outbound extraction have run.
 function _module_store_tree_ref(m::SymbolServer.ModuleStore)
     segs = _var_ref_path(m.name)
-    return StaticLint.TreeRef(segs[end], :module, nothing, segs[1:end - 1])
+    return StaticLint.TreeRef(segs[end], :external_module, nothing, segs[1:end - 1])
 end
 
 """
@@ -285,18 +289,32 @@ function _strip_module_stores!(meta_dict::Dict{UInt64,StaticLint.Meta})
     return
 end
 
-# Aggregate every TreeRef-valued ref in `meta_dict` by (name, origin_module).
-# Only `Meta.ref` entries count as reference SITES: an import-statement leaf
-# binds a `Binding` whose `.val` is a TreeRef, and body uses of that name
-# resolve to the (file-local) import binding — neither is a tree-resolved
-# ref site itself. The nameless root-context stand-in
-# (`TreeRef("", :module, ...)`, produced for import components denoting the
-# synthetic tree root) is skipped as noise.
+# Aggregate every tree-resolved reference site in `meta_dict` by
+# (name, origin_module). Two shapes count:
+# - a `Meta.ref` that IS a `TreeRef` (plain tree resolution, and body uses
+#   of colon-list-imported names, which the tree binds under the BOUND
+#   name — so an `f as g` alias surfaces its uses as `g` rows);
+# - a `Meta.ref` that is a file-local `Binding` whose `.val isa TreeRef` —
+#   the import-statement components themselves (colon-list leaves, their
+#   `as`-aliases, and a whole-module import's module-name component), whose
+#   binding val carries the tree target. These are counted under the
+#   TreeRef's own (SOURCE) name so M4's "who references X" aggregation sees
+#   them.
+# The nameless root-context stand-in (`TreeRef("", :module, ...)`, produced
+# for import components denoting the synthetic tree root) is skipped as
+# noise.
 function _collect_outbound(meta_dict::Dict{UInt64,StaticLint.Meta})
     acc = Dict{Tuple{String,Vector{String}},Tuple{Union{Nothing,ItemRef},Int}}()
     for m in values(meta_dict)
-        r = m.ref
-        r isa StaticLint.TreeRef || continue
+        ref = m.ref
+        r = if ref isa StaticLint.TreeRef
+            ref
+        elseif ref isa StaticLint.Binding && ref.val isa StaticLint.TreeRef
+            ref.val
+        else
+            nothing
+        end
+        r === nothing && continue
         isempty(r.name) && continue
         key = (r.name, r.origin_module)
         prev = get(acc, key, nothing)
@@ -399,25 +417,25 @@ at `semantic_pass`'s strip call site).
 The query depends on this file's CST (`derived_julia_legacy_syntax_tree`),
 the id-free path selector (`derived_file_module_path` — deliberately NOT
 `derived_module_tree(rt, root).file_modules[file]`, whose whole-tree value
-changes on every tree-table change anywhere in the root), the visible names
-of the modules the file's names resolve through
-(`derived_module_visible_names`, reached via the `TreeModuleContext`), the
-file's lint configuration, and the environment. Consequences:
+changes on every tree-table change anywhere in the root), the id-free
+visible-names faces of the modules the file's names resolve through
+(`derived_module_visible_names_idfree`) plus one per-name
+`derived_visible_item` for each DISTINCT tree-declared name the file
+actually references, the per-module import-component selectors
+(`derived_module_exists`/`derived_module_declared_at`), the file's lint
+configuration, and the environment. Nothing in the analysis frame reads the
+whole `derived_module_tree` value. Consequences:
 
 - A body edit in a SIBLING file: that file's inventory backdates → the
-  module tree backdates → the selectors backdate → this analysis is
+  module tree backdates → every selector backdates → this analysis is
   untouched.
-- A top-level edit in a sibling that doesn't change the name/kind sets:
-  `derived_module_names`/visible-names backdate → this analysis is
-  untouched (the id-shift survival of the Task-2 selector layer pays off
-  here).
-
-Caveat: a file whose own text contains `using`/`import` of tree modules
-additionally reaches `derived_module_tree` directly (through the context's
-import-path helpers `_denoted_tree_module_path`/`_module_declared_at`), so
-for exactly those files a tree-VALUE change re-runs the analysis even when
-their module's visible names are unaffected; files without such imports
-keep the selector-level cutoff described above.
+- A top-level edit in a sibling that shifts item ids but not the name/kind
+  sets (e.g. reordering two same-kind declarations): the tree — and the
+  FULL `derived_module_visible_names`, whose `VisibleName.item`s carry the
+  shifted ids — re-execute with changed values, but the id-free faces and
+  the per-name items of unshifted names backdate → only analyses that
+  reference an actually-shifted name re-execute, and those MUST (their
+  outbound `ItemRef`s change).
 """
 Salsa.@derived function derived_file_analysis(rt, root, file)
     @debug "derived_file_analysis" root=root file=file

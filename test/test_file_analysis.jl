@@ -614,6 +614,71 @@ end
     @test new_a == JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])["a"]
 end
 
+@testitem "derived_file_analysis: import-bound tree references count in the outbound table" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Sib
+        export f
+        f() = 1
+        end
+        """,
+        B => """
+        using .Sib: f as g
+        h1() = g()
+        h2() = g()
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    f_item = JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg", "Sib"])["f"]
+
+    # every site resolves to the file-local import binding, whose val is the
+    # tree target — all aggregated under the SOURCE name: the statement's
+    # `f` leaf and its `as`-alias `g` (2) plus the two body uses of `g`
+    ob_f = only(filter(o -> o.name == "f", fa.outbound))
+    @test ob_f.target == f_item
+    @test ob_f.origin_module == ["MainPkg", "Sib"]
+    @test ob_f.count == 4
+
+    # no separate row under the BOUND name — the alias is file-local
+    @test !any(o -> o.name == "g", fa.outbound)
+end
+
+@testitem "derived_file_analysis: a whole-module import contributes an outbound row for the module" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Sib
+        f() = 1
+        end
+        """,
+        B => """
+        using .Sib
+        q() = Sib.f()
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+
+    # the statement's `Sib` component (import binding with a TreeRef val)
+    # and the qualified use's `Sib` (direct TreeRef) aggregate into one row
+    ob = only(filter(o -> o.name == "Sib", fa.outbound))
+    @test ob.target == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg"])["Sib"]
+    @test ob.origin_module == ["MainPkg"]
+    @test ob.count == 2
+end
+
 @testitem "derived_file_analysis: no handles or module stores survive in the frozen value" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """
@@ -639,11 +704,13 @@ end
     cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, B)
     @test SL.refof(only(find_identifiers(cst, "afunc")), fa.meta) isa SL.TreeRef
 
-    # the `Base` module ref survives as plain data, not as the ModuleStore
+    # the `Base` module ref survives as plain data, not as the ModuleStore —
+    # kind `:external_module` marks it as an env-store stand-in,
+    # distinguishable from tree-resolved `:module` TreeRefs
     rbase = SL.refof(only(find_identifiers(cst, "Base")), fa.meta)
     @test rbase isa SL.TreeRef
     @test rbase.name == "Base"
-    @test rbase.kind === :module
+    @test rbase.kind === :external_module
 
     # ... but never entered the outbound table (it resolved through the env
     # stores, not through the tree)
