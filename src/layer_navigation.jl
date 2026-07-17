@@ -152,12 +152,12 @@ end
 # enclose the position — the enclosing package/module path prefix comes from
 # `derived_file_module_path` instead (the old whole-closure chain crossed files
 # and needed no such prefix).
-function _in_file_module_names(s::StaticLint.Scope, ms=String[])
+function _enclosing_module_names(s::StaticLint.Scope, ms=String[])
     if CSTParser.defines_module(s.expr) && CSTParser.isidentifier(s.expr.args[2])
         pushfirst!(ms, StaticLint.valofid(s.expr.args[2]))
     end
     if CSTParser.parentof(s) isa StaticLint.Scope
-        return _in_file_module_names(CSTParser.parentof(s), ms)
+        return _enclosing_module_names(CSTParser.parentof(s), ms)
     else
         return ms
     end
@@ -196,7 +196,7 @@ function _get_module_at(runtime, uri::URI, offset::Int)
     # `derived_file_module_path`. Join both: `file_path` ++ in-file names.
     meta_dict = derived_file_analysis(runtime, root, uri).meta
     scope = _retrieve_scope(x, meta_dict)
-    in_file = scope === nothing ? String[] : _in_file_module_names(scope)
+    in_file = scope === nothing ? String[] : _enclosing_module_names(scope)
 
     file_path = derived_file_module_path(runtime, root, uri)
     names = file_path === nothing ? in_file : vcat(file_path, in_file)

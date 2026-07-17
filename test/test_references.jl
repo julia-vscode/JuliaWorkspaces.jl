@@ -520,7 +520,7 @@ end
     @test got == expected
 end
 
-@testitem "Definitions: cross-file struct lands at its declaration" setup=[DefCrossWS] begin
+@testitem "Definitions: cross-file struct without constructors lands at its declaration" setup=[DefCrossWS] begin
     a_src = """
     greet(name) = 1
     struct S
@@ -530,11 +530,42 @@ end
     b_src = "maker() = S(1)\n"
     jw = defcross_workspace(a_src, b_src)
 
+    # A struct with no outer constructors: exactly one location (byte-identical
+    # to a single-item resolution; the method-items selector returns just it).
     off = findfirst("S(1)", b_src).start
     defs = get_definitions(jw, DEF_B_URI, off)
     @test length(defs) == 1
     @test defs[1].uri == DEF_A_URI
     @test defs[1].start.line == 2   # `struct S` on line 2 of a.jl
+end
+
+@testitem "Definitions: cross-file struct offers its constructor locations" setup=[DefCrossWS] begin
+    # F12 on a struct call offers the declaration AND its outer constructors,
+    # exactly as F12 on a function offers all its methods (old whole-closure
+    # parity: `_get_definitions_from_val(::Binding)` walked a DataType binding's
+    # refs/get_method just like a Function).
+    a_src = """
+    struct S
+        x
+    end
+    S(a, b) = S(a + b)
+    """
+    b_src = "maker() = S(1)\n"
+    jw = defcross_workspace(a_src, b_src)
+
+    off = findfirst("S(1)", b_src).start
+    defs = get_definitions(jw, DEF_B_URI, off)
+    @test length(defs) == 2
+    @test all(d -> d.uri == DEF_A_URI, defs)
+    lines = sort([d.start.line for d in defs])
+    @test lines == [1, 4]   # `struct S` (line 1) + `S(a, b) = ...` (line 4)
+
+    # Ground truth: the two datatype items via derived_method_items.
+    rt = jw.runtime
+    root = JuliaWorkspaces.derived_best_root_for_uri(rt, DEF_B_URI)
+    qroot = JuliaWorkspaces._method_items_root(rt, root, ["DefCross"])
+    refs = JuliaWorkspaces.derived_method_items(rt, qroot, ["DefCross"], "S")
+    @test length(refs) == 2
 end
 
 @testitem "Definitions: a file-local binding shadows a sibling name" setup=[DefCrossWS] begin

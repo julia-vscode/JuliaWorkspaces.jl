@@ -289,10 +289,16 @@ function _get_definitions_from_val(x::CSTParser.EXPR, tls::StaticLint.Scope, env
 end
 
 # Kinds whose go-to-definition offers ALL method items (`derived_method_items`),
-# not just the single declaring item: multi-method callables. Everything else
-# with an ItemRef (const/global/assignment/enum member/module) resolves to its
-# one declaring item.
-const _DEF_METHOD_ITEM_KINDS = (:function, :macro)
+# not just the single declaring item: multi-definition callables. Functions and
+# macros offer every method; a struct/datatype offers its declaration AND its
+# outer constructors (F12 on a struct call offers its constructors exactly as
+# F12 on a function offers its methods — old whole-closure parity, where
+# `_get_definitions_from_val(::Binding)` walked a DataType binding's refs the
+# same as a Function's). The datatype kinds are those `derived_file_inventory`
+# emits (layer_inventory.jl:617/636). Everything else with an ItemRef
+# (const/global/assignment/enum/enum member/module) resolves to its one
+# declaring item.
+const _DEF_METHOD_ITEM_KINDS = (:function, :macro, :struct, :mutable_struct, :abstract, :primitive)
 
 # Push the definition location of a single inventory item, materialized
 # request-time from its own file (`derived_item_positions` — the volatile leaf,
