@@ -364,6 +364,132 @@ end
     @test "first" in allparams && "last" in allparams
 end
 
+@testitem "Signatures: deved workspace-package callee shows its signatures" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    main_project = """
+    name = "MainP"
+    uuid = "72345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    b_project = """
+    name = "B"
+    uuid = "82345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    # `B` is a workspace package (deved sibling folder); its method set lives
+    # in B's OWN root's tree. Both the `using`-bring-in call and the
+    # qualified call must serve B's signatures.
+    entry = """
+    module MainP
+    using B
+    f() = myfunc(
+    g() = B.myfunc(
+    end
+    """
+    b_entry = """
+    module B
+    export myfunc
+    myfunc(alpha, beta) = 1
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsp/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsp/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsp/Main/src/MainP.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///wsp/B/Project.toml"), SourceText(b_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsp/B/src/B.jl"), SourceText(b_entry, "julia")))
+
+    uri = URI("file:///wsp/Main/src/MainP.jl")
+
+    idx = findfirst("myfunc(", entry)[end] + 1
+    result = get_signature_help(jw, uri, idx)
+    @test any(s -> occursin("myfunc(alpha, beta)", s.label), result.signatures)
+    @test any(s -> [p.label for p in s.parameters] == ["alpha", "beta"], result.signatures)
+
+    idx_q = findlast("myfunc(", entry)[end] + 1
+    result_q = get_signature_help(jw, uri, idx_q)
+    @test any(s -> occursin("myfunc(alpha, beta)", s.label), result_q.signatures)
+    @test any(s -> [p.label for p in s.parameters] == ["alpha", "beta"], result_q.signatures)
+end
+
+@testitem "Signatures: cross-file struct with only an inner constructor shows it" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "SigInner"
+    uuid = "92345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    entry = """
+    module SigInner
+    include("t.jl")
+    caller() = Inner(
+    end
+    """
+    t_src = """
+    struct Inner
+        x
+        Inner(x::Int) = new(x)
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///siginner/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///siginner/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///siginner/src/SigInner.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///siginner/src/t.jl"), SourceText(t_src, "julia")))
+
+    uri = URI("file:///siginner/src/SigInner.jl")
+    idx = findfirst("Inner(", entry)[end] + 1
+    result = get_signature_help(jw, uri, idx)
+    # The inner constructor is the struct's ONLY constructor (the implicit
+    # field-based one is suppressed) and must be served cross-file.
+    @test length(result.signatures) == 1
+    sig = only(result.signatures)
+    @test occursin("Inner(x::Int)", sig.label)
+    @test [p.label for p in sig.parameters] == ["x"]
+
+    # The SAME-FILE case goes through the unchanged local Binding path and
+    # must keep rendering the inner constructor exactly once (no double
+    # render from the cross-file addition).
+    local_src = """
+    struct LInner
+        x
+        LInner(x::Int) = new(x)
+    end
+    lcaller() = LInner(
+    """
+    luri = URI("file:///siginner/src/local.jl")
+    add_file!(jw, TextFile(luri, SourceText(local_src, "julia")))
+    lidx = findlast("LInner(", local_src)[end] + 1
+    lresult = get_signature_help(jw, luri, lidx)
+    @test count(s -> occursin("LInner(x::Int)", s.label), lresult.signatures) == 1
+end
+
 @testitem "Signatures: Base.println through the env store is unchanged" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI

@@ -71,7 +71,7 @@ function _fcall_arg_number(x)
 end
 
 """
-    _collect_signatures(x, meta_dict, env, runtime)
+    _collect_signatures(x, meta_dict, env, runtime, root)
 
 Given an EXPR `x` inside a call, collect all signature information for the
 called function.
@@ -123,13 +123,50 @@ end
 # CST, so the arg bindings match by objectid), so `_expr_signature!` recovers
 # parameter names (and var"..." quoting) exactly as for a local definition.
 function _collect_tree_signatures!(sigs::Vector{SignatureInfo}, tr::StaticLint.TreeRef, runtime, root::URI)
-    for ref in derived_method_items(runtime, root, tr.origin_module, tr.name)
+    qroot = _method_items_root(runtime, root, tr.origin_module)
+    for ref in derived_method_items(runtime, qroot, tr.origin_module, tr.name)
         entry = get(derived_item_positions(runtime, ref.file), ref.id, nothing)
         entry === nothing && continue
-        item_meta = derived_file_analysis(runtime, root, ref.file).meta
+        item_meta = derived_file_analysis(runtime, qroot, ref.file).meta
         _expr_signature!(sigs, entry.expr, item_meta)
+        # A struct's INNER constructors are not separate top-level items (they
+        # live inside the struct body), and `_expr_signature!`'s struct branch
+        # deliberately suppresses the implicit field constructor when they
+        # exist — so render them here, from the materialized struct EXPR.
+        # Here ONLY, not in `_expr_signature!`: the local Binding path already
+        # reaches inner constructors through the binding's method refs
+        # (`get_method`), so rendering them inside `_expr_signature!` would
+        # double-render for same-file structs.
+        if CSTParser.defines_struct(entry.expr)
+            body = entry.expr.args[3]
+            if body isa CSTParser.EXPR && body.args !== nothing
+                for member in body.args
+                    CSTParser.defines_function(member) && _expr_signature!(sigs, member, item_meta)
+                end
+            end
+        end
     end
     return
+end
+
+# The root whose tree `derived_method_items` should be queried with for a
+# tree-resolved callee: the current root when `origin_module` is one of its
+# tree paths (including the synthetic root `String[]`); otherwise — mirroring
+# the cross-root dispatch of `_workspace_package_context` /
+# `_tree_module_target` — the entry root of the workspace package named by the
+# path's first segment. A deved workspace package's method set lives in ITS
+# OWN root's tree, never the current one (the old whole-closure pass indexed
+# deved packages too, so returning empty here would be a regression). Falls
+# back to the current root (where `derived_method_items` then returns empty)
+# when neither resolves.
+function _method_items_root(rt, root::URI, origin_module::Vector{String})
+    isempty(origin_module) && return root
+    derived_module_exists(rt, root, origin_module) && return root
+    entry = get(derived_workspace_package_roots(rt), origin_module[1], nothing)
+    if entry !== nothing && derived_module_exists(rt, entry, origin_module)
+        return entry
+    end
+    return root
 end
 
 # Fallback
