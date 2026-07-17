@@ -1028,3 +1028,79 @@ end
     r = SL.refof(hits[2], meta_dict)
     @test r isa SL.Binding
 end
+
+@testitem "derived_file_analysis: a macro-wrapped sibling declaration resolves cross-file" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        SomeMod.@somemacro function mfunc(x)
+            x
+        end
+        """,
+        B => "caller() = mfunc(1)\n",
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+
+    @test !any(d -> occursin("mfunc", d.message), fa.diagnostics)
+    @test only(filter(o -> o.name == "mfunc", fa.outbound)).target !== nothing
+end
+
+@testitem "derived_file_analysis: an unindexed external whole-module import still binds its name" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        import NotIndexedPkg
+        include("b.jl")
+        end
+        """,
+        B => "caller() = NotIndexedPkg.foo()\n",
+    ))
+    rt = jw.runtime
+
+    # the import statement itself still warns (resolution failed) ...
+    fa_root = JuliaWorkspaces.derived_file_analysis(rt, ROOT, ROOT)
+    @test any(d -> occursin("NotIndexedPkg", d.message), fa_root.diagnostics)
+
+    # ... but per that warning's own contract ("anything imported through
+    # this statement is assumed to exist"), the bound name must not be
+    # reported missing at its use sites in sibling files.
+    vn = JuliaWorkspaces.derived_module_visible_names(rt, ROOT, ["MainPkg"])
+    @test haskey(vn, "NotIndexedPkg")
+    fa_b = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+    @test !any(d -> occursin("NotIndexedPkg", d.message), fa_b.diagnostics)
+end
+
+@testitem "derived_file_analysis: a sibling file's failed wildcard using suppresses missing-ref hints module-wide" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        using NotIndexedPkg
+        include("b.jl")
+        end
+        """,
+        B => """
+        caller() = some_wildcard_provided_name()
+        module Inner
+        inner_caller() = another_undefined_name()
+        end
+        """,
+    ))
+    rt = jw.runtime
+
+    fa_b = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+    # `using NotIndexedPkg` (in the SIBLING entry file) failed to resolve, so
+    # any bare name in MainPkg's scope may come from it — parity with the
+    # whole-closure pass's `scope.unresolved_wildcard_import` suppression,
+    # which spans all files spliced into the module
+    @test !any(d -> occursin("some_wildcard_provided_name", d.message), fa_b.diagnostics)
+    # ... but a module DECLARED INSIDE the analyzed file is its own scope
+    # boundary (`in_unresolved_wildcard_import_scope` stops at modules): the
+    # suppression must not leak into it
+    @test any(d -> occursin("another_undefined_name", d.message), fa_b.diagnostics)
+end

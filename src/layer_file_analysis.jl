@@ -457,6 +457,22 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     ctx = TreeModuleContext(rt, root, path)
     StaticLint.semantic_pass(file, cst, env, meta_dict, rt; module_context=ctx)
 
+    # Cross-file wildcard-using suppression: if the module this file is
+    # spliced into has a failed wildcard `using` ANYWHERE (typically in the
+    # entry file), the whole-closure pass suppressed bare missing-ref hints
+    # throughout the module via the shared scope's
+    # `unresolved_wildcard_import` flag. Per-file, the file's root scope
+    # stands in for the module interior — setting the flag there reproduces
+    # the suppression exactly: `in_unresolved_wildcard_import_scope`'s walk
+    # still stops at modules DECLARED INSIDE this file, so their contents
+    # keep their hints (matching the old pass's module-boundary rule). The
+    # file's OWN failed wildcard usings need no help — `semantic_pass` +
+    # `mark_unresolved_imports!` set the flag locally, as always.
+    if derived_module_unresolved_wildcard_using(rt, root, path)
+        fscope = StaticLint.scopeof(cst, meta_dict)
+        fscope isa StaticLint.Scope && (fscope.unresolved_wildcard_import = true)
+    end
+
     # The per-file slice of the whole-closure pass's tail
     # (`derived_static_lint_meta_for_root`, layer_static_lint.jl), in the
     # same order, minus the closure loop: this file is the only file.

@@ -183,8 +183,22 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
 
     elseif target.sort === :external
         store = _resolve_external_module(rt, root, tp)
-        store === nothing && return entries   # missing external module: contributes nothing
         origin = kind === :using ? :using_external : :import_binding
+        if store === nothing
+            # The module isn't in the environment (unindexed dependency, or a
+            # genuinely missing package). Julia still binds the statement's
+            # name lexically, and the analysis reports the failure ONCE at the
+            # import statement with "anything imported through this statement
+            # is assumed to exist and will not be checked" — so the bound name
+            # must exist here or every use site would contradict that message
+            # with a spurious missing-ref hint. Exported names are unknowable
+            # without the store; only the module name itself binds. The ledger
+            # entry keeps the denoted target so relative/member chains through
+            # the binding re-attempt (and fail) at their own use sites.
+            bound = alias !== nothing ? alias : tp[end]
+            push!(entries, (bound, VisibleName(:external_symbol, origin, nothing, tp), target))
+            return entries
+        end
         if kind === :using
             for en in store.exportednames
                 name = String(en)
@@ -608,4 +622,62 @@ Salsa.@derived function derived_visible_item(rt, root, path, name)
     visible = derived_module_visible_names(rt, root, path)
     vn = get(visible, name, nothing)
     return vn === nothing ? nothing : vn.item
+end
+
+"""
+    derived_module_unresolved_wildcard_using(rt, root, path) -> Bool
+
+Whether module `path` in `root`'s tree contains a wildcard `using` (non-colon
+form, any declaring file) whose target cannot be resolved: a `:unresolved`
+target the bounded pass-2 re-attempt doesn't land, an `:external` target
+missing from the environment, or a `:workspace_package` target whose package
+root is gone. This is the module-tree analog of the whole-closure pass's
+`scope.unresolved_wildcard_import` flag (StaticLint/imports.jl:347-352): a
+wildcard `using` of an unknown module may bring in ANY name, so bare
+missing-ref hints inside that module's scope are meaningless noise
+(`in_unresolved_wildcard_import_scope`, StaticLint/linting/checks.jl). In the
+whole-closure pass the flag naturally spans every file spliced into the
+module (they share the module's `Scope`); per-file analyses consult THIS
+query to reproduce that cross-file suppression (`derived_file_analysis` sets
+the flag on the analyzed file's root scope — module boundaries inside the
+file still stop the scope walk, exactly like the old pass).
+
+Bool-valued and id-free: sibling edits that don't change the module's
+wildcard-using resolvability backdate here, keeping the per-file analyses'
+cutoff intact.
+"""
+Salsa.@derived function derived_module_unresolved_wildcard_using(rt, root, path)
+    @debug "derived_module_unresolved_wildcard_using" root=root path=path
+
+    node = module_node(derived_module_tree(rt, root), path)
+    node === nothing && return false
+    for ri in node.imports
+        ri.kind === :using || continue
+        isempty(ri.symbols) || continue   # colon form binds only the listed names
+        _wildcard_using_unresolved(rt, root, path, ri) && return true
+    end
+    return false
+end
+
+# Resolvability of one wildcard `using`'s target, mirroring what the
+# visibility passes would do with it: `:tree` targets always resolve;
+# `:external`/`:workspace_package` targets resolve iff their store/root
+# exists; `:unresolved` targets get the same bounded pass-2 re-attempt as
+# `_visible_names_impl` — and a re-attempt that lands on an external/package
+# target is still checked for store/root existence.
+function _wildcard_using_unresolved(rt, root, path::Vector{String}, ri::ResolvedImport)
+    t = ri.target
+    if t.sort === :tree
+        return false
+    elseif t.sort === :external
+        return _resolve_external_module(rt, root, t.path) === nothing
+    elseif t.sort === :workspace_package
+        return !haskey(derived_workspace_package_roots(rt), t.path[1])
+    else # :unresolved
+        re = _reattempt_unresolved(rt, root, path, ri, Set{URI}())
+        re === nothing && return true
+        re.sort === :external && return _resolve_external_module(rt, root, re.path) === nothing
+        re.sort === :workspace_package && return !haskey(derived_workspace_package_roots(rt), re.path[1])
+        return false
+    end
 end
