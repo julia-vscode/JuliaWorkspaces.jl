@@ -1137,3 +1137,58 @@ end
     # suppression must not leak into it
     @test any(d -> occursin("another_undefined_name", d.message), fa_b.diagnostics)
 end
+
+@testitem "derived_file_analysis: method-set lints decline for tree-visible callees" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        # A sees only a forward declaration and a single method of `f` — the
+        # module's full method set provably extends beyond this file (the
+        # names are visible through the tree context), so per-file
+        # FunctionHasNoMethods / IncorrectCallArgs would be false positives.
+        A => """
+        function pe end
+        pe_caller() = pe(1)
+        f(x) = x
+        f_caller() = f(1, 2)
+        """,
+        B => """
+        pe(x) = x
+        f(x, y) = x + y
+        """,
+    ))
+    rt = jw.runtime
+
+    fa_a = JuliaWorkspaces.derived_file_analysis(rt, ROOT, A)
+    @test !any(d -> occursin("Called function has no methods", d.message), fa_a.diagnostics)
+    @test !any(d -> occursin("Possible method call error", d.message), fa_a.diagnostics)
+
+    # A LOCAL (function-scope) callee is not tree-visible: its method set is
+    # fully in view, so the arity check must still fire.
+    local_uri = URI("file:///t/src/local.jl")
+    jw2 = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("local.jl")
+        end
+        """,
+        local_uri => """
+        function outer()
+            g(x) = x
+            return g(1, 2)
+        end
+        """,
+    ))
+    fa_l = JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, local_uri)
+    @test any(d -> occursin("Possible method call error", d.message), fa_l.diagnostics)
+
+    # The whole-closure pass is untouched: it sees the full method set and
+    # never produced these lints on this fixture in the first place — and its
+    # `check_all` path takes no tree-visibility predicate at all.
+    old = JuliaWorkspaces.derived_static_lint_diagnostics_for_root(rt, ROOT)
+    @test !any(d -> occursin("method", d.message), Iterators.flatten(values(old)))
+end

@@ -109,13 +109,22 @@ LintOptions(::Colon) = LintOptions(fill(true, length(default_options))...)
 LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
     LintOptions(something.(options, default_options)...)
 
-function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict)
+# `tree_visible` (per-file traversal mode only, `nothing` in the
+# whole-closure pass): a `name::String -> Bool` predicate over the analyzed
+# file's tree-context visible names. When the callee of a call is ALSO
+# visible through the tree context, the file provably sees only a partial
+# method set (other files of the module may add methods, forward
+# declarations get their methods elsewhere), so the method-set lints
+# (`FunctionHasNoMethods`/`IncorrectCallArgs`) must decline — the lost
+# true-positive direction (a genuinely method-less module-level function) is
+# sanctioned conservatism of the per-file architecture.
+function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing)
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
     is_test_throws_macrocall(x, env, meta_dict) && return
 
     # Do checks
-    opts.call && check_call(x, env, meta_dict)
+    opts.call && check_call(x, env, meta_dict, tree_visible)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
     opts.constif && check_if_conds(x, meta_dict)
@@ -132,7 +141,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict)
 
     if x.args !== nothing
         for i in 1:length(x.args)
-            check_all(x.args[i], opts, env, meta_dict)
+            check_all(x.args[i], opts, env, meta_dict, tree_visible)
         end
     end
 end
@@ -332,7 +341,7 @@ end
 is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} = true
 is_something_with_methods(x) = false
 
-function check_call(x, env::ExternalEnv, meta_dict)
+function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
@@ -343,6 +352,18 @@ function check_call(x, env::ExternalEnv, meta_dict)
         # find the function we're dealing with
         func_ref = refof_call_func(x, meta_dict)
         func_ref === nothing && return
+
+        # Per-file mode partial-method-set gate (see `check_all`'s docs):
+        # a Binding-backed callee whose name is also tree-visible has an
+        # unknowable-from-this-file method set — decline. Store-backed
+        # callees (env) keep their full method sets and stay checked.
+        if tree_visible !== nothing && func_ref isa Binding
+            name = CSTParser.get_name(x)
+            if name isa EXPR && isidentifier(name)
+                n = valofid(name)
+                n !== nothing && tree_visible(n) && return
+            end
+        end
 
         if is_something_with_methods(func_ref) && !(func_ref isa Binding && func_ref.val isa EXPR && func_ref.val.head === :macro)
             # intentionally empty

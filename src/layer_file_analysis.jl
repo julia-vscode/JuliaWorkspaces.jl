@@ -476,8 +476,17 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # The per-file slice of the whole-closure pass's tail
     # (`derived_static_lint_meta_for_root`, layer_static_lint.jl), in the
     # same order, minus the closure loop: this file is the only file.
+    # `tree_visible` gates the method-set lints
+    # (FunctionHasNoMethods/IncorrectCallArgs): a callee that is also visible
+    # through the tree context provably has a method set this file only
+    # partially sees (forward declarations, methods in sibling files), so
+    # those checks decline rather than false-positive — see `check_all`'s
+    # docs; the analysis already depends on the id-free visible-names face,
+    # so this adds no new invalidation edge.
     lint_config = derived_lint_configuration(rt, file)
-    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict)
+    visible_names = derived_module_visible_names_idfree(rt, root, path)
+    tree_visible = name -> haskey(visible_names, name)
+    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible)
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file
