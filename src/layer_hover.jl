@@ -178,6 +178,13 @@ end
 
 _ensure_ends_with(s, c = "\n") = endswith(s, c) ? s : string(s, c)
 
+# Compact `module <name>` hover rendering, shared by the cross-file (`TreeRef`)
+# and same-file (local `Binding` whose `.val` is a module EXPR) paths so both
+# agree byte-for-byte. The old whole-module-body dump is intentionally gone
+# (user-approved 2026-07-17).
+_module_ref_hover(documentation::String, name) =
+    string(_ensure_ends_with(documentation), "```julia\nmodule ", name, "\n```\n")
+
 # ============================================================================
 # Type annotation helpers (for variable hover + completions)
 # ============================================================================
@@ -414,7 +421,7 @@ function _get_tree_ref_hover(tr::StaticLint.TreeRef, documentation::String, expr
     end
 
     if tr.kind === :module
-        return string(_ensure_ends_with(documentation), "```julia\nmodule ", tr.name, "\n```\n")
+        return _module_ref_hover(documentation, tr.name)
     elseif tr.kind in (:function, :macro, :struct, :mutable_struct, :abstract, :primitive, :enum)
         return _tree_method_items_hover(tr, documentation, rt, root)
     else
@@ -487,7 +494,12 @@ function _get_tooltip(b::StaticLint.Binding, documentation::String, meta_dict::M
     if b.val isa StaticLint.Binding
         documentation = _get_hover(b.val, documentation, expr, env, meta_dict)
     elseif b.val isa CSTParser.EXPR
-        if CSTParser.defines_function(b.val) || CSTParser.defines_datatype(b.val)
+        if CSTParser.defines_module(b.val)
+            # Same-file module name: render the SAME compact `module <name>` the
+            # cross-file `TreeRef` path produces, not the whole module body
+            # (user-approved 2026-07-17; see `_module_ref_hover`).
+            documentation = _module_ref_hover(documentation, CSTParser.str_value(CSTParser.get_name(b.val)))
+        elseif CSTParser.defines_function(b.val) || CSTParser.defines_datatype(b.val)
             documentation = _get_func_hover(b, documentation, expr, env, meta_dict)
             for r in b.refs
                 method = StaticLint.get_method(r)

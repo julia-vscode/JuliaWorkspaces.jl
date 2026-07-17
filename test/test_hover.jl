@@ -854,6 +854,41 @@ end
     @test !occursin("subfn() = ", result)
 end
 
+@testitem "Hover: module-name hover is compact on both same-file and cross-file paths" setup=[HoverCrossWS] begin
+    # A module declared in the SIBLING file `a.jl` (resolved as a `TreeRef`) and
+    # a module declared in the hovered file `b.jl` itself (resolved as a local
+    # `Binding` whose `.val` is the module EXPR). Both name references must
+    # render the SAME compact `module <name>` — no whole-module-body dump
+    # (user-approved 2026-07-17).
+    a_src = """
+    module SharedMod
+    sharedfn() = 1
+    end
+    """
+    b_src = """
+    module LocalMod
+    localfn() = 1
+    end
+    using .SharedMod
+    crossref() = SharedMod
+    localref() = LocalMod
+    """
+    jw = hoverx_workspace(a_src, b_src)
+
+    expected(name) = "\n```julia\nmodule $name\n```\n"
+
+    cross = hover_at(jw, b_src, "crossref() = SharedMod")
+    localm = hover_at(jw, b_src, "localref() = LocalMod")
+
+    # Same compact format on both paths (byte-for-byte, differing only by name).
+    @test cross == expected("SharedMod")
+    @test localm == expected("LocalMod")
+
+    # The old whole-module-body dump is gone on the same-file path too.
+    @test !occursin("localfn", localm)
+    @test !occursin("sharedfn", cross)
+end
+
 @testitem "Hover: cross-file operator definition resolves through visibility" setup=[HoverCrossWS] begin
     # Operators are not resolved through the tree context during the per-file
     # pass (identifier-gated), so hover's operator fallback must consult the
