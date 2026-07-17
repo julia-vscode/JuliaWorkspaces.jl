@@ -160,7 +160,9 @@ end
     @test byname("f").signature == "f(x)"
     @test byname("g").kind === :function
     @test occursin("g(a::Int, b", byname("g").signature)
-    @test byname("m").kind === :macro
+    # macros are stored WITH the `@` prefix (matching `export @m` spelling)
+    @test byname("@m").kind === :macro
+    @test isempty(filter(i -> i.name == "m", inv.items))
     @test byname("C").kind === :const
     @test byname("G").kind === :global
     @test byname("x").kind === :assignment

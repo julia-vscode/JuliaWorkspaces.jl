@@ -535,6 +535,13 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
         name = _symbol_name(CSTParser.get_name(x))
         name === nothing && return
         kind = CSTParser.headof(x) === :function ? :function : :macro
+        if kind === :macro && !startswith(name, "@")
+            # macros are named WITH the `@` prefix throughout the inventory
+            # layers: `@foo` and `foo` can legitimately coexist in one scope,
+            # and this matches both StaticLint's binding names and the
+            # `export @foo` / `using X: @foo` spellings.
+            name = "@" * name
+        end
         qualifier = _item_qualifier(CSTParser.get_name(x))
         push!(acc.items, InventoryItem(id, name, qualifier, kind, _render_sig(x), String[], parent_module))
     elseif CSTParser.defines_datatype(x)

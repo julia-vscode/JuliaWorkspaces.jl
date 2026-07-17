@@ -1161,3 +1161,37 @@ end
     @test visible["Iterators"].origin === :using_external
     @test visible["Iterators"].origin_module == ["Base", "Iterators"]
 end
+
+@testitem "module visibility: exported macros flow through a whole-module using" setup=[ModuleTreeWS] begin
+    # macros are stored WITH the `@` prefix throughout the inventory layers,
+    # so the export gate (`exports ∩ names`) and colon-list member lookups
+    # match the `export @mymac` / `using .Sub: @mymac` spellings.
+    tree, root_uri, jw = tree_of("""
+    module Parent
+    module Sub
+    export @mymac
+    macro mymac(x)
+        x
+    end
+    end
+    using .Sub
+    module Colon
+    using ..Sub: @mymac
+    end
+    end
+    """)
+
+    @test JuliaWorkspaces.derived_module_names(jw.runtime, root_uri, ["Parent", "Sub"])["@mymac"] === :macro
+
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent"])
+    @test haskey(visible, "@mymac")
+    @test visible["@mymac"].kind === :macro
+    @test visible["@mymac"].origin === :using_tree
+    @test visible["@mymac"].item == JuliaWorkspaces.derived_module_declared(jw.runtime, root_uri, ["Parent", "Sub"])["@mymac"]
+    @test !haskey(visible, "mymac")
+
+    colon_visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent", "Colon"])
+    @test haskey(colon_visible, "@mymac")
+    @test colon_visible["@mymac"].kind === :macro
+    @test colon_visible["@mymac"].origin === :import_binding
+end

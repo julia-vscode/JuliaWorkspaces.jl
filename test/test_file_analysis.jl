@@ -322,9 +322,8 @@ end
 end
 
 @testitem "file analysis: a sibling file's macro resolves through the tree" setup=[FileAnalysisWS] begin
-    # inventory item names for macros carry no `@` ("mymac"), while the
-    # reference site's identifier does ("@mymac") — the context lookup must
-    # bridge that.
+    # macros are stored WITH the `@` prefix throughout the inventory layers,
+    # so the reference site's "@mymac" hits the visible-names key directly.
     jw = ws_with(Dict(
         ROOT => """
         module MainPkg
@@ -346,7 +345,31 @@ end
     r = SL.refof(x, meta_dict)
     @test r isa SL.TreeRef
     @test r.kind === :macro
-    @test r.item == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg"])["mymac"]
+    @test r.item == JuliaWorkspaces.derived_module_declared(jw.runtime, ROOT, ["MainPkg"])["@mymac"]
+end
+
+@testitem "file analysis: a bare name does not resolve against a macro-only declaration" setup=[FileAnalysisWS] begin
+    # `@foo` and `foo` can coexist; when only `macro mymac` exists, a bare
+    # `mymac` reference must MISS (missing-ref parity), not borrow the macro.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        macro mymac(x)
+            x
+        end
+        """,
+        B => "w() = mymac\n",
+    ))
+
+    cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
+
+    x = only(find_identifiers(cst, "mymac"))
+    @test !SL.hasref(x, meta_dict)
 end
 
 @testitem "file analysis: local file scope wins over the tree context" setup=[FileAnalysisWS] begin
