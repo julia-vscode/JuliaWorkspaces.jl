@@ -145,6 +145,20 @@ function StaticLint.resolve_ref_from_module(x1::CSTParser.EXPR, ctx::TreeModuleC
     return true
 end
 
+# See `StaticLint.tree_context_declares_datatype`'s docstring: `name` resolves
+# to a datatype through this context iff it is visible here with a datatype
+# kind. Consulting the id-free visible-names face (the same query
+# `resolve_ref_from_module` uses) keeps this consistent with how the name will
+# actually resolve — if a reference would resolve to a datatype TreeRef, the
+# defining constructor must not shadow it with a local function binding — and
+# adds no coarser Salsa dependency than the per-file analysis already has.
+function StaticLint.tree_context_declares_datatype(ctx::TreeModuleContext, name::String)::Bool
+    visible = derived_module_visible_names_idfree(ctx.rt, ctx.root, ctx.path)
+    vn = get(visible, name, nothing)
+    vn === nothing && return false
+    return _is_datatype_kind(vn.kind)
+end
+
 # The tree path of the module a module-kinded VisibleName DENOTES, or
 # `nothing` when it isn't a module of this root's tree (external and
 # workspace-package modules chain no further in-file). `VisibleName` doesn't

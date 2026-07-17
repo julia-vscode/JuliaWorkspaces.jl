@@ -102,6 +102,26 @@ Implemented by the concrete context type.
 function workspace_package_context end
 
 """
+    tree_context_declares_datatype(ctx::AbstractModuleContext, name::String) -> Bool
+
+Whether the module tree resolves `name` to a DATATYPE (struct/abstract/
+primitive/enum) in `ctx`'s module. Used by `add_binding` in per-file
+traversal mode to extend the method-extension rule across the cross-file
+boundary the per-file scope can't see: an outer constructor or other method
+extension `T(...) = ...` for a datatype `T` declared in a SIBLING file must
+NOT introduce a shadowing local FUNCTION binding — that binding would make
+in-file `::T` annotations (and every other in-file use of `T`) resolve to the
+constructor, a non-DataType, producing a false `InvalidTypeDeclaration`
+diagnostic and misattributing consumers. The whole-closure pass gets this for
+free (the datatype's binding is already in the shared top-level scope, so the
+existing `scopehasbinding` arm fires); per-file mode only sees sibling
+declarations through the tree context, which this predicate consults.
+Implemented by the concrete context type; there is no context (and this is
+never called) in the whole-closure pass.
+"""
+function tree_context_declares_datatype end
+
+"""
     TreeRef
 
 Plain-data reference target for a name resolved through the module tree in

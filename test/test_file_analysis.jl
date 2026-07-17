@@ -1838,3 +1838,81 @@ end
     @test !isdefined(JuliaWorkspaces, :derived_each_reference)
     @test !isdefined(JuliaWorkspaces, :derived_references)
 end
+
+@testitem "file analysis: an outer constructor for a sibling-file datatype does not shadow the struct" setup=[FileAnalysisWS] begin
+    # Regression: a datatype declared in one file and its plain outer
+    # constructor written in a SIBLING file, both reached through an
+    # intermediary `packagedef.jl`-style include (the real Revise.jl shape:
+    # `module Revise; include("packagedef.jl"); end` → types.jl `struct
+    # WatchList` + utils.jl `WatchList() = ...`). In per-file traversal mode
+    # the constructor's file can only see the struct through the module tree,
+    # not as a local scope binding, so `WatchList() = ...` used to introduce a
+    # shadowing local FUNCTION binding — making in-file `::WatchList`
+    # annotations resolve to a non-DataType and emit a false
+    # `InvalidTypeDeclaration` diagnostic, and misattributing every consumer to
+    # the constructor rather than the struct. The whole-closure pass never had
+    # this problem (the struct binding is already in the shared scope).
+    pkgdef = URI("file:///t/src/packagedef.jl")
+    types = URI("file:///t/src/types.jl")
+    utils = URI("file:///t/src/utils.jl")
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("packagedef.jl")
+        end
+        """,
+        pkgdef => """
+        include("types.jl")
+        include("utils.jl")
+        """,
+        types => """
+        mutable struct WatchList
+            x
+        end
+        """,
+        utils => """
+        WatchList() = WatchList(0)
+        watched(l::WatchList) = l.x
+        """,
+    ))
+    rt = jw.runtime
+
+    # (a) both included files splice into the same module path.
+    @test JuliaWorkspaces.derived_file_module_path(rt, ROOT, types) == ["MainPkg"]
+    @test JuliaWorkspaces.derived_file_module_path(rt, ROOT, utils) == ["MainPkg"]
+
+    # (b) the struct is the declared/visible winner at the module (datatype
+    # wins over its own constructor).
+    @test JuliaWorkspaces.derived_module_names(rt, ROOT, ["MainPkg"])["WatchList"] == :mutable_struct
+    vis = JuliaWorkspaces.derived_module_visible_names(rt, ROOT, ["MainPkg"])
+    @test haskey(vis, "WatchList") && vis["WatchList"].kind == :mutable_struct
+    struct_ref = JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])["WatchList"]
+    @test struct_ref.file == types
+
+    # (c) NO false `InvalidTypeDeclaration` diagnostic on utils.jl, and the
+    # `::WatchList` annotation resolves to the tree struct (a TreeRef carrying
+    # the struct's declaring ItemRef), not to the local constructor binding.
+    fa = JuliaWorkspaces.derived_file_analysis(rt, ROOT, utils)
+    @test !any(d -> occursin("non-DataType", d.message), fa.diagnostics)
+
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(rt, utils)
+    anns = find_identifiers(cst, "WatchList")
+    decl_anns = filter(x -> (p = SL.parentof(x); p isa CST.EXPR && CST.isdeclaration(p)), anns)
+    @test !isempty(decl_anns)   # the `l::WatchList` annotations
+    ann_ref = SL.refof(first(decl_anns), fa.meta)
+    @test ann_ref isa SL.TreeRef
+    @test ann_ref.kind == :mutable_struct
+    @test ann_ref.item == struct_ref
+
+    # every in-file use of `WatchList` (annotations AND the constructor's own
+    # call sites) resolves to the struct, not to a local constructor binding.
+    @test !isempty(anns)
+    @test all(x -> SL.refof(x, fa.meta) isa SL.TreeRef &&
+                   SL.refof(x, fa.meta).item == struct_ref, anns)
+
+    # (d) `derived_method_items` returns BOTH the struct and the constructor.
+    mi = JuliaWorkspaces.derived_method_items(rt, ROOT, ["MainPkg"], "WatchList")
+    @test length(mi) == 2
+    @test any(r -> r.file == types, mi)
+    @test any(r -> r.file == utils, mi)
+end

@@ -421,6 +421,18 @@ function add_binding(x, state, scope=state.scope)
                     else
                         seterror!(x, CannotDefineFuncAlreadyHasValue, meta_dict)
                     end
+                elseif (ctx = enclosing_tree_context(tls)) !== nothing && tree_context_declares_datatype(ctx, name)
+                    # Per-file traversal mode: `name` is a DATATYPE declared in
+                    # a SIBLING file of this module — visible only through the
+                    # module tree, so the `scopehasbinding(tls, name)` arm above
+                    # missed it. This definition is therefore an outer
+                    # constructor / method extension over that datatype, so
+                    # apply the same rule as the `isfunction`/`isdatatype` arm:
+                    # do nothing, the name resolves (via
+                    # `resolve_ref_from_module`) to the tree's datatype. Adding
+                    # a local function binding here would shadow the struct and
+                    # make in-file `::name` annotations resolve to a
+                    # non-DataType (a false `InvalidTypeDeclaration`).
                 else
                     scope.names[name] = b
                     if !hasref(b.name, meta_dict)
