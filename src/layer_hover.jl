@@ -360,7 +360,7 @@ end
 # Core hover dispatch
 # ============================================================================
 
-_get_hover(x, documentation::String, expr, env, meta_dict) = documentation
+_get_hover(x, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing) = documentation
 
 function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
     if (CSTParser.isidentifier(x) || CSTParser.isoperator(x)) && StaticLint.hasref(x, meta_dict)

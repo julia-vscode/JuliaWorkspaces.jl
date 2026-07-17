@@ -61,6 +61,12 @@
     # Hovering over a bare integer literal should return nothing
     @test get_hover_text(jw, uri, index_of(source, 3, 2)) === nothing
 
+    # Regression: hovering a blank/whitespace position resolves to no expr
+    # (`get_expr1` returns `nothing`); it must return nothing, not crash. The
+    # per-file-meta migration widened the `_get_hover` call to 7 args but left
+    # the `::Any` fallback at 5 args, so a `nothing` expr had no matching method.
+    @test get_hover_text(jw, uri, index_of(source, 2, 1)) === nothing
+
     # Hovering over `Base` should produce hover text (it's a known module)
     result = get_hover_text(jw, uri, index_of(source, 4, 1))
     @test result !== nothing
