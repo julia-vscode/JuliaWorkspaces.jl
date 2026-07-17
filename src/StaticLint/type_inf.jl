@@ -226,9 +226,42 @@ function get_eventual_datatype(b::SymbolServer.FunctionStore, env::ExternalEnv)
     return SymbolServer._lookup(b.extends, getsymbols(env))
 end
 
+# Per-file traversal mode only: does `b`'s declaration carry an explicit `::`
+# type annotation that resolved through the module tree (a `TreeRef`)? The
+# legacy `Binding.type` slot can't carry a TreeRef, so `infer_type_decl`
+# leaves the type as `nothing` — but the type IS declared and known, so
+# by-use inference must not override it with a guess (it inferred e.g.
+# `Core.DebugInfo` for a `framecode::FrameCode` argument and then flagged the
+# struct's real fields as missing references). Mirrors the annotation
+# unwrapping in `infer_type_decl` (curly / getfield forms).
+function declared_type_is_tree_backed(b::Binding, meta_dict)
+    v = b.val
+    v isa EXPR || return false
+    t = if v.head isa EXPR && valof(v.head) == "::" && v.args !== nothing && length(v.args) == 2
+        v.args[2]
+    elseif isassignment(v) && v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
+           v.args[1].args !== nothing && length(v.args[1].args) == 2
+        v.args[1].args[2]
+    elseif CSTParser.issplat(v) && v.args !== nothing && length(v.args) >= 1 &&
+           v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
+           v.args[1].args !== nothing && length(v.args[1].args) == 2
+        v.args[1].args[2]
+    else
+        return false
+    end
+    if iscurly(t) && t.args !== nothing && length(t.args) >= 1
+        t = t.args[1]
+    end
+    if CSTParser.is_getfield_w_quotenode(t)
+        t = t.args[2].args[1]
+    end
+    return refof(t, meta_dict) isa TreeRef
+end
+
 # Work out what type a bound variable has by functions that are called on it.
 function infer_type_by_use(b::Binding, env::ExternalEnv, meta_dict)
     b.type !== nothing && return # b already has a type
+    declared_type_is_tree_backed(b, meta_dict) && return # declared type is known, just not carriable — never guess over it
     possibletypes = []
     visitedmethods = []
     ifbranch = nothing

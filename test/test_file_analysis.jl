@@ -1076,6 +1076,39 @@ end
     @test !any(d -> occursin("NotIndexedPkg", d.message), fa_b.diagnostics)
 end
 
+@testitem "derived_file_analysis: by-use inference never overrides a tree-backed type annotation" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        struct S
+            a
+        end
+        """,
+        B => """
+        g(y::VersionNumber) = y
+        function f(x::S)
+            g(x)
+            return x.a
+        end
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+
+    # `x` is DECLARED `::S` — a sibling-file struct that resolves through the
+    # module tree. The legacy `Binding.type` slot can't carry that (TreeRef),
+    # so by-use inference used to kick in (`g(x)` pins `VersionNumber`, an
+    # env type WITH fields) and the field check then flagged the real field
+    # `a` as a missing reference. The whole-closure pass never did this: the
+    # resolved annotation always set the type before by-use could guess.
+    @test !any(d -> occursin("Missing reference: a", d.message), fa.diagnostics)
+end
+
 @testitem "derived_file_analysis: a sibling file's failed wildcard using suppresses missing-ref hints module-wide" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """
