@@ -175,7 +175,12 @@ end
     @test byname("green").kind === :enum_member
     @test byname("inner").parent_module == ["M"]
     @test only(filter(m -> m.name == "M", inv.modules)).bare == false
-    @test any(i -> i.kind === :opaque_macrocall, inv.items)
+    # `@somethingunknown foo bar` is walked TRANSPARENTLY (bare identifier
+    # args produce no items) — `:opaque_macrocall` rows are reserved for the
+    # isolated-scope macros (testitem/testset families), see
+    # `_is_isolated_scope_macrocall` and the dedicated macrocall testitems.
+    @test !any(i -> i.kind === :opaque_macrocall, inv.items)
+    @test isempty(filter(i -> i.name in ("foo", "bar"), inv.items))
 end
 
 @testitem "inventory extraction: imports, exports, includes" setup=[InventoryWS] begin
@@ -653,4 +658,90 @@ end
                      "p", "q", "Fruit", "apple", "banana", "DocS", "m_f"]
         @test expected in names
     end
+end
+
+@testitem "inventory walker: non-isolating macrocalls are transparent containers" begin
+    using JuliaWorkspaces: _foreach_toplevel_item
+    using JuliaWorkspaces: CSTParser
+
+    src = """
+    Salsa.@derived function foo(x)
+        x
+    end
+    @bar(baz() = 1)
+    @testset "s" begin
+        inner() = 1
+    end
+    """
+    cst = CSTParser.parse(src, true)
+
+    visited = []
+    _foreach_toplevel_item(cst) do x, id, parent_module, offset
+        push!(visited, (id=id, head=CSTParser.headof(x), offset=offset))
+    end
+
+    # 3 item-like nodes: foo's `function` (unwrapped from the macrocall),
+    # baz's assignment (unwrapped from the call-form macrocall, past the
+    # opening paren), and the `@testset` macrocall itself (isolating scope —
+    # stays opaque; `inner` is never visited).
+    @test [v.id for v in visited] == collect(1:3)
+    @test visited[1].head === :function
+    @test src[visited[1].offset + 1] == 'f'   # `function ...`
+    @test src[visited[2].offset + 1] == 'b'   # `baz() = 1`
+    @test visited[3].head === :macrocall
+    @test length(visited) == 3
+end
+
+@testitem "inventory extraction: macro-wrapped declarations, imports, and includes surface" setup=[InventoryWS] begin
+    a_uri = URI("file:///inv/src/a.jl")
+    inv, _ = inventory_of("""
+    Salsa.@derived function derived_foo(rt)
+        1
+    end
+    @auto_hash_equals struct D
+        a
+    end
+    Base.@kwdef struct K
+        x = 1
+    end
+    @static if VERSION > v"1.0"
+        import SomePkg
+        cond_mf() = 1
+    else
+        cond_mg() = 2
+    end
+    @static if true
+        include("a.jl")
+    end
+    @testitem "t" begin
+        leaky1() = 1
+    end
+    @testset "s" begin
+        leaky2() = 1
+    end
+    @testmodule TM begin
+        leaky3() = 1
+    end
+    @testsnippet TS begin
+        leaky4() = 1
+    end
+    @safetestset "st" begin
+        leaky5() = 1
+    end
+    """; extra_files=Dict(a_uri => "z() = 1\n"))
+
+    byname(n) = only(filter(i -> i.name == n, inv.items))
+    @test byname("derived_foo").kind === :function
+    @test byname("derived_foo").signature == "derived_foo(rt)"
+    @test byname("D").kind === :struct
+    @test byname("D").field_names == ["a"]
+    @test byname("K").kind === :struct
+    @test byname("cond_mf").kind === :function
+    @test byname("cond_mg").kind === :function
+    # a `using`/`import` inside a macro-wrapped `@static if` is a real import
+    @test any(i -> i.kind === :import && i.path == ["SomePkg"], inv.imports)
+    # an `include` inside a macro-wrapped `@static if` is a real include event
+    @test any(inc -> inc.target == a_uri, inv.includes)
+    # isolating macros (testitem family + testset family) leak nothing
+    @test isempty(filter(i -> i.name in ("leaky1", "leaky2", "leaky3", "leaky4", "leaky5"), inv.items))
 end

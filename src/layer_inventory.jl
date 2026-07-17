@@ -120,6 +120,13 @@ arm for `:if`/`:block`, so definitions inside them bind at the enclosing
 level): their statement lists are walked as if they were direct siblings of
 the container, at the same `parent_module` and continuing the same id
 sequence; the container node itself gets no id and is never passed to `f`.
+Non-isolating macrocalls (everything except the testitem/testset families and
+`@enum`, see `_is_isolated_scope_macrocall`) are transparent the same way:
+StaticLint traverses a macrocall's arguments in the enclosing scope, so
+`Salsa.@derived function f() end`, `@auto_hash_equals struct S end`,
+`@static if …`-wrapped imports/includes, etc. all bind at the module level —
+the inventory must be exactly as sighted (spec: "no blinder" than
+`mark_bindings!`/the traversal that consumes it).
 This walker is the single source of truth for item ids: the inventory
 extractor and the position map both use it, so ids always agree.
 """
@@ -132,53 +139,95 @@ end
 function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
     args === nothing && return offset
     for a in args
-        item = a
-        item_offset = offset
-        wrapped = _doc_wrapped_item(a)
-        if wrapped !== nothing
-            for j in 1:3
-                item_offset += a.args[j].fullspan
-            end
-            item = wrapped
-        end
-
-        # A ternary (`cond ? a : b`) also parses with head `:if`, so the
-        # container check alone isn't enough to tell it apart from a real
-        # `if`/`elseif`/`else` chain — and checking whether `args[2]` (the
-        # "then" branch) is `:block`-shaped is NOT a reliable discriminator
-        # either: `cond ? begin ... end : b` gives a ternary an `args[2]` with
-        # head `:block` too (confirmed via CST exploration). What's reliable
-        # is the node's own leading keyword trivia: a real `if`/`elseif` node
-        # has `trivia[1]` headed `:IF`/`:ELSEIF`; a ternary's `trivia[1]` is
-        # its `?` operator token. So only descend when `trivia[1]` is the
-        # real keyword; a ternary falls through to the `else` branch below and
-        # is treated as a single opaque item (no descent into its arms).
-        if CSTParser.headof(item) === :if && CSTParser.headof(item.trivia[1]) === :IF
-            _walk_if_chain!(f, item, parent_module, item_offset, next_id)
-        elseif CSTParser.headof(item) === :block
-            _walk_transparent_block!(f, item, parent_module, item_offset, next_id)
-        else
-            next_id[] += 1
-            f(item, next_id[], parent_module, item_offset)
-
-            if CSTParser.defines_module(item) && item.args !== nothing && length(item.args) >= 3
-                mod_name = CSTParser.isidentifier(item.args[2]) ? StaticLint.valofid(item.args[2]) : nothing
-                if mod_name !== nothing
-                    inner_parent = vcat(parent_module, [mod_name])
-                    # Offset of the module block's first child: the module node's
-                    # offset plus the fullspans of the `module`/`baremodule`
-                    # keyword token (held in `.trivia[1]`, NOT `.args[1]` — the
-                    # latter is a synthetic bare/non-bare flag with span 0; see
-                    # layer_navigation.jl:122) and the name.
-                    block_offset = item_offset + item.trivia[1].fullspan + item.args[2].fullspan
-                    _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, next_id)
-                end
-            end
-        end
-
+        _walk_one!(f, a, parent_module, offset, next_id)
         offset += a.fullspan
     end
     return offset
+end
+
+function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+    item = a
+    item_offset = offset
+    wrapped = _doc_wrapped_item(a)
+    if wrapped !== nothing
+        for j in 1:3
+            item_offset += a.args[j].fullspan
+        end
+        item = wrapped
+    end
+
+    # A ternary (`cond ? a : b`) also parses with head `:if`, so the
+    # container check alone isn't enough to tell it apart from a real
+    # `if`/`elseif`/`else` chain — and checking whether `args[2]` (the
+    # "then" branch) is `:block`-shaped is NOT a reliable discriminator
+    # either: `cond ? begin ... end : b` gives a ternary an `args[2]` with
+    # head `:block` too (confirmed via CST exploration). What's reliable
+    # is the node's own leading keyword trivia: a real `if`/`elseif` node
+    # has `trivia[1]` headed `:IF`/`:ELSEIF`; a ternary's `trivia[1]` is
+    # its `?` operator token. So only descend when `trivia[1]` is the
+    # real keyword; a ternary falls through to the `else` branch below and
+    # is treated as a single opaque item (no descent into its arms).
+    if CSTParser.headof(item) === :if && CSTParser.headof(item.trivia[1]) === :IF
+        _walk_if_chain!(f, item, parent_module, item_offset, next_id)
+    elseif CSTParser.headof(item) === :block
+        _walk_transparent_block!(f, item, parent_module, item_offset, next_id)
+    elseif CSTParser.ismacrocall(item) && !_is_enum_macro(item) && !_is_isolated_scope_macrocall(item)
+        _walk_macrocall!(f, item, parent_module, item_offset, next_id)
+    else
+        next_id[] += 1
+        f(item, next_id[], parent_module, item_offset)
+
+        if CSTParser.defines_module(item) && item.args !== nothing && length(item.args) >= 3
+            mod_name = CSTParser.isidentifier(item.args[2]) ? StaticLint.valofid(item.args[2]) : nothing
+            if mod_name !== nothing
+                inner_parent = vcat(parent_module, [mod_name])
+                # Offset of the module block's first child: the module node's
+                # offset plus the fullspans of the `module`/`baremodule`
+                # keyword token (held in `.trivia[1]`, NOT `.args[1]` — the
+                # latter is a synthetic bare/non-bare flag with span 0; see
+                # layer_navigation.jl:122) and the name.
+                block_offset = item_offset + item.trivia[1].fullspan + item.args[2].fullspan
+                _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, next_id)
+            end
+        end
+    end
+    return nothing
+end
+
+# Macros whose bodies are ISOLATED from the enclosing module scope in the
+# analysis — StaticLint's `is_scope_introducing_macrocall` (`@testitem`,
+# `@testset`, `@safetestset`; scope.jl:144-154) plus the prebuilt-scope
+# testsetup macros (`@testmodule`/`@testsnippet`; macros.jl:97-106). Nothing
+# declared inside them binds at the enclosing level, so the walker keeps the
+# macrocall opaque (one `:opaque_macrocall` item, no descent). Every OTHER
+# macrocall is walked transparently — matching StaticLint's traversal, which
+# processes macro arguments in the enclosing scope.
+function _is_isolated_scope_macrocall(x::CSTParser.EXPR)
+    mname = _macro_name_string(x.args[1])
+    return mname == "@testitem" || mname == "@testset" || mname == "@safetestset" ||
+           mname == "@testmodule" || mname == "@testsnippet"
+end
+
+# Walks a non-isolating macrocall's macro ARGUMENTS as top-level items: the
+# macro-name component (`args[1]`) and the parameters placeholder (`args[2]`,
+# a zero-span `:NOTHING` node) are skipped; every remaining arg goes through
+# the same per-item dispatch as a direct file-level statement (so nested
+# `@static if` chains, blocks, and even macrocall-wrapped modules all work).
+# Offsets come from CSTParser's source-order child iteration (`for c in x`
+# interleaves args and trivia in source order), which stays correct for the
+# call form `@foo(a, b)` where paren/comma TRIVIA sit between the args —
+# summing arg fullspans alone would drift there.
+function _walk_macrocall!(f, mc::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+    margs = mc.args
+    (margs === nothing || length(margs) < 3) && return nothing
+    child_offset = offset
+    for c in mc
+        if any(j -> margs[j] === c, 3:length(margs))
+            _walk_one!(f, c, parent_module, child_offset, next_id)
+        end
+        child_offset += c.fullspan
+    end
+    return nothing
 end
 
 # A `:block` node is CSTParser's uniform wrapper for a statement list. As a
@@ -644,6 +693,10 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
                 end
             end
         else
+            # Only the isolated-scope macros (`_is_isolated_scope_macrocall`)
+            # still reach this arm — the walker descends into every other
+            # macrocall transparently, so their contents were classified as
+            # ordinary items and no opaque row is emitted for them.
             mname = _macro_name_string(x.args[1])
             push!(acc.items, InventoryItem(id, something(mname, ""), String[], :opaque_macrocall, nothing, String[], parent_module))
         end
