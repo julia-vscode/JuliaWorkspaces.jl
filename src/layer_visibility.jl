@@ -164,9 +164,8 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
             # gated by ITS OWN exports — this is what lets a workspace
             # package re-export a name it itself brought in via `using`, and
             # is exactly where a dev-cycle between two workspace packages
-            # would recurse forever without `visited`'s guard (the
-            # recursive call below self-guards on `entry in visited`).
-            sub_visible = _visible_names_impl(rt, entry, tp, visited)
+            # would recurse forever without `visited`'s guard.
+            sub_visible = _cross_root_visible_names(rt, entry, tp, visited)
             exports = derived_module_exports(rt, entry, tp).exports
             for name in exports
                 haskey(sub_visible, name) || continue
@@ -519,6 +518,76 @@ function _visible_names_pass1(rt, root, path::Vector{String}, visited::Set{URI})
     return (result, modtargets)
 end
 
+# The set of workspace-package entry roots reachable from `root` by following
+# whole-module `using`/`import` edges of workspace packages, as classified at
+# the module-tree layer. A superset of the roots `_cross_root_visible_names`
+# would actually recurse into: the pass-2 ledger re-attempt can only chase a
+# workspace-package name that an enclosing module already bound with a direct
+# `:workspace_package` import (so that root already appears here), and any
+# deeper hop follows that package's OWN imports (its out-edges, also here).
+# Being a superset is what makes the acyclicity check below CONSERVATIVE —
+# an over-counted edge can only turn a `false` (memoize) into a `true`
+# (stay on the plain, cycle-safe path), never the unsafe reverse.
+function _wp_out_roots(rt, root::URI, wp_roots::Dict{String,URI})
+    tree = derived_module_tree(rt, root)
+    outs = Set{URI}()
+    for node in tree.modules
+        for ri in derived_module_imports(rt, root, node.path)
+            ri.target.sort === :workspace_package || continue
+            isempty(ri.target.path) && continue
+            dep = get(wp_roots, ri.target.path[1], nothing)
+            dep === nothing || push!(outs, dep)
+        end
+    end
+    return outs
+end
+
+# Whether the workspace-package using-subgraph reachable from `entry` contains
+# a cycle (a plain DFS with grey/black colouring). This is the guard that
+# decides whether a cross-root recursion may be routed through the memoized
+# `derived_module_visible_names` (which necessarily re-enters with an EMPTY
+# visited set — see `_cross_root_visible_names`). If any reachable node lies
+# on a cycle, memoizing would either Salsa-re-enter an in-progress key
+# (infinite recursion — Salsa has no in-progress guard) or cache a
+# cycle-truncated, entry-dependent value (poisoning), so such packages stay on
+# the plain `visited`-threaded path instead. All edge lookups hit memoized
+# leaf queries (`derived_module_tree`/`derived_module_imports`), and this
+# whole helper runs inside `entry`'s own memoized visible-names computation, so
+# its cost is memoized per package.
+function _wp_subgraph_has_cycle(rt, entry::URI)
+    wp_roots = derived_workspace_package_roots(rt)
+    onstack = Set{URI}()
+    done = Set{URI}()
+    function visit(u::URI)
+        push!(onstack, u)
+        for v in _wp_out_roots(rt, u, wp_roots)
+            v in done && continue
+            v in onstack && return true          # back-edge: cycle
+            visit(v) && return true
+        end
+        delete!(onstack, u)
+        push!(done, u)
+        return false
+    end
+    return visit(entry)
+end
+
+# One cross-root workspace-package recursion, memoized when it is safe to be.
+# When `entry`'s reachable using-subgraph is acyclic, its visible names are
+# independent of the caller chain, so the recursion is routed through the
+# memoized `derived_module_visible_names(rt, entry, tp)` — the whole point of
+# this cutoff: two consumer modules that both `using` the same acyclic package
+# then share ONE computation of that package's names instead of reassembling
+# them once per consumer per revision. A cycle-bearing `entry` (or one already
+# on the chain) stays on the plain `visited`-threaded `_visible_names_impl`,
+# which terminates via its own `entry in visited` guard and never caches a
+# truncated result.
+function _cross_root_visible_names(rt, entry::URI, tp::Vector{String}, visited::Set{URI})
+    (entry in visited || _wp_subgraph_has_cycle(rt, entry)) &&
+        return _visible_names_impl(rt, entry, tp, visited)
+    return derived_module_visible_names(rt, entry, tp)
+end
+
 # The full (pass 1 + pass 2) computation, threaded with the cross-root
 # `visited` set so a workspace-package chain (rule 2's `:workspace_package`
 # bullet, and the ledger re-attempt's own `:workspace_package` continuation)
@@ -528,7 +597,19 @@ end
 # `using`-derived exports are skipped; a caller resolving a name TO this root
 # still gets the plain module binding, since that doesn't require expanding
 # this root's own visible names).
+#
+# Wrapped in a trace span (attributes `root`/`path`) so the cross-root cutoff
+# is observable: with the memoization above, an acyclic package used by two
+# consumer modules records ONE `visible_names_recurse` span for that package
+# (its single memoized computation), not one per consumer.
 function _visible_names_impl(rt, root, path::Vector{String}, visited::Set{URI})::Dict{String,VisibleName}
+    return Salsa.TraceLogging.@trace(
+        "visible_names_recurse",
+        (; root=string(root), path=path),
+        _visible_names_impl_body(rt, root, path, visited))
+end
+
+function _visible_names_impl_body(rt, root, path::Vector{String}, visited::Set{URI})::Dict{String,VisibleName}
     root in visited && return Dict{String,VisibleName}()
     visited = union(visited, Set([root]))
 

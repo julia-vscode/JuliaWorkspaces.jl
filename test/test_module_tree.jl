@@ -925,6 +925,78 @@ end
     @test visible["P2"].origin === :using_workspace_package
 end
 
+@testitem "module visibility: an acyclic package used by two modules is computed once" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    # Collect every span; filter by name + (root, path) attributes afterwards.
+    mutable struct SpanCollector <: TL.AbstractTraceReceiver
+        spans::Vector{TL.TraceSpan}
+    end
+    SpanCollector() = SpanCollector(TL.TraceSpan[])
+    TL.receive_span(r::SpanCollector, s::TL.TraceSpan) = (push!(r.spans, s); nothing)
+
+    function project_toml(name, uuid)
+        """
+        name = "$name"
+        uuid = "$uuid"
+        version = "0.1.0"
+        """
+    end
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/Main/Project.toml"), SourceText(project_toml("Main", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"), "toml")))
+    main = URI("file:///ws/Main/src/Main.jl")
+    add_file!(jw, TextFile(main, SourceText("""
+    module Main
+    module M1
+    using DevedPkg
+    end
+    module M2
+    using DevedPkg
+    end
+    end
+    """, "julia")))
+    add_file!(jw, TextFile(URI("file:///ws/DevedPkg/Project.toml"), SourceText(project_toml("DevedPkg", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"), "toml")))
+    dev = URI("file:///ws/DevedPkg/src/DevedPkg.jl")
+    add_file!(jw, TextFile(dev, SourceText("""
+    module DevedPkg
+    export a, b, c
+    a() = 1
+    b() = 2
+    c() = 3
+    end
+    """, "julia")))
+    rt = jw.runtime
+
+    recv = SpanCollector()
+    v1, v2 = TL.with_tracing(recv) do
+        (JuliaWorkspaces.derived_module_visible_names(rt, main, ["Main", "M1"]),
+         JuliaWorkspaces.derived_module_visible_names(rt, main, ["Main", "M2"]))
+    end
+
+    # Both consumer modules see the package's exports (behavior unchanged).
+    for v in (v1, v2)
+        @test v["a"].origin === :using_workspace_package
+        @test v["b"].origin === :using_workspace_package
+        @test v["c"].origin === :using_workspace_package
+        @test v["DevedPkg"].kind === :module
+    end
+
+    # The point: DevedPkg's visible names are assembled exactly ONCE across the
+    # two consumers (the acyclic cross-root recursion is routed through the
+    # memoized `derived_module_visible_names`, so the second consumer hits the
+    # cache). Before this cutoff the recursion was a plain call and DevedPkg was
+    # reassembled once per consumer (twice).
+    dev_recurse = count(recv.spans) do s
+        s.name == "visible_names_recurse" && s.attributes !== nothing &&
+            get(s.attributes, :root, nothing) == string(dev) &&
+            get(s.attributes, :path, nothing) == ["DevedPkg"]
+    end
+    @test dev_recurse == 1
+end
+
 @testitem "module visibility: using an external module brings its exports" setup=[ModuleTreeWS] begin
     # NOTE: the brief suggested `Base64`, but this sandbox's SymbolServer
     # stdlib cache (`SymbolServer.stdlibs`, built from `Base.loaded_modules_array()`

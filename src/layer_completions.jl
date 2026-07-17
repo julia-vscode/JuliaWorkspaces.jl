@@ -1171,7 +1171,7 @@ end
 
 # Field completions for a struct-kind `TreeRef`: the field names come from
 # the declaring file's inventory item (matched on BOTH id and name — ids can
-# be shared between sibling items, see `_declared_item_kind`).
+# be shared between sibling items, see `_build_kind_index`).
 function _tree_struct_field_completions(tr::StaticLint.TreeRef, spartial, state::_CompletionState)
     state.rt === nothing && return
     tr.item === nothing && return

@@ -274,6 +274,87 @@ end
     @test sort(collect(keys(nt))) == sort(replace(collect(keys(ot)), "mymac" => "@mymac"))
 end
 
+@testitem "Symbols: workspace symbols value-family range widening" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_workspace_symbols
+    using JuliaWorkspaces.URIs2: URI
+    import JuliaWorkspaces as JW
+
+    project_toml = """
+    name = "WsVal"
+    uuid = "82345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+    [deps]
+    """
+    source = """
+    module WsVal
+    const MyConst = 42
+    global MyGlobal = 7
+    plain_assign = 100
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsval/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsval/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    uri = URI("file:///wsval/src/WsVal.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    rt = jw.runtime
+
+    # OLD workspace symbols reproduced inline (same shape as the parity testitem).
+    function old_ws(q)
+        out = Dict{String,NTuple{4,Int}}()
+        for u in JW.derived_text_files(rt)
+            r = JW.derived_best_root_for_uri(rt, u)
+            r === nothing && continue
+            md = JW.derived_static_lint_meta_for_root(rt, r).meta_dict
+            c = JW.derived_julia_legacy_syntax_tree(rt, u)
+            for (rng, b) in JW._collect_toplevel_bindings_w_loc(c, md, query=q)
+                s = JW._offset_to_position(rt, u, first(rng))
+                e = JW._offset_to_position(rt, u, last(rng))
+                out[JW._get_name_of_binding(b.name)] = (s.line, s.column, e.line, e.column)
+            end
+        end
+        return out
+    end
+
+    ot = old_ws("")
+    nt = Dict(r.name => (r.start.line, r.start.column, r.stop.line, r.stop.column) for r in get_workspace_symbols(jw, ""))
+
+    # Unlike the def-family (functions/structs/modules), which keep byte-identical
+    # ranges vs the old pass, value-family items (const/global/assignment) are
+    # now sourced from `derived_item_positions`, whose EXPR is the FULL defining
+    # statement. The old whole-closure walk ranged only the bound identifier, so
+    # these ranges WIDEN — a sanctioned M4 divergence (a symbol range covering
+    # `const MyConst = 42` is more useful than one covering just `MyConst`).
+    for nm in ["MyConst", "MyGlobal", "plain_assign"]
+        @test haskey(nt, nm)
+        nl, nsc, _, nec = nt[nm]
+        ol, osc, _, oec = ot[nm]
+        # single-line statements
+        @test nt[nm][1] == nt[nm][3]
+        # new range strictly CONTAINS the old identifier-only range ...
+        @test nsc <= osc
+        @test nec >= oec
+        @test nt[nm] != ot[nm]
+    end
+
+    # `const`/`global` keywords precede the identifier: the new range reaches
+    # back over the keyword (strictly smaller start column than the old
+    # identifier-only range).
+    @test nt["MyConst"][2] < ot["MyConst"][2]
+    @test nt["MyGlobal"][2] < ot["MyGlobal"][2]
+    # `plain_assign = 100`: the assignment starts at the identifier (same start
+    # as old), but the new range now extends over the RHS value.
+    @test nt["plain_assign"][2] == ot["plain_assign"][2]
+    @test nt["plain_assign"][4] > ot["plain_assign"][4]
+end
+
 @testitem "Symbols: workspace @-macro findable by bare and @ query; kinds served" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_workspace_symbols
     using JuliaWorkspaces.URIs2: URI

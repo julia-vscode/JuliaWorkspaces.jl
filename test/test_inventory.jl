@@ -183,6 +183,26 @@ end
     @test isempty(filter(i -> i.name in ("foo", "bar"), inv.items))
 end
 
+@testitem "inventory extraction: operator and var\"\" macro spellings" setup=[InventoryWS] begin
+    # Operator-named macro: `get_name` resolves to the OPERATOR node `+`, so the
+    # name must come through `_symbol_name` (not `_item_name`, which drops
+    # operators) and then get the `@` prefix like any other macro.
+    inv, _ = inventory_of("macro +(a, b) end")
+    plus = only(filter(i -> i.kind === :macro, inv.items))
+    @test plus.name == "@+"
+    @test isempty(filter(i -> i.name == "+", inv.items))
+
+    # `var""`-named macros ARE handled on this CSTParser lineage (probed): the
+    # NONSTDIDENTIFIER unwraps through `StaticLint.valofid`. When the var"" text
+    # already carries the `@`, it is kept as-is; when it does not, the `@`
+    # prefix is added — either way the stored name is the `@`-spelled macro.
+    inv2, _ = inventory_of("macro var\"@weird\"() end")
+    @test only(filter(i -> i.kind === :macro, inv2.items)).name == "@weird"
+
+    inv3, _ = inventory_of("macro var\"weird\"() end")
+    @test only(filter(i -> i.kind === :macro, inv3.items)).name == "@weird"
+end
+
 @testitem "inventory extraction: imports, exports, includes" setup=[InventoryWS] begin
     using JuliaWorkspaces.URIs2: URI
 
