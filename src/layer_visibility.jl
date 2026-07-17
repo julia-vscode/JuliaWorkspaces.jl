@@ -74,10 +74,11 @@ end
 # its *parent's* `declared` dict with exactly this same ItemRef (module-tree
 # splicing rule 3/5), so reading it off the module's own node is equivalent
 # and doesn't require the caller to know which parent path to look in.
+# Routed through the per-module `derived_module_declared_at` selector rather
+# than reading the whole tree value directly, so callers running inside a
+# per-file analysis frame don't pick up a whole-tree dependency.
 function _module_declared_at(rt, root, path::Vector{String})
-    tree = derived_module_tree(rt, root)
-    node = module_node(tree, path)
-    return node === nothing ? nothing : node.declared_at
+    return derived_module_declared_at(rt, root, path)
 end
 
 # The effective `ExternalEnv` for `root`, per the task-3 brief's binding: the

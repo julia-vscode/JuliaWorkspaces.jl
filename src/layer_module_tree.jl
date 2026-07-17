@@ -602,6 +602,43 @@ Salsa.@derived function derived_module_imports(rt, root, path)
 end
 
 """
+    derived_module_exists(rt, root, path::Vector{String}) -> Bool
+
+Whether `path` names a module in `root`'s tree — the id-free existence
+probe. Deliberately NOT expressible as `!isempty(derived_module_names(...))`:
+an EMPTY declared module (`module Sub end`) still exists. Exists so that
+per-file analysis code can test module existence without depending on the
+whole `derived_module_tree` value (a `Bool` backdates on every tree change
+that doesn't create/remove this one module).
+"""
+Salsa.@derived function derived_module_exists(rt, root, path)
+    @debug "derived_module_exists" root=root path=path
+
+    tree = derived_module_tree(rt, root)
+    return module_node(tree, path) !== nothing
+end
+
+"""
+    derived_module_declared_at(rt, root, path::Vector{String}) -> Union{Nothing,ItemRef}
+
+The `ItemRef` of the `module` declaration for the module at `path` — a
+straight projection of `derived_module_tree`'s `ModuleNode.declared_at`.
+`nothing` when `path` names no module in the tree (and for tree modules
+without a recorded declaration, e.g. the synthetic root). Id-carrying, but
+per-module: a tree-value change elsewhere in the root re-executes only this
+cheap projection, whose unchanged value then backdates — this is what lets
+the per-file analysis reference a module's declaration site without
+depending on the whole tree value.
+"""
+Salsa.@derived function derived_module_declared_at(rt, root, path)
+    @debug "derived_module_declared_at" root=root path=path
+
+    tree = derived_module_tree(rt, root)
+    node = module_node(tree, path)
+    return node === nothing ? nothing : node.declared_at
+end
+
+"""
     derived_file_module_path(rt, root, file::URI) -> Union{Nothing,Vector{String}}
 
 The absolute module path `file`'s top level splices into within `root`'s

@@ -490,6 +490,68 @@ end
     @test !any(d -> occursin("something_undefined_abc", d.message), fa.diagnostics)
 end
 
+@testitem "derived_file_analysis: an unrelated same-kind reorder does not re-run an import-bearing analysis" setup=[FileAnalysisWS] begin
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    other = URI("file:///t/src/other.jl")
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("other.jl")
+        include("b.jl")
+        end
+        """,
+        A => """
+        module Sub
+        export sfunc
+        sfunc() = 1
+        end
+        """,
+        other => """
+        module Other
+        o1() = 1
+        o2() = 2
+        end
+        """,
+        B => """
+        using .Sub
+        u() = sfunc()
+        """,
+    ))
+    rt = jw.runtime
+
+    # Untraced baseline: fills the memo cache so the traced call below only
+    # counts what the edit actually invalidated (see the trace-baseline note
+    # in test_module_tree.jl's invalidation testitem).
+    fa0 = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+    @test only(filter(o -> o.name == "sfunc", fa0.outbound)).target !== nothing
+
+    # Reorder two same-kind functions in the UNRELATED module: their item
+    # ids swap, so the tree VALUE changes — but nothing B's analysis
+    # resolves through does. The import-path helpers must reach the tree
+    # through per-module selectors, not the whole tree value, for this to
+    # backdate.
+    JuliaWorkspaces.update_file!(jw, TextFile(other, SourceText("""
+    module Other
+    o2() = 2
+    o1() = 1
+    end
+    """, "julia")))
+
+    recv = CountReceiver()
+    TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, ROOT, B), recv)
+    @test get(recv.counts, "derived_file_analysis", 0) == 0
+end
+
 @testitem "derived_file_analysis: no handles or module stores survive in the frozen value" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """

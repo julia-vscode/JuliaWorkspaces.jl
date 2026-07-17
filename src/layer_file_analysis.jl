@@ -77,11 +77,14 @@ end
 # bindings — so both candidates are validated against the tree, extended
 # path first (the only ambiguous case, an alias colliding with an equally
 # named submodule of the target, is resolved in the submodule's favor).
-function _denoted_tree_module_path(ctx::TreeModuleContext, name::String, vn::VisibleName)
-    tree = derived_module_tree(ctx.rt, ctx.root)
+# Existence is checked through the id-free `derived_module_exists` selector,
+# NOT the whole tree value: this helper runs inside the per-file analysis
+# frame, and a whole-tree dependency would re-run every import-bearing
+# analysis on any tree-value change anywhere in the root.
+function _denoted_tree_module_path(ctx::TreeModuleContext, name::String, vn)
     extended = vcat(vn.origin_module, [name])
-    module_node(tree, extended) === nothing || return extended
-    if !isempty(vn.origin_module) && module_node(tree, vn.origin_module) !== nothing
+    derived_module_exists(ctx.rt, ctx.root, extended) && return extended
+    if !isempty(vn.origin_module) && derived_module_exists(ctx.rt, ctx.root, vn.origin_module)
         return vn.origin_module
     end
     return nothing
