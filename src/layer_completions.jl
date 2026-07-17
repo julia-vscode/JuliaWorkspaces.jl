@@ -1025,6 +1025,16 @@ function _add_visible_name_completion(state::_CompletionState, rt, root, name::S
             detail = _completion_details_description(val)
             documentation = val isa SymbolServer.SymStore ? _sanitize_docstring(val.doc) : nothing
         end
+    elseif vn.item !== nothing
+        # A tree-declared name: attach its defining-file docstring UPFRONT
+        # (the LS has no `completionItem/resolve` handler, so lazy resolution
+        # is not an option). Request-time via `item_documentation` — the
+        # docstring lives outside the inventory, so this reads the volatile
+        # `derived_item_positions` leaf of the DECLARING file (memoized; a
+        # per-keystroke edit in the current file leaves sibling positions
+        # cached).
+        doc = item_documentation(rt, vn.item)
+        doc === nothing || (documentation = _sanitize_docstring(doc))
     end
     foreach(possible_names) do nn
         _add_completion_item(state, CompletionResultItem(

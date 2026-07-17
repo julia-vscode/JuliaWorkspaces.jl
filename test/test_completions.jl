@@ -1156,6 +1156,60 @@ end
     @test "println" in labels5
 end
 
+@testitem "Completions: cross-file items carry their defining-file docstring" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, update_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "DocPkg"
+    uuid = "d2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    entry = """
+    module DocPkg
+    include("sib.jl")
+    include("leaf.jl")
+    using .Sib
+    end
+    """
+    sib = """
+    module Sib
+    export documented_fn
+    \"\"\"
+    documented_fn does a thing
+    \"\"\"
+    documented_fn(x) = x
+    end
+    """
+    leaf = "documented_f\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///docpkg/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///docpkg/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///docpkg/src/DocPkg.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///docpkg/src/sib.jl"), SourceText(sib, "julia")))
+    leaf_uri = URI("file:///docpkg/src/leaf.jl")
+    add_file!(jw, TextFile(leaf_uri, SourceText(leaf, "julia")))
+
+    # The completion for a sibling-declared name carries its docstring UPFRONT
+    # (no completionItem/resolve handler exists) — resolved request-time from
+    # the declaring file via `item_documentation`.
+    item = only(filter(i -> i.label == "documented_fn",
+        get_completions(jw, leaf_uri, findfirst("documented_f\n", leaf)[end]).items))
+    @test item.documentation !== nothing
+    @test occursin("documented_fn does a thing", item.documentation)
+
+    # Editing ONLY the docstring in the declaring file surfaces in a fresh
+    # completion (docs live outside the inventory; the position leaf reparses).
+    update_file!(jw, TextFile(URI("file:///docpkg/src/sib.jl"),
+        SourceText(replace(sib, "does a thing" => "does a thing EDITED"), "julia")))
+    item2 = only(filter(i -> i.label == "documented_fn",
+        get_completions(jw, leaf_uri, findfirst("documented_f\n", leaf)[end]).items))
+    @test item2.documentation !== nothing
+    @test occursin("does a thing EDITED", item2.documentation)
+end
+
 @testitem "Completions: dot-completion on a workspace module lists its names" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
