@@ -708,13 +708,18 @@ function load_core(; get_return_type = false)
     push!(cache[:Core].exportednames, :ccall)
     cache[:Core][Symbol("@__doc__")] = FunctionStore(VarRef(VarRef(Core), Symbol("@__doc__")), [], "", VarRef(VarRef(Core), Symbol("@__doc__")), true)
     cache_methods(getglobal(Core, Symbol("@__doc__")), Symbol("@__doc__"), cache, false)
-    # Accounts for the odd situation where Base.rand only has methods from Random which doesn't appear to be explicitly used.
+    # Accounts for Base functions that are always-available but whose methods live entirely in a stdlib,
+    # so the Core+Base crawl drops them and they must be re-attached by hand. Examples: rand/randn (methods
+    # in Random) and kron! (methods in LinearAlgebra), none of which appear to be explicitly used.
     # append!(cache[:Base][:rand].methods, cache_methods(Base.rand, cache))
     for m in cache_methods(Base.rand, :rand, cache, get_return_type)
         push!(cache[:Base][:rand].methods, m[2])
     end
     for m in cache_methods(Base.randn, :randn, cache, get_return_type)
         push!(cache[:Base][:randn].methods, m[2])
+    end
+    for m in cache_methods(Base.kron!, :kron!, cache, get_return_type)
+        push!(cache[:Base][:kron!].methods, m[2])
     end
 
     return cache

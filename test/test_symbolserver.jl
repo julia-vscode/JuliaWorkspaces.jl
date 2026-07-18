@@ -897,3 +897,20 @@ end
     CacheStore.write(io, ft)
     @test CacheStore.read(IOBuffer(take!(io))) == ft
 end
+
+@testitem "SymbolServer: always-available Base functions with stdlib-only methods get re-attached" begin
+    using JuliaWorkspaces.SymbolServer: load_core, FunctionStore
+
+    # Exercise the *live* crawler (via load_core), not the baked `stdlibs` const.
+    # rand/randn (methods in Random) and kron! (methods in LinearAlgebra) are
+    # Base-owned and always-available, but the Core+Base crawl leaves them as
+    # 0-method FunctionStores because none of their methods live in Base. load_core
+    # re-attaches them by hand. Pre-fix, kron! had 0 methods here.
+    base = load_core()[:Base]
+
+    for s in (:rand, :randn, :kron!)
+        entry = base[s]
+        @test entry isa FunctionStore
+        @test !isempty(entry.methods)
+    end
+end
