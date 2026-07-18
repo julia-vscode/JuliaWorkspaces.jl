@@ -132,6 +132,35 @@ Salsa.@derived function derived_roots(rt)
 end
 
 """
+    derived_reverse_include_map(rt)
+
+The inverted include graph: maps each included file (child) to the set of files
+that include it (parents). Parents are drawn from `derived_all_julia_files`, so
+every parent has content; children may be missing or unresolved include targets
+that have no content themselves.
+
+This is the one shared node that depends on every file's include list. Per-file
+reverse queries (`derived_roots_for_uri`) depend on just this map instead of
+re-walking the forward graph from every root, which would record O(workspace)
+dependencies per file and make Salsa verification O(n²) overall. Include lists
+are value-stable across content-only edits, so this map back-dates on typical
+edits and cuts invalidation off for all downstream per-file nodes.
+"""
+Salsa.@derived function derived_reverse_include_map(rt)
+    @debug "derived_reverse_include_map"
+
+    result = Dict{URI,Set{URI}}()
+
+    for uri in derived_all_julia_files(rt)
+        for included in derived_includes(rt, uri)
+            push!(get!(Set{URI}, result, included), uri)
+        end
+    end
+
+    return result
+end
+
+"""
     derived_roots_for_uri(rt, uri)
 
 Return the set of roots whose include tree contains `uri`.
@@ -140,41 +169,28 @@ If `uri` is itself a root, it will be included in the result.
 Salsa.@derived function derived_roots_for_uri(rt, uri)
     @debug "derived_roots_for_uri" uri=uri
 
+    reverse_map = derived_reverse_include_map(rt)
     roots = derived_roots(rt)
 
-    result = Set{URI}()
+    # Walk up the reverse include edges from `uri`; every ancestor (including
+    # `uri` itself) that is a root is a root whose include tree contains `uri`.
+    # The visited set makes self- and cyclic includes terminate.
+    ancestors = Set{URI}([uri])
+    queue = URI[uri]
+    while !isempty(queue)
+        current = popfirst!(queue)
 
-    for root in roots
-        if root == uri
-            push!(result, root)
-            continue
-        end
+        parents = get(reverse_map, current, nothing)
+        parents === nothing && continue
 
-        # BFS from root through include tree
-        visited = Set{URI}()
-        queue = URI[root]
-        found = false
-        while !isempty(queue) && !found
-            current = popfirst!(queue)
-            current in visited && continue
-            push!(visited, current)
-                for inc in derived_includes(rt, current)
-                    if inc == uri
-                        found = true
-                        break
-                    end
-                    if !(inc in visited)
-                        push!(queue, inc)
-                    end
-                end
-        end
-
-        if found
-            push!(result, root)
+        for parent in parents
+            parent in ancestors && continue
+            push!(ancestors, parent)
+            push!(queue, parent)
         end
     end
 
-    return result
+    return intersect(ancestors, roots)
 end
 
 """
