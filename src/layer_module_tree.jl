@@ -736,26 +736,22 @@ function _resolve_extension_qualifier(modpaths::Set{Vector{String}}, loc::Vector
 end
 
 # Depth-first splice walk (mirroring `_build_tree_structure`'s file/include
-# interleaving) that appends, in true splice order, every item named `name`
-# whose module resolves to `target`: an unqualified item whose absolute module
-# (`vcat(P, item.parent_module)`) equals `target`, or a qualified extension
-# whose qualifier resolves to `target` (`_resolve_extension_qualifier`). Item
-# and include events are merged and processed in id order (include-first on an
-# id tie, matching `_build_tree_structure`), so an include's subtree is spliced
-# before the includer's later items.
-function _collect_method_items!(rt, F::URI, P::Vector{String}, target::Vector{String},
-                                name::String, modpaths::Set{Vector{String}},
-                                result::Vector{ItemRef}, visited::Set{URI})
+# interleaving) that calls `emit(F, item, loc)` for every binding-kind item —
+# name-filtered when `name !== nothing` — in true splice order, where `loc` is
+# the item's absolute module path (`vcat(P, item.parent_module)`). Item and
+# include events are merged and processed in id order (include-first on an id
+# tie, matching `_build_tree_structure`), so an include's subtree is spliced
+# before the includer's later items. Only binding kinds declare (or, qualified,
+# extend) a name — an `:opaque_macrocall` row named `@foo` is a top-level USAGE
+# of the macro, not a method of it. The keep-predicate and payload live in
+# `emit`; shared by the method-item and external-extension projections.
+function _walk_spliced_binding_items!(emit, rt, F::URI, P::Vector{String},
+                                      name::Union{Nothing,String}, visited::Set{URI})
     inv = derived_file_inventory(rt, F)
 
     events = Tuple{Int,Symbol,Any}[]
     for item in inv.items
-        # Same kind gate as `_build_tree_structure`'s declared handling:
-        # only binding kinds declare (or, qualified, extend) a name —
-        # an `:opaque_macrocall` row named `@foo` is a top-level USAGE of
-        # the macro, not a method of it. Qualified extensions are
-        # `:function`/`:macro` items, both in the set.
-        if item.name == name && item.kind in _BINDING_ITEM_KINDS
+        if (name === nothing || item.name == name) && item.kind in _BINDING_ITEM_KINDS
             push!(events, (item.id, :item, item))
         end
     end
@@ -766,19 +762,14 @@ function _collect_method_items!(rt, F::URI, P::Vector{String}, target::Vector{St
 
     for (_, kind, payload) in events
         if kind === :item
-            item = payload
-            loc = vcat(P, item.parent_module)
-            resolved = isempty(item.qualifier) ? loc :
-                _resolve_extension_qualifier(modpaths, loc, item.qualifier)
-            resolved == target && push!(result, (file=F, id=item.id))
+            emit(F, payload, vcat(P, payload.parent_module))
         else
             inc = payload
             inc.target === nothing && continue
-            newP = vcat(P, inc.parent_module)
             inc.target in visited && continue
             derived_has_content(rt, inc.target) || continue
             push!(visited, inc.target)
-            _collect_method_items!(rt, inc.target, newP, target, name, modpaths, result, visited)
+            _walk_spliced_binding_items!(emit, rt, inc.target, vcat(P, inc.parent_module), name, visited)
         end
     end
     return
@@ -811,54 +802,25 @@ Salsa.@derived function derived_method_items(rt, root, path, name)
     result = ItemRef[]
     path in modpaths || return result
 
-    _collect_method_items!(rt, root, String[], path, name, modpaths, result, Set{URI}([root]))
+    # An unqualified item declares in its own module; a qualified extension in
+    # the module its qualifier resolves to.
+    _walk_spliced_binding_items!(rt, root, String[], name, Set{URI}([root])) do F, item, loc
+        resolved = isempty(item.qualifier) ? loc :
+            _resolve_extension_qualifier(modpaths, loc, item.qualifier)
+        resolved == path && push!(result, (file=F, id=item.id))
+    end
     return result
 end
 
 const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
 
-# Splice walk (mirroring `_collect_method_items!`) that appends every binding-kind
-# item named `name` whose NON-empty qualifier resolves to NO tree module — i.e. a
-# workspace method extension of a Base/stdlib/package function (`Base.relpath(...)`,
-# `Foo.bar(...)` where `Foo` is an external package). These are exactly the
-# extensions `derived_method_items` DISCARDS (its qualifier resolves outside the
-# tree). Such extensions apply globally in the session, so this is workspace-wide,
-# not per-module.
-function _collect_external_extensions!(rt, F::URI, P::Vector{String}, name::String,
-                                       modpaths::Set{Vector{String}},
-                                       result::Vector{ExternalExtension}, visited::Set{URI})
-    inv = derived_file_inventory(rt, F)
-
-    events = Tuple{Int,Symbol,Any}[]
-    for item in inv.items
-        if item.name == name && item.kind in _BINDING_ITEM_KINDS && !isempty(item.qualifier)
-            push!(events, (item.id, :item, item))
-        end
-    end
-    for inc in inv.includes
-        push!(events, (inc.id, :include, inc))
-    end
-    sort!(events; by=e -> (e[1], e[2] === :include ? 0 : 1), alg=Base.Sort.MergeSort)
-
-    for (_, kind, payload) in events
-        if kind === :item
-            item = payload
-            loc = vcat(P, item.parent_module)
-            if _resolve_extension_qualifier(modpaths, loc, item.qualifier) === nothing
-                push!(result, (qualifier=item.qualifier, signature=item.signature, ref=(file=F, id=item.id)))
-            end
-        else
-            inc = payload
-            inc.target === nothing && continue
-            newP = vcat(P, inc.parent_module)
-            inc.target in visited && continue
-            derived_has_content(rt, inc.target) || continue
-            push!(visited, inc.target)
-            _collect_external_extensions!(rt, inc.target, newP, name, modpaths, result, visited)
-        end
-    end
-    return
-end
+# Is `item` (at absolute module path `loc`) a workspace method extension of an
+# EXTERNAL function/type — written with a qualifier that resolves to NO tree
+# module (`Base.relpath(...)`, `Foo.bar(...)` where `Foo` is an external
+# package)? These are exactly the extensions `derived_method_items` DISCARDS.
+_is_external_extension(modpaths, item, loc) =
+    !isempty(item.qualifier) &&
+    _resolve_extension_qualifier(modpaths, loc, item.qualifier) === nothing
 
 """
     derived_external_method_extensions(rt, root, name::String) -> Vector{ExternalExtension}
@@ -882,29 +844,11 @@ Salsa.@derived function derived_external_method_extensions(rt, root, name)
     tree = derived_module_tree(rt, root)
     modpaths = Set{Vector{String}}(n.path for n in tree.modules)
     result = ExternalExtension[]
-    _collect_external_extensions!(rt, root, String[], name, modpaths, result, Set{URI}([root]))
+    _walk_spliced_binding_items!(rt, root, String[], name, Set{URI}([root])) do F, item, loc
+        _is_external_extension(modpaths, item, loc) &&
+            push!(result, (qualifier=item.qualifier, signature=item.signature, ref=(file=F, id=item.id)))
+    end
     return result
-end
-
-# Splice walk collecting the NAMES of all external method extensions in the tree.
-function _collect_external_extension_names!(rt, F::URI, P::Vector{String},
-                                            modpaths::Set{Vector{String}},
-                                            result::Set{String}, visited::Set{URI})
-    inv = derived_file_inventory(rt, F)
-    for item in inv.items
-        if item.kind in _BINDING_ITEM_KINDS && !isempty(item.qualifier) &&
-           _resolve_extension_qualifier(modpaths, vcat(P, item.parent_module), item.qualifier) === nothing
-            push!(result, item.name)
-        end
-    end
-    for inc in inv.includes
-        inc.target === nothing && continue
-        inc.target in visited && continue
-        derived_has_content(rt, inc.target) || continue
-        push!(visited, inc.target)
-        _collect_external_extension_names!(rt, inc.target, vcat(P, inc.parent_module), modpaths, result, visited)
-    end
-    return
 end
 
 """
@@ -923,6 +867,8 @@ Salsa.@derived function derived_external_extension_names(rt, root)
     tree = derived_module_tree(rt, root)
     modpaths = Set{Vector{String}}(n.path for n in tree.modules)
     result = Set{String}()
-    _collect_external_extension_names!(rt, root, String[], modpaths, result, Set{URI}([root]))
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
+        _is_external_extension(modpaths, item, loc) && push!(result, item.name)
+    end
     return result
 end
