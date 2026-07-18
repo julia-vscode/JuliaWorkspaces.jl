@@ -3996,3 +3996,72 @@ end
     @test StaticLint.scopehasmodule(filescope, :Base)
     @test StaticLint.scopehasmodule(filescope, :Core)
 end
+
+@testitem "iterate_over_ss_methods de-duplicates cross-package extensions" begin
+    using JuliaWorkspaces
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    using JuliaWorkspaces.SymbolServer: VarRef, ModuleStore, FunctionStore, DataTypeStore,
+        MethodStore, FakeTypeName, EnvStore, collect_extended_methods, _samestore
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # A method present both in a function's OWN store (as `load_core` bakes stdlib
+    # methods onto Base.rand) AND in an in-scope extension package's store must be
+    # yielded exactly once. Own and extension MethodStores are built independently
+    # (no shared identity), matching the real core-append-vs-package-store split.
+    mk(n; mod, file) = [MethodStore(:rand, mod, file, Int32(i),
+                                    Pair{Any,Any}[:x => FakeTypeName(Int)],
+                                    Symbol[], FakeTypeName(Any)) for i in 1:n]
+    N = 5
+    own = mk(N; mod=:Base, file="random.jl")
+    copies = [MethodStore(m.name, m.mod, m.file, m.line, copy(m.sig), copy(m.kws), m.rt) for m in own]
+
+    base_vr = VarRef(VarRef(nothing, :Base), :rand)
+    rand_vr = VarRef(VarRef(nothing, :Random), :rand)
+    fs_base = FunctionStore(base_vr, copy(own), "", base_vr, true)     # extends == name
+    fs_rand = FunctionStore(rand_vr, copy(copies), "", base_vr, true)  # extends Base.rand
+
+    modBase = ModuleStore(VarRef(nothing, :Base), Dict{Symbol,Any}(:rand => fs_base), "", true, [:rand], Symbol[])
+    modRand = ModuleStore(VarRef(nothing, :Random), Dict{Symbol,Any}(:rand => fs_rand), "", true, [:rand], Symbol[])
+    env_store = EnvStore(:Base => modBase, :Random => modRand)
+    env = SL.ExternalEnv(env_store, collect_extended_methods(env_store), Symbol[:Base, :Random])
+
+    tls = SL.Scope(CSTParser.parse("begin end"))
+    tls.modules = Dict{Symbol,Any}(:Base => modBase, :Random => modRand)
+
+    collect_ms(b) = (out = MethodStore[]; SL.iterate_over_ss_methods(b, tls, env, m -> (push!(out, m); false)); out)
+    dup_pairs(c) = count(_samestore(c[i], c[j]) for i in eachindex(c) for j in 1:(i-1); init=0)
+
+    got = collect_ms(fs_base)
+    # Pre-fix: own (5) + Random extension (5) [+ Base self-entry (5)] were all
+    # yielded -> >= 10. Post-fix: each method once.
+    @test length(got) == N
+    @test dup_pairs(got) == 0
+    @test all(o -> any(g -> _samestore(o, g), got), own)  # union complete, nothing lost
+
+    # A genuinely distinct extension method is still kept.
+    push!(fs_rand.methods, MethodStore(:rand, :Random, "random.jl", Int32(999),
+                                       Pair{Any,Any}[:y => FakeTypeName(Int)], Symbol[], FakeTypeName(Any)))
+    got2 = collect_ms(fs_base)
+    @test length(got2) == N + 1
+    @test dup_pairs(got2) == 0
+
+    # DataTypeStore variant: a type whose constructor is extended by another package.
+    foo_vr = VarRef(VarRef(nothing, :A), :Foo)
+    ctors = mk(4; mod=:A, file="a.jl")
+    ctor_copies = [MethodStore(m.name, m.mod, m.file, m.line, copy(m.sig), copy(m.kws), m.rt) for m in ctors]
+    dts = DataTypeStore(FakeTypeName(foo_vr, []),
+                        FakeTypeName(VarRef(VarRef(nothing, :Core), :Any), []),
+                        [], [], [], copy(ctors), "", true)
+    fs_foo_ext = FunctionStore(VarRef(VarRef(nothing, :B), :Foo), copy(ctor_copies), "", foo_vr, false)
+    modA = ModuleStore(VarRef(nothing, :A), Dict{Symbol,Any}(:Foo => dts), "", true, [:Foo], Symbol[])
+    modB = ModuleStore(VarRef(nothing, :B), Dict{Symbol,Any}(:Foo => fs_foo_ext), "", true, [:Foo], Symbol[])
+    esD = EnvStore(:A => modA, :B => modB)
+    envD = SL.ExternalEnv(esD, collect_extended_methods(esD), Symbol[:A, :B])
+    tlsD = SL.Scope(CSTParser.parse("begin end"))
+    tlsD.modules = Dict{Symbol,Any}(:A => modA, :B => modB)
+    gotD = MethodStore[]
+    SL.iterate_over_ss_methods(dts, tlsD, envD, m -> (push!(gotD, m); false))
+    @test length(gotD) == 4
+    @test dup_pairs(gotD) == 0
+end

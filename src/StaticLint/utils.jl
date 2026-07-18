@@ -234,8 +234,18 @@ end
 # f is a function that returns `true` if we want to break early from the loop
 
 iterate_over_ss_methods(b, tls, env, f) = false
+
+# Structural de-dup key for a MethodStore, mirroring `SymbolServer._samestore`
+# (which matches on file/line/sig). `MethodStore` has no structural `Base.==`/
+# `Base.hash`, so distinct-but-equal stores — e.g. a stdlib method baked into the
+# core store by `load_core` AND provided again by an in-scope extension package —
+# only collapse under this key, not under identity (`===`).
+_ss_method_key(m::SymbolServer.MethodStore) = (m.file, m.line, m.sig)
+
 function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env::ExternalEnv, f)
+    seen = Set{Tuple{String,Int32,Vector{Pair{Any,Any}}}}()
     for m in b.methods
+        push!(seen, _ss_method_key(m))
         ret = f(m)
         ret && return true
     end
@@ -251,6 +261,13 @@ function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env:
                     !(rootmod isa SymbolServer.ModuleStore) && continue
                     if haskey(rootmod.vals, b.extends.name) && (rootmod.vals[b.extends.name] isa SymbolServer.FunctionStore || rootmod.vals[b.extends.name] isa SymbolServer.DataTypeStore)# check package is available and has ref
                         for m in rootmod.vals[b.extends.name].methods #
+                            # Skip a method already yielded from `b.methods` or an
+                            # earlier extension: functions whose stdlib methods are
+                            # baked into the core store AND provided by an in-scope
+                            # extension would otherwise be visited twice.
+                            k = _ss_method_key(m)
+                            k in seen && continue
+                            push!(seen, k)
                             ret = f(m)
                             ret && return true
                         end
@@ -268,7 +285,9 @@ function iterate_over_ss_methods(b::SymbolServer.DataTypeStore, tls::Scope, env:
     elseif b.name isa SymbolServer.FakeTypeName
         bname = b.name.name
     end
+    seen = Set{Tuple{String,Int32,Vector{Pair{Any,Any}}}}()
     for m in b.methods
+        push!(seen, _ss_method_key(m))
         ret = f(m)
         ret && return true
     end
@@ -284,6 +303,11 @@ function iterate_over_ss_methods(b::SymbolServer.DataTypeStore, tls::Scope, env:
                     !(rootmod isa SymbolServer.ModuleStore) && continue
                     if haskey(rootmod.vals, bname.name) && (rootmod.vals[bname.name] isa SymbolServer.FunctionStore || rootmod.vals[bname.name] isa SymbolServer.DataTypeStore)# check package is available and has ref
                         for m in rootmod.vals[bname.name].methods #
+                            # Skip a method already yielded from `b.methods` or an
+                            # earlier extension (see the FunctionStore variant).
+                            k = _ss_method_key(m)
+                            k in seen && continue
+                            push!(seen, k)
                             ret = f(m)
                             ret && return true
                         end
