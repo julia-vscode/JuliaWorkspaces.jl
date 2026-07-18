@@ -7,6 +7,30 @@ function settype!(b::Binding, type)
     b.type = type
 end
 
+# `(a, b, …)::Tuple{T1, T2, …}` (a typed positional destructure, e.g. a function
+# arg `(file, line)::Tuple{AbstractString, Any}`): each element must take its
+# POSITIONAL parameter type, not the whole tuple type. Without this, every
+# element was assigned `Tuple{...}` itself. Returns true when it set a type;
+# falls back (returns false) for anything not a plain positional `Tuple{...}`
+# match — `Vararg`/`NTuple` params, an out-of-range index, or a non-identifier
+# element (e.g. a nested tuple) — leaving the caller's normal path to run.
+function _infer_tuple_decl_element!(binding, lhs, ann, state, scope)
+    (iscurly(ann) && isidentifier(ann.args[1]) && valofid(ann.args[1]) == "Tuple") || return false
+    name = binding.name
+    isidentifier(name) || return false
+    nm = valofid(name)
+    idx = findfirst(a -> isidentifier(a) && valofid(a) == nm, lhs.args)
+    idx === nothing && return false
+    # curly args are [Tuple, T1, T2, …], so the i-th element's param is ann.args[i+1]
+    pidx = idx + 1
+    pidx <= length(ann.args) || return false
+    t = ann.args[pidx]
+    # a `Vararg{…}` param spans a variable number of elements — can't map by position
+    (iscurly(t) && isidentifier(t.args[1]) && valofid(t.args[1]) == "Vararg") && return false
+    infer_type_decl(binding, t, state, scope)
+    return true
+end
+
 function infer_type(binding::Binding, scope, state)
     if binding isa Binding
         binding.type !== nothing && return
@@ -29,7 +53,12 @@ function infer_type(binding::Binding, scope, state)
                     end
                 end
             elseif binding.val.head isa EXPR && valof(binding.val.head) == "::"
-                infer_type_decl(binding, state, scope)
+                lhs = binding.val.args[1]
+                if CSTParser.istuple(lhs) && _infer_tuple_decl_element!(binding, lhs, binding.val.args[2], state, scope)
+                    # `(a, b, …)::Tuple{T1, T2, …}` positional destructure handled below
+                else
+                    infer_type_decl(binding, state, scope)
+                end
             elseif CSTParser.issplat(binding.val) && length(binding.val.args) >= 1 &&
                    binding.val.args[1].head isa EXPR && valof(binding.val.args[1].head) == "::"
                 infer_type_decl(binding, binding.val.args[1].args[2], state, scope)

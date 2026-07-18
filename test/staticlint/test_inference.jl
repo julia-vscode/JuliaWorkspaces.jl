@@ -376,6 +376,29 @@ end
     end
 end
 
+@testitem "typed tuple-destructure arg infers element types positionally" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, headof, Binding
+    CSTParser = JuliaWorkspaces.CSTParser
+    walk(f, x) = (f(x); x.args !== nothing && foreach(a -> walk(f, a), x.args))
+
+    # `(a, b)::Tuple{T1, T2}` (e.g. Revise's
+    # `location_string((file, line)::Tuple{AbstractString, Any},)`) must give each
+    # element its POSITIONAL parameter type, not the whole `Tuple{...}` type.
+    let (cst, meta_dict) = parse_and_pass("""
+        location_string((file, line)::Tuple{AbstractString, Any},) = abspath(file)
+        """)
+        types = Dict{String,Any}()
+        walk(cst) do x
+            if headof(x) === :IDENTIFIER
+                b = bindingof(x, meta_dict)
+                b isa Binding && b.type !== nothing && (types[CSTParser.valof(x)] = b.type)
+            end
+        end
+        @test types["file"].name.name.name == :AbstractString
+        @test types["line"].name.name.name == :Any
+    end
+end
+
 @testitem "bounded Vararg{T,N} matching (#422)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: func_nargs, match_method, ExternalEnv, errorof, IncorrectCallArgs
     using JuliaWorkspaces.SymbolServer: MethodStore, FakeTypeName, FakeTypeofVararg, VarRef, EnvStore
