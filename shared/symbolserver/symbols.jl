@@ -758,19 +758,23 @@ function load_core(; get_return_type = false)
     cache[:Core][Symbol("@__doc__")] = FunctionStore(VarRef(VarRef(Core), Symbol("@__doc__")), [], "", VarRef(VarRef(Core), Symbol("@__doc__")), true)
     cache_methods(getglobal(Core, Symbol("@__doc__")), Symbol("@__doc__"), cache, false)
     # `invokelatest` and `invoke_in_world` forward keyword arguments to their
-    # target (`f(args...; kwargs...)`), but each is a single method whose
-    # `Base.kwarg_decl` reports no keywords, so the crawled store has `kws == []`.
-    # A call like `invokelatest(f, args...; kw=v)` would then be wrongly flagged
-    # as passing an unknown keyword (`check_call`). Mark their methods with a
-    # keyword splat so any keyword is accepted. (They are Core-owned; Base
-    # re-exports them as VarRefs to these stores.)
-    for n in (:invokelatest, :invoke_in_world)
+    # target (`f(args...; kwargs...)`), but each is a single crawled method whose
+    # `Base.kwarg_decl` reports no keywords and whose parameters are the generic
+    # `(x...)` — so `check_call` would flag `invokelatest(f, args...; kw=v)` as an
+    # unknown keyword, and hover/signature-help shows meaningless `x...`. Replace
+    # the methods with their documented forms (mirroring the internal
+    # `_call_latest`/`_call_in_world` signatures) plus a keyword splat so any
+    # keyword is accepted. (They are Core-owned; Base re-exports them as VarRefs
+    # to these stores.)
+    for (n, sig) in (
+        :invokelatest => Pair{Any,Any}[:f => FakeTypeName(Function), :args => FakeTypeName(Vararg{Any})],
+        :invoke_in_world => Pair{Any,Any}[:world => FakeTypeName(UInt), :f => FakeTypeName(Function), :args => FakeTypeName(Vararg{Any})],
+    )
         haskey(cache[:Core], n) || continue
         fs = cache[:Core][n]
         fs isa FunctionStore || continue
-        for ms in fs.methods
-            Symbol("kwargs...") in ms.kws || push!(ms.kws, Symbol("kwargs..."))
-        end
+        empty!(fs.methods)
+        push!(fs.methods, MethodStore(n, :Core, "built-in", 0, sig, [Symbol("kwargs...")], FakeTypeName(Any)))
     end
     # `invoke`'s crawled signature is imprecise (it carries a spurious extra
     # positional, so the `argtypes::Type` constraint lands on the wrong argument
