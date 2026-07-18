@@ -398,6 +398,58 @@ end
     # Case-sensitive when prefix has uppercase
     @test is_completion_match("Base", "Bas")
     @test !is_completion_match("base", "Bas")
+    # Fuzzy matches: transposition/omission typos reach their target
+    @test is_completion_match("length", "lenght")
+    @test is_completion_match("println", "pritnln")
+    @test is_completion_match("Vector", "Vecotr")
+    @test is_completion_match("filter", "fitler")
+    @test is_completion_match("@test", "@tset")
+    # ...but unrelated names stay below the cutoff
+    @test !is_completion_match("Regex", "pri")
+    @test !is_completion_match("setfield!", "shuffel")
+end
+
+@testitem "Completions: fuzzy match surfaces typo'd store symbols" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    module FuzzyComp
+
+    lenght
+    pri
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///fuzzycomp/src/FuzzyComp.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # Typo'd partial "lenght" (line 3, col 7): no prefix match exists, the
+    # fuzzy tier surfaces `length`
+    index = string_index(source, 3, 7)
+    result = get_completions(jw, uri, index)
+    @test any(item -> item.label == "length", result.items)
+
+    # Partial "pri" (line 4, col 4): prefix matches (print, println, ...) must
+    # rank above the fuzzy-only match `pi`
+    index = string_index(source, 4, 4)
+    result = get_completions(jw, uri, index)
+    print_idx = findfirst(i -> i.label == "print", result.items)
+    pi_idx = findfirst(i -> i.label == "pi", result.items)
+    @test print_idx !== nothing
+    @test pi_idx !== nothing
+    @test print_idx < pi_idx
 end
 
 @testitem "Completions: relevance ranking unit" begin

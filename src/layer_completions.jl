@@ -230,12 +230,17 @@ function _is_in_fexpr(x::CSTParser.EXPR, f)
     end
 end
 
+# REPL.fuzzyscore is normalized to [0, 1]; genuine typos (transpositions,
+# omissions) score >= 0.75 against their intended target, while unrelated
+# names rarely exceed 0.6.
+const _FUZZY_MATCH_CUTOFF = 0.6
+
 """
-    is_completion_match(s, prefix, cutoff=3)
+    is_completion_match(s, prefix, cutoff=_FUZZY_MATCH_CUTOFF)
 
 Returns true if `s` starts with `prefix` or has a sufficiently high fuzzy score.
 """
-function is_completion_match(s::AbstractString, prefix::AbstractString, cutoff=3)
+function is_completion_match(s::AbstractString, prefix::AbstractString, cutoff=_FUZZY_MATCH_CUTOFF)
     starter = if !any(isuppercase, prefix)
         startswith(lowercase(s), prefix)
     else
