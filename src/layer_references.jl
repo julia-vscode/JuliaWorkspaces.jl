@@ -444,6 +444,14 @@ function _get_definitions_from_tree_ref(tr::StaticLint.TreeRef, tls, env, result
                 val isa SymbolServer.SymStore && tls isa StaticLint.Scope &&
                     _get_definitions_from_val(val, tls, env, results, runtime, root)
             end
+        elseif tr.kind === :external_module
+            # A `using`/`import`ed external module name (`using CodeTracking`,
+            # `using Base`): the strip rewrote its store ref to this stand-in.
+            # Resolve the module store and route through the ModuleStore path
+            # (jumps to the module's source via its `eval`), mirroring hover.
+            store = _resolve_external_module(runtime, root, vcat(tr.origin_module, [tr.name]))
+            store isa SymbolServer.ModuleStore && tls isa StaticLint.Scope &&
+                _get_definitions_from_val(store, tls, env, results, runtime, root)
         end
         return
     end

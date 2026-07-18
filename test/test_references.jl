@@ -99,6 +99,27 @@ end
     @test all(d -> d.uri == uri, defs)
 end
 
+@testitem "References: go-to-definition on a using'd module name" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_definitions
+    using JuliaWorkspaces.URIs2: URI
+
+    # `using Base` — the module name resolves to an external module store, which
+    # the per-file strip rewrites to a `:external_module` TreeRef. Go-to-def must
+    # follow it to the module's source, not return nothing (regression: a
+    # `using Foo` name yielded no definition).
+    source = "module DefUsing\nusing Base\nfoo() = Base\nend\n"
+    jw = JuliaWorkspace()
+    uri = URI("file:///defusing/src/DefUsing.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    p_using = first(findfirst("using Base", source)) + length("using ")
+    @test !isempty(get_definitions(jw, uri, p_using))
+
+    # a bare `Base` usage in the body resolves the same way
+    p_body = first(findlast("Base", source))
+    @test !isempty(get_definitions(jw, uri, p_body))
+end
+
 @testitem "References: rename basic" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_rename_edits
     using JuliaWorkspaces.URIs2: URI
