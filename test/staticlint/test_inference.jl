@@ -150,6 +150,20 @@ end
     @test !any(d -> occursin("Cannot define function", d.message), fa.diagnostics)
 end
 
+@testitem "infer property-destructure loop variable field types" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: CoreTypes
+    # `for (; a, b) in coll` must infer each variable's OWN field type from the
+    # element type of `coll`, not the whole element type for every variable
+    # (Revise's `for (; reeval, mod, exs_infos, …) in reeval_infos`).
+    let (cst, meta_dict) = parse_and_pass(
+            "struct RI\n    a::Int\n    b::String\nend\nris = RI[]\nfor (; a, b) in ris\n    a\n    b\nend\n")
+        ba = find_binding(cst, meta_dict, "a")
+        bb = find_binding(cst, meta_dict, "b")
+        @test ba !== nothing && CoreTypes.isint(ba.type)
+        @test bb !== nothing && CoreTypes.isstring(bb.type)
+    end
+end
+
 @testitem "infer_module" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: bindingof
     let (cst, meta_dict) = parse_and_pass("module A end")

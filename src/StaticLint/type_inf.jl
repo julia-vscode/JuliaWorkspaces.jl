@@ -124,7 +124,16 @@ function infer_type_assignment_rhs(binding, state, scope)
 
     is_destructuring = CSTParser.istuple(lhs) && !isempty(lhs.args) && CSTParser.isparameters(lhs.args[1])
     if is_loop_iter_assignment(binding.val)
-        settype!(binding, infer_eltype(rhs, state))
+        elt = infer_eltype(rhs, state)
+        if is_destructuring
+            # property destructure in a loop (`for (; a, b) in coll`): each
+            # variable takes its OWN field type from the element type, not the
+            # whole element type. Without this every variable was set to the
+            # collection's eltype.
+            infer_destructuring_type(binding, elt, meta_dict)
+        else
+            settype!(binding, elt)
+        end
     elseif headof(rhs) === :ref && length(rhs.args) > 1 && all(a -> _is_scalar_index(a, state, scope), @view rhs.args[2:end])
         # Only infer the element type when every index is provably scalar
         # (integer literal / `begin`/`end` / `Number`-typed ref). A slice or
