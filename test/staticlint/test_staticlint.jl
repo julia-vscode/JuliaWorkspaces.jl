@@ -741,6 +741,26 @@ end
     end
 end
 
+@testitem "check_call kwarg-forwarding builtins tolerate keywords" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof
+    # `invokelatest`/`invoke`/`invoke_in_world` forward `; kwargs...` to their
+    # target, so passing keywords must not be flagged. Their crawled `kwarg_decl`
+    # is empty, so `load_core` marks their methods with a keyword splat.
+    for src in [
+        "f(err) = invokelatest(showerror, stderr, err; blame_revise=false)",
+        "f(err) = Base.invokelatest(showerror, stderr, err; blame_revise=false)",
+        "g(world, f, a) = Base.invoke_in_world(world, f, a; kw=1)",
+        # `invoke` is given its three documented forms (argtypes::Type/Method/
+        # CodeInstance), each with a keyword splat; the crawled signature carried a
+        # spurious extra positional that mis-flagged valid calls.
+        "g(f) = invoke(f, Tuple{Int}, 1)",
+        "g(f) = invoke(f, Tuple{Int}, 1; kw=2)",
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        @test errorof(cst.args[1].args[2], meta_dict) === nothing
+    end
+end
+
 @testitem "check_call method definition" setup=[shared_static_lint] begin
     (cst, meta_dict) = parse_and_pass("""
     Base.sin(a,b) = 1

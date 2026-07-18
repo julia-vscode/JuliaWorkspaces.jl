@@ -711,7 +711,7 @@ function load_core(; get_return_type = false)
     push!(cache[:Core][:fieldtype].methods, MethodStore(:fieldtype, :Core, "built-in", 0, [:t => FakeTypeName(DataType), :field => FakeTypeName(Symbol)], Symbol[], FakeTypeName(Type{T} where T)))
     push!(cache[:Core][:getfield].methods, MethodStore(:getfield, :Core, "built-in", 0, [:object => FakeTypeName(Any), :item => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:ifelse].methods, MethodStore(:ifelse, :Core, "built-in", 0, [:condition => FakeTypeName(Bool), :x => FakeTypeName(Any), :y => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
-    push!(cache[:Core][:invoke].methods, MethodStore(:invoke, :Core, "built-in", 0, [:f => FakeTypeName(Function), :x => FakeTypeName(Any), :argtypes => FakeTypeName(Type{T} where T) , :args => FakeTypeName(Vararg{Any})], Symbol[], FakeTypeName(Any)))
+    # `invoke` is handled below (its methods are replaced with the documented forms).
     push!(cache[:Core][:isa].methods, MethodStore(:isa, :Core, "built-in", 0, [:a => FakeTypeName(Any), :T => FakeTypeName(Type{T} where T)], Symbol[], FakeTypeName(Bool)))
     push!(cache[:Core][:isdefined].methods, MethodStore(:isdefined, :Core, "built-in", 0, [:value => FakeTypeName(Any), :field => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:nfields].methods, MethodStore(:nfields, :Core, "built-in", 0, [:x => FakeTypeName(Any)], Symbol[], FakeTypeName(Int)))
@@ -757,6 +757,34 @@ function load_core(; get_return_type = false)
     push!(cache[:Core].exportednames, :ccall)
     cache[:Core][Symbol("@__doc__")] = FunctionStore(VarRef(VarRef(Core), Symbol("@__doc__")), [], "", VarRef(VarRef(Core), Symbol("@__doc__")), true)
     cache_methods(getglobal(Core, Symbol("@__doc__")), Symbol("@__doc__"), cache, false)
+    # `invokelatest` and `invoke_in_world` forward keyword arguments to their
+    # target (`f(args...; kwargs...)`), but each is a single method whose
+    # `Base.kwarg_decl` reports no keywords, so the crawled store has `kws == []`.
+    # A call like `invokelatest(f, args...; kw=v)` would then be wrongly flagged
+    # as passing an unknown keyword (`check_call`). Mark their methods with a
+    # keyword splat so any keyword is accepted. (They are Core-owned; Base
+    # re-exports them as VarRefs to these stores.)
+    for n in (:invokelatest, :invoke_in_world)
+        haskey(cache[:Core], n) || continue
+        fs = cache[:Core][n]
+        fs isa FunctionStore || continue
+        for ms in fs.methods
+            Symbol("kwargs...") in ms.kws || push!(ms.kws, Symbol("kwargs..."))
+        end
+    end
+    # `invoke`'s crawled signature is imprecise (it carries a spurious extra
+    # positional, so the `argtypes::Type` constraint lands on the wrong argument
+    # and valid calls are flagged). Replace it with the three documented forms,
+    # each forwarding `; kwargs...`.
+    if haskey(cache[:Core], :invoke) && cache[:Core][:invoke] isa FunctionStore
+        invoke_methods = cache[:Core][:invoke].methods
+        empty!(invoke_methods)
+        for at in (FakeTypeName(Type{T} where T), FakeTypeName(Method), FakeTypeName(Core.CodeInstance))
+            push!(invoke_methods, MethodStore(:invoke, :Core, "built-in", 0,
+                [:f => FakeTypeName(Function), :argtypes => at, :args => FakeTypeName(Vararg{Any})],
+                [Symbol("kwargs...")], FakeTypeName(Any)))
+        end
+    end
     # Accounts for Base functions that are always-available but which loaded stdlibs
     # (Random, LinearAlgebra, …) extend: the Core+Base crawl attributes each method to
     # its defining module, so methods defined outside Core/Base are dropped and those
