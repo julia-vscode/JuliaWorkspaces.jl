@@ -902,15 +902,24 @@ end
     using JuliaWorkspaces.SymbolServer: load_core, FunctionStore
 
     # Exercise the *live* crawler (via load_core), not the baked `stdlibs` const.
-    # rand/randn (methods in Random) and kron! (methods in LinearAlgebra) are
-    # Base-owned and always-available, but the Core+Base crawl leaves them as
-    # 0-method FunctionStores because none of their methods live in Base. load_core
-    # re-attaches them by hand. Pre-fix, kron! had 0 methods here.
+    # rand/randn (methods in Random) and kron/kron! (methods in LinearAlgebra) are
+    # Base-owned and always-available, but the Core+Base crawl attributes each method
+    # to its defining module and drops the stdlib-defined ones, leaving these stores
+    # method-incomplete. load_core re-attaches the dropped stdlib methods generically.
     base = load_core()[:Base]
 
-    for s in (:rand, :randn, :kron!)
+    for s in (:rand, :randn, :kron, :kron!)
         entry = base[s]
         @test entry isa FunctionStore
         @test !isempty(entry.methods)
     end
+
+    # `kron` is the partial case the old hand-maintained rand/randn/kron! appends
+    # missed entirely: the crawl kept its single Base method but dropped ~16
+    # LinearAlgebra methods, so pre-fix `kron` had exactly 1 method here.
+    @test length(base[:kron].methods) >= 16
+    # Regression on the previously hand-appended, fully-external functions.
+    @test length(base[:rand].methods) >= 20    # all from Random
+    @test length(base[:randn].methods) >= 10   # all from Random
+    @test length(base[:kron!].methods) >= 10   # all from LinearAlgebra
 end

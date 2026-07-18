@@ -602,6 +602,19 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
 end
 
 
+# A method defined in `mod` is captured by the Core+Base crawl iff `mod` is
+# Base/Core or a submodule of one; methods defined in loaded stdlibs (Random,
+# LinearAlgebra, …) are attributed to those modules and dropped from the
+# Core+Base stores.
+function _crawled_by_corebase(mod::Module)
+    while true
+        (mod === Base || mod === Core) && return true
+        p = parentmodule(mod)
+        p === mod && return false
+        mod = p
+    end
+end
+
 function load_core(; get_return_type = false)
     c = Pkg.Types.Context()
     cache = getenvtree([:Core,:Base])
@@ -708,18 +721,29 @@ function load_core(; get_return_type = false)
     push!(cache[:Core].exportednames, :ccall)
     cache[:Core][Symbol("@__doc__")] = FunctionStore(VarRef(VarRef(Core), Symbol("@__doc__")), [], "", VarRef(VarRef(Core), Symbol("@__doc__")), true)
     cache_methods(getglobal(Core, Symbol("@__doc__")), Symbol("@__doc__"), cache, false)
-    # Accounts for Base functions that are always-available but whose methods live entirely in a stdlib,
-    # so the Core+Base crawl drops them and they must be re-attached by hand. Examples: rand/randn (methods
-    # in Random) and kron! (methods in LinearAlgebra), none of which appear to be explicitly used.
-    # append!(cache[:Base][:rand].methods, cache_methods(Base.rand, cache))
-    for m in cache_methods(Base.rand, :rand, cache, get_return_type)
-        push!(cache[:Base][:rand].methods, m[2])
-    end
-    for m in cache_methods(Base.randn, :randn, cache, get_return_type)
-        push!(cache[:Base][:randn].methods, m[2])
-    end
-    for m in cache_methods(Base.kron!, :kron!, cache, get_return_type)
-        push!(cache[:Base][:kron!].methods, m[2])
+    # Accounts for Base functions that are always-available but which loaded stdlibs
+    # (Random, LinearAlgebra, …) extend: the Core+Base crawl attributes each method to
+    # its defining module, so methods defined outside Core/Base are dropped and those
+    # Base functions end up method-incomplete (rand 0/76, randn 0/14, kron! 0/13 — fully
+    # external; kron 1/17 — partial; plus operators `*`, `\`, `+`, … and others). Re-attach
+    # the dropped, stdlib-defined methods generically rather than by hand. Safe against
+    # double-counting at request time via the `iterate_over_ss_methods` de-dup.
+    for n in unsorted_names(Base; all = true, imported = true)
+        _isdefinedglobal(Base, n) || continue
+        ok, f = _try_getglobal(Base, n)
+        ok || continue
+        (f isa Function && !(f isa Core.Builtin)) || continue   # builtins/intrinsics handled separately
+        haskey(cache[:Base], n) || continue
+        st = cache[:Base][n]
+        st isa FunctionStore || continue
+        # Cheap gate: `methodlist` is exactly what `cache_methods` iterates, so a store
+        # that already holds every method (crawl captured it fully) is skipped.
+        length(st.methods) >= length(methodlist(f)) && continue
+        for (mmod, mstore) in cache_methods(f, n, cache, get_return_type)
+            _crawled_by_corebase(mmod) && continue                       # already captured by the crawl
+            any(existing -> _samestore(existing, mstore), st.methods) && continue  # de-dup safety
+            push!(st.methods, mstore)
+        end
     end
 
     return cache
