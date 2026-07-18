@@ -69,6 +69,54 @@ function infer_type(binding::Binding, scope, state)
     end
 end
 
+# Resolve a datatype-denoting external `TreeRef` to its `SymStore` via the env.
+# In the per-file traversal mode a `using`'d name from a sibling file (e.g.
+# `using Base: PkgId`) resolves through the module tree to a `TreeRef`, not to a
+# local `Binding`/store. Walk `getsymbols(env)` by `origin_module` to the
+# `ModuleStore`, then look up `name` (following a `VarRef`). Mirrors hover's
+# external-symbol resolution (`_get_tree_ref_hover`) but stays inside StaticLint.
+# Returns the store (ideally a `DataTypeStore`) or `nothing`.
+function resolve_treeref_store(tr::TreeRef, state)
+    tr.kind === :external_symbol || return nothing
+    isempty(tr.origin_module) && return nothing
+    store = get(getsymbols(state), Symbol(tr.origin_module[1]), nothing)
+    store isa SymbolServer.ModuleStore || return nothing
+    for i in 2:length(tr.origin_module)
+        sub = maybe_lookup(get(store.vals, Symbol(tr.origin_module[i]), nothing), state)
+        sub isa SymbolServer.ModuleStore || return nothing
+        store = sub
+    end
+    val = get(store.vals, Symbol(tr.name), nothing)
+    val === nothing && return nothing
+    return maybe_lookup(val, state)
+end
+
+# The datatype constructed by a constructor-style call's callee (`x = T(...)`),
+# for type inference — a datatype `Binding`, a `DataTypeStore`, or `nothing`.
+# Handles a bare identifier callee, a qualified getfield callee (`Base.PkgId`),
+# and a cross-file `TreeRef` callee (resolved through the env).
+function _resolve_constructor_datatype(callname, scope, state)
+    meta_dict = state.meta_dict
+    if isidentifier(callname)
+        resolve_ref(callname, scope, state)
+        hasref(callname, meta_dict) || return nothing
+        ref = refof(callname, meta_dict)
+    elseif is_getfield_w_quotenode(callname)
+        resolve_getfield(callname, scope, state)
+        ref = refof_maybe_getfield(callname, meta_dict)
+    else
+        return nothing
+    end
+    if ref isa TreeRef
+        ref = resolve_treeref_store(ref, state)
+    end
+    rb = get_root_method(ref)
+    if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
+        return rb
+    end
+    return nothing
+end
+
 function infer_type_assignment_rhs(binding, state, scope)
     meta_dict = state.meta_dict
     lhs = binding.val.args[1]
@@ -96,17 +144,12 @@ function infer_type_assignment_rhs(binding, state, scope)
                 return
             end
             callname = CSTParser.get_name(rhs)
-            if isidentifier(callname)
-                resolve_ref(callname, scope, state)
-                if hasref(callname, meta_dict)
-                    rb = get_root_method(refof(callname, meta_dict))
-                    if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
-                        if is_destructuring
-                            infer_destructuring_type(binding, rb, meta_dict)
-                        else
-                            settype!(binding, rb)
-                        end
-                    end
+            rb = _resolve_constructor_datatype(callname, scope, state)
+            if rb !== nothing
+                if is_destructuring
+                    infer_destructuring_type(binding, rb, meta_dict)
+                else
+                    settype!(binding, rb)
                 end
             end
         elseif CSTParser.iscurly(rhs) || CSTParser.iswhere(rhs)
@@ -193,8 +236,34 @@ end
 # An alias may resolve to something carrying no field information (or `nothing`).
 infer_destructuring_type(binding, rb, meta_dict, depth=0) = nothing
 
-function infer_type_decl(binding, state, scope)
+# Shared tail of both `infer_type_decl` forms: `t` is the (unwrapped, resolved)
+# type expression of a `::T` declaration. A cross-file `TreeRef` annotation
+# (e.g. a sibling `using Base: PkgId`) is resolved through the env — since
+# `Binding.type` can't carry a TreeRef, the resolved `DataTypeStore` is set (and
+# if it doesn't resolve, the type is left unset for `declared_type_is_tree_backed`
+# to protect from by-use guessing).
+function _settype_from_decl!(binding, t, state)
     meta_dict = state.meta_dict
+    r = refof(t, meta_dict)
+    if r isa TreeRef
+        store = resolve_treeref_store(r, state)
+        store isa SymbolServer.DataTypeStore && settype!(binding, store)
+    elseif r isa Binding
+        rb = get_root_method(r)
+        if rb isa Binding && CoreTypes.isdatatype(rb.type)
+            settype!(binding, rb)
+        else
+            settype!(binding, r)
+        end
+    else
+        edt = get_eventual_datatype(r, state.env)
+        if edt !== nothing
+            settype!(binding, edt)
+        end
+    end
+end
+
+function infer_type_decl(binding, state, scope)
     t = binding.val.args[2]
     if isidentifier(t)
         resolve_ref(t, scope, state)
@@ -207,19 +276,7 @@ function infer_type_decl(binding, state, scope)
         resolve_getfield(t, scope, state)
         t = t.args[2].args[1]
     end
-    if refof(t, meta_dict) isa Binding
-        rb = get_root_method(refof(t, meta_dict))
-        if rb isa Binding && CoreTypes.isdatatype(rb.type)
-            settype!(binding, rb)
-        else
-            settype!(binding, refof(t, meta_dict))
-        end
-    else
-        edt = get_eventual_datatype(refof(t, meta_dict), state.env)
-        if edt !== nothing
-            settype!(binding, edt)
-        end
-    end
+    _settype_from_decl!(binding, t, state)
 end
 
 function infer_type_decl(binding, t, state, scope)
@@ -234,19 +291,7 @@ function infer_type_decl(binding, t, state, scope)
         resolve_getfield(t, scope, state)
         t = t.args[2].args[1]
     end
-    if refof(t, state.meta_dict) isa Binding
-        rb = get_root_method(refof(t, state.meta_dict))
-        if rb isa Binding && CoreTypes.isdatatype(rb.type)
-            settype!(binding, rb)
-        else
-            settype!(binding, refof(t, state.meta_dict))
-        end
-    else
-        edt = get_eventual_datatype(refof(t, state.meta_dict), state.env)
-        if edt !== nothing
-            settype!(binding, edt)
-        end
-    end
+    _settype_from_decl!(binding, t, state)
 end
 
 get_eventual_datatype(_, _::ExternalEnv) = nothing

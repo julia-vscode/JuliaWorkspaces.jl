@@ -12,6 +12,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     export JuliaWorkspaces
     export parse_and_pass, check_resolved, get_hints, get_env, collect_hints
     export module_name, find_module_by_name, find_first
+    export ws_files, find_identifiers, find_binding
 
     const TEST_URI = JuliaWorkspaces.URIs2.uri"file://test.jl"
 
@@ -116,6 +117,37 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
 
     # Adapter to support do-block call style: find_first(root) do x ... end
     find_first(f::Function, root::CSTParser.EXPR) = find_first(root, f)
+
+    # Build a workspace from `uri => source` pairs (for cross-file / per-file
+    # traversal tests that go through `derived_file_analysis`).
+    function ws_files(pairs::Pair{<:JuliaWorkspaces.URIs2.URI,<:AbstractString}...)
+        jw = JuliaWorkspaces.JuliaWorkspace()
+        for (u, s) in pairs
+            add_file!(jw, TextFile(u, SourceText(s, "julia")))
+        end
+        return jw
+    end
+
+    function find_identifiers(x, value::String, hits=CSTParser.EXPR[])
+        if StaticLint.headof(x) === :IDENTIFIER && CSTParser.valof(x) == value
+            push!(hits, x)
+        elseif x.args !== nothing
+            for a in x.args
+                find_identifiers(a, value, hits)
+            end
+        end
+        return hits
+    end
+
+    # Last binding attached to an identifier named `name` in `cst` (or nothing).
+    function find_binding(cst, meta_dict, name::String)
+        b = nothing
+        for x in find_identifiers(cst, name)
+            bb = StaticLint.bindingof(x, meta_dict)
+            bb isa StaticLint.Binding && (b = bb)
+        end
+        return b
+    end
 end
 
 

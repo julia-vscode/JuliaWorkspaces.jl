@@ -68,6 +68,70 @@ end
     end
 end
 
+@testitem "infer cross-file constructor through a TreeRef callee" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, refof, TreeRef
+    using JuliaWorkspaces.URIs2: URI
+    const DataTypeStore = JuliaWorkspaces.SymbolServer.DataTypeStore
+
+    root = URI("file:///t/src/Root.jl")
+    stale = URI("file:///t/src/stale.jl")
+    jw = ws_files(
+        root => "module Root\nusing Base: PkgId\ninclude(\"stale.jl\")\nend\n",
+        stale => "function f(newmods)\n    for M in newmods\n        key = PkgId(M)\n        Base.insert_extension_triggers(key)\n    end\nend\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, stale)
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, stale)
+
+    # The `PkgId` callee resolves cross-file to a TreeRef (not a Binding/store).
+    pkgid = only(find_identifiers(cst, "PkgId"))
+    @test refof(pkgid, fa.meta) isa TreeRef
+
+    # `key = PkgId(M)` must infer `key::PkgId`, not fall back to a by-use guess.
+    keyb = find_binding(cst, fa.meta, "key")
+    @test keyb !== nothing
+    @test keyb.type isa DataTypeStore
+    @test occursin("PkgId", string(keyb.type.name))
+
+    # ...and the method call on `key` no longer false-flags.
+    @test isempty(fa.diagnostics)
+end
+
+@testitem "infer qualified constructor (getfield callee)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof
+    const DataTypeStore = JuliaWorkspaces.SymbolServer.DataTypeStore
+
+    let (cst, meta_dict) = parse_and_pass("function f(m)\n    key = Base.PkgId(m)\n    key\nend\n")
+        keyb = find_binding(cst, meta_dict, "key")
+        @test keyb !== nothing
+        @test keyb.type isa DataTypeStore
+        @test occursin("PkgId", string(keyb.type.name))
+    end
+end
+
+@testitem "infer cross-file type annotation through a TreeRef" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, Binding
+    using JuliaWorkspaces.URIs2: URI
+    const DataTypeStore = JuliaWorkspaces.SymbolServer.DataTypeStore
+    const CST = JuliaWorkspaces.CSTParser
+
+    root = URI("file:///t/src/Root.jl")
+    g = URI("file:///t/src/g.jl")
+    jw = ws_files(
+        root => "module Root\nusing Base: PkgId\ninclude(\"g.jl\")\nend\n",
+        g => "g(x::PkgId) = x\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, g)
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, g)
+
+    # the `x::PkgId` arg binding (attached to the `::` decl) narrows to PkgId,
+    # even though the annotation resolved cross-file to a TreeRef.
+    argdecl = find_first(x -> CST.isdeclaration(x) && bindingof(x, fa.meta) isa Binding, cst)
+    @test argdecl !== nothing
+    argb = bindingof(argdecl, fa.meta)
+    @test argb.type isa DataTypeStore
+    @test occursin("PkgId", string(argb.type.name))
+end
+
 @testitem "infer_module" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: bindingof
     let (cst, meta_dict) = parse_and_pass("module A end")
