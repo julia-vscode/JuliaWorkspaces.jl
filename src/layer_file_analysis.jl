@@ -731,15 +731,21 @@ function item_documentation(rt, ref::ItemRef)
     entry === nothing && return nothing
     expr = entry.expr
 
+    # `string(...)` guarantees a `String` even for INTERPOLATED docstrings,
+    # whose payload `to_codeobject` yields a `:string` `Expr` rather than a
+    # plain `String` literal. Every consumer (hover + completion) then gets a
+    # `String`, and the rendered text stays byte-identical to the old
+    # whole-closure hover path, which likewise `string(...)`-wrapped this
+    # `to_codeobject` result.
     doc_expr = _maybe_get_doc_expr(expr)
     if _is_doc_expr(doc_expr)
-        return CSTParser.to_codeobject(_get_doc_payload_expr(doc_expr))
+        return string(CSTParser.to_codeobject(_get_doc_payload_expr(doc_expr)))
     end
     # `const`/`global` wrappers carry the docstring one level up (the item
     # node is the assignment inside the `const`).
     p = CSTParser.parentof(expr)
     if p isa CSTParser.EXPR && _is_const_expr(p) && _expr_has_preceding_docs(p)
-        return CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(p)))
+        return string(CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(p))))
     end
     return nothing
 end

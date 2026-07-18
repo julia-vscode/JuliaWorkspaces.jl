@@ -1210,6 +1210,63 @@ end
     @test occursin("does a thing EDITED", item2.documentation)
 end
 
+@testitem "Completions/Hover: interpolated docstrings stringify (no MethodError)" begin
+    # A docstring containing `$(...)` interpolation does NOT parse as a plain
+    # String literal — its payload `to_codeobject`s to a `:string` `Expr`. The
+    # doc extraction (`item_documentation`) must yield a `String` so neither the
+    # completion path (which passed the raw value to `_sanitize_docstring`, the
+    # original crash) nor the hover path chokes.
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "DocInterp"
+    uuid = "e3345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    entry = """
+    module DocInterp
+    include("sib.jl")
+    include("leaf.jl")
+    using .Sib
+    end
+    """
+    # docstring with STRING INTERPOLATION in the payload
+    sib = """
+    module Sib
+    export Colex
+    \"\"\"
+        \$(@__MODULE__()).Colex <: Base.Order.Ordering
+    The colexicographic ordering for `SmallBitSet`.
+    See also [`\$(@__MODULE__()).Lex`](@ref).
+    \"\"\"
+    struct Colex end
+    end
+    """
+    leaf = "Col\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///docinterp/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///docinterp/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///docinterp/src/DocInterp.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///docinterp/src/sib.jl"), SourceText(sib, "julia")))
+    leaf_uri = URI("file:///docinterp/src/leaf.jl")
+    add_file!(jw, TextFile(leaf_uri, SourceText(leaf, "julia")))
+    sib_uri = URI("file:///docinterp/src/sib.jl")
+
+    # Completion: must NOT crash and must carry a sane String docstring.
+    item = only(filter(i -> i.label == "Colex",
+        get_completions(jw, leaf_uri, findfirst("Col\n", leaf)[end]).items))
+    @test item.documentation isa String
+    @test occursin("colexicographic ordering", item.documentation)
+
+    # Hover on the defining struct name: must NOT crash and render the doc.
+    hover = get_hover_text(jw, sib_uri, findfirst("struct Colex", sib)[end])
+    @test hover isa String
+    @test occursin("colexicographic ordering", hover)
+end
+
 @testitem "Completions: dot-completion on a workspace module lists its names" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
