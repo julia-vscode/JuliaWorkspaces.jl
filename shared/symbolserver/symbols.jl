@@ -529,19 +529,6 @@ function all_names(m, pred, symbols = Set(Symbol[]), seen = Set(Module[]))
     symbols
 end
 
-# On 1.12, names(Base) spuriously includes bindings that are really owned by
-# Core (JuliaLang/julia#60046), so we filter those out below. This could also be
-# a version check, but doing it this way should be more robust.
-const CORE_BASE_NAMES_CONFUSION = :Bool in names(Base)
-
-# ...but only skip a confused name when Core *exports* it: Core-side resolution
-# then finds it, so we needn't alias it into Base (and skipping avoids duplicating
-# e.g. `Memory`/`Cvoid` as full DataTypeStores). A Core-owned name that Core does
-# NOT export (e.g. `invokelatest`) has no Core-export fallback, so it must fall
-# through to the re-export branches below, which create a cheap VarRef alias to
-# Core — without this, such names are dropped entirely and never resolve.
-const CORE_EXPORTED_NAMES = Base.IdSet{Symbol}(names(Core))
-
 function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Base.IdSet{Symbol} = getallns(), visited = Base.IdSet{Module}();  get_return_type = false)
     if m isa Module
         cache = _lookup(VarRef(m), env, true)
@@ -552,10 +539,6 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
             !_isdefinedglobal(m, s) && continue
             ok, x = _try_getglobal(m, s)
             ok || continue
-
-            if CORE_BASE_NAMES_CONFUSION && m === Base && s in CORE_EXPORTED_NAMES && _isdefinedglobal(Core, s) && getglobal(Core, s) === x
-                continue
-            end
 
             if Base.unwrap_unionall(x) isa DataType # Unions aren't handled here.
                 if parentmodule(x) === m
