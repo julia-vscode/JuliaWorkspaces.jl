@@ -814,3 +814,115 @@ Salsa.@derived function derived_method_items(rt, root, path, name)
     _collect_method_items!(rt, root, String[], path, name, modpaths, result, Set{URI}([root]))
     return result
 end
+
+const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
+
+# Splice walk (mirroring `_collect_method_items!`) that appends every binding-kind
+# item named `name` whose NON-empty qualifier resolves to NO tree module — i.e. a
+# workspace method extension of a Base/stdlib/package function (`Base.relpath(...)`,
+# `Foo.bar(...)` where `Foo` is an external package). These are exactly the
+# extensions `derived_method_items` DISCARDS (its qualifier resolves outside the
+# tree). Such extensions apply globally in the session, so this is workspace-wide,
+# not per-module.
+function _collect_external_extensions!(rt, F::URI, P::Vector{String}, name::String,
+                                       modpaths::Set{Vector{String}},
+                                       result::Vector{ExternalExtension}, visited::Set{URI})
+    inv = derived_file_inventory(rt, F)
+
+    events = Tuple{Int,Symbol,Any}[]
+    for item in inv.items
+        if item.name == name && item.kind in _BINDING_ITEM_KINDS && !isempty(item.qualifier)
+            push!(events, (item.id, :item, item))
+        end
+    end
+    for inc in inv.includes
+        push!(events, (inc.id, :include, inc))
+    end
+    sort!(events; by=e -> (e[1], e[2] === :include ? 0 : 1), alg=Base.Sort.MergeSort)
+
+    for (_, kind, payload) in events
+        if kind === :item
+            item = payload
+            loc = vcat(P, item.parent_module)
+            if _resolve_extension_qualifier(modpaths, loc, item.qualifier) === nothing
+                push!(result, (qualifier=item.qualifier, signature=item.signature, ref=(file=F, id=item.id)))
+            end
+        else
+            inc = payload
+            inc.target === nothing && continue
+            newP = vcat(P, inc.parent_module)
+            inc.target in visited && continue
+            derived_has_content(rt, inc.target) || continue
+            push!(visited, inc.target)
+            _collect_external_extensions!(rt, inc.target, newP, name, modpaths, result, visited)
+        end
+    end
+    return
+end
+
+"""
+    derived_external_method_extensions(rt, root, name::String) -> Vector{ExternalExtension}
+
+Every workspace method extension of an EXTERNAL (Base/stdlib/package) function or
+type named `name` — a binding-kind inventory item written with a qualifier
+(`Base.relpath(...)`, `OrderedCollections.foo(...)`) whose qualifier resolves to no
+module of `root`'s tree. Each entry carries the `qualifier` as written, the
+normalized `signature` string, and the defining `ItemRef`. Splice order,
+workspace-wide (an external extension applies globally, independent of the call
+site's module). Empty when `name` has no such extension.
+
+Used to make hover and the method-call lint aware of workspace overloads of
+store-backed functions, which live in the per-file `scope.overloaded` and are
+otherwise invisible across files. A thin projection of `derived_module_tree` + the
+per-file inventories; plain data throughout.
+"""
+Salsa.@derived function derived_external_method_extensions(rt, root, name)
+    @debug "derived_external_method_extensions" root=root name=name
+
+    tree = derived_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    result = ExternalExtension[]
+    _collect_external_extensions!(rt, root, String[], name, modpaths, result, Set{URI}([root]))
+    return result
+end
+
+# Splice walk collecting the NAMES of all external method extensions in the tree.
+function _collect_external_extension_names!(rt, F::URI, P::Vector{String},
+                                            modpaths::Set{Vector{String}},
+                                            result::Set{String}, visited::Set{URI})
+    inv = derived_file_inventory(rt, F)
+    for item in inv.items
+        if item.kind in _BINDING_ITEM_KINDS && !isempty(item.qualifier) &&
+           _resolve_extension_qualifier(modpaths, vcat(P, item.parent_module), item.qualifier) === nothing
+            push!(result, item.name)
+        end
+    end
+    for inc in inv.includes
+        inc.target === nothing && continue
+        inc.target in visited && continue
+        derived_has_content(rt, inc.target) || continue
+        push!(visited, inc.target)
+        _collect_external_extension_names!(rt, inc.target, vcat(P, inc.parent_module), modpaths, result, visited)
+    end
+    return
+end
+
+"""
+    derived_external_extension_names(rt, root) -> Set{String}
+
+The set of names that have at least one workspace external method extension
+(`derived_external_method_extensions`) anywhere in `root`'s tree. A cheap,
+stable-valued gate: a call to a store-backed function whose name is NOT in this
+set provably has no workspace overload, so callers avoid the per-name query (and
+its dependency) entirely. Its value changes only when an external extension is
+added/removed, so most edits leave it unchanged and dependents backdate.
+"""
+Salsa.@derived function derived_external_extension_names(rt, root)
+    @debug "derived_external_extension_names" root=root
+
+    tree = derived_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    result = Set{String}()
+    _collect_external_extension_names!(rt, root, String[], modpaths, result, Set{URI}([root]))
+    return result
+end

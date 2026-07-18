@@ -121,13 +121,13 @@ LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
 # decline — the lost true-positive direction (a genuinely method-less
 # module-level function) is sanctioned conservatism of the per-file
 # architecture.
-function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing)
+function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing)
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
     is_test_throws_macrocall(x, env, meta_dict) && return
 
     # Do checks
-    opts.call && check_call(x, env, meta_dict, tree_visible)
+    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
     opts.constif && check_if_conds(x, meta_dict)
@@ -144,7 +144,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
 
     if x.args !== nothing
         for i in 1:length(x.args)
-            check_all(x.args[i], opts, env, meta_dict, tree_visible)
+            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended)
         end
     end
 end
@@ -344,7 +344,7 @@ end
 is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} = true
 is_something_with_methods(x) = false
 
-function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing)
+function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
@@ -366,6 +366,16 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing)
                 n = valofid(name)
                 n !== nothing && tree_visible(n, x) && return
             end
+        end
+
+        # Per-file mode partial-method-set gate for a STORE-backed callee that a
+        # workspace file extends (`Base.relpath(::AbstractString, ::PkgData)` in a
+        # sibling): the overload lives in that file's `scope.overloaded` and is not
+        # in the env store's method set, so this file sees only a partial set —
+        # decline rather than false-positive. `tree_extended` (per-file mode only)
+        # confirms `func_ref` is the function actually extended.
+        if tree_extended !== nothing && (func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore)
+            tree_extended(func_ref, x) && return
         end
 
         if is_something_with_methods(func_ref) && !(func_ref isa Binding && func_ref.val isa EXPR && func_ref.val.head === :macro)

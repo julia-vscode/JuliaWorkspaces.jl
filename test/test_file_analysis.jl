@@ -468,6 +468,30 @@ end
     @test any(d -> d.source == "StaticLint.jl" && occursin("nothing", d.message), fa.diagnostics)
 end
 
+@testitem "derived_file_analysis: a store function extended in a sibling is not false-flagged" setup=[FileAnalysisWS] begin
+    # `Base.relpath(a,b,c)` overload lives in sibling a.jl; the 3-arg call in b.jl
+    # is valid but the overload isn't in Base's env store, so check_call must
+    # decline rather than false-flag IncorrectCallArgs.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "Base.relpath(a::AbstractString, b::AbstractString, c::AbstractString) = a\n",
+        B => "f() = relpath(\"a\", \"b\", \"c\")\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("method call error", d.message), fa.diagnostics)
+end
+
+@testitem "derived_file_analysis: a store call with no workspace extension still flags" setup=[FileAnalysisWS] begin
+    # guard: the decline is precise — a genuinely wrong call to a store function
+    # the workspace does NOT extend must still flag.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "f() = sqrt(1, 2, 3)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test any(d -> occursin("method call error", d.message), fa.diagnostics)
+end
+
 @testitem "derived_file_analysis: unresolved in-file imports are marked and reported" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """

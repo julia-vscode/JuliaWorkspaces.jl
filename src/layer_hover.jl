@@ -373,7 +373,7 @@ function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_di
         elseif r isa StaticLint.Binding
             _get_hover(r, documentation, expr, env, meta_dict)
         elseif r isa SymbolServer.SymStore
-            _get_hover(r, documentation, expr, env, meta_dict)
+            _get_hover(r, documentation, expr, env, meta_dict, rt, root)
         elseif r isa StaticLint.TreeRef
             # A name resolved THROUGH the module tree in per-file mode: render
             # from the inventory item (+ defining-file docstring) rather than a
@@ -559,14 +559,14 @@ end
 
 # --- SymbolServer stores ----------------------------------------------------
 
-function _get_hover(b::SymbolServer.SymStore, documentation::String, expr, env, meta_dict)
+function _get_hover(b::SymbolServer.SymStore, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
     if !isempty(b.doc)
         documentation = string(documentation, b.doc, "\n")
     end
     documentation = string(documentation, "```julia\n", b, "\n```")
 end
 
-function _get_hover(f::SymbolServer.FunctionStore, documentation::String, expr, env, meta_dict)
+function _get_hover(f::SymbolServer.FunctionStore, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
     if !isempty(f.doc)
         documentation = string(documentation, f.doc, "\n\n")
     end
@@ -619,6 +619,26 @@ function _get_hover(f::SymbolServer.FunctionStore, documentation::String, expr, 
 
         println(totalio, "$(method_count). `$(sig)` in `$(m.mod)` at [$(text)]($(link))\n")
         return false
+    end
+
+    # Workspace files can extend a store-backed function (`Base.relpath(::T)` in a
+    # sibling). Those methods live in the per-file scope, not the env store, so
+    # `iterate_over_ss_methods` misses them — add them from the module tree.
+    if rt !== nothing && root !== nothing
+        for e in _matching_workspace_extensions(rt, root, env, f)
+            method_count += 1
+            sig = something(e.signature, string(f.name))
+            entry = get(derived_item_positions(rt, e.ref.file), e.ref.id, nothing)
+            if entry === nothing
+                println(totalio, "$(method_count). `$(sig)`\n")
+            else
+                line = _offset_to_position(rt, e.ref.file, entry.offset).line + 1
+                p = uri2filepath(e.ref.file)
+                text = string(p === nothing ? string(e.ref.file) : basename(p), ':', line)
+                link = string(e.ref.file, "#", line)
+                println(totalio, "$(method_count). `$(sig)` at [$(text)]($(link))\n")
+            end
+        end
     end
 
     documentation = string(

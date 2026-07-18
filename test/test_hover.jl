@@ -88,6 +88,26 @@
     @test result !== nothing
 end
 
+@testitem "Hover: lists a workspace overload of a store-backed function" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    root = URI("file:///hoverext/src/M.jl")
+    a = URI("file:///hoverext/src/a.jl")
+    b = URI("file:///hoverext/src/b.jl")
+    add_file!(jw, TextFile(root, SourceText("module M\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", "julia")))
+    add_file!(jw, TextFile(a, SourceText("struct P end\nBase.relpath(x::AbstractString, p::P) = x\n", "julia")))
+    bsrc = "f(x::AbstractString, p::P) = relpath(x, p)\n"
+    add_file!(jw, TextFile(b, SourceText(bsrc, "julia")))
+
+    # hover on the `relpath` call in b.jl must list the sibling a.jl overload
+    # alongside Base's methods (it lives in the per-file scope, not the env store).
+    h = get_hover_text(jw, b, first(findfirst("relpath", bsrc)))
+    @test h !== nothing
+    @test occursin("relpath(x::AbstractString, p::P)", h)
+end
+
 @testitem "Hover: closer keywords" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
     using JuliaWorkspaces.URIs2: URI

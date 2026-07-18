@@ -538,6 +538,63 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
     return diagnostics
 end
 
+# The bare name symbol of a store-backed function/type (`Base.Filesystem.relpath`
+# → `:relpath`), or `nothing`.
+_store_name_symbol(f::SymbolServer.FunctionStore) = f.name isa SymbolServer.VarRef ? f.name.name : nothing
+function _store_name_symbol(d::SymbolServer.DataTypeStore)
+    n = d.name
+    n isa SymbolServer.FakeTypeName && (n = n.name)
+    n isa SymbolServer.VarRef ? n.name : nothing
+end
+_store_name_symbol(@nospecialize(_)) = nothing
+
+# Resolve a written qualifier + name (`["Base"], :relpath`) to its store via the
+# env symbols, following a `VarRef`. Returns the store or `nothing`.
+function _resolve_qualified_store(env, qualifier::Vector{String}, name_sym::Symbol)
+    isempty(qualifier) && return nothing
+    syms = StaticLint.getsymbols(env)
+    store = get(syms, Symbol(qualifier[1]), nothing)
+    store isa SymbolServer.ModuleStore || return nothing
+    for i in 2:length(qualifier)
+        sub = StaticLint.maybe_lookup(get(store.vals, Symbol(qualifier[i]), nothing), env)
+        sub isa SymbolServer.ModuleStore || return nothing
+        store = sub
+    end
+    val = get(store.vals, name_sym, nothing)
+    val === nothing && return nothing
+    return StaticLint.maybe_lookup(val, env)
+end
+
+# Do `a` and `b` denote the same store-backed function/type? Functions compare by
+# `extends` (the canonical VarRef of the extended generic); types by name.
+_same_store_target(a::SymbolServer.FunctionStore, b::SymbolServer.FunctionStore) = a.extends == b.extends
+_same_store_target(a::SymbolServer.DataTypeStore, b::SymbolServer.DataTypeStore) = a.name == b.name
+_same_store_target(@nospecialize(_), @nospecialize(_)) = false
+
+# Workspace method extensions that actually extend the store-backed function/type
+# `func_ref` (e.g. a sibling `Base.relpath(::AbstractString, ::PkgData)`): a
+# workspace external extension named the same whose written qualifier resolves (in
+# `env`) to the same underlying function/type. Used by hover (to list them) and
+# the method-call lint (to decline for a callee whose method set this file only
+# partially sees).
+function _matching_workspace_extensions(rt, root, env, func_ref)
+    name_sym = _store_name_symbol(func_ref)
+    name_sym === nothing && return ExternalExtension[]
+    name = String(name_sym)
+    # Cheap, stable-valued gate: skip the per-name query (and its dependency) for
+    # the common case of a store function the workspace never extends.
+    name in derived_external_extension_names(rt, root) || return ExternalExtension[]
+    exts = derived_external_method_extensions(rt, root, name)
+    isempty(exts) && return exts
+    return filter(exts) do e
+        resolved = _resolve_qualified_store(env, e.qualifier, name_sym)
+        resolved !== nothing && _same_store_target(resolved, func_ref)
+    end
+end
+
+_store_extended_in_workspace(rt, root, env, func_ref) =
+    !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
+
 """
     derived_file_analysis(rt, root::URI, file::URI) -> FileAnalysis
 
@@ -640,7 +697,11 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
         p = vcat(path, _in_file_module_names(x, meta_dict))
         haskey(derived_module_visible_names_idfree(rt, root, p), name)
     end
-    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible)
+    # A store-backed callee (Base/stdlib/package function) that a workspace file
+    # extends: its overload isn't in the env store, so decline the method-call
+    # lint rather than false-positive (see `_store_extended_in_workspace`).
+    tree_extended = (func_ref, x) -> _store_extended_in_workspace(rt, root, env, func_ref)
+    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended)
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file
