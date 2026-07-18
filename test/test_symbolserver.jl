@@ -1,3 +1,45 @@
+@testitem "SymbolServer: Core-in-Base re-exports resolve (invokelatest; julia#60046)" begin
+    using JuliaWorkspaces.SymbolServer: getenvtree, symbols, _lookup, VarRef,
+        FunctionStore, DataTypeStore, CORE_BASE_NAMES_CONFUSION
+
+    # Build the Base/Core stores with the *live* crawler. We call getenvtree/symbols
+    # directly rather than reading the module-level `stdlibs` const, because that
+    # const is baked at precompile time; exercising the crawler is what actually
+    # verifies the current symbols.jl code path.
+    env = getenvtree([:Base, :Core])
+    symbols(env)
+    base = env[:Base]
+
+    # On 1.12 `names(Base)` spuriously lists Core-owned bindings (JuliaLang/julia#60046).
+    # `invokelatest` is owned by Core and NOT exported by Core, so the confusion
+    # filter must let it through to be aliased into Base; otherwise it is dropped
+    # entirely and never resolves (the bug this guards against). It must be present,
+    # stay exported from Base, and resolve to Core's function.
+    @test haskey(base.vals, :invokelatest)
+    @test :invokelatest in base.exportednames
+    entry = base.vals[:invokelatest]
+    if entry isa VarRef
+        # On 1.12 it's a cheap VarRef alias into Core (not a duplicated store).
+        @test _lookup(entry, env, true) isa FunctionStore
+    else
+        @test entry isa FunctionStore
+    end
+
+    # A representative Core-exported re-export must still resolve (no regression).
+    @test haskey(base.vals, :Bool)
+
+    if CORE_BASE_NAMES_CONFUSION
+        # Core-*exported* type aliases (e.g. `Memory` = GenericMemory{...},
+        # `Cvoid` = Nothing) are resolved via Core's export, so the filter still
+        # skips them: they must NOT be duplicated into Base as full DataTypeStores.
+        # (Guards against dropping the filter wholesale, which pulled these in
+        # through the expensive shadow-rename branch.)
+        for s in (:Memory, :MemoryRef, :Cvoid)
+            @test !(get(base.vals, s, nothing) isa DataTypeStore)
+        end
+    end
+end
+
 @testitem "SymbolServer: method_world reads the right field" begin
     using JuliaWorkspaces.SymbolServer: method_world
 
