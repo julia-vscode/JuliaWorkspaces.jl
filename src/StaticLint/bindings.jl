@@ -116,11 +116,27 @@ function mark_bindings!(x::EXPR, state)
                 mark_binding!(arg, meta_dict)
             end
         end
-    elseif headof(x) === :local
+    elseif headof(x) === :local || headof(x) === :global
+        # A declaration-only `local`/`global x` or `local`/`global x::T` (no
+        # assignment) still introduces the name, and both forms need the same
+        # marking here — the local-vs-global scope difference is handled
+        # downstream in `add_binding` (a `:global` name is redirected to the
+        # global scope via the `#globals` marker set by `mark_globals`; a
+        # `:local` name stays in the current scope). Without a binding here,
+        # later uses of the name are flagged as missing references — the bare
+        # identifier form was handled for `:local` but never for `:global`, and
+        # the typed-declaration form (`x::T`) was handled for neither. The
+        # assignment form (`global x = v` / `local x = v`) is handled by the
+        # child assignment during traversal, so skip it here to avoid a double
+        # binding.
         for i = 1:length(x.args)
-            if isidentifier(x.args[i])
-                mark_binding!(x.args[i], meta_dict)
-                setref!(x.args[i], bindingof(x.args[i], meta_dict), meta_dict)
+            arg = x.args[i]
+            if isidentifier(arg)
+                mark_binding!(arg, meta_dict)
+                setref!(arg, bindingof(arg, meta_dict), meta_dict)
+            elseif CSTParser.isdeclaration(arg) && isidentifier(arg.args[1])
+                mark_binding!(arg, meta_dict)
+                setref!(arg.args[1], bindingof(arg, meta_dict), meta_dict)
             end
         end
     end

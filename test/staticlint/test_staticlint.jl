@@ -9,6 +9,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     const CSTParser = JuliaWorkspaces.CSTParser
     const StaticLint = JuliaWorkspaces.StaticLint
 
+    export JuliaWorkspaces
     export parse_and_pass, check_resolved, get_hints, get_env, collect_hints
     export module_name, find_module_by_name, find_first
 
@@ -47,7 +48,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
 
         cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, our_uri)
         meta_dict, workspace_packages = JuliaWorkspaces.derived_static_lint_meta_for_root(jw.runtime, our_uri)
-        
+
         return cst, meta_dict, jw
     end
 
@@ -415,7 +416,7 @@ end
     f() where {T,S}
     f() where {T<:Any}
     """)
-    
+
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[1].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[3], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
@@ -1087,7 +1088,7 @@ end
     cst, meta_dict = parse_and_pass("""
         stdcall
         """)
-    
+
     @test !hasref(cst[1], meta_dict)
 end
 
@@ -1186,7 +1187,7 @@ end
     using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument
 
     cst, meta_dict = parse_and_pass("function f(arg) arg = 1 end")
-    
+
     @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === UnusedFunctionArgument
 end
 
@@ -1441,7 +1442,7 @@ end
         Base.fetch(x) = 1
         function f(a::fetch) a end
         """)
-            
+
     @test errorof(cst.args[1].args[1].args[2], meta_dict) === InvalidTypeDeclaration
     @test errorof(cst.args[2].args[1].args[2], meta_dict) === InvalidTypeDeclaration
     @test errorof(cst.args[3].args[1].args[2], meta_dict) === nothing
@@ -1974,7 +1975,7 @@ end
         end
         break
         """)
-    
+
     @test errorof(cst.args[1].args[2].args[1], meta_dict) === nothing
     @test errorof(cst.args[2], meta_dict) === JuliaWorkspaces.StaticLint.ShouldBeInALoop
 end
@@ -1982,7 +1983,7 @@ end
 @testitem "@." setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: hasref
 
-    cst, meta_dict = parse_and_pass("@. a + b")    
+    cst, meta_dict = parse_and_pass("@. a + b")
 
     @test hasref(cst.args[1].args[1], meta_dict)
 end
@@ -3717,6 +3718,94 @@ end
         """)
         uses = filter(id -> CSTParser.valof(id) in ("foo", "bar", "baz"), get_ids(cst))[end-2:end]
         @test all(id -> refof(id, meta_dict) !== nothing, uses)
+    end
+end
+
+@testitem "declaration-only global/local binds the name" setup=[shared_static_lint] begin
+    # A `global`/`local x` or `global`/`local x::T` declaration without an
+    # assignment still introduces the name; later uses must resolve (not be
+    # flagged as missing references). The assignment form already worked (via
+    # the `#globals` redirect for globals), but the declaration-only forms
+    # created no binding: `:global` was unhandled entirely, and `:local`
+    # handled only the bare-identifier form, not the typed `x::T` form.
+
+    # Typed global declaration at module top level (Revise's `global juliadir::String`).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        global juliadir::String
+        get_it() = juliadir
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Bare global declaration at module top level.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        global juliadir
+        get_it() = juliadir
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Comma-separated mix of bare and typed global declarations.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        global a, b::Int
+        use() = a + b
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # A typed `global x::T` inside a function still declares the module global,
+    # so uses outside the function resolve.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function setit()
+            global juliadir::String
+        end
+        get_it() = juliadir
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Typed `local x::T` declaration in a function body, later assigned & used.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            local z::Int
+            z = 1
+            return z
+        end
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Comma-separated mix of bare and typed local declarations.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            local a, b::Int
+            a = 1
+            b = 2
+            return a + b
+        end
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Guard: a *bare* `x::T` (no `global`/`local` keyword) is a type-assert that
+    # READS `x`, not a declaration — at module scope and in a local scope alike
+    # (both raise `UndefVarError` at runtime). It must stay flagged as a missing
+    # reference; only the keyword forms above introduce a binding.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module M
+            x::Int
+        end
+        """)
+        @test !isempty(collect_hints(cst, meta_dict, jw))
+    end
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            z::Int
+            z = 1
+            return z
+        end
+        """)
+        @test !isempty(collect_hints(cst, meta_dict, jw))
     end
 end
 
