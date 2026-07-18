@@ -814,13 +814,57 @@ end
 
 const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
 
-# Is `item` (at absolute module path `loc`) a workspace method extension of an
-# EXTERNAL function/type — written with a qualifier that resolves to NO tree
-# module (`Base.relpath(...)`, `Foo.bar(...)` where `Foo` is an external
-# package)? These are exactly the extensions `derived_method_items` DISCARDS.
-_is_external_extension(modpaths, item, loc) =
-    !isempty(item.qualifier) &&
-    _resolve_extension_qualifier(modpaths, loc, item.qualifier) === nothing
+# Names imported for UNQUALIFIED extension: `import Base: relpath` (or an import
+# from any non-tree target) lets a later bare `relpath(...) = ...` extend the
+# external function without writing the qualifier. Map each module path to
+# `imported name => import target module path` (`"relpath" => ["Base"]`),
+# including names inherited from enclosing modules (nearer scope wins). Used to
+# recognize those bare method definitions as external extensions and to recover
+# the qualifier that resolves them in the env.
+function _external_import_targets(tree::ModuleTree)
+    own = Dict{Vector{String},Dict{String,Vector{String}}}()
+    for node in tree.modules
+        d = Dict{String,Vector{String}}()
+        for imp in node.imports
+            imp.kind === :import || continue
+            imp.target.sort === :tree && continue   # a tree import extends a workspace function, not a store one
+            for s in imp.symbols
+                d[s.name] = imp.target.path
+            end
+        end
+        own[node.path] = d
+    end
+    result = Dict{Vector{String},Dict{String,Vector{String}}}()
+    for node in tree.modules
+        merged = Dict{String,Vector{String}}()
+        p = copy(node.path)
+        while true
+            for (k, v) in own[p]
+                haskey(merged, k) || (merged[k] = v)
+            end
+            isempty(p) && break
+            pop!(p)
+        end
+        result[node.path] = merged
+    end
+    return result
+end
+
+# The qualifier under which `item` (at absolute module path `loc`) extends an
+# EXTERNAL (Base/stdlib/package) function/type, or `nothing` when it is not such
+# an extension. Two forms: a qualified item whose qualifier resolves to NO tree
+# module (`Base.relpath(...)` — exactly the extensions `derived_method_items`
+# DISCARDS), or a bare method definition (`relpath(...) = ...`) whose name is
+# `import`ed from a non-tree target (`import Base: relpath`). The returned
+# qualifier is the module path that resolves the extended function in the env.
+function _external_extension_qualifier(modpaths, import_targets, item, loc)
+    if !isempty(item.qualifier)
+        return _resolve_extension_qualifier(modpaths, loc, item.qualifier) === nothing ? item.qualifier : nothing
+    end
+    item.kind === :function || return nothing
+    tgts = get(import_targets, loc, nothing)
+    tgts === nothing ? nothing : get(tgts, item.name, nothing)
+end
 
 """
     derived_external_method_extensions(rt, root, name::String) -> Vector{ExternalExtension}
@@ -843,10 +887,11 @@ Salsa.@derived function derived_external_method_extensions(rt, root, name)
 
     tree = derived_module_tree(rt, root)
     modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    import_targets = _external_import_targets(tree)
     result = ExternalExtension[]
     _walk_spliced_binding_items!(rt, root, String[], name, Set{URI}([root])) do F, item, loc
-        _is_external_extension(modpaths, item, loc) &&
-            push!(result, (qualifier=item.qualifier, signature=item.signature, ref=(file=F, id=item.id)))
+        q = _external_extension_qualifier(modpaths, import_targets, item, loc)
+        q === nothing || push!(result, (qualifier=q, signature=item.signature, ref=(file=F, id=item.id)))
     end
     return result
 end
@@ -866,9 +911,10 @@ Salsa.@derived function derived_external_extension_names(rt, root)
 
     tree = derived_module_tree(rt, root)
     modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    import_targets = _external_import_targets(tree)
     result = Set{String}()
     _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
-        _is_external_extension(modpaths, item, loc) && push!(result, item.name)
+        _external_extension_qualifier(modpaths, import_targets, item, loc) === nothing || push!(result, item.name)
     end
     return result
 end

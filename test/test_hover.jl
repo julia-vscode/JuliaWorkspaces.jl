@@ -126,6 +126,19 @@ end
     @test occursin("partition(x::P, n::Int)", result)
 end
 
+@testitem "Hover: workspace overload via an unqualified import is listed" setup=[HoverCrossWS] begin
+    # `import Base: relpath` then a bare `relpath(...) = ...` extends Base.relpath
+    # without a qualifier; hover must still list the sibling overload.
+    a_src = "struct P end\nimport Base: relpath\nrelpath(x::AbstractString, p::P) = x\n"
+    b_src = "duse(x::AbstractString, p::P) = relpath(x, p)\n"
+    jw = hoverx_workspace(a_src, b_src)
+
+    result = hover_at(jw, b_src, "= relpath")
+    @test result !== nothing
+    @test occursin("is a function with", result)
+    @test occursin("relpath(x::AbstractString, p::P)", result)
+end
+
 @testitem "Hover: workspace constructor extension of a store-backed type is listed" setup=[HoverCrossWS] begin
     # A sibling extends a store TYPE's constructor (`Base.Dict(::P)`); the
     # method-call lint already declines for it, so hover must surface it too.

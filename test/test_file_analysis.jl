@@ -492,6 +492,18 @@ end
     @test any(d -> occursin("method call error", d.message), fa.diagnostics)
 end
 
+@testitem "derived_file_analysis: a store function extended via unqualified import is not false-flagged" setup=[FileAnalysisWS] begin
+    # `import Base: relpath` then a bare 3-arg `relpath(...) = ...` extends
+    # Base.relpath; the 3-arg call in b.jl is valid and must not false-flag.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "import Base: relpath\nrelpath(a::AbstractString, b::AbstractString, c::AbstractString) = a\n",
+        B => "f() = relpath(\"a\", \"b\", \"c\")\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("method call error", d.message), fa.diagnostics)
+end
+
 @testitem "derived_file_analysis: unresolved in-file imports are marked and reported" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """

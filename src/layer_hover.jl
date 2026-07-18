@@ -430,6 +430,19 @@ function _get_tree_ref_hover(tr::StaticLint.TreeRef, documentation::String, expr
         doc !== nothing && (documentation = string(documentation, doc))
         return _module_ref_hover(documentation, tr.name)
     elseif tr.kind in (:function, :macro, :struct, :mutable_struct, :abstract, :primitive, :enum)
+        # A workspace function that EXTENDS a store-backed function (an `import
+        # Base: relpath` + bare `relpath(...) = ...`) is tree-declared, so it
+        # resolves here rather than to the env `FunctionStore`. Render it through
+        # the store hover so the underlying Base methods appear alongside the
+        # workspace overloads (unified with the qualified path), instead of the
+        # workspace-methods-only tree rendering.
+        if env !== nothing
+            for e in derived_external_method_extensions(rt, root, tr.name)
+                store = _resolve_qualified_store(env, e.qualifier, Symbol(tr.name))
+                store isa SymbolServer.FunctionStore &&
+                    return _get_hover(store, documentation, expr, env, meta_dict, rt, root)
+            end
+        end
         return _tree_method_items_hover(tr, documentation, rt, root)
     else
         return _tree_binding_hover(tr, documentation, expr, env, rt, root)
