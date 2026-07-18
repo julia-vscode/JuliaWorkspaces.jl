@@ -110,9 +110,29 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime, root::URI)
         tls = _retrieve_toplevel_scope(call_name, meta_dict)
         tls === nothing && return sigs
         _get_signatures(f_ref, tls, sigs, env, meta_dict)
+        # A store-backed callee the workspace extends (`Base.relpath(::T)` in a
+        # sibling): the env store's method set misses that overload, so offer it
+        # from its defining EXPR, like a tree method item.
+        if f_ref isa Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
+            _workspace_extension_signatures!(sigs, f_ref, env, runtime, root)
+        end
     end
 
     return sigs
+end
+
+# Signatures of the workspace method extensions of a store-backed callee,
+# rendered exactly like `_collect_tree_signatures!` renders a tree method item:
+# the defining EXPR is materialized request-time and paired with its own
+# file-analysis meta so parameter names recover.
+function _workspace_extension_signatures!(sigs::Vector{SignatureInfo}, f_ref, env, runtime, root::URI)
+    for e in _matching_workspace_extensions(runtime, root, env, f_ref)
+        entry = get(derived_item_positions(runtime, e.ref.file), e.ref.id, nothing)
+        entry === nothing && continue
+        item_meta = derived_file_analysis(runtime, root, e.ref.file).meta
+        _expr_signature!(sigs, entry.expr, item_meta)
+    end
+    return
 end
 
 # Signatures for a tree-resolved callee: every inventory method item of `name`

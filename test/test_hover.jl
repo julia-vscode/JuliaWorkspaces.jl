@@ -106,6 +106,37 @@ end
     h = get_hover_text(jw, b, first(findfirst("relpath", bsrc)))
     @test h !== nothing
     @test occursin("relpath(x::AbstractString, p::P)", h)
+    # the overload is defined on line 2 of a.jl — both the label and the link
+    @test occursin("[a.jl:2]", h)
+    @test occursin("#2)", h)
+end
+
+@testitem "Hover: workspace overload listed for a store function reached through the tree" setup=[HoverCrossWS] begin
+    # `partition` is brought in by `using Base.Iterators` in the ENTRY file, so
+    # in per-file mode b.jl's ref is a `TreeRef` of kind `:external_symbol`.
+    # The sibling a.jl overload must be listed on this resolution path too, not
+    # only when the name resolves directly to the env `FunctionStore`.
+    a_src = "struct P end\nBase.Iterators.partition(x::P, n::Int) = x\n"
+    b_src = "puse(p) = partition(p, 2)\n"
+    jw = hoverx_workspace(a_src, b_src; entry_extra="using Base.Iterators\n")
+
+    result = hover_at(jw, b_src, "puse(p) = partition")
+    @test result !== nothing
+    @test occursin("is a function with", result)
+    @test occursin("partition(x::P, n::Int)", result)
+end
+
+@testitem "Hover: workspace constructor extension of a store-backed type is listed" setup=[HoverCrossWS] begin
+    # A sibling extends a store TYPE's constructor (`Base.Dict(::P)`); the
+    # method-call lint already declines for it, so hover must surface it too.
+    a_src = "struct P end\nBase.Dict(p::P) = Dict{Int,Int}()\n"
+    b_src = "duse(p) = Dict(p)\n"
+    jw = hoverx_workspace(a_src, b_src)
+
+    result = hover_at(jw, b_src, "duse(p) = Dict")
+    @test result !== nothing
+    @test occursin("Dict(p::P)", result)
+    @test occursin("[a.jl:2]", result)
 end
 
 @testitem "Hover: closer keywords" begin

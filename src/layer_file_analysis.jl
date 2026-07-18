@@ -578,6 +578,7 @@ _same_store_target(@nospecialize(_), @nospecialize(_)) = false
 # the method-call lint (to decline for a callee whose method set this file only
 # partially sees).
 function _matching_workspace_extensions(rt, root, env, func_ref)
+    env === nothing && return ExternalExtension[]
     name_sym = _store_name_symbol(func_ref)
     name_sym === nothing && return ExternalExtension[]
     name = String(name_sym)

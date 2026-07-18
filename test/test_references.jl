@@ -804,3 +804,16 @@ end
     @test rs(BP, findfirst("myfunc(alpha", bmod).start) == expected      # from B's decl
     @test rs(MP, findfirst("myfunc(1", main).start) == expected          # from MainP's use
 end
+
+@testitem "Definitions: workspace overload of a store-backed function is offered" setup=[DefCrossWS] begin
+    # The sibling a.jl extends Base's `relpath`; go-to-definition on the call
+    # must offer that workspace overload (the env store's method set misses it).
+    a_src = "struct P end\nBase.relpath(x::AbstractString, p::P) = x\n"
+    b_src = "caller(x, p) = relpath(x, p)\n"
+    jw = defcross_workspace(a_src, b_src)
+
+    off = findfirst("relpath(x, p)", b_src).start
+    defs = get_definitions(jw, DEF_B_URI, off)
+    # the overload is defined on line 2 of a.jl
+    @test any(d -> d.uri == DEF_A_URI && d.start.line == 2, defs)
+end

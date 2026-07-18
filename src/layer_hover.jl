@@ -412,11 +412,11 @@ function _get_tree_ref_hover(tr::StaticLint.TreeRef, documentation::String, expr
             if store isa SymbolServer.ModuleStore
                 val = get(store.vals, Symbol(tr.name), nothing)
                 val isa SymbolServer.VarRef && (val = StaticLint.maybe_lookup(val, env))
-                val isa SymbolServer.SymStore && return _get_hover(val, documentation, expr, env, meta_dict)
+                val isa SymbolServer.SymStore && return _get_hover(val, documentation, expr, env, meta_dict, rt, root)
             end
         elseif tr.kind === :external_module
             store = _resolve_external_module(rt, root, vcat(tr.origin_module, [tr.name]))
-            store isa SymbolServer.SymStore && return _get_hover(store, documentation, expr, env, meta_dict)
+            store isa SymbolServer.SymStore && return _get_hover(store, documentation, expr, env, meta_dict, rt, root)
         end
         return documentation
     end
@@ -559,11 +559,52 @@ end
 
 # --- SymbolServer stores ----------------------------------------------------
 
-function _get_hover(b::SymbolServer.SymStore, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
+function _store_doc_hover(b::SymbolServer.SymStore, documentation::String)
     if !isempty(b.doc)
         documentation = string(documentation, b.doc, "\n")
     end
-    documentation = string(documentation, "```julia\n", b, "\n```")
+    return string(documentation, "```julia\n", b, "\n```")
+end
+
+_get_hover(b::SymbolServer.SymStore, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing) =
+    _store_doc_hover(b, documentation)
+
+# One numbered method-list entry per workspace extension of a store-backed
+# function/type, appended to `io`; returns the updated method count. Links to
+# the defining item when its position materializes.
+function _workspace_extension_lines!(io::IO, rt, exts, method_count::Int, fallback_sig::String)
+    for e in exts
+        method_count += 1
+        sig = something(e.signature, fallback_sig)
+        entry = get(derived_item_positions(rt, e.ref.file), e.ref.id, nothing)
+        if entry === nothing
+            println(io, "$(method_count). `$(sig)`\n")
+        else
+            line = _offset_to_position(rt, e.ref.file, entry.offset).line
+            p = uri2filepath(e.ref.file)
+            text = string(p === nothing ? string(e.ref.file) : basename(p), ':', line)
+            println(io, "$(method_count). `$(sig)` at [$(text)]($(string(e.ref.file, '#', line)))\n")
+        end
+    end
+    return method_count
+end
+
+# A store-backed TYPE'S constructors are not listed on hover, but a workspace
+# extension of one (`Base.Dict(::P)` in a sibling) is otherwise invisible at
+# the call site — surface those, mirroring the function-store rendering.
+function _get_hover(d::SymbolServer.DataTypeStore, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
+    documentation = _store_doc_hover(d, documentation)
+    (rt === nothing || root === nothing) && return documentation
+    exts = _matching_workspace_extensions(rt, root, env, d)
+    isempty(exts) && return documentation
+    name = _store_name_symbol(d)
+    io = IOBuffer()
+    count = _workspace_extension_lines!(io, rt, exts, 0, string(name))
+    return string(
+        documentation,
+        "\n\n`$(name)` is extended in the workspace with **$(count)** method$(count == 1 ? "" : "s")\n",
+        String(take!(io))
+    )
 end
 
 function _get_hover(f::SymbolServer.FunctionStore, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
@@ -625,20 +666,8 @@ function _get_hover(f::SymbolServer.FunctionStore, documentation::String, expr, 
     # sibling). Those methods live in the per-file scope, not the env store, so
     # `iterate_over_ss_methods` misses them — add them from the module tree.
     if rt !== nothing && root !== nothing
-        for e in _matching_workspace_extensions(rt, root, env, f)
-            method_count += 1
-            sig = something(e.signature, string(f.name))
-            entry = get(derived_item_positions(rt, e.ref.file), e.ref.id, nothing)
-            if entry === nothing
-                println(totalio, "$(method_count). `$(sig)`\n")
-            else
-                line = _offset_to_position(rt, e.ref.file, entry.offset).line + 1
-                p = uri2filepath(e.ref.file)
-                text = string(p === nothing ? string(e.ref.file) : basename(p), ':', line)
-                link = string(e.ref.file, "#", line)
-                println(totalio, "$(method_count). `$(sig)` at [$(text)]($(link))\n")
-            end
-        end
+        exts = _matching_workspace_extensions(rt, root, env, f)
+        method_count = _workspace_extension_lines!(totalio, rt, exts, method_count, string(f.name))
     end
 
     documentation = string(

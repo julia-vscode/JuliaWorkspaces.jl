@@ -582,3 +582,48 @@ end
     sig = first(result.signatures)
     @test [p.label for p in sig.parameters] == ["a", "b"]
 end
+
+@testitem "Signatures: workspace overload of a store-backed function is offered" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "SigExt"
+    uuid = "42345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    # The sibling a.jl extends Base's `relpath`; the env store's method set
+    # misses that overload, so signature help must offer it alongside the
+    # store methods.
+    entry = """
+    module SigExt
+    include("a.jl")
+    include("b.jl")
+    end
+    """
+    a_src = "struct P end\nBase.relpath(x::AbstractString, p::P) = x\n"
+    b_src = "f(x, p) = relpath(\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///sigext/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///sigext/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///sigext/src/SigExt.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///sigext/src/a.jl"), SourceText(a_src, "julia")))
+    add_file!(jw, TextFile(URI("file:///sigext/src/b.jl"), SourceText(b_src, "julia")))
+
+    uri = URI("file:///sigext/src/b.jl")
+    idx = findfirst("relpath(", b_src)[end]
+    result = get_signature_help(jw, uri, idx)
+    @test !isempty(result.signatures)
+    @test any(s -> occursin("relpath(x::AbstractString, p::P)", s.label), result.signatures)
+    # the store's own methods stay offered
+    @test any(s -> !occursin("::P", s.label), result.signatures)
+end

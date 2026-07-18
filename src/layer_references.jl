@@ -346,15 +346,15 @@ end
 # Go-to-definition
 # ============================================================================
 
-function _get_definitions_from_val(x, tls, env, results, runtime) end # fallback
+function _get_definitions_from_val(x, tls, env, results, runtime, root=nothing) end # fallback
 
-function _get_definitions_from_val(x::SymbolServer.ModuleStore, tls, env, results, runtime)
+function _get_definitions_from_val(x::SymbolServer.ModuleStore, tls, env, results, runtime, root=nothing)
     if haskey(x.vals, :eval) && x[:eval] isa SymbolServer.FunctionStore
-        _get_definitions_from_val(x[:eval], tls, env, results, runtime)
+        _get_definitions_from_val(x[:eval], tls, env, results, runtime, root)
     end
 end
 
-function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, tls, env, results, runtime)
+function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, tls, env, results, runtime, root=nothing)
     StaticLint.iterate_over_ss_methods(x, tls, env, function (m)
         if safe_isfile(m.file)
             pos = Position(m.line, 1)
@@ -366,25 +366,32 @@ function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolSer
         end
         return false
     end)
+    # Workspace method extensions of the store callee (`Base.relpath(::T)` in a
+    # sibling) are not in the env store's method set — offer them too.
+    if root !== nothing
+        for e in _matching_workspace_extensions(runtime, root, env, x)
+            _push_item_definition(e.ref, results, runtime)
+        end
+    end
 end
 
-function _get_definitions_from_val(b::StaticLint.Binding, tls, env, results, runtime)
+function _get_definitions_from_val(b::StaticLint.Binding, tls, env, results, runtime, root=nothing)
     if !(b.val isa CSTParser.EXPR)
-        _get_definitions_from_val(b.val, tls, env, results, runtime)
+        _get_definitions_from_val(b.val, tls, env, results, runtime, root)
     end
     if b.type === StaticLint.CoreTypes.Function || b.type === StaticLint.CoreTypes.DataType
         for ref in b.refs
             method = StaticLint.get_method(ref)
             if method !== nothing
-                _get_definitions_from_val(method, tls, env, results, runtime)
+                _get_definitions_from_val(method, tls, env, results, runtime, root)
             end
         end
     elseif b.val isa CSTParser.EXPR
-        _get_definitions_from_val(b.val, tls, env, results, runtime)
+        _get_definitions_from_val(b.val, tls, env, results, runtime, root)
     end
 end
 
-function _get_definitions_from_val(x::CSTParser.EXPR, tls::StaticLint.Scope, env, results, runtime)
+function _get_definitions_from_val(x::CSTParser.EXPR, tls::StaticLint.Scope, env, results, runtime, root=nothing)
     loc = _get_file_loc(x, runtime)
     if loc !== nothing
         uri, o = loc
@@ -435,7 +442,7 @@ function _get_definitions_from_tree_ref(tr::StaticLint.TreeRef, tls, env, result
                 val = get(store.vals, Symbol(tr.name), nothing)
                 val isa SymbolServer.VarRef && (val = StaticLint.maybe_lookup(val, env))
                 val isa SymbolServer.SymStore && tls isa StaticLint.Scope &&
-                    _get_definitions_from_val(val, tls, env, results, runtime)
+                    _get_definitions_from_val(val, tls, env, results, runtime, root)
             end
         end
         return
@@ -496,7 +503,7 @@ function _get_definitions(runtime, uri::URI, offset::Int)
             b = _resolve_shadow_binding(b)
             b = _canonical_local_definition(b, meta_dict)
             tls === nothing && return results
-            _get_definitions_from_val(b, tls, env, results, runtime)
+            _get_definitions_from_val(b, tls, env, results, runtime, root)
         end
     end
 
