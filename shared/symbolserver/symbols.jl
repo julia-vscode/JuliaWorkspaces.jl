@@ -602,13 +602,18 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
 end
 
 
-# A method defined in `mod` is captured by the Core+Base crawl iff `mod` is
-# Base/Core or a submodule of one; methods defined in loaded stdlibs (Random,
-# LinearAlgebra, …) are attributed to those modules and dropped from the
-# Core+Base stores.
-function _crawled_by_corebase(mod::Module)
+# stdlibs loaded in a bare Julia sysimage — their Base-function extensions are
+# usable without an explicit `using`; determined empirically for Julia 1.12,
+# review across Julia versions. (JLL build artifacts like OpenBLAS_jll /
+# libblastrampoline_jll are loaded too but don't extend Base functions.)
+const _ALWAYS_AVAILABLE_STDLIBS = Set{Symbol}([:LinearAlgebra, :Random, :SHA, :Sockets, :FileWatching, :Libdl, :Artifacts])
+
+# A method defined in `mod` counts as always-available iff `mod` (or one of its
+# ancestor modules, e.g. LinearAlgebra.BLAS → LinearAlgebra) is on the sysimage
+# stdlib allow-list.
+function _is_always_available(mod::Module)
     while true
-        (mod === Base || mod === Core) && return true
+        nameof(mod) in _ALWAYS_AVAILABLE_STDLIBS && return true
         p = parentmodule(mod)
         p === mod && return false
         mod = p
@@ -726,8 +731,11 @@ function load_core(; get_return_type = false)
     # its defining module, so methods defined outside Core/Base are dropped and those
     # Base functions end up method-incomplete (rand 0/76, randn 0/14, kron! 0/13 — fully
     # external; kron 1/17 — partial; plus operators `*`, `\`, `+`, … and others). Re-attach
-    # the dropped, stdlib-defined methods generically rather than by hand. Safe against
-    # double-counting at request time via the `iterate_over_ss_methods` de-dup.
+    # the dropped methods generically rather than by hand, but ONLY those defined in an
+    # always-available sysimage stdlib: load_core runs during JuliaWorkspaces' precompile
+    # with its full dependency tree loaded, so an unscoped re-attach leaks methods from
+    # Dates/LibGit2/CSTParser/… into the shipped Base store. Safe against double-counting at
+    # request time via the `iterate_over_ss_methods` de-dup.
     for n in unsorted_names(Base; all = true, imported = true)
         _isdefinedglobal(Base, n) || continue
         ok, f = _try_getglobal(Base, n)
@@ -740,7 +748,7 @@ function load_core(; get_return_type = false)
         # that already holds every method (crawl captured it fully) is skipped.
         length(st.methods) >= length(methodlist(f)) && continue
         for (mmod, mstore) in cache_methods(f, n, cache, get_return_type)
-            _crawled_by_corebase(mmod) && continue                       # already captured by the crawl
+            _is_always_available(mmod) || continue                       # only re-attach sysimage-stdlib methods
             any(existing -> _samestore(existing, mstore), st.methods) && continue  # de-dup safety
             push!(st.methods, mstore)
         end

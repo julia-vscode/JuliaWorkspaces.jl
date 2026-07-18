@@ -922,4 +922,23 @@ end
     @test length(base[:rand].methods) >= 20    # all from Random
     @test length(base[:randn].methods) >= 10   # all from Random
     @test length(base[:kron!].methods) >= 10   # all from LinearAlgebra
+
+    # The re-attach must be scoped to the always-available sysimage stdlibs. load_core
+    # runs during JuliaWorkspaces' precompile with its whole dependency tree loaded, so
+    # an unscoped re-attach leaks methods from those deps (Dates, LibGit2, CSTParser,
+    # CommonMark, JuliaFormatter, Salsa, JSONRPC, …) into the shipped Base store. Assert
+    # no Base FunctionStore holds a method attributed to one of those known leakers.
+    # (Legit sources are Base and its submodules — Math, Iterators, … — plus the
+    # allow-listed stdlibs and their submodules like LinearAlgebra.BLAS.)
+    present_mods = Set{Symbol}()
+    for (_, st) in base.vals
+        st isa FunctionStore || continue
+        for m in st.methods
+            push!(present_mods, m.mod)
+        end
+    end
+    for bad in (:Dates, :LibGit2, :CSTParser, :CommonMark, :JuliaFormatter, :Salsa,
+                :JSONRPC, :Crayons, :SymbolServer, :Base64, :Markdown, :Test)
+        @test !(bad in present_mods)
+    end
 end
