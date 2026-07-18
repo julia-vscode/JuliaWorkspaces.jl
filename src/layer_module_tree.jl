@@ -812,6 +812,33 @@ Salsa.@derived function derived_method_items(rt, root, path, name)
     return result
 end
 
+"""
+    derived_method_arities(rt, root, path::Vector{String}, name::String) -> Vector{MethodArity}
+
+The argument-count signatures `(minargs, maxargs, kws, kwsplat)` of every method
+of `name` at module `path` (the same selection as `derived_method_items`, minus
+items with no arity — non-callables). Plain data (integers/symbols), so it
+backdates; a thin projection of `derived_module_tree` + the per-file inventories
+with NO dependency on any file's analysis. Lets the per-file method-call lint
+check a call's argument count against the callee's FULL cross-file method set.
+"""
+Salsa.@derived function derived_method_arities(rt, root, path, name)
+    @debug "derived_method_arities" root=root path=path name=name
+
+    tree = derived_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    result = MethodArity[]
+    path in modpaths || return result
+
+    _walk_spliced_binding_items!(rt, root, String[], name, Set{URI}([root])) do F, item, loc
+        item.arity === nothing && return
+        resolved = isempty(item.qualifier) ? loc :
+            _resolve_extension_qualifier(modpaths, loc, item.qualifier)
+        resolved == path && push!(result, item.arity)
+    end
+    return result
+end
+
 const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
 
 # Names imported for UNQUALIFIED extension: `import Base: relpath` (or an import

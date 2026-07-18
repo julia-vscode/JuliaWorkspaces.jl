@@ -4,6 +4,7 @@ import ..derived_has_file
 import ..derived_julia_legacy_syntax_tree
 import ..derived_include_dict
 import ..ItemRef
+import ..MethodArity
 
 using AutoHashEquals: @auto_hash_equals
 

@@ -486,7 +486,24 @@ end
 # `Vector` (not the old per-root `Set`): a single file analyzed once cannot
 # produce the cross-root duplicates the Set deduplicated, and the CST
 # traversal order keeps the result deterministic.
-function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri)
+# Cross-file arity set for a call whose callee is a tree-visible workspace
+# function (the case `check_call` argument-count-checks against the full method
+# set), or `nothing` when the callee isn't such a function — then the render path
+# uses the local `describe_call_mismatch` instead.
+function _call_cross_file_arities(rt, root, path, call, meta_dict)
+    root === nothing && return nothing
+    func_ref = StaticLint.refof_call_func(call, meta_dict)
+    (func_ref isa StaticLint.Binding || func_ref isa StaticLint.TreeRef) || return nothing
+    nm = CSTParser.get_name(call)
+    (nm isa CSTParser.EXPR && StaticLint.isidentifier(nm)) || return nothing
+    name = StaticLint.valofid(nm)
+    name === nothing && return nothing
+    p = vcat(path, _in_file_module_names(call, meta_dict))
+    haskey(derived_module_visible_names_idfree(rt, root, p), name) || return nothing
+    return derived_method_arities(rt, root, p, name)
+end
+
+function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[])
     diagnostics = Diagnostic[]
 
     # Names the project declares as dependencies, for the UnresolvedImport
@@ -526,7 +543,13 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
             code = StaticLint.errorof(err[2], meta_dict)
             description = get(StaticLint.LintCodeDescriptions, code, "")
             if code === StaticLint.IncorrectCallArgs
-                detail = StaticLint.describe_call_mismatch(err[2], env, meta_dict)
+                # For a tree-visible workspace callee, describe from the full
+                # cross-file arity set (the local candidates are incomplete);
+                # otherwise from the local candidates (store/local methods).
+                ar = _call_cross_file_arities(rt, root, path, err[2], meta_dict)
+                detail = ar !== nothing ?
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar) :
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict)
                 detail !== nothing && (description = detail)
             end
             severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
@@ -706,7 +729,16 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # extends: its overload isn't in the env store, so decline the method-call
     # lint rather than false-positive (see `_store_extended_in_workspace`).
     tree_extended = (func_ref, x) -> _store_extended_in_workspace(rt, root, env, func_ref)
-    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended)
+    # `tree_arities` lets the method-call lint check a tree-visible workspace
+    # callee's ARGUMENT COUNT against its full cross-file method set (the local
+    # `func_ref` sees only this file's methods). Plain-data arities from the
+    # inventory — no dependency on sibling analyses. (Positional-type checking of
+    # such callees is deferred; see the cross-file-method-checks design doc.)
+    tree_arities = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        derived_method_arities(rt, root, p, name)
+    end
+    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities)
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file
@@ -717,7 +749,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # `state.resolveonly`, so this can only run after the pass).
     StaticLint.mark_unresolved_imports!(cst, meta_dict)
 
-    diagnostics = _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri)
+    diagnostics = _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root, path)
 
     # Extract outbound BEFORE the store strip: the strip rewrites env-store
     # module refs into TreeRef stand-ins, which must not be counted as

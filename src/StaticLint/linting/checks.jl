@@ -121,13 +121,13 @@ LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
 # decline — the lost true-positive direction (a genuinely method-less
 # module-level function) is sanctioned conservatism of the per-file
 # architecture.
-function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing)
+function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing)
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
     is_test_throws_macrocall(x, env, meta_dict) && return
 
     # Do checks
-    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended)
+    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
     opts.constif && check_if_conds(x, meta_dict)
@@ -144,7 +144,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
 
     if x.args !== nothing
         for i in 1:length(x.args)
-            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended)
+            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities)
         end
     end
 end
@@ -336,6 +336,9 @@ function compare_f_call(
     return true
 end
 
+compare_f_call(ref::MethodArity, act) =
+    compare_f_call((ref.minargs, ref.maxargs, ref.kws, ref.kwsplat), act)
+
 function is_something_with_methods(x::Binding)
     (CoreTypes.isfunction(x.type) && x.val isa EXPR) ||
     (CoreTypes.isdatatype(x.type) && x.val isa EXPR && CSTParser.defines_struct(x.val)) ||
@@ -344,7 +347,7 @@ end
 is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} = true
 is_something_with_methods(x) = false
 
-function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing)
+function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
@@ -360,11 +363,31 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
         # a Binding-backed callee whose name is also tree-visible has an
         # unknowable-from-this-file method set — decline. Store-backed
         # callees (env) keep their full method sets and stay checked.
-        if tree_visible !== nothing && func_ref isa Binding
+        # A tree-visible workspace callee — a local `Binding` whose name is also
+        # tree-visible (methods may span sibling files), OR a `TreeRef` to a
+        # function/macro/struct defined only in sibling files.
+        if tree_visible !== nothing &&
+           (func_ref isa Binding ||
+            (func_ref isa TreeRef && func_ref.kind in (:function, :macro, :struct, :mutable_struct)))
             name = CSTParser.get_name(x)
             if name isa EXPR && isidentifier(name)
                 n = valofid(name)
-                n !== nothing && tree_visible(n, x) && return
+                if n !== nothing && tree_visible(n, x)
+                    # The local `func_ref` sees only THIS file's methods of a
+                    # tree-visible name, but the tree knows all of them. Check the
+                    # argument count against the full cross-file arity set
+                    # (`tree_arities`); a positional TYPE check of a cross-file
+                    # callee is deferred (needs sibling analyses). Splatted calls
+                    # have an unknowable arity — skip.
+                    if tree_arities !== nothing && !call_has_splat(x)
+                        arities = tree_arities(n, x)
+                        if !isempty(arities)
+                            cc = call_nargs(x)
+                            any(a -> compare_f_call(a, cc), arities) || seterror!(x, IncorrectCallArgs, meta_dict)
+                        end
+                    end
+                    return
+                end
             end
         end
 
@@ -574,9 +597,9 @@ function _candidate_methods(call::EXPR, env::ExternalEnv, meta_dict)
     return cands
 end
 
-_cand_nargs(m::SymbolServer.MethodStore, env, meta_dict) = func_nargs(m)
+_cand_nargs(m::SymbolServer.MethodStore, env, meta_dict) = MethodArity(func_nargs(m)...)
 _cand_nargs(m::EXPR, env, meta_dict) =
-    CSTParser.defines_struct(m) ? struct_nargs(m, env, meta_dict) : func_nargs(m, env, meta_dict)
+    MethodArity((CSTParser.defines_struct(m) ? struct_nargs(m, env, meta_dict) : func_nargs(m, env, meta_dict))...)
 
 # Expected type of positional slot `i` (1-based) of candidate `m` at a call of
 # `nargs` positional arguments, or `nothing` when it can't be pinned down
@@ -611,15 +634,15 @@ end
 
 # Render the arity constraint of a set of `func_nargs`-style tuples for a message.
 function _arity_desc(counts)
-    mins = sort!(unique(c[1] for c in counts))
-    unbounded = any(c[2] == typemax(Int) for c in counts)
+    mins = sort!(unique(c.minargs for c in counts))
+    unbounded = any(c.maxargs == typemax(Int) for c in counts)
     if unbounded
         return string("at least ", minimum(mins))
-    elseif length(mins) == 1 && all(c[2] == mins[1] for c in counts)
+    elseif length(mins) == 1 && all(c.maxargs == mins[1] for c in counts)
         return string(mins[1])
     else
-        lo = minimum(c[1] for c in counts)
-        hi = maximum(c[2] for c in counts)
+        lo = minimum(c.minargs for c in counts)
+        hi = maximum(c.maxargs for c in counts)
         return lo == hi ? string(lo) : string(lo, " to ", hi)
     end
 end
@@ -634,10 +657,15 @@ argument, the inferred type, and the expected type). Returns `nothing` when no
 specific reason is derivable (splatted call, unusual callee shape), so the caller
 keeps the generic wording.
 """
-function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict)
+function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_arities=nothing)
     call_has_splat(call) && return nothing
-    cands = _candidate_methods(call, env, meta_dict)
-    (cands === nothing || isempty(cands)) && return nothing
+    # `cand_arities` (cross-file arity set, from `derived_method_arities`) drives
+    # the arg-count / keyword reason for a callee whose method set spans files —
+    # the local candidate EXPRs are then incomplete, so skip the type branch. With
+    # no `cand_arities`, enumerate the local candidates (store methods / local
+    # method EXPRs) and do the full arity + keyword + positional-type analysis.
+    cands = cand_arities === nothing ? _candidate_methods(call, env, meta_dict) : nothing
+    cand_arities === nothing && (cands === nothing || isempty(cands)) && return nothing
     name = _call_name_str(call)
     name === nothing && return nothing
     store = getsymbols(env)
@@ -650,9 +678,10 @@ function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict)
         join((string("::", _format_type(t)) for t in inferred), ", "),
         isempty(act_kws) ? "" : string("; ", join(act_kws, ", ")), ")`.")
 
-    counts = [_cand_nargs(c, env, meta_dict) for c in cands]
+    counts = cand_arities === nothing ? [_cand_nargs(c, env, meta_dict) for c in cands] : cand_arities
+    isempty(counts) && return nothing
 
-    arity_ok = [i for i in eachindex(cands) if counts[i][1] <= nargs <= counts[i][2]]
+    arity_ok = [i for i in eachindex(counts) if counts[i].minargs <= nargs <= counts[i].maxargs]
     if isempty(arity_ok)
         return string(header, " Expected ", _arity_desc(counts), " argument",
             _arity_desc(counts) == "1" ? "" : "s", ", got ", nargs, ".")
@@ -660,14 +689,18 @@ function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict)
 
     # keyword: a passed keyword no arity-matching candidate accepts
     if !isempty(act_kws)
-        accepts(i, kw) = counts[i][4] || kw in counts[i][3] # kwsplat or listed
+        accepts(i, kw) = counts[i].kwsplat || kw in counts[i].kws
         for kw in act_kws
             any(i -> accepts(i, kw), arity_ok) || return string(header, " Unsupported keyword `", kw, "`.")
         end
     end
 
-    # positional type: closest arity/keyword-ok candidate with a known mismatch
-    kw_ok = [i for i in arity_ok if counts[i][4] || all(kw in counts[i][3] for kw in act_kws)]
+    # positional type: only with real candidate EXPRs/MethodStores in hand
+    # (the cross-file arity path has no per-method types — that is Part B).
+    cands === nothing && return header
+
+    # closest arity/keyword-ok candidate with a known mismatch
+    kw_ok = [i for i in arity_ok if counts[i].kwsplat || all(kw in counts[i].kws for kw in act_kws)]
     consider = isempty(kw_ok) ? arity_ok : kw_ok
     best_i, best_slot, best_got, best_exp, best_count = 0, 0, nothing, nothing, typemax(Int)
     for i in consider

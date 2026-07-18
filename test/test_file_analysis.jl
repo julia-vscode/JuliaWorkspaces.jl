@@ -481,6 +481,38 @@ end
     @test !any(d -> occursin("method matching", d.message) || occursin("method call error", d.message), fa.diagnostics)
 end
 
+@testitem "derived_file_analysis: cross-file argument-count check for project functions" setup=[FileAnalysisWS] begin
+    # A module-level project function's method set spans files; the arg count is
+    # checked against the FULL set (from the inventory, no sibling analysis).
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+
+    # `f` defined only in a sibling, called with a wrong arity: flagged w/ detail.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "f(x) = x\n",
+        B => "g() = f(1, 2)\n",
+    ))
+    d = mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B))
+    @test length(d) == 1 && occursin("Expected 1 argument, got 2", d[1])
+
+    # A call matching a sibling method's arity is NOT flagged (arities aggregate
+    # across files: f(x) in a.jl + f(x,y) in b.jl).
+    jw2 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "f(x) = x\n",
+        B => "f(x, y) = x\ng() = f(1, 2)\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B)))
+
+    # A bare forward declaration contributes no arity ⇒ no false positive.
+    jw3 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "function f end\n",
+        B => "g() = f(1)\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw3.runtime, ROOT, B)))
+end
+
 @testitem "derived_file_analysis: a method-call error names the mismatch" setup=[FileAnalysisWS] begin
     # the flagged call renders a specific reason, not the bare
     # "Possible method call error." — here an arity mismatch on a store function.

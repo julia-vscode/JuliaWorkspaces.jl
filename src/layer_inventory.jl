@@ -8,6 +8,25 @@
 # Position/EXPR reattachment lives exclusively in `derived_item_positions`.
 
 """
+    MethodArity(minargs, maxargs, kws, kwsplat)
+
+The argument-count shape of a callable: the positional count range
+`minargs..maxargs` (`maxargs == typemax(Int)` for an unbounded `x...`/`Vararg`),
+the accepted keyword names `kws`, and `kwsplat` (a `; kwargs...` accepts any
+keyword). Produced by `StaticLint.func_nargs`/`struct_nargs` (via the splatting
+constructor `MethodArity(func_nargs(x)...)`) and compared against a call's
+`call_nargs` by `StaticLint.compare_f_call`. Plain data, so it backdates when
+carried in the inventory for the cross-file argument-count check. Defined here
+(the parent module) and imported into StaticLint, mirroring `ItemRef`.
+"""
+@auto_hash_equals struct MethodArity
+    minargs::Int
+    maxargs::Int
+    kws::Vector{Symbol}
+    kwsplat::Bool
+end
+
+"""
     InventoryItem
 
 One top-level (module-level) item of a file. `parent_module` is the module
@@ -18,7 +37,10 @@ top level (whatever module the file is spliced into by its includer).
 `String[]` means the name is bound locally (a plain definition, not a method
 extension of an already-existing name elsewhere). `signature` is a normalized
 (re-printed) signature string for functions and macros, `nothing` otherwise.
-`field_names` is populated for structs.
+`field_names` is populated for structs. `arity`, when non-`nothing`, is the
+callable's `MethodArity` (argument-count shape) computed from the defining EXPR —
+plain data (so it backdates), used by the cross-file argument-count check for
+methods whose full set spans files.
 """
 @auto_hash_equals struct InventoryItem
     id::Int
@@ -28,7 +50,13 @@ extension of an already-existing name elsewhere). `signature` is a normalized
     signature::Union{Nothing,String}
     field_names::Vector{String}
     parent_module::Vector{String}
+    arity::Union{Nothing,MethodArity}
 end
+
+# Back-compat constructor: non-callable items (assignments, consts, enums, …)
+# carry no arity.
+InventoryItem(id, name, qualifier, kind, signature, field_names, parent_module) =
+    InventoryItem(id, name, qualifier, kind, signature, field_names, parent_module, nothing)
 
 "An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
 `alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
@@ -540,7 +568,7 @@ function _classify_assignment!(acc, x, id, parent_module, kind_override, contain
         name = _symbol_name(CSTParser.get_name(x))
         if name !== nothing
             qualifier = _item_qualifier(CSTParser.get_name(x))
-            push!(acc.items, InventoryItem(id, name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module))
+            push!(acc.items, InventoryItem(id, name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
         end
     elseif CSTParser.iscurly(x.args[1])
         # Typealias: `Vector{T} = ...` — name comes from the curly's base
@@ -608,7 +636,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             name = "@" * name
         end
         qualifier = _item_qualifier(CSTParser.get_name(x))
-        push!(acc.items, InventoryItem(id, name, qualifier, kind, _render_sig(x), String[], parent_module))
+        push!(acc.items, InventoryItem(id, name, qualifier, kind, _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
         name = _item_name(CSTParser.get_name(x))
@@ -636,7 +664,8 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             kind = CSTParser.defines_abstract(x) ? :abstract : :primitive
             field_names = String[]
         end
-        push!(acc.items, InventoryItem(id, name, String[], kind, nothing, field_names, parent_module))
+        arity = CSTParser.defines_struct(x) ? MethodArity(StaticLint.struct_nargs(x)...) : nothing
+        push!(acc.items, InventoryItem(id, name, String[], kind, nothing, field_names, parent_module, arity))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;
         # curly lhs → :assignment (typealias); plain identifier lhs → :assignment
