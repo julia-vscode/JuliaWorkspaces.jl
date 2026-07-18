@@ -132,6 +132,24 @@ end
     @test occursin("PkgId", string(argb.type.name))
 end
 
+@testitem "method through a const type alias with an unresolved base" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # `const A = Foo{Int}` is a type alias (a `curly` is always a type
+    # application), so `A(x) = ...` is a valid constructor definition — even when
+    # the base `Foo` doesn't resolve to a datatype store (e.g. a foreign
+    # parametric like Revise's `OrderedDict{Module,ExprsInfos}`). It must not
+    # false-flag "Cannot define function ; it already has a value."
+    root = URI("file:///t/src/M.jl")
+    f = URI("file:///t/src/t.jl")
+    jw = ws_files(
+        root => "module M\ninclude(\"t.jl\")\nend\n",
+        f => "const A = Foo{Int}\nA(x::Int) = A()\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, f)
+    @test !any(d -> occursin("Cannot define function", d.message), fa.diagnostics)
+end
+
 @testitem "infer_module" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: bindingof
     let (cst, meta_dict) = parse_and_pass("module A end")

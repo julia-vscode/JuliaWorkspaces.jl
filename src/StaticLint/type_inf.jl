@@ -160,14 +160,19 @@ function infer_type_assignment_rhs(binding, state, scope)
             unwrapped = CSTParser.rem_wheres_decls(rhs)
             if CSTParser.iscurly(unwrapped)
                 callname = CSTParser.get_name(unwrapped)
+                # A `curly` is always a type application (`X{...}`), so the alias
+                # is a type regardless of whether the base `X` resolves — a
+                # foreign/unresolved parametric base (e.g. Revise's
+                # `OrderedDict{Module,ExprsInfos}`) must still count as a datatype
+                # so that method definitions through the alias
+                # (`Alias(x) = ...`) don't false-flag CannotDefineFuncAlreadyHasValue.
+                # Still resolve the base so a genuine missing reference is reported.
                 if isidentifier(callname)
                     resolve_ref(callname, scope, state)
-                    if hasref(callname, meta_dict)
-                        rb = get_root_method(refof(callname, meta_dict))
-                        if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
-                            settype!(binding, CoreTypes.DataType)
-                        end
-                    end
+                    settype!(binding, CoreTypes.DataType)
+                elseif is_getfield_w_quotenode(callname)
+                    resolve_getfield(callname, scope, state)
+                    settype!(binding, CoreTypes.DataType)
                 end
             end
         elseif (literal_type = infer_literal_type(rhs)) !== nothing
