@@ -594,18 +594,24 @@ function check_is_used_in_getindex(expr, lhs, arr, meta_dict)
     return false
 end
 
+# `nothing` is Core-owned but re-exported by Base. Depending on how the crawl
+# represents the re-export, a use can resolve to either the Core or the Base
+# store entry — two distinct `GenericStore` instances that don't compare equal —
+# so matching only against `Core[:nothing]` misses uses that resolve through
+# Base. Accept either.
+function _refers_to_nothing(@nospecialize(r), env::ExternalEnv)
+    r === nothing && return false
+    syms = getsymbols(env)
+    r == syms[:Core][:nothing] && return true
+    return haskey(syms[:Base], :nothing) && r == syms[:Base][:nothing]
+end
+
 function check_nothing_equality(x::EXPR, env::ExternalEnv, meta_dict)
     if isbinarycall(x) && length(x.args) == 3
-        _nothing = getsymbols(env)[:Core][:nothing]
-        if valof(x.args[1]) == "==" && (
-                (valof(x.args[2]) == "nothing" && refof(x.args[2], meta_dict) == _nothing) ||
-                (valof(x.args[3]) == "nothing" && refof(x.args[3], meta_dict) == _nothing)
-            )
+        _is_nothing(a) = valof(a) == "nothing" && _refers_to_nothing(refof(a, meta_dict), env)
+        if valof(x.args[1]) == "==" && (_is_nothing(x.args[2]) || _is_nothing(x.args[3]))
             seterror!(x.args[1], NothingEquality, meta_dict)
-        elseif valof(x.args[1]) == "!=" && (
-                (valof(x.args[2]) == "nothing" && refof(x.args[2], meta_dict) == _nothing) ||
-                (valof(x.args[3]) == "nothing" && refof(x.args[3], meta_dict) == _nothing)
-            )
+        elseif valof(x.args[1]) == "!=" && (_is_nothing(x.args[2]) || _is_nothing(x.args[3]))
             seterror!(x.args[1], NothingNotEq, meta_dict)
         end
     end

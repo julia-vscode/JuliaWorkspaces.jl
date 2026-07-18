@@ -34,6 +34,29 @@
     # DataTypeStores via the shadow-rename branch. That redundant duplication is
     # an accepted tradeoff of the simpler filter-free crawler, so we deliberately
     # do NOT assert against it here.
+
+    # Method completeness for Core-owned *concrete* types re-exported/aliased by
+    # Base. `cache_methods` (run during the Core crawl, which precedes Base) seeds
+    # Base's entry with the type's Base-defined extension methods
+    # (`String(::Vector{UInt8})`, the `Int` constructors, …). The DataType-branch
+    # guard in `symbols` must NOT clobber that seeded, method-carrying store with a
+    # fresh (method-poor) shadow `DataTypeStore` or a `VarRef` — otherwise the
+    # linter's identity-based type checks (`check_call`, `check_kw_default`) stop
+    # matching valid calls/defaults. Regression guard for that.
+    let s = base.vals[:String]
+        @test s isa FunctionStore
+        @test any(m -> occursin("Array", string(m.sig)) || occursin("Vector", string(m.sig)), s.methods)
+    end
+    # `Int` (a *concrete* alias of `Int64`; `nameof(Int64) === :Int64 ≠ :Int`, so it
+    # hits the shadow-rename branch) is likewise preserved as its seeded
+    # method-carrying `FunctionStore`, whose `.extends` resolves back to the
+    # canonical `Core.Int`.
+    @test base.vals[:Int] isa FunctionStore
+    # A *parametric* alias (`Vector` = `Array{T,1} where T`) must instead stay a
+    # `DataTypeStore` — arg-type inference needs its type structure to match e.g.
+    # `v::Vector{UInt8}`. The `!(x isa UnionAll)` half of the guard keeps the
+    # parametric case out of the preserve-branch.
+    @test base.vals[:Vector] isa DataTypeStore
 end
 
 @testitem "SymbolServer: Core-level intrinsics forward to Core.Intrinsics" begin

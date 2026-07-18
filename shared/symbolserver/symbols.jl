@@ -544,6 +544,29 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
                 if parentmodule(x) === m
                     cache[s] = DataTypeStore(x, s, m, s in getnames(m))
                     cache_methods(x, s, env, get_return_type)
+                elseif !(x isa UnionAll) && haskey(cache, s) && (cache[s] isa FunctionStore || cache[s] isa DataTypeStore) && !isempty(cache[s].methods)
+                    # `cache_methods` (run when the owning module was crawled — Core is
+                    # crawled before Base) already seeded a method-carrying store for this
+                    # name: a Core-owned *concrete* type re-exported or aliased by Base
+                    # collects its Base-defined extension methods here — `String`
+                    # (`String(::Vector{UInt8})` …), and concrete aliases like `Int`→`Int64`.
+                    # Leave that store untouched. Overwriting it with a fresh shadow
+                    # `DataTypeStore` (below) makes it a *different* instance from the
+                    # canonical `Core.String`/`Core.Int` store, so the linter's identity-based
+                    # type comparisons (`check_kw_default`, `check_call`, type inference) stop
+                    # matching; overwriting with a `VarRef` (further below) drops the extension
+                    # methods. Keeping the seeded `FunctionStore` lets `get_eventual_datatype`
+                    # follow its `.extends` back to the canonical type.
+                    #
+                    # The `!(x isa UnionAll)` guard is essential: a *parametric* alias like
+                    # `Vector` (= `Array{T,1} where T`, whose `nameof` is `:Array` ≠ `:Vector`,
+                    # so it too is a shadow-rename case) must stay a `DataTypeStore` — arg-type
+                    # inference needs its type structure to match e.g. `v::Vector{UInt8}`
+                    # against `String(::Vector{UInt8})`. A `FunctionStore` has no such structure.
+                    #
+                    # A genuine renamed shadow (e.g. `DataFrames.Not → InvertedIndices.InvertedIndex`)
+                    # is NOT seeded — `cache_methods` attributes those methods to the owning
+                    # module, not the shadowing one — so it correctly falls through below.
                 elseif nameof(x) !== s
                     # This needs some finessing.
                     cache[s] = DataTypeStore(x, s, m, s in getnames(m))
