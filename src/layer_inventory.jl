@@ -650,6 +650,15 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             elseif CSTParser.isidentifier(inner)
                 name = _item_name(inner)
                 name === nothing || push!(acc.items, InventoryItem(id, name, String[], kind_override, nothing, String[], parent_module))
+            elseif CSTParser.isdeclaration(inner) && CSTParser.isidentifier(inner.args[1])
+                # `global x::T` (typed declaration, no assignment): the inner is a
+                # `::` declaration node, not an identifier or assignment. Unwrap to
+                # the declared name so it still enters the module's declared names —
+                # mirrors the `:global`/`:local` typed-declaration handling in
+                # `mark_bindings!` (bindings.jl). Without this, e.g. Revise's
+                # module-wide `global juliadir::String` is invisible cross-file.
+                name = _item_name(inner.args[1])
+                name === nothing || push!(acc.items, InventoryItem(id, name, String[], kind_override, nothing, String[], parent_module))
             end
         end
     elseif CSTParser.headof(x) === :export || CSTParser.headof(x) === :public

@@ -137,6 +137,8 @@ end
     macro m(ex) end
     const C = 1
     global G = 2
+    global juliadir::String
+    global p, q::Int
     x = 3
     abstract type A end
     struct S
@@ -165,6 +167,13 @@ end
     @test isempty(filter(i -> i.name == "m", inv.items))
     @test byname("C").kind === :const
     @test byname("G").kind === :global
+    # Declaration-only typed globals (`global x::T`, no assignment) must still be
+    # extracted so they enter the module's declared/visible names (Revise's
+    # module-wide `global juliadir::String`). The comma form mixes a bare name
+    # and a typed declaration.
+    @test byname("juliadir").kind === :global
+    @test byname("p").kind === :global
+    @test byname("q").kind === :global
     @test byname("x").kind === :assignment
     @test byname("A").kind === :abstract
     @test byname("S").kind === :struct
