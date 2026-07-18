@@ -13,6 +13,10 @@ function _is_env_dependent_diagnostic(d::Diagnostic)
     d.source != "StaticLint.jl" && return false
     startswith(d.message, "Missing reference:") && return true
     startswith(d.message, "Failed to resolve `") && return true
+    # Detailed method-call errors (`describe_call_mismatch`) replace the static
+    # `IncorrectCallArgs` message but are just as env-dependent (method sets need
+    # package symbols) — suppress them until the environment is ready too.
+    startswith(d.message, "No method matching") && return true
     return d.message in _ENV_DEPENDENT_LINT_MESSAGES
 end
 

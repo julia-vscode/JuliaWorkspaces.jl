@@ -4220,3 +4220,34 @@ end
     @test length(gotD) == 4
     @test dup_pairs(gotD) == 0
 end
+
+@testitem "check_call: describe_call_mismatch names the mismatch" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    CST = JuliaWorkspaces.CSTParser
+
+    firstcall(cst, name) = find_first(cst) do x
+        SL.headof(x) === :call && x.args !== nothing && !isempty(x.args) &&
+            SL.isidentifier(x.args[1]) && CST.valof(x.args[1]) == name
+    end
+    function describe(src, name)
+        cst, meta_dict, jw = parse_and_pass(src)
+        SL.describe_call_mismatch(firstcall(cst, name), get_env(jw), meta_dict)
+    end
+
+    # arity
+    m = describe("f(x) = x\nf(1, 2)\n", "f")
+    @test occursin("No method matching `f(", m)
+    @test occursin("Expected 1 argument", m) && occursin("got 2", m)
+
+    # positional type
+    m = describe("f(x::Int) = x\nf(\"s\")\n", "f")
+    @test occursin("argument 1", m) && occursin("Int", m) && occursin("String", m)
+
+    # positional type with several methods picks the closest by arity
+    m = describe("f(x::Int) = x\nf(x::Int, y::Int) = x\nf(\"s\")\n", "f")
+    @test occursin("argument 1", m) && occursin("expected `Int", m) && occursin("got `String", m)
+
+    # keyword: a store function with no keywords called with one
+    m = describe("g() = sqrt(1; foo=2)\n", "sqrt")
+    @test occursin("keyword `foo`", m)
+end

@@ -478,7 +478,20 @@ end
         B => "f() = relpath(\"a\", \"b\", \"c\")\n",
     ))
     fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
-    @test !any(d -> occursin("method call error", d.message), fa.diagnostics)
+    @test !any(d -> occursin("method matching", d.message) || occursin("method call error", d.message), fa.diagnostics)
+end
+
+@testitem "derived_file_analysis: a method-call error names the mismatch" setup=[FileAnalysisWS] begin
+    # the flagged call renders a specific reason, not the bare
+    # "Possible method call error." — here an arity mismatch on a store function.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "f() = sqrt(1, 2, 3)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    d = only(x for x in fa.diagnostics if occursin("method matching", x.message))
+    @test occursin("sqrt", d.message)
+    @test occursin("Expected 1 argument", d.message) && occursin("got 3", d.message)
 end
 
 @testitem "derived_file_analysis: a store call with no workspace extension still flags" setup=[FileAnalysisWS] begin
@@ -489,7 +502,7 @@ end
         B => "f() = sqrt(1, 2, 3)\n",
     ))
     fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
-    @test any(d -> occursin("method call error", d.message), fa.diagnostics)
+    @test any(d -> occursin("method matching", d.message), fa.diagnostics)
 end
 
 @testitem "derived_file_analysis: a store function extended via unqualified import is not false-flagged" setup=[FileAnalysisWS] begin
@@ -501,7 +514,7 @@ end
         B => "f() = relpath(\"a\", \"b\", \"c\")\n",
     ))
     fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
-    @test !any(d -> occursin("method call error", d.message), fa.diagnostics)
+    @test !any(d -> occursin("method matching", d.message) || occursin("method call error", d.message), fa.diagnostics)
 end
 
 @testitem "derived_file_analysis: unresolved in-file imports are marked and reported" setup=[FileAnalysisWS] begin
@@ -1370,7 +1383,7 @@ end
 
     fa_a = JuliaWorkspaces.derived_file_analysis(rt, ROOT, A)
     @test !any(d -> occursin("Called function has no methods", d.message), fa_a.diagnostics)
-    @test !any(d -> occursin("Possible method call error", d.message), fa_a.diagnostics)
+    @test !any(d -> occursin("method matching", d.message) || occursin("Possible method call error", d.message), fa_a.diagnostics)
 
     # A LOCAL (function-scope) callee is not tree-visible: its method set is
     # fully in view, so the arity check must still fire.
@@ -1389,7 +1402,7 @@ end
         """,
     ))
     fa_l = JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, local_uri)
-    @test any(d -> occursin("Possible method call error", d.message), fa_l.diagnostics)
+    @test any(d -> occursin("method matching", d.message) || occursin("Possible method call error", d.message), fa_l.diagnostics)
 
     # The whole-closure pass is untouched: it sees the full method set and
     # never produced these lints on this fixture in the first place — and its
@@ -1419,7 +1432,7 @@ end
         scope2 => "hs(a, b) = 2\n",
     ))
     fa_sl = JuliaWorkspaces.derived_file_analysis(jw3.runtime, ROOT, sl)
-    @test !any(d -> occursin("Possible method call error", d.message), fa_sl.diagnostics)
+    @test !any(d -> occursin("method matching", d.message) || occursin("Possible method call error", d.message), fa_sl.diagnostics)
 end
 
 @testitem "qualified use through a tree-module lhs resolves members to TreeRefs" setup=[FileAnalysisWS] begin

@@ -525,6 +525,10 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
         elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
             code = StaticLint.errorof(err[2], meta_dict)
             description = get(StaticLint.LintCodeDescriptions, code, "")
+            if code === StaticLint.IncorrectCallArgs
+                detail = StaticLint.describe_call_mismatch(err[2], env, meta_dict)
+                detail !== nothing && (description = detail)
+            end
             severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
                 :hint, Symbol[:unnecessary]
             else

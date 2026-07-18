@@ -508,6 +508,194 @@ function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv,
     return true # We shouldn't get here
 end
 
+# ── Detailed "possible method call error" messages ─────────────────────────
+# `check_call` flags a call with the bare `IncorrectCallArgs` code; these build a
+# human-readable reason at render time (see `describe_call_mismatch`), reusing the
+# same arg-count / arg-type machinery `sig_match_any` uses so the reason can never
+# disagree with the flag.
+
+# Short, readable name of a type value (as produced by `call_arg_types` /
+# `_resolve_type_expr` / a MethodStore sig slot). Strips the noisy `Core.` prefix.
+function _format_type(@nospecialize(t))
+    s = t === nothing ? "Any" :
+        t isa SymbolServer.DataTypeStore ? string(t.name) :
+        t isa Binding ? (t.name isa EXPR ? valofid(t.name) : string(t.name)) :
+        string(t)
+    s === nothing && (s = "Any")
+    startswith(s, "Core.") ? s[6:end] : s
+end
+
+# The callee name of a call, as written (`f`, `Base.foo`), or `nothing`.
+function _call_name_str(call::EXPR)
+    n = CSTParser.get_name(call)
+    n isa EXPR || return nothing
+    return string(to_codeobject(n))
+end
+
+# Candidate methods of a call's callee — store `MethodStore`s and/or workspace
+# method `EXPR`s — mirroring `sig_match_any`'s enumeration but without the match
+# filter. Returns `nothing` for a callee shape we can't enumerate confidently.
+function _candidate_methods(call::EXPR, env::ExternalEnv, meta_dict)
+    func_ref = refof_call_func(call, meta_dict)
+    func_ref === nothing && return nothing
+    fuel = 20
+    while func_ref isa Binding && func_ref.val isa Binding && fuel > 0
+        func_ref = func_ref.val
+        fuel -= 1
+    end
+    if func_ref isa Binding && (func_ref.val isa SymbolServer.FunctionStore || func_ref.val isa SymbolServer.DataTypeStore)
+        func_ref = func_ref.val
+    end
+    cands = Any[]
+    if func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore
+        tls = retrieve_toplevel_scope(call, meta_dict)
+        if tls isa Scope
+            iterate_over_ss_methods(func_ref, tls, env, m -> (push!(cands, m); false))
+        else
+            append!(cands, func_ref.methods)
+        end
+    elseif func_ref isa Binding && (CoreTypes.isfunction(func_ref.type) || CoreTypes.isdatatype(func_ref.type))
+        if func_ref.val isa EXPR && defines_function(func_ref.val) &&
+           !(parentof(func_ref.val) isa EXPR && CSTParser.ismacrocall(parentof(func_ref.val)))
+            push!(cands, func_ref.val)
+        end
+        for ref in func_ref.refs
+            m = get_method(ref)
+            m === nothing && continue
+            if m isa SymbolServer.FunctionStore
+                append!(cands, m.methods)
+            elseif m isa EXPR
+                push!(cands, m)
+            end
+        end
+    else
+        return nothing
+    end
+    return cands
+end
+
+_cand_nargs(m::SymbolServer.MethodStore, env, meta_dict) = func_nargs(m)
+_cand_nargs(m::EXPR, env, meta_dict) =
+    CSTParser.defines_struct(m) ? struct_nargs(m, env, meta_dict) : func_nargs(m, env, meta_dict)
+
+# Expected type of positional slot `i` (1-based) of candidate `m` at a call of
+# `nargs` positional arguments, or `nothing` when it can't be pinned down
+# (untyped arg, splat/vararg element, out of range) — matching `match_method`'s
+# leniency so a mismatch is only ever asserted where the matcher rejected it.
+function _expected_arg_type(m::SymbolServer.MethodStore, i::Int, nargs::Int, store, meta_dict)
+    sig = m.sig
+    n = length(sig)
+    n == 0 && return nothing
+    if last(sig)[2] isa SymbolServer.FakeTypeofVararg
+        va = last(sig)[2]
+        i <= n - 1 && return sig[i][2]
+        return isdefined(va, :T) ? va.T : nothing
+    end
+    i <= n ? sig[i][2] : nothing
+end
+function _expected_arg_type(m::EXPR, i::Int, nargs::Int, store, meta_dict)
+    sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(m))
+    (sig isa EXPR && sig.args !== nothing) || return nothing
+    decls = EXPR[]
+    for j in 2:length(sig.args)
+        a = unwrap_nospecialize(sig.args[j])
+        isparameters(a) && continue
+        push!(decls, a)
+    end
+    i <= length(decls) || return nothing
+    a = decls[i]
+    (issplat(a) || is_explicit_vararg_decl(a)) && return nothing
+    (isdeclaration(a) && length(a.args) >= 2) || return nothing
+    return _resolve_type_expr(a.args[2], store, meta_dict)
+end
+
+# Render the arity constraint of a set of `func_nargs`-style tuples for a message.
+function _arity_desc(counts)
+    mins = sort!(unique(c[1] for c in counts))
+    unbounded = any(c[2] == typemax(Int) for c in counts)
+    if unbounded
+        return string("at least ", minimum(mins))
+    elseif length(mins) == 1 && all(c[2] == mins[1] for c in counts)
+        return string(mins[1])
+    else
+        lo = minimum(c[1] for c in counts)
+        hi = maximum(c[2] for c in counts)
+        return lo == hi ? string(lo) : string(lo, " to ", hi)
+    end
+end
+
+"""
+    describe_call_mismatch(call::EXPR, env, meta_dict) -> Union{Nothing,String}
+
+A specific message for a call `check_call` flagged with `IncorrectCallArgs`:
+`No method matching \\\`f(::T1, ::T2)\\\`.` plus the closest reason — an argument
+count mismatch, an unsupported keyword, or a positional type mismatch (naming the
+argument, the inferred type, and the expected type). Returns `nothing` when no
+specific reason is derivable (splatted call, unusual callee shape), so the caller
+keeps the generic wording.
+"""
+function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict)
+    call_has_splat(call) && return nothing
+    cands = _candidate_methods(call, env, meta_dict)
+    (cands === nothing || isempty(cands)) && return nothing
+    name = _call_name_str(call)
+    name === nothing && return nothing
+    store = getsymbols(env)
+
+    act_min, act_max, act_kws = call_nargs(call)
+    nargs = act_min # no splat ⇒ min == max
+    inferred, _ = call_arg_types(call, false, meta_dict, store)
+
+    header = string("No method matching `", name, "(",
+        join((string("::", _format_type(t)) for t in inferred), ", "),
+        isempty(act_kws) ? "" : string("; ", join(act_kws, ", ")), ")`.")
+
+    counts = [_cand_nargs(c, env, meta_dict) for c in cands]
+
+    arity_ok = [i for i in eachindex(cands) if counts[i][1] <= nargs <= counts[i][2]]
+    if isempty(arity_ok)
+        return string(header, " Expected ", _arity_desc(counts), " argument",
+            _arity_desc(counts) == "1" ? "" : "s", ", got ", nargs, ".")
+    end
+
+    # keyword: a passed keyword no arity-matching candidate accepts
+    if !isempty(act_kws)
+        accepts(i, kw) = counts[i][4] || kw in counts[i][3] # kwsplat or listed
+        for kw in act_kws
+            any(i -> accepts(i, kw), arity_ok) || return string(header, " Unsupported keyword `", kw, "`.")
+        end
+    end
+
+    # positional type: closest arity/keyword-ok candidate with a known mismatch
+    kw_ok = [i for i in arity_ok if counts[i][4] || all(kw in counts[i][3] for kw in act_kws)]
+    consider = isempty(kw_ok) ? arity_ok : kw_ok
+    best_i, best_slot, best_got, best_exp, best_count = 0, 0, nothing, nothing, typemax(Int)
+    for i in consider
+        mism = 0
+        first_slot = 0
+        for s in 1:nargs
+            exp = _expected_arg_type(cands[i], s, nargs, store, meta_dict)
+            exp === nothing && continue
+            got = s <= length(inferred) ? inferred[s] : nothing
+            if !_has_type_intersection(got, exp, store, meta_dict)
+                mism += 1
+                first_slot == 0 && (first_slot = s)
+            end
+        end
+        if mism > 0 && mism < best_count
+            best_count = mism
+            best_i, best_slot = i, first_slot
+            best_exp = _expected_arg_type(cands[i], first_slot, nargs, store, meta_dict)
+            best_got = first_slot <= length(inferred) ? inferred[first_slot] : nothing
+        end
+    end
+    if best_slot > 0
+        return string(header, " At argument ", best_slot, ": expected `",
+            _format_type(best_exp), "`, got `", _format_type(best_got), "`.")
+    end
+    return header
+end
+
 function get_method(name::EXPR)
     f = maybe_get_parent_fexpr(name, x -> CSTParser.defines_function(x) || CSTParser.defines_struct(x) || CSTParser.defines_macro(x))
     if f !== nothing && CSTParser.get_name(f) == name
