@@ -36,6 +36,53 @@
     # do NOT assert against it here.
 end
 
+@testitem "SymbolServer: Core-level intrinsics forward to Core.Intrinsics" begin
+    using JuliaWorkspaces.SymbolServer: load_core, _lookup, VarRef, FunctionStore
+
+    # Exercise the *live* crawler (via load_core), not the baked `stdlibs` const.
+    # Intrinsics report `parentmodule(x) === Core` even though they live in
+    # `Core.Intrinsics`. Pre-fix the own-function test misclassified a Core-level
+    # intrinsic (e.g. `Core.add_int`) as Core-owned and emitted a duplicate,
+    # 0-method `FunctionStore` in `cache[:Core]`. The fix classifies an intrinsic
+    # as "own" only at `Core.Intrinsics`, so accessed off `Core` it forwards to
+    # `VarRef(VarRef(Core.Intrinsics), name)` which resolves to the owned store
+    # (holding the synthetic intrinsic method).
+    env = load_core()
+    core = env[:Core]
+    intrinsics = env[:Core][:Intrinsics]
+
+    # Every intrinsic reachable as `Core.<name>` (parentmodule === Core) must, in
+    # `cache[:Core]`, be a VarRef forwarding to the Core.Intrinsics store that
+    # carries the method — NOT a 0-method own FunctionStore.
+    core_level = Symbol[]
+    for n in names(Core.Intrinsics; all = true)
+        isdefined(Core.Intrinsics, n) || continue
+        getglobal(Core.Intrinsics, n) isa Core.IntrinsicFunction || continue
+        (isdefined(Core, n) && getglobal(Core, n) isa Core.IntrinsicFunction) || continue
+        push!(core_level, n)
+    end
+    @test !isempty(core_level)   # there are Core-level-accessible intrinsics
+    for s in core_level
+        entry = core.vals[s]
+        @test entry isa VarRef                      # forwarded, not an own store
+        resolved = _lookup(entry, env, true)
+        @test resolved isa FunctionStore
+        @test length(resolved.methods) >= 1         # resolves to the store WITH the method
+        @test resolved === intrinsics.vals[s]       # specifically the Core.Intrinsics-owned store
+    end
+
+    # Spot-check the two previously hardcoded names still work purely from the crawl.
+    for s in (:add_int, :sle_int)
+        @test s in core_level
+        @test core.vals[s] isa VarRef
+    end
+
+    # No regression: the Core.Intrinsics-owned store itself is a real FunctionStore
+    # with its method (not turned into a VarRef).
+    @test intrinsics.vals[:add_int] isa FunctionStore
+    @test length(intrinsics.vals[:add_int].methods) >= 1
+end
+
 @testitem "SymbolServer: method_world reads the right field" begin
     using JuliaWorkspaces.SymbolServer: method_world
 

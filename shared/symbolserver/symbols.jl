@@ -558,7 +558,12 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
                     cache[s] = VarRef(VarRef(parentmodule(x)), nameof(x))
                 end
             elseif x isa Function
-                if parentmodule(x) === m || (x isa Core.IntrinsicFunction && m === Core.Intrinsics)
+                # Intrinsics report `parentmodule(x) === Core` even though they actually live in
+                # `Core.Intrinsics`, so a plain `parentmodule(x) === m` test would misclassify them as
+                # Core-owned and emit an empty (0-method) FunctionStore. Treat an intrinsic as "own" only
+                # at `Core.Intrinsics`; accessed from anywhere else it falls through to the `elseif` branch
+                # below which forwards to `VarRef(VarRef(Core.Intrinsics), nameof(x))`.
+                if (x isa Core.IntrinsicFunction ? m === Core.Intrinsics : parentmodule(x) === m)
                     cache[s] = FunctionStore(x, s, m, s in getnames(m))
                     cache_methods(x, s, env, get_return_type)
                 elseif !haskey(cache, s)
@@ -712,9 +717,6 @@ function load_core(; get_return_type = false)
         push!(cache[:Base][:randn].methods, m[2])
     end
 
-    # Intrinsics
-    cache[:Core][:add_int] = VarRef(VarRef(VarRef(nothing, :Core), :Intrinsics), :add_int)
-    cache[:Core][:sle_int] = VarRef(VarRef(VarRef(nothing, :Core), :Intrinsics), :sle_int)
     return cache
 end
 
