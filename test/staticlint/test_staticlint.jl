@@ -727,6 +727,20 @@ end
     end
 end
 
+@testitem "check_call parametric re-exported type constructor (Ref)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof
+    # `Ref` is a parametric Core-owned type re-exported by Base under its own name;
+    # its constructor methods are attributed to Base. The crawler must represent
+    # `Base.Ref` as a method-carrying DataTypeStore (not a VarRef to the
+    # method-poor `Core.Ref`), otherwise call-checking these constructors falsely
+    # flags them as having no matching method.
+    for src in ["f() = Ref(5.0)", "f() = Ref(false)", "f() = Ref{Float64}(5.0)", "f() = Ref(0.0)"]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[1].args[2].args[1]
+        @test errorof(call, meta_dict) === nothing
+    end
+end
+
 @testitem "check_call method definition" setup=[shared_static_lint] begin
     (cst, meta_dict) = parse_and_pass("""
     Base.sin(a,b) = 1

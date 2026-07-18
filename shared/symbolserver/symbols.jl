@@ -567,12 +567,20 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
                     # A genuine renamed shadow (e.g. `DataFrames.Not → InvertedIndices.InvertedIndex`)
                     # is NOT seeded — `cache_methods` attributes those methods to the owning
                     # module, not the shadowing one — so it correctly falls through below.
-                elseif nameof(x) !== s
+                elseif nameof(x) !== s || x isa UnionAll
                     # This needs some finessing.
                     cache[s] = DataTypeStore(x, s, m, s in getnames(m))
                     ms = cache_methods(x, s, env, get_return_type)
                     # A slightly difficult case. `s` is probably a shadow binding of `x` but we should store the methods nonetheless.
                     # Example: DataFrames.Not points to InvertedIndices.InvertedIndex
+                    #
+                    # `x isa UnionAll` extends this to a *parametric* Core-owned type
+                    # re-exported by Base under its own name (`Ref`, `nameof(Ref) === :Ref`,
+                    # so the `nameof !== s` shadow test misses it). It needs a
+                    # `DataTypeStore` — not the `VarRef` below — for two reasons: its
+                    # constructor methods are attributed to Base (so a VarRef to the
+                    # method-poor `Core.Ref` drops them, breaking call-checking of e.g.
+                    # `Ref(5.0)`), and `T{...}` curly application needs the type structure.
                     for m in ms
                         push!(cache[s].methods, m[2])
                     end

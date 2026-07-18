@@ -57,6 +57,17 @@
     # `v::Vector{UInt8}`. The `!(x isa UnionAll)` half of the guard keeps the
     # parametric case out of the preserve-branch.
     @test base.vals[:Vector] isa DataTypeStore
+
+    # A parametric Core-owned type re-exported by Base under its OWN name (`Ref`,
+    # `nameof(Ref) === :Ref`, so the shadow-rename branch's `nameof !== s` misses
+    # it) must still be a `DataTypeStore` carrying its constructor methods — NOT a
+    # `VarRef` to the method-poor `Core.Ref` (its constructors are attributed to
+    # Base). Otherwise call-checking a constructor call like `Ref(5.0)` finds no
+    # methods.
+    let rref = base.vals[:Ref]
+        @test rref isa DataTypeStore
+        @test !isempty(rref.methods)
+    end
 end
 
 @testitem "SymbolServer: Core-level intrinsics forward to Core.Intrinsics" begin
