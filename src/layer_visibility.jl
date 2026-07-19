@@ -12,8 +12,9 @@
 # module tree, ever get carried into a returned value. Storing a
 # `ModuleStore`/`ExternalEnv` in a derived value would break Salsa's
 # structural-equality cutoff the same way storing one in the module tree
-# would (see layer_module_tree.jl's own header) — `ExternalEnv` compares by
-# identity, not structure.
+# would (see layer_module_tree.jl's own header) — `ModuleStore` compares by
+# identity, and `ExternalEnv`, though it now backdates when unchanged,
+# still couples the value's invalidation to environment changes.
 
 """
     VisibleName

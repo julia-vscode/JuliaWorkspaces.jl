@@ -7,10 +7,11 @@
 # the same files must be `isequal`, so that Salsa's early-exit stops
 # invalidation here.
 #
-# CRITICAL: values in this layer must NEVER depend on `derived_environment`
-# (ExternalEnv's isequal is identity, not structural). Using it would
-# permanently break the tree's backdating, introducing incorrect cache hits
-# across sessions.
+# CRITICAL: values in this layer must NEVER depend on `derived_environment`:
+# the tree must stay env-independent so an environment change (project
+# resolve, package update) cannot invalidate it. ExternalEnv now backdates
+# when rebuilt-but-unchanged (structural isequal over shared stores), but a
+# *changed* env would still invalidate any tree that depended on it.
 
 """
     ItemRef

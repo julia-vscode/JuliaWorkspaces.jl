@@ -185,6 +185,26 @@ mutable struct ExternalEnv
     project_deps::Vector{Symbol}
 end
 
+# Module stores are immutable and shared across environments, so entrywise
+# *identity* of `symbols` is the right (and cheap) equality. This lets a
+# rebuilt-but-unchanged environment back-date instead of invalidating every
+# consumer.
+function Base.isequal(a::ExternalEnv, b::ExternalEnv)
+    a === b && return true
+    length(a.symbols) == length(b.symbols) || return false
+    for (k, v) in a.symbols
+        get(b.symbols, k, nothing) === v || return false
+    end
+    return a.project_deps == b.project_deps && isequal(a.extended_methods, b.extended_methods)
+end
+function Base.hash(a::ExternalEnv, h::UInt)
+    x = zero(UInt)
+    for (k, v) in a.symbols
+        x ⊻= hash((k, objectid(v)))
+    end
+    return hash(a.project_deps, hash(x, h))
+end
+
 """
     TestSetupInfo
 
