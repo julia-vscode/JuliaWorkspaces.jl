@@ -48,3 +48,31 @@ end
     @test length(launches) == 5
     @test isempty(df.launch_queue)
 end
+
+@testitem "Dynamic reconcile: finished work frees a slot for the best-priority queued key" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg, ProcessIndexedMsg,
+        ProcessIndexFailedMsg, WatchTestEnvironmentKey, CreateStandaloneProjectKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=1, launcher=(df, djp) -> push!(launches, djp.key))
+
+    shallow_late = CreateStandaloneProjectKey("/ws/A", UInt64(1))          # standalone, depth 2
+    deep         = CreateStandaloneProjectKey("/ws/A/test/data/B", UInt64(2))
+    first_up     = WatchTestEnvironmentKey("/ws/C/sub", "C", UInt64(3))    # depth 3
+
+    # Insertion order deliberately not priority order.
+    handle!(df, ReconcileMsg(Set{DJPKey}([deep, first_up, shallow_late])))
+    @test length(launches) == 1
+    @test launches[1] == shallow_late          # dispatch is priority-sorted (Task 4 asserts too)
+
+    handle!(df, ProcessIndexedMsg(launches[1], "/tmp/x"))
+    @test length(launches) == 2
+    @test launches[2] == first_up              # depth 3 beats depth 4
+
+    handle!(df, ProcessIndexFailedMsg(launches[2], ErrorException("boom")))
+    @test length(launches) == 3
+    @test launches[3] == deep
+    @test isempty(df.launch_queue)
+    @test df.pending_count[] == 1              # only `deep` still pending
+end

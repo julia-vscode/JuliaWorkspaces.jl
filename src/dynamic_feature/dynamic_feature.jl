@@ -691,6 +691,32 @@ function _request_launch!(df::DynamicFeature, key::DJPKey)
     return
 end
 
+# Launch queued keys, best `_launch_priority` first (stable: strict `<` keeps
+# insertion order among equals), while slots are free. Skips keys whose work
+# was cancelled while queued.
+function _drain_launch_queue!(df::DynamicFeature)
+    while _has_free_slot(df) && !isempty(df.launch_queue)
+        best = 1
+        for i in 2:length(df.launch_queue)
+            if _launch_priority(df.launch_queue[i]) < _launch_priority(df.launch_queue[best])
+                best = i
+            end
+        end
+        key = df.launch_queue[best]
+        deleteat!(df.launch_queue, best)
+        key in df.inflight || continue
+        _launch_now!(df, key)
+    end
+    return
+end
+
+# A launched child reached a terminal state: release its slot and refill.
+function _free_slot!(df::DynamicFeature, key::DJPKey)
+    delete!(df.launching, key)
+    _drain_launch_queue!(df)
+    return
+end
+
 """
     Base.run(df::DynamicFeature)
 
@@ -911,6 +937,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         delete!(df.procs, key)
     end
 
+    _free_slot!(df, key)
     _complete_work_item!(df, key)
     return false
 end
@@ -933,6 +960,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         delete!(df.procs, key)
     end
 
+    _free_slot!(df, key)
     _complete_work_item!(df, key)
     return false
 end
@@ -953,6 +981,7 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
         _complete_work_item!(df, key)
     end
 
+    _free_slot!(df, key)
     return false
 end
 
