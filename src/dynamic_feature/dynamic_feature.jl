@@ -62,13 +62,14 @@ function index_project(djp::DynamicJuliaProcess, store_path::String)
     )
 end
 
-function create_standalone_project(djp::DynamicJuliaProcess, store_path::String)
+function create_standalone_project(djp::DynamicJuliaProcess, store_path::String, project_dir::String)
     JSONRPC.send(
         djp.endpoint,
         JuliaDynamicAnalysisProtocol.create_standalone_project_request_type,
         JuliaDynamicAnalysisProtocol.CreateStandaloneProjectParams(
             djp.project_path,
-            store_path
+            store_path,
+            project_dir
         )
     )
 end
@@ -391,6 +392,25 @@ struct DynamicFeature
             launcher,
         )
     end
+end
+
+# Persistent, deterministic project dir for a standalone package: reused
+# across sessions while the package's Project.toml (content hash) is
+# unchanged. Sibling dirs for the same package under an *old* hash are
+# removed — a changed package gets a fresh resolve, and growth stays bounded.
+function _standalone_project_dir(df::DynamicFeature, key::CreateStandaloneProjectKey)
+    parent = joinpath(dirname(df.store_path), "standalone-projects")
+    name = basename(key.package_path)
+    dir = joinpath(parent, string(name, "-", string(key.content_hash, base=16, pad=16)))
+    if isdir(parent)
+        for other in readdir(parent; join=true)
+            if startswith(basename(other), string(name, "-")) && other != dir
+                try rm(other; recursive=true) catch; end
+            end
+        end
+    end
+    mkpath(dir)
+    return dir
 end
 
 """
@@ -873,7 +893,7 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
     # as a `ProcessIndexedMsg`/`ProcessIndexFailedMsg`.
     Threads.@async try
         result_dir = if key isa CreateStandaloneProjectKey
-            create_standalone_project(djp, df.store_path)
+            create_standalone_project(djp, df.store_path, _standalone_project_dir(df, key))
         else
             index_project(djp, df.store_path)
         end

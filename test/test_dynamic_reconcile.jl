@@ -158,3 +158,24 @@ end
     @test all(k -> k isa WatchEnvironmentKey, req_off)        # ...and is fully disabled
     @test !isempty(req_off)                                   # real projects still watched
 end
+
+@testitem "Dynamic reconcile: standalone project dirs are hash-keyed and cleaned up" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, CreateStandaloneProjectKey,
+        _standalone_project_dir
+
+    store = mktempdir()
+    df = DynamicFeature(DynamicPersistent, store; launcher=(df, djp) -> nothing)
+
+    key1 = CreateStandaloneProjectKey("/ws/Pkg", UInt64(0x1234))
+    key2 = CreateStandaloneProjectKey("/ws/Pkg", UInt64(0x5678))
+
+    dir1 = _standalone_project_dir(df, key1)
+    @test startswith(dir1, joinpath(dirname(store), "standalone-projects"))
+    @test occursin("Pkg-", basename(dir1))
+    @test _standalone_project_dir(df, key1) == dir1      # deterministic
+    @test isdir(dir1)                                    # parent-created
+
+    dir2 = _standalone_project_dir(df, key2)
+    @test dir2 != dir1
+    @test !isdir(dir1)      # old hash dir for the same package cleaned up
+end
