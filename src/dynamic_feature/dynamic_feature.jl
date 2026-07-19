@@ -736,7 +736,11 @@ function _drain_launch_queue!(df::DynamicFeature)
     end
 
     # Refreshes fill remaining slots only when no first-time work wants them.
-    while _has_free_slot(df) && isempty(df.launch_queue) && !isempty(df.refresh_queue)
+    # `pending_count` (not just `launch_queue`) gates this: it covers queued,
+    # launched, and prep-in-flight work items, so the completion of the last
+    # first-time item -- including a fast-lane serve itself -- is what
+    # releases refreshes to run.
+    while _has_free_slot(df) && df.pending_count[] <= 0 && isempty(df.launch_queue) && !isempty(df.refresh_queue)
         best = 1
         for i in 2:length(df.refresh_queue)
             if _launch_priority(df.refresh_queue[i]) < _launch_priority(df.refresh_queue[best])
@@ -918,6 +922,7 @@ function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
         push!(df.done, key)
         _complete_work_item!(df, key)
         push!(df.refresh_queue, key)
+        _drain_launch_queue!(df)
     else
         _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
         _request_launch!(df, key)
@@ -1030,8 +1035,11 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         delete!(df.procs, key)
     end
 
-    _free_slot!(df, key)
+    # Decrement pending_count before freeing the slot: the free-slot drain
+    # reads pending_count to decide whether a queued refresh may launch, so it
+    # must see this item's own completion, not a stale pre-decrement value.
     _complete_work_item!(df, key)
+    _free_slot!(df, key)
     return false
 end
 
@@ -1069,8 +1077,9 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         delete!(df.procs, key)
     end
 
-    _free_slot!(df, key)
+    # Same ordering rationale as ProcessIndexedMsg: decrement before draining.
     _complete_work_item!(df, key)
+    _free_slot!(df, key)
     return false
 end
 
@@ -1182,6 +1191,7 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
             delete!(df.procs, key)
         end
         delete!(df.launching, key)
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
     end
 
     # ── Spawn work for newly-required keys ─────────────────────────────────

@@ -221,9 +221,12 @@ end
     push!(df.inflight, key)
     handle!(df, StandaloneProjectPrepDoneMsg(key, true))
 
-    @test isempty(launches)                       # no child
     @test key in df.done
-    @test df.refresh_queue == [key]               # background refresh queued
+    # Nothing else is pending, so the background refresh -- not a child for
+    # the serve itself -- launches immediately once queued.
+    @test launches == [key]
+    @test isempty(df.refresh_queue)
+    @test key in df.refreshing
     result = take!(df.out_channel)
     @test result isa StandaloneProjectReadyResult
 end
@@ -253,6 +256,7 @@ end
         ProcessIndexedMsg, ProcessIndexFailedMsg, CreateStandaloneProjectKey,
         WatchTestEnvironmentKey, WatchTestEnvironmentMsg, StandaloneProjectReadyResult, DJPKey,
         handle!, _standalone_project_dir
+    using Base.Threads: atomic_add!
 
     launches = DJPKey[]
     df = DynamicFeature(DynamicPersistent, mktempdir();
@@ -261,41 +265,52 @@ end
     fast = CreateStandaloneProjectKey("/ws/Fast", UInt64(1))
     slow = WatchTestEnvironmentKey("/ws/Slow", "Slow", UInt64(2))
 
-    # Fast-lane hit queues a refresh...
-    push!(df.inflight, fast)
-    handle!(df, StandaloneProjectPrepDoneMsg(fast, true))
-    take!(df.out_channel)               # the served-stale ready result
-    pending_after_serve = df.pending_count[]
-
-    # ...but first-time work still wins the only slot.
+    # `slow` is first-time work occupying the only slot; drive its pending
+    # accounting the way ReconcileMsg does.
     push!(df.inflight, slow)
+    atomic_add!(df.pending_count, 1)
     handle!(df, WatchTestEnvironmentMsg(slow))
     @test launches == [slow]
 
-    # Slot frees with nothing left in the primary queue -> refresh launches.
+    # A fast-lane hit while `slow` is still pending: served immediately, but
+    # its background refresh only queues -- first-time work still owns the
+    # only slot.
+    push!(df.inflight, fast)
+    atomic_add!(df.pending_count, 1)
+    handle!(df, StandaloneProjectPrepDoneMsg(fast, true))
+    take!(df.out_channel)               # the served-stale ready result
+    @test launches == [slow]
+    @test fast in df.refresh_queue
+    @test !(fast in df.refreshing)
+
+    # `slow` completes: pending hits 0, freeing the slot for the refresh.
+    pending_before_refresh = df.pending_count[]
     handle!(df, ProcessIndexedMsg(slow, "/tmp/x"))
     take!(df.out_channel)               # slow's ready result
     @test launches == [slow, fast]
     @test fast in df.refreshing
-    @test df.pending_count[] == pending_after_serve - 1   # -1 is slow's own completion; refresh itself never counted
+    @test df.pending_count[] == pending_before_refresh - 1   # slow's own completion; refresh never counted
 
-    # Refresh completion re-emits the ready result and frees the slot.
+    # Refresh completion re-emits the ready result, frees the slot, and never
+    # touches pending_count.
+    pending_before_done = df.pending_count[]
     handle!(df, ProcessIndexedMsg(fast, _standalone_project_dir(df, fast)))
     @test take!(df.out_channel) isa StandaloneProjectReadyResult
     @test !(fast in df.refreshing)
+    @test df.pending_count[] == pending_before_done
 
-    # A refresh failure must not poison failed_projects.
+    # A second serve+refresh cycle whose refresh fails must not poison
+    # failed_projects -- the served-stale environment keeps working. Nothing
+    # else is pending, so the refresh launches immediately.
     push!(df.inflight, fast)
+    atomic_add!(df.pending_count, 1)
     handle!(df, StandaloneProjectPrepDoneMsg(fast, true))
     take!(df.out_channel)
-    handle!(df, ProcessIndexedMsg(WatchTestEnvironmentKey("/dummy", "D", UInt64(9)), "/tmp"))  # no-op drain trigger
-    # drain directly: the queue drains on any slot release; fast is queued
-    @test fast in df.refresh_queue || fast in df.refreshing
-    if fast in df.refreshing
-        handle!(df, ProcessIndexFailedMsg(fast, ErrorException("refresh boom")))
-        @test !(fast in df.failed_projects)
-        @test fast in df.done
-    end
+    @test fast in df.refreshing
+
+    handle!(df, ProcessIndexFailedMsg(fast, ErrorException("refresh boom")))
+    @test !(fast in df.failed_projects)
+    @test fast in df.done
 end
 
 @testitem "Dynamic reconcile: reconcile purges dropped refresh entries" begin
@@ -307,7 +322,9 @@ end
     push!(df.inflight, key)
     handle!(df, StandaloneProjectPrepDoneMsg(key, true))
     take!(df.out_channel)
-    @test key in df.refresh_queue
+    # Nothing else is pending, so the refresh already launched into
+    # `refreshing` rather than sitting in `refresh_queue`.
+    @test key in df.refreshing
 
     handle!(df, ReconcileMsg(Set{DJPKey}()))
     @test isempty(df.refresh_queue)
