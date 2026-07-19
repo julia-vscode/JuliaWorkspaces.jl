@@ -45,13 +45,15 @@ end
         end
     end
 
+    # Chained field hashes: hashing a tuple here heap-allocates it (the
+    # Union-typed query/fragment fields defeat stack allocation), and URI
+    # hashing is on the hot dict-probe path of every per-file query.
     function Base.hash(a::URI, h::UInt)
-        if a.scheme=="file"
-            path_norm = lowercase(a.path)
-            return hash((a.scheme, a.authority, path_norm, a.query, a.fragment), h)
-        else
-            return hash((a.scheme, a.authority, a.path, a.query, a.fragment), h)
-        end
+        h = hash(a.scheme, h)
+        h = hash(a.authority, h)
+        h = a.scheme == "file" ? hash(lowercase(a.path), h) : hash(a.path, h)
+        h = hash(a.query, h)
+        return hash(a.fragment, h)
     end
 else
     function Base.:(==)(a::URI, b::URI)
@@ -62,8 +64,14 @@ else
             a.fragment == b.fragment
     end
 
+    # Chained field hashes — see the case-insensitive branch above for why
+    # the tuple version allocates.
     function Base.hash(a::URI, h::UInt)
-        return hash((a.scheme, a.authority, a.path, a.query, a.fragment), h)
+        h = hash(a.scheme, h)
+        h = hash(a.authority, h)
+        h = hash(a.path, h)
+        h = hash(a.query, h)
+        return hash(a.fragment, h)
     end
 end
 
