@@ -200,10 +200,38 @@ end
     dir2 = _standalone_project_dir(df, key2)
     @test dir2 != dir1
     @test !isdir(dir1)      # old hash dir for the same package cleaned up
+
+    # A same-basename package under a *different* path must not be touched by
+    # the other package's cleanup — otherwise one package's launch could
+    # `rm -rf` a sibling's dir mid-resolve.
+    other_path_key = CreateStandaloneProjectKey("/ws-old/Pkg", UInt64(0x5678))
+    other_path_dir = _standalone_project_dir(df, other_path_key)
+    @test other_path_dir != dir2
+    @test isdir(dir2)             # untouched by the other path's cleanup
+    @test isdir(other_path_dir)
+
+    # Re-running the original key's cleanup must not remove the other path's
+    # dir either.
+    dir2_again = _standalone_project_dir(df, key2)
+    @test dir2_again == dir2
+    @test isdir(other_path_dir)
+
+    # Prefix collision: "Pkg" cleanup must never remove "Pkg-extra" dirs.
+    pkg_key = CreateStandaloneProjectKey("/ws2/Pkg", UInt64(1))
+    pkg_extra_key = CreateStandaloneProjectKey("/ws2/Pkg-extra", UInt64(2))
+    pkg_dir = _standalone_project_dir(df, pkg_key)
+    pkg_extra_dir = _standalone_project_dir(df, pkg_extra_key)
+    @test isdir(pkg_extra_dir)
+
+    # Re-resolving `pkg_key` with a new content hash must clean up only its
+    # own old dir, never `pkg_extra_dir`.
+    pkg_key_v2 = CreateStandaloneProjectKey("/ws2/Pkg", UInt64(3))
+    _standalone_project_dir(df, pkg_key_v2)
+    @test isdir(pkg_extra_dir)
 end
 
-@testitem "Dynamic reconcile: standalone fast lane serves existing project without a child" begin
-    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, CreateStandaloneProjectMsg,
+@testitem "Dynamic reconcile: standalone fast lane serves existing project and refreshes when idle" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent,
         StandaloneProjectPrepDoneMsg, CreateStandaloneProjectKey, StandaloneProjectReadyResult,
         DJPKey, handle!, _standalone_project_dir
 
@@ -356,4 +384,38 @@ end
     handle!(df, ReconcileMsg(Set{DJPKey}()))
     @test isempty(df.refresh_queue)
     @test isempty(df.refreshing)
+end
+
+@testitem "Dynamic reconcile: refresh drains when a watch-env fast lane completes last" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, StandaloneProjectPrepDoneMsg,
+        EnvironmentPrepDoneMsg, CreateStandaloneProjectKey, WatchEnvironmentKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=1, launcher=(df, djp) -> push!(launches, djp.key))
+
+    skey = CreateStandaloneProjectKey("/ws/Fast", UInt64(1))
+    wkey = WatchEnvironmentKey("/ws/Slow", UInt64(2))
+
+    # Keep a watch-env work item outstanding (the last one to finish, via its
+    # own fast lane) so the standalone key's refresh queues instead of
+    # launching immediately.
+    push!(df.inflight, wkey)
+    Threads.atomic_add!(df.pending_count, 1)
+
+    push!(df.inflight, skey)
+    Threads.atomic_add!(df.pending_count, 1)
+    handle!(df, StandaloneProjectPrepDoneMsg(skey, true))
+    take!(df.out_channel)               # the served-stale ready result
+    @test skey in df.refresh_queue
+    @test isempty(launches)
+    @test !(skey in df.refreshing)
+
+    # `wkey` completes through its own fast lane (all caches already
+    # available) -- the common warm-restart ordering where standalone preps
+    # finish fast and watch-env preps finish last. This must drain the queued
+    # refresh, not leave it stalled.
+    handle!(df, EnvironmentPrepDoneMsg(wkey, false))
+    @test skey in df.refreshing
+    @test launches == [skey]
 end

@@ -403,15 +403,24 @@ end
 
 # Persistent, deterministic project dir for a standalone package: reused
 # across sessions while the package's Project.toml (content hash) is
-# unchanged. Sibling dirs for the same package under an *old* hash are
+# unchanged. Sibling dirs for the same package *path* under an *old* hash are
 # removed — a changed package gets a fresh resolve, and growth stays bounded.
+# The dir name includes a path hash (not just `basename(package_path)`) so
+# same-named packages under different paths (e.g. `packages/Foo` vs
+# `packages-old/Foo`) get distinct dirs; without it, this function re-running
+# on another package's `ProcessLaunchedMsg` task could `rm -rf` a sibling's dir
+# mid-resolve. The path-hash segment is also why cleanup can match on a plain
+# prefix without colliding with a differently-named package that merely starts
+# with the same characters (e.g. `Pkg` vs `Pkg-extra`).
 function _standalone_project_dir(df::DynamicFeature, key::CreateStandaloneProjectKey)
     parent = joinpath(dirname(df.store_path), "standalone-projects")
     name = basename(key.package_path)
-    dir = joinpath(parent, string(name, "-", string(key.content_hash, base=16, pad=16)))
+    path_hash = string(hash(key.package_path), base=16, pad=16)[1:8]
+    prefix = string(name, "-", path_hash, "-")
+    dir = joinpath(parent, string(prefix, string(key.content_hash, base=16, pad=16)))
     if isdir(parent)
         for other in readdir(parent; join=true)
-            if startswith(basename(other), string(name, "-")) && other != dir
+            if startswith(basename(other), prefix) && other != dir
                 try rm(other; recursive=true) catch; end
             end
         end
@@ -851,6 +860,13 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
+        # This fast lane never occupies a launch slot, so it cannot rely on
+        # `_free_slot!` to drain queued refreshes. Without this, the last
+        # outstanding first-time item completing this way (the common
+        # warm-restart ordering where standalone preps finish fast and
+        # watch-env preps finish last) would leave queued refreshes stalled
+        # forever.
+        _drain_launch_queue!(df)
     elseif df.djp_mode != DynamicOff
         @info "Launching DJP for remaining missing packages" project_path=key.project_path
         _report_progress(df, _progress_key("index", key), "Starting indexer for $(basename(key.project_path))...", 0)
@@ -860,6 +876,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
+        _drain_launch_queue!(df)
     end
 
     return false
