@@ -363,6 +363,11 @@ struct DynamicFeature
     # Launch implementation; injectable so reactor tests observe launches
     # without spawning processes (same seam pattern as `progress_callback`).
     launcher::Function
+    # ── Background refresh of served-stale standalone envs ──
+    # Strictly lower priority than `launch_queue`; never counts as a pending
+    # work item (readiness must not wait on refreshes).
+    refresh_queue::Vector{DJPKey}
+    refreshing::Set{DJPKey}
 
     function DynamicFeature(djp_mode::DynamicMode, store_path::String;
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
@@ -390,6 +395,8 @@ struct DynamicFeature
             Vector{DJPKey}(),
             Set{DJPKey}(),
             launcher,
+            Vector{DJPKey}(),
+            Set{DJPKey}(),
         )
     end
 end
@@ -867,8 +874,40 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
         return false
     end
 
-    _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
-    _request_launch!(df, key)
+    _report_progress(df, _progress_key("index", key), "Checking standalone project for $(basename(key.package_path))...", 0)
+
+    # Offload the (IO-bound) dir + missing-package check to a task so the
+    # reactor stays responsive; the decision comes back as a
+    # `StandaloneProjectPrepDoneMsg` so all state mutation stays on the reactor.
+    dir = _standalone_project_dir(df, key)
+    store_path = df.store_path
+    Threads.@async try
+        usable = isfile(joinpath(dir, "Project.toml")) && isfile(joinpath(dir, "Manifest.toml"))
+        fast_lane = usable && isempty(_get_missing_packages(dir, store_path))
+        put!(df.in_channel, StandaloneProjectPrepDoneMsg(key, fast_lane))
+    catch err
+        @error "Standalone project prep failed" key exception=(err, catch_backtrace())
+        put!(df.in_channel, ProcessIndexFailedMsg(key, err))
+    end
+
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
+    key = msg.key
+
+    if msg.fast_lane
+        @info "Serving existing standalone project; refreshing in background" package_path=key.package_path
+        dir = _standalone_project_dir(df, key)
+        put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash))
+        push!(df.done, key)
+        _complete_work_item!(df, key)
+        push!(df.refresh_queue, key)
+        _drain_launch_queue!(df)
+    else
+        _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
+        _request_launch!(df, key)
+    end
 
     return false
 end

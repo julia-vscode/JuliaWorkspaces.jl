@@ -63,14 +63,23 @@ end
 
     # Insertion order deliberately not priority order.
     handle!(df, ReconcileMsg(Set{DJPKey}([deep, first_up, shallow_late])))
+    # The standalone keys' fast-lane check runs off-reactor and hasn't reported
+    # back yet, so the only synchronous kind grabs the sole slot first.
     @test length(launches) == 1
-    @test launches[1] == shallow_late          # dispatch is priority-sorted (Task 4 asserts too)
+    @test launches[1] == first_up
 
-    handle!(df, ProcessIndexedMsg(launches[1], "/tmp/x"))
+    # Drain the two async standalone-prep decisions (both dirs are fresh, so
+    # neither is fast-laned); with no free slot left, both simply queue.
+    for _ in 1:2
+        handle!(df, take!(df.in_channel))
+    end
+    @test Set(df.launch_queue) == Set([shallow_late, deep])
+
+    handle!(df, ProcessIndexedMsg(first_up, "/tmp/x"))
     @test length(launches) == 2
-    @test launches[2] == first_up              # depth 3 beats depth 4
+    @test launches[2] == shallow_late           # depth 2 beats depth 4
 
-    handle!(df, ProcessIndexFailedMsg(launches[2], ErrorException("boom")))
+    handle!(df, ProcessIndexFailedMsg(shallow_late, ErrorException("boom")))
     @test length(launches) == 3
     @test launches[3] == deep
     @test isempty(df.launch_queue)
@@ -102,19 +111,32 @@ end
 end
 
 @testitem "Dynamic reconcile: initial dispatch launches shallowest keys first" begin
-    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg,
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg, ProcessIndexedMsg,
         WatchTestEnvironmentKey, CreateStandaloneProjectKey, DJPKey, handle!
 
     launches = DJPKey[]
     df = DynamicFeature(DynamicPersistent, mktempdir();
-        max_concurrent_djps=2, launcher=(df, djp) -> push!(launches, djp.key))
+        max_concurrent_djps=1, launcher=(df, djp) -> push!(launches, djp.key))
 
     fixture  = CreateStandaloneProjectKey("/ws/Pkg/test/testdata/Fix", UInt64(1))
     root_sa  = CreateStandaloneProjectKey("/ws/Pkg", UInt64(2))
     testenv  = WatchTestEnvironmentKey("/ws/Pkg", "Pkg", UInt64(3))
 
     handle!(df, ReconcileMsg(Set{DJPKey}([fixture, root_sa, testenv])))
-    @test launches == [root_sa, testenv]      # standalone(1) then testenv(2) at depth 2
+    # The standalone keys' fast-lane check runs off-reactor and hasn't reported
+    # back yet, so the only synchronous kind grabs the sole slot.
+    @test launches == [testenv]
+
+    # Drain the two async standalone-prep decisions (both dirs are fresh, so
+    # neither is fast-laned); with no free slot left, both simply queue.
+    for _ in 1:2
+        handle!(df, take!(df.in_channel))
+    end
+    @test launches == [testenv]
+    @test Set(df.launch_queue) == Set([root_sa, fixture])
+
+    handle!(df, ProcessIndexedMsg(testenv, "/tmp/x"))
+    @test launches == [testenv, root_sa]      # shallower standalone wins the freed slot
     @test df.launch_queue == [fixture]
 end
 
@@ -178,4 +200,50 @@ end
     dir2 = _standalone_project_dir(df, key2)
     @test dir2 != dir1
     @test !isdir(dir1)      # old hash dir for the same package cleaned up
+end
+
+@testitem "Dynamic reconcile: standalone fast lane serves existing project without a child" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, CreateStandaloneProjectMsg,
+        StandaloneProjectPrepDoneMsg, CreateStandaloneProjectKey, StandaloneProjectReadyResult,
+        DJPKey, handle!, _standalone_project_dir
+
+    launches = DJPKey[]
+    store = mktempdir()
+    df = DynamicFeature(DynamicPersistent, store; launcher=(df, djp) -> push!(launches, djp.key))
+
+    key = CreateStandaloneProjectKey("/ws/Pkg", UInt64(0xabc))
+    dir = _standalone_project_dir(df, key)
+    write(joinpath(dir, "Project.toml"), "name = \"scratch\"\n")
+    write(joinpath(dir, "Manifest.toml"), "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n\n[deps]\n")
+
+    # Drive the prep decision synchronously (the async prep task is exercised
+    # end-to-end by the suites; reactor logic is what we test here).
+    push!(df.inflight, key)
+    handle!(df, StandaloneProjectPrepDoneMsg(key, true))
+
+    @test isempty(launches)                       # no child
+    @test key in df.done
+    @test df.refresh_queue == [key]               # background refresh queued
+    result = take!(df.out_channel)
+    @test result isa StandaloneProjectReadyResult
+end
+
+@testitem "Dynamic reconcile: standalone prep miss launches through the cap" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, StandaloneProjectPrepDoneMsg,
+        CreateStandaloneProjectKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=1, launcher=(df, djp) -> push!(launches, djp.key))
+
+    k1 = CreateStandaloneProjectKey("/ws/A", UInt64(1))
+    k2 = CreateStandaloneProjectKey("/ws/B", UInt64(2))
+    push!(df.inflight, k1); push!(df.inflight, k2)
+
+    handle!(df, StandaloneProjectPrepDoneMsg(k1, false))
+    handle!(df, StandaloneProjectPrepDoneMsg(k2, false))
+
+    @test launches == [k1]
+    @test df.launch_queue == [k2]
+    @test isempty(df.refresh_queue)
 end

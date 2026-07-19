@@ -91,6 +91,17 @@ struct EnvironmentPrepDoneMsg <: DynamicReactorMessage
 end
 
 """
+Posted by the async standalone-prep task spawned from
+`CreateStandaloneProjectMsg`. `fast_lane` is true when the persistent project
+dir already exists and all of its manifest's packages have symbol caches — the
+stale environment is served immediately and refreshed in the background.
+"""
+struct StandaloneProjectPrepDoneMsg <: DynamicReactorMessage
+    key::CreateStandaloneProjectKey
+    fast_lane::Bool
+end
+
+"""
 Posted by the async environment-prep task to report cache-download progress for
 a work item. `fraction` is the download phase's own completion fraction (0..1);
 `1.0` ends the item's download progress bar. Routing these through the reactor
