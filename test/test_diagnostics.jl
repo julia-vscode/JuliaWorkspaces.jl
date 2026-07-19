@@ -16,6 +16,51 @@
     @test diags[1].source == "JuliaSyntax.jl"
 end
 
+@testitem "Diagnostic equality distinguishes empty ranges by position" begin
+    using JuliaWorkspaces: Diagnostic
+
+    # Empty UnitRanges compare equal regardless of position (`24:23 == 23:22`).
+    # Diagnostic equality/hash must still tell an empty range at one position
+    # from an empty range at another, or Salsa backdating keeps a stale range.
+    a = Diagnostic(24:23, :error, "Expected `end`", nothing, Symbol[], "JuliaSyntax.jl")
+    b = Diagnostic(23:22, :error, "Expected `end`", nothing, Symbol[], "JuliaSyntax.jl")
+
+    @test a != b
+    @test !isequal(a, b)
+    @test hash(a) != hash(b)
+
+    # Same position still compares equal (backdating must still work normally).
+    c = Diagnostic(23:22, :error, "Expected `end`", nothing, Symbol[], "JuliaSyntax.jl")
+    @test b == c
+    @test isequal(b, c)
+    @test hash(b) == hash(c)
+end
+
+@testitem "Syntax diagnostics: EOF range not left stale after trailing-trivia edit" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, update_file!, get_diagnostic, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # Unterminated blocks make JuliaSyntax report an empty EOF-marker range.
+    # Deleting the trailing space shifts that empty range by one; the stale
+    # range must not survive (its offset would exceed the shortened content and
+    # crash the consumer's offset->position conversion), which happened while
+    # editing the end of a file.
+    u = URI("file:/edit.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("module M\nfunction f()\n ", "julia")))  # 23 bytes
+    get_diagnostic(jw, u)  # cache diagnostics (empty range 24:23) at length 23
+
+    update_file!(jw, TextFile(u, SourceText("module M\nfunction f()\n", "julia")))  # 22 bytes
+    diags = get_diagnostic(jw, u)
+    n = 22
+
+    @test !isempty(diags)
+    for d in diags
+        @test first(d.range) <= n + 1   # stale 24:23 would give first=24 > 23
+        @test last(d.range) <= n + 1
+    end
+end
+
 @testitem "Basic synta error 2" begin
     using JuliaWorkspaces.URIs2: URI
 

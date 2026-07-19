@@ -288,13 +288,35 @@ A diagnostic struct, consisting of range, severity, message, and source.
 - tags::Vector{Symbol}
 - source::String
 """
-@auto_hash_equals struct Diagnostic
+struct Diagnostic
     range::UnitRange{Int64}
     severity::Symbol
     message::String
     uri::Union{Nothing,URI}
     tags::Vector{Symbol}
     source::String
+end
+
+# Compare ranges by their endpoints, not as `UnitRange`s: all empty ranges are
+# `==` regardless of position (`24:23 == 23:22`), which would let Salsa backdate
+# a shifted zero-width diagnostic (e.g. an EOF marker after a trailing-trivia
+# edit) and keep a stale, now-out-of-bounds range.
+function _diag_fields_equal(a::Diagnostic, b::Diagnostic, eq)
+    eq(first(a.range), first(b.range)) && eq(last(a.range), last(b.range)) &&
+        eq(a.severity, b.severity) && eq(a.message, b.message) &&
+        eq(a.uri, b.uri) && eq(a.tags, b.tags) && eq(a.source, b.source)
+end
+Base.:(==)(a::Diagnostic, b::Diagnostic) = _diag_fields_equal(a, b, ==)
+Base.isequal(a::Diagnostic, b::Diagnostic) = _diag_fields_equal(a, b, isequal)
+function Base.hash(d::Diagnostic, h::UInt)
+    h = hash(first(d.range), h)
+    h = hash(last(d.range), h)
+    h = hash(d.severity, h)
+    h = hash(d.message, h)
+    h = hash(d.uri, h)
+    h = hash(d.tags, h)
+    h = hash(d.source, h)
+    return hash(Diagnostic, h)
 end
 
 struct SContext
