@@ -79,6 +79,27 @@ struct DynamicProcessCrashException <: Exception
     exitcode::Union{Int,Nothing}
 end
 
+# ─── Launch prioritization ───────────────────────────────────────────────────
+#
+# Environments higher up the directory tree resolve first, so a package's main
+# environment is ready before its test environment, testdata fixtures, nested
+# docs/benchmark projects, etc. At equal depth the main env beats a standalone
+# project beats a test env (a package's test-env key carries the same path as
+# its main-env key).
+
+_key_path(key::WatchEnvironmentKey) = key.project_path
+_key_path(key::WatchTestEnvironmentKey) = key.project_path
+_key_path(key::CreateStandaloneProjectKey) = key.package_path
+
+_kind_rank(::WatchEnvironmentKey) = 0
+_kind_rank(::CreateStandaloneProjectKey) = 1
+_kind_rank(::WatchTestEnvironmentKey) = 2
+
+function _launch_priority(key::DJPKey)
+    depth = count(c -> c == '/' || c == '\\', normpath(_key_path(key)))
+    return (depth, _kind_rank(key))
+end
+
 # Dispatch handler for JSONRPC messages received FROM the dynamic analysis
 # process. `ctx` is the `(reactor_channel, djp)` tuple passed by the message
 # loop in `start`; all state mutation happens on the reactor, so this only
