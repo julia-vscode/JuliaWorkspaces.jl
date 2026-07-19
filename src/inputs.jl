@@ -90,9 +90,11 @@ Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, versio
 
             # @info "Lazy load package metadata for" name uuid version git_tree_sha1 cache_path
 
+            push!(ctx.dynamic_feature.loaded_pkg_metadata, PkgCacheKey((name, uuid, version, git_tree_sha1)))
+
             return package_data
         else
-            push!(ctx.dynamic_feature.missing_pkg_metadata, @NamedTuple{name::Symbol,uuid::UUID,version::VersionNumber,git_tree_sha1::Union{String,Nothing}}((name,uuid,version,git_tree_sha1)))
+            push!(ctx.dynamic_feature.missing_pkg_metadata, PkgCacheKey((name, uuid, version, git_tree_sha1)))
             # @info "Queued package metadata loading" name uuid version git_tree_sha1
             return nothing
         end

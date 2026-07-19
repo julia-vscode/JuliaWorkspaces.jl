@@ -324,6 +324,9 @@ Downloading a cached index avoids having to index a package locally.
 """
 const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://julia-symbolcache.org"
 
+# Identity of one package's symbol cache on disc.
+const PkgCacheKey = @NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}
+
 struct DynamicFeature
     djp_mode::DynamicMode
     store_path::String
@@ -341,7 +344,10 @@ struct DynamicFeature
     # The `required` set from the most recent reconcile, used by `_reconcile!`
     # to skip sending a `ReconcileMsg` when nothing changed.
     last_required::Set{DJPKey}
-    missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}
+    missing_pkg_metadata::Set{PkgCacheKey}
+    # Package caches whose metadata input is already populated; guards against
+    # re-reading (and re-`set_input`ing) multi-MB cache files.
+    loaded_pkg_metadata::Set{PkgCacheKey}
     pending_count::Threads.Atomic{Int}
     update_channel::Channel{Symbol}
     progress_callback::Union{Nothing,Function}
@@ -385,7 +391,8 @@ struct DynamicFeature
             Set{DJPKey}(),
             Set{DJPKey}(),
             Set{DJPKey}(),
-            Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}(),
+            Set{PkgCacheKey}(),
+            Set{PkgCacheKey}(),
             Threads.Atomic{Int}(0),
             Channel{Symbol}(100),
             progress_callback,

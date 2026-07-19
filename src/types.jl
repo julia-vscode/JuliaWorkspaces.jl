@@ -407,30 +407,39 @@ function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1)
     return nothing
 end
 
+"""
+    _ensure_package_cache_loaded!(jw, name, uuid, version, git_tree_sha1) -> Bool
+
+Populate the `input_package_metadata` input for one package from its on-disc
+symbol cache, unless it is already populated. Returns `true` when the input
+holds data after the call, `false` when no cache exists on disc.
+"""
+function _ensure_package_cache_loaded!(jw::JuliaWorkspace, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing})
+    df = jw.dynamic_feature
+    key = PkgCacheKey((name, uuid, version, git_tree_sha1))
+    key in df.loaded_pkg_metadata && return true
+
+    package_data = _try_load_package_cache(df.store_path, name, uuid, version, git_tree_sha1)
+    package_data === nothing && return false
+
+    set_input_package_metadata!(jw.runtime, name, uuid, version, git_tree_sha1, package_data)
+    push!(df.loaded_pkg_metadata, key)
+    return true
+end
+
 function _load_package_caches_for_project!(jw, project_uri)
     project = derived_project(jw.runtime, project_uri)
     project === nothing && return
 
-    store_path = jw.dynamic_feature.store_path
-
     for (_, v) in project.regular_packages
-        package_data = _try_load_package_cache(store_path, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1)
-        if package_data !== nothing
-            # @info "Now package data is ready" v.name v.uuid v.version v.git_tree_sha1
-            set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1, package_data)
-        end
+        _ensure_package_cache_loaded!(jw, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), v.git_tree_sha1)
         # Reading caches can take a while; keep other tasks responsive.
         yield()
     end
 
     for (_, v) in project.stdlib_packages
         v.version === nothing && continue
-        ver = parse(VersionNumber, v.version)
-        package_data = _try_load_package_cache(store_path, Symbol(v.name), v.uuid, ver, nothing)
-        if package_data !== nothing
-            # @info "Now package data is ready (stdlib)" v.name v.uuid v.version
-            set_input_package_metadata!(jw.runtime, Symbol(v.name), v.uuid, ver, nothing, package_data)
-        end
+        _ensure_package_cache_loaded!(jw, Symbol(v.name), v.uuid, parse(VersionNumber, v.version), nothing)
         yield()
     end
 end
@@ -439,20 +448,22 @@ end
     _load_missing_package_metadata!(jw::JuliaWorkspace)
 
 Load the on-disc symbol caches for every package recorded in
-`missing_pkg_metadata` into the Salsa runtime. Reading dozens of caches (some
-tens of MB) takes seconds, and this runs on the consumer task — typically a
-host's main dispatch loop — so it yields between packages to keep other tasks
-responsive and reports per-package progress on its own progress bar.
+`missing_pkg_metadata` into the Salsa runtime. Successfully loaded entries are
+removed from the set; entries with no cache on disc yet stay for a later
+retry. Reading dozens of caches (some tens of MB) takes seconds, and this runs
+on the consumer task — typically a host's main dispatch loop — so it yields
+between packages to keep other tasks responsive and reports per-package
+progress on its own progress bar.
 """
 function _load_missing_package_metadata!(jw::JuliaWorkspace)
     df = jw.dynamic_feature
-    n_meta = length(df.missing_pkg_metadata)
+    pending = collect(df.missing_pkg_metadata)
+    n_meta = length(pending)
     n_meta == 0 && return
 
-    for (idx, m) in enumerate(df.missing_pkg_metadata)
-        package_data = _try_load_package_cache(df.store_path, m.name, m.uuid, m.version, m.git_tree_sha1)
-        if package_data !== nothing
-            set_input_package_metadata!(jw.runtime, m.name, m.uuid, m.version, m.git_tree_sha1, package_data)
+    for (idx, m) in enumerate(pending)
+        if _ensure_package_cache_loaded!(jw, m.name, m.uuid, m.version, m.git_tree_sha1)
+            delete!(df.missing_pkg_metadata, m)
         end
 
         # Cap below 100: the final report closes the progress bar.
