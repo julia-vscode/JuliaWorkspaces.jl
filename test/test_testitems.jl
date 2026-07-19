@@ -603,3 +603,36 @@ version = "0.1.0"
         @test test_env.project_uri === nothing  # Should be set to nothing due to lack of manifest
     end
 end
+
+@testitem "Test-item detail equality distinguishes empty ranges by position" begin
+    using JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail
+    using JuliaWorkspaces.URIs2: @uri_str
+
+    u = uri"file:///t.jl"
+
+    # Empty UnitRanges are == regardless of position (24:23 == 23:22); a shifted
+    # empty range (e.g. an EOF marker after a trailing-trivia edit) must count as
+    # a change, or Salsa backdating keeps the stale range.
+    te_a = TestErrorDetail(u, "id", "n", "msg", 24:23)
+    te_b = TestErrorDetail(u, "id", "n", "msg", 23:22)
+    @test te_a != te_b
+    @test !isequal(te_a, te_b)
+    @test hash(te_a) != hash(te_b)
+
+    ti_a = TestItemDetail(u, "id", "n", "code", 24:23, 24:23, true, Symbol[], Symbol[])
+    ti_b = TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[])
+    @test ti_a != ti_b
+    @test !isequal(ti_a, ti_b)
+    @test hash(ti_a) != hash(ti_b)
+
+    ts_a = TestSetupDetail(u, :n, :k, "code", 24:23, 24:23)
+    ts_b = TestSetupDetail(u, :n, :k, "code", 23:22, 23:22)
+    @test ts_a != ts_b
+    @test !isequal(ts_a, ts_b)
+    @test hash(ts_a) != hash(ts_b)
+
+    # Identical values still compare equal (backdating must still work).
+    @test te_b == TestErrorDetail(u, "id", "n", "msg", 23:22)
+    @test isequal(ti_b, TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[]))
+    @test hash(ts_b) == hash(TestSetupDetail(u, :n, :k, "code", 23:22, 23:22))
+end

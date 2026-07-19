@@ -1,3 +1,10 @@
+# Position-aware key for a range field. Empty UnitRanges compare `==`/`isequal`
+# regardless of position (`24:23 == 23:22`), so a struct holding a bare
+# UnitRange would treat a shifted zero-width span (e.g. a JuliaSyntax EOF
+# marker after a trailing-trivia edit) as unchanged — letting Salsa backdating
+# keep a stale range whose offset later exceeds the content.
+_range_key(r::UnitRange) = (first(r), last(r))
+
 """
     struct TestItemDetail
 
@@ -13,7 +20,7 @@ Details of a test item.
 - option_tags::Vector{Symbol}
 - option_setup::Vector{Symbol}
 """
-@auto_hash_equals struct TestItemDetail
+struct TestItemDetail
     uri::URI
     id::String
     name::String
@@ -24,6 +31,10 @@ Details of a test item.
     option_tags::Vector{Symbol}
     option_setup::Vector{Symbol}
 end
+_key(x::TestItemDetail) = (x.uri, x.id, x.name, x.code, _range_key(x.range), _range_key(x.code_range), x.option_default_imports, x.option_tags, x.option_setup)
+Base.:(==)(a::TestItemDetail, b::TestItemDetail) = _key(a) == _key(b)
+Base.isequal(a::TestItemDetail, b::TestItemDetail) = isequal(_key(a), _key(b))
+Base.hash(x::TestItemDetail, h::UInt) = hash(_key(x), hash(TestItemDetail, h))
 
 """
     struct TestSetupDetail
@@ -37,7 +48,7 @@ Details of a test setup.
 - range::UnitRange{Int}
 - code_range::UnitRange{Int}
 """
-@auto_hash_equals struct TestSetupDetail
+struct TestSetupDetail
     uri::URI
     name::Symbol
     kind::Symbol
@@ -45,6 +56,10 @@ Details of a test setup.
     range::UnitRange{Int}
     code_range::UnitRange{Int}
 end
+_key(x::TestSetupDetail) = (x.uri, x.name, x.kind, x.code, _range_key(x.range), _range_key(x.code_range))
+Base.:(==)(a::TestSetupDetail, b::TestSetupDetail) = _key(a) == _key(b)
+Base.isequal(a::TestSetupDetail, b::TestSetupDetail) = isequal(_key(a), _key(b))
+Base.hash(x::TestSetupDetail, h::UInt) = hash(_key(x), hash(TestSetupDetail, h))
 
 """
     struct TestErrorDetail
@@ -57,13 +72,17 @@ Details of a test error.
 - message::String
 - range::UnitRange{Int}
 """
-@auto_hash_equals struct TestErrorDetail
+struct TestErrorDetail
     uri::URI
     id::String
     name::Union{Nothing,String}
     message::String
     range::UnitRange{Int}
 end
+_key(x::TestErrorDetail) = (x.uri, x.id, x.name, x.message, _range_key(x.range))
+Base.:(==)(a::TestErrorDetail, b::TestErrorDetail) = _key(a) == _key(b)
+Base.isequal(a::TestErrorDetail, b::TestErrorDetail) = isequal(_key(a), _key(b))
+Base.hash(x::TestErrorDetail, h::UInt) = hash(_key(x), hash(TestErrorDetail, h))
 
 """
     struct TestDetails
