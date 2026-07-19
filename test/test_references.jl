@@ -120,6 +120,60 @@ end
     @test !isempty(get_definitions(jw, uri, p_body))
 end
 
+@testitem "Definitions: an external package module lands in its source file" begin
+    using JuliaWorkspaces: JuliaWorkspaces, DefinitionResult
+    using JuliaWorkspaces.URIs2: filepath2uri
+    using JuliaWorkspaces.SymbolServer: ModuleStore, FunctionStore, MethodStore, VarRef
+
+    # A package `using`'d in a resolved environment binds to a `ModuleStore`
+    # (not a workspace EXPR/TreeRef) whose members carry real source files.
+    # Go-to-def on the module name must land in the module's main source file
+    # `<Name>.jl`, not return nothing — regression: the handler only produced a
+    # location for modules exposing an `eval` FunctionStore (e.g. Base) and
+    # yielded nothing for every package module, whose `eval` is a `VarRef`.
+    dir = mktempdir()
+    main = joinpath(dir, "Foo.jl")
+    util = joinpath(dir, "helpers.jl")
+    write(main, "module Foo\nf() = 1\nend\n")
+    write(util, "g() = 2\n")
+
+    modref = VarRef(nothing, :Foo)
+    ms = ModuleStore(modref, Dict{Symbol,Any}(), "", true, Symbol[:f], Symbol[])
+    ms.vals[:f] = FunctionStore(VarRef(modref, :f),
+        [MethodStore(:f, :Foo, main, Int32(2), Pair{Any,Any}[], Symbol[], nothing)],
+        "", VarRef(modref, :f), true)
+    ms.vals[:g] = FunctionStore(VarRef(modref, :g),
+        [MethodStore(:g, :Foo, util, Int32(1), Pair{Any,Any}[], Symbol[], nothing)],
+        "", VarRef(modref, :g), false)
+
+    results = DefinitionResult[]
+    JuliaWorkspaces._get_definitions_from_val(ms, nothing, nothing, results, nothing, nothing)
+
+    @test !isempty(results)
+    @test any(d -> d.uri == filepath2uri(main), results)
+
+    # Wrapper package: `Bar.jl` only `include`s; the definitions live in
+    # `impl.jl`, so no member's basename is `Bar.jl`. Go-to-def must still land
+    # on the entry file `Bar.jl` sitting in the same `src` dir, not on `impl.jl`
+    # (JuliaInterpreter/LoweredCodeUtils are shaped this way).
+    dir2 = mktempdir()
+    src2 = mkpath(joinpath(dir2, "src"))
+    entry = joinpath(src2, "Bar.jl")
+    impl = joinpath(src2, "impl.jl")
+    write(entry, "module Bar\ninclude(\"impl.jl\")\nend\n")
+    write(impl, "h() = 3\n")
+    barref = VarRef(nothing, :Bar)
+    ms2 = ModuleStore(barref, Dict{Symbol,Any}(), "", true, Symbol[:h], Symbol[])
+    ms2.vals[:h] = FunctionStore(VarRef(barref, :h),
+        [MethodStore(:h, :Bar, impl, Int32(1), Pair{Any,Any}[], Symbol[], nothing)],
+        "", VarRef(barref, :h), true)
+
+    results2 = DefinitionResult[]
+    JuliaWorkspaces._get_definitions_from_val(ms2, nothing, nothing, results2, nothing, nothing)
+
+    @test any(d -> d.uri == filepath2uri(entry), results2)
+end
+
 @testitem "References: rename basic" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_rename_edits
     using JuliaWorkspaces.URIs2: URI

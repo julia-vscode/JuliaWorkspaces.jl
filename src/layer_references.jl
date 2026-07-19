@@ -348,7 +348,43 @@ end
 
 function _get_definitions_from_val(x, tls, env, results, runtime, root=nothing) end # fallback
 
+# The module's own source file. Preferred, in order: a member method file whose
+# basename is `<ModuleName>.jl` (the file declaring `module <Name>`); the entry
+# file `<Name>.jl` sitting next to a member (include-wrapper packages define the
+# module in a thin entry that has no members of its own); else the first member
+# file that exists on disc. `nothing` when no member has a locatable file.
+function _module_source_file(x::SymbolServer.ModuleStore)
+    target = string(x.name.name) * ".jl"
+    fallback = nothing
+    for (_, v) in x.vals
+        methods = v isa SymbolServer.FunctionStore ? v.methods :
+                  v isa SymbolServer.DataTypeStore ? v.methods : continue
+        for m in methods
+            f = string(m.file)
+            safe_isfile(f) || continue
+            basename(f) == target && return f
+            if fallback === nothing
+                fallback = f
+                entry = joinpath(dirname(f), target)
+                safe_isfile(entry) && return entry
+            end
+        end
+    end
+    return fallback
+end
+
 function _get_definitions_from_val(x::SymbolServer.ModuleStore, tls, env, results, runtime, root=nothing)
+    # Jump to the module's own source file. A package module's `eval` is a
+    # `VarRef` (to `Core.EvalInto`), so the old `:eval`-only route produced
+    # nothing for every package module.
+    file = _module_source_file(x)
+    if file !== nothing
+        uri = URIs2.filepath2uri(file)
+        push!(results, DefinitionResult(uri, Position(1, 1), Position(1, 1)))
+        return
+    end
+    # Fallback for modules with no locatable members but a real `eval`
+    # FunctionStore (e.g. Base): route to its methods as before.
     if haskey(x.vals, :eval) && x[:eval] isa SymbolServer.FunctionStore
         _get_definitions_from_val(x[:eval], tls, env, results, runtime, root)
     end
