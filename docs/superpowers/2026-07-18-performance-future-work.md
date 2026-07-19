@@ -43,11 +43,16 @@ Notes: this is a **LanguageServer.jl change** (the inventories work deliberately
 
 Secondary finding from the same measurement: **~84 ms of the median sweep is GC** — the sweep still allocates heavily (the `derived_all_diagnostics` aggregator re-executes per edit: fresh 792-entry Dict + whole-Dict backdating `isequal`, see Targeted follow-ups). A changed-files push model or aggregator-free publish would attack that; the debounce makes it less urgent by paying it rarely.
 
-## 2. DJP reconcile concurrency  *(startup cost in many-env workspaces; needs fresh work)*
+## 2. DJP reconcile concurrency  *(IMPLEMENTED — cap + priority + standalone fast lane; suites green)*
 
-`derived_required_dynamic_projects` = **86** items in the repro (39 `WatchEnvironment` / 19 `WatchTestEnvironment` / 28 `CreateStandaloneProject`, incl. testdata, packages-old, environments/v1.0–v1.13). The `ReconcileMsg` handler dispatches them **all at once, with no concurrency cap**, and only `WatchEnvironment` has a caches-present fast-lane — test-env/standalone entries always spawn a child Julia doing `Pkg.develop`/`resolve`/`TestEnv.activate` + `SymbolServer.get_store`. Dominates startup/reconcile in big multi-env workspaces.
+Was: the `ReconcileMsg` handler dispatched all ~86 required keys at once (up to ~47 simultaneous child Julia processes in the repro), and only `WatchEnvironment` had a caches-present fast lane — standalone results additionally lived in child tempdirs, so every LS restart re-ran all 28 standalone resolves.
 
-Fix: a concurrency cap on the reconcile dispatch + extend the caches-present fast-lane to test-env/standalone (not just `WatchEnvironment`).
+**Implemented (2026-07-19, spec `docs/superpowers/specs/2026-07-19-djp-concurrency-standalone-fastlane-design.md`, plan-driven TDD, commits `dc1a800..bb40835` + LS `65f38a0`):**
+- **Launch cap** (`julia.maxConcurrentIndexingProcesses`, default 4, 0 = unlimited): launches queue past the cap and drain best-`_launch_priority`-first — shallower directory first, then main env → standalone → test env at equal depth — at reconcile dispatch AND every slot release. Reconcile purges dropped queued keys with balanced accounting. Injectable `launcher` seam makes the reactor fully unit-testable (`test/test_dynamic_reconcile.jl`, 13 testitems).
+- **Standalone fast lane, serve-stale + background refresh**: standalone projects now live in persistent hash-keyed dirs (`<store-sibling>/standalone-projects/<name>-<hash16>`, old-hash dirs cleaned up; child gets the dir via the protocol's new `projectDir`). Prep checks dir + `_get_missing_packages`; on a hit the stale env is served immediately (no child) and a refresh is queued. **Refreshes start only when `pending_count == 0`** (no first-time work outstanding anywhere — the last serve itself triggers the drain, so liveness holds even in all-fast-lane workspaces); refresh failures never poison `failed_projects`; readiness never waits on refreshes. NB this pending-gate resolved a plan-text-vs-plan-test contradiction in favor of "refreshes are truly background".
+- **`julia.enableWorkspaceEnvironmentResolution`** (default true): when false, `derived_required_dynamic_projects` emits only real-project `WatchEnvironmentKey`s — no standalone/test-env fabrication.
+
+Follow-ups (deliberate): test-env fast lane (spec's phase C — TestEnv owns its tempdir, manifest-portability investigation needed); extension `package.json` declarations for both settings (julia-vscode repo); note the async standalone prep means standalone keys never win a launch slot synchronously in mixed reconcile batches (inherent, benign).
 
 ## 3. Cold start beyond the DJP herd  *(startup latency; mix of JW + LS.jl fixes)*
 
