@@ -1033,6 +1033,7 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
             # has been removed from `df.procs`.
             if key in df.inflight
                 _complete_work_item!(df, key)
+                delete!(df.launching, key)
             end
         end
     end
@@ -1042,9 +1043,17 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
     filter!(k -> k in required, df.done)
     filter!(k -> k in required, df.failed_projects)
 
+    # Queued-but-not-launched keys that are no longer required never launch;
+    # balance their pending work items like the kill path above.
+    filter!(df.launch_queue) do k
+        k in required && return true
+        _complete_work_item!(df, k)
+        return false
+    end
+
     # ── Spawn work for newly-required keys ─────────────────────────────────
     known = union(Set(keys(df.procs)), df.inflight, df.done, df.failed_projects)
-    for key in required
+    for key in sort!(collect(required); by=_launch_priority)
         key in known && continue
 
         # Accounting that previously lived in the lazy inputs: register one
@@ -1060,6 +1069,8 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
             handle!(df, CreateStandaloneProjectMsg(key))
         end
     end
+
+    _drain_launch_queue!(df)
 
     return false
 end

@@ -76,3 +76,44 @@ end
     @test isempty(df.launch_queue)
     @test df.pending_count[] == 1              # only `deep` still pending
 end
+
+@testitem "Dynamic reconcile: dropped keys are purged from queue and accounting balances" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg, ProcessIndexedMsg,
+        WatchTestEnvironmentKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=1, launcher=(df, djp) -> push!(launches, djp.key))
+
+    keys = [WatchTestEnvironmentKey("/ws/p$i", "P$i", UInt64(i)) for i in 1:3]
+    handle!(df, ReconcileMsg(Set{DJPKey}(keys)))
+    @test length(launches) == 1
+    @test length(df.launch_queue) == 2
+
+    # Second reconcile keeps only the launched key: queued keys must vanish
+    # without ever launching, and their pending work items must be balanced.
+    handle!(df, ReconcileMsg(Set{DJPKey}([launches[1]])))
+    @test isempty(df.launch_queue)
+    @test df.pending_count[] == 1
+
+    handle!(df, ProcessIndexedMsg(launches[1], "/tmp/x"))
+    @test df.pending_count[] == 0
+    @test length(launches) == 1
+end
+
+@testitem "Dynamic reconcile: initial dispatch launches shallowest keys first" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg,
+        WatchTestEnvironmentKey, CreateStandaloneProjectKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=2, launcher=(df, djp) -> push!(launches, djp.key))
+
+    fixture  = CreateStandaloneProjectKey("/ws/Pkg/test/testdata/Fix", UInt64(1))
+    root_sa  = CreateStandaloneProjectKey("/ws/Pkg", UInt64(2))
+    testenv  = WatchTestEnvironmentKey("/ws/Pkg", "Pkg", UInt64(3))
+
+    handle!(df, ReconcileMsg(Set{DJPKey}([fixture, root_sa, testenv])))
+    @test launches == [root_sa, testenv]      # standalone(1) then testenv(2) at depth 2
+    @test df.launch_queue == [fixture]
+end
