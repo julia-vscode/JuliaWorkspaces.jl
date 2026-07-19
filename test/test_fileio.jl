@@ -14,3 +14,23 @@
         end
     end
 end
+
+@testitem "read_path_into_textdocuments honors file_limit" begin
+    using JuliaWorkspaces: read_path_into_textdocuments
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    dir = mktempdir()
+    for i in 1:5
+        write(joinpath(dir, "f$i.jl"), "f$i() = $i\n")
+    end
+    write(joinpath(dir, "Project.toml"), "name = \"X\"\n")
+
+    unlimited = read_path_into_textdocuments(filepath2uri(dir))
+    @test length(unlimited) == 6
+
+    # Only Julia files count against the limit.
+    at_limit = read_path_into_textdocuments(filepath2uri(dir), file_limit=5)
+    @test length(at_limit) == 6
+
+    @test read_path_into_textdocuments(filepath2uri(dir), file_limit=4) === nothing
+end
