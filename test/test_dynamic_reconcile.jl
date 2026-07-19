@@ -315,15 +315,42 @@ end
 
 @testitem "Dynamic reconcile: reconcile purges dropped refresh entries" begin
     using JuliaWorkspaces: DynamicFeature, DynamicPersistent, StandaloneProjectPrepDoneMsg,
-        ReconcileMsg, CreateStandaloneProjectKey, DJPKey, handle!
+        ReconcileMsg, CreateStandaloneProjectKey, WatchTestEnvironmentKey, ProcessIndexedMsg,
+        DJPKey, handle!
 
     df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> nothing)
     key = CreateStandaloneProjectKey("/ws/Gone", UInt64(7))
+    other = WatchTestEnvironmentKey("/ws/Other", "Other", UInt64(99))
+
+    # Keep a first-time work item outstanding so the fast-laned key's refresh
+    # queues instead of launching immediately.
+    push!(df.inflight, other)
+    Threads.atomic_add!(df.pending_count, 1)
+
+    Threads.atomic_add!(df.pending_count, 1)
     push!(df.inflight, key)
     handle!(df, StandaloneProjectPrepDoneMsg(key, true))
     take!(df.out_channel)
-    # Nothing else is pending, so the refresh already launched into
-    # `refreshing` rather than sitting in `refresh_queue`.
+    # `other` is still pending, so the refresh sits queued rather than
+    # launching -- this is the branch the purge below is meant to exercise.
+    @test !isempty(df.refresh_queue)
+    @test key in df.refresh_queue
+
+    # Reconcile drops `key` but keeps `other` required: the queued refresh
+    # entry must vanish even though nothing else about `other` changes.
+    handle!(df, ReconcileMsg(Set{DJPKey}([other])))
+    @test isempty(df.refresh_queue)
+    @test key ∉ df.refreshing
+
+    # Now exercise the `refreshing` branch: let `other` finish so pending hits
+    # 0, then re-serve `key` fast-lane so its refresh launches immediately
+    # into `refreshing`, and confirm a reconcile-drop clears that too.
+    handle!(df, ProcessIndexedMsg(other, "/tmp/x"))
+
+    Threads.atomic_add!(df.pending_count, 1)
+    push!(df.inflight, key)
+    handle!(df, StandaloneProjectPrepDoneMsg(key, true))
+    take!(df.out_channel)
     @test key in df.refreshing
 
     handle!(df, ReconcileMsg(Set{DJPKey}()))
