@@ -734,6 +734,21 @@ function _drain_launch_queue!(df::DynamicFeature)
         key in df.inflight || continue
         _launch_now!(df, key)
     end
+
+    # Refreshes fill remaining slots only when no first-time work wants them.
+    while _has_free_slot(df) && isempty(df.launch_queue) && !isempty(df.refresh_queue)
+        best = 1
+        for i in 2:length(df.refresh_queue)
+            if _launch_priority(df.refresh_queue[i]) < _launch_priority(df.refresh_queue[best])
+                best = i
+            end
+        end
+        key = df.refresh_queue[best]
+        deleteat!(df.refresh_queue, best)
+        push!(df.refreshing, key)
+        _report_progress(df, _progress_key("refresh", key), "Refreshing environment...", 0)
+        _launch_now!(df, key)
+    end
     return
 end
 
@@ -903,7 +918,6 @@ function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
         push!(df.done, key)
         _complete_work_item!(df, key)
         push!(df.refresh_queue, key)
-        _drain_launch_queue!(df)
     else
         _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
         _request_launch!(df, key)
@@ -966,6 +980,26 @@ end
 
 function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     key = msg.key
+
+    if key in df.refreshing
+        # Background refresh finished: re-emit the (idempotent) ready result —
+        # freshness lands via the rewritten Manifest and the result path's
+        # package-cache loading. Never touches pending_count.
+        delete!(df.refreshing, key)
+        djp = get(df.procs, key, nothing)
+        if djp !== nothing && state(djp.fsm) == DynamicProcessIndexing
+            transition!(djp.fsm, DynamicProcessDone; reason="refreshed")
+        end
+        put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(msg.result_dir), key.content_hash))
+        if df.djp_mode == DynamicIndexingOnly && djp !== nothing
+            kill(djp)
+            delete!(df.procs, key)
+        end
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
+        _free_slot!(df, key)
+        return false
+    end
+
     if key ∉ df.inflight
         @debug "Stale/duplicate ProcessIndexedMsg; ignoring" key
         return false
@@ -1003,6 +1037,22 @@ end
 
 function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
     key = msg.key
+
+    if key in df.refreshing
+        # The served stale environment keeps working; do not poison
+        # failed_projects over a refresh.
+        @warn "Background environment refresh failed" key exception=(msg.err,)
+        delete!(df.refreshing, key)
+        djp = get(df.procs, key, nothing)
+        if djp !== nothing
+            try kill(djp) catch; end
+            delete!(df.procs, key)
+        end
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
+        _free_slot!(df, key)
+        return false
+    end
+
     if key ∉ df.inflight
         @debug "Stale/duplicate ProcessIndexFailedMsg; ignoring" key
         return false
@@ -1028,6 +1078,16 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     key = msg.key
     djp = get(df.procs, key, nothing)
     djp === nothing && return false
+
+    if key in df.refreshing && state(djp.fsm) in (DynamicProcessStarting, DynamicProcessConnected, DynamicProcessIndexing)
+        @warn "Background refresh process terminated unexpectedly" key
+        delete!(df.refreshing, key)
+        try kill(djp) catch; end
+        delete!(df.procs, key)
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
+        _free_slot!(df, key)
+        return false
+    end
 
     # A termination while the work item is still in flight means the process
     # died before its index request completed — treat as a failure.
@@ -1108,6 +1168,20 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
         k in required && return true
         _complete_work_item!(df, k)
         return false
+    end
+
+    # Refresh bookkeeping for keys that are no longer required: queued entries
+    # just vanish (they are not work items); launched ones are killed.
+    filter!(k -> k in required, df.refresh_queue)
+    for key in collect(df.refreshing)
+        key in required && continue
+        delete!(df.refreshing, key)
+        djp = get(df.procs, key, nothing)
+        if djp !== nothing
+            try kill(djp) catch; end
+            delete!(df.procs, key)
+        end
+        delete!(df.launching, key)
     end
 
     # ── Spawn work for newly-required keys ─────────────────────────────────

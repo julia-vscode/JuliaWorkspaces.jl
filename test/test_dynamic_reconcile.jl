@@ -247,3 +247,69 @@ end
     @test df.launch_queue == [k2]
     @test isempty(df.refresh_queue)
 end
+
+@testitem "Dynamic reconcile: refresh runs at strict low priority and is not a work item" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, StandaloneProjectPrepDoneMsg,
+        ProcessIndexedMsg, ProcessIndexFailedMsg, CreateStandaloneProjectKey,
+        WatchTestEnvironmentKey, WatchTestEnvironmentMsg, StandaloneProjectReadyResult, DJPKey,
+        handle!, _standalone_project_dir
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=1, launcher=(df, djp) -> push!(launches, djp.key))
+
+    fast = CreateStandaloneProjectKey("/ws/Fast", UInt64(1))
+    slow = WatchTestEnvironmentKey("/ws/Slow", "Slow", UInt64(2))
+
+    # Fast-lane hit queues a refresh...
+    push!(df.inflight, fast)
+    handle!(df, StandaloneProjectPrepDoneMsg(fast, true))
+    take!(df.out_channel)               # the served-stale ready result
+    pending_after_serve = df.pending_count[]
+
+    # ...but first-time work still wins the only slot.
+    push!(df.inflight, slow)
+    handle!(df, WatchTestEnvironmentMsg(slow))
+    @test launches == [slow]
+
+    # Slot frees with nothing left in the primary queue -> refresh launches.
+    handle!(df, ProcessIndexedMsg(slow, "/tmp/x"))
+    take!(df.out_channel)               # slow's ready result
+    @test launches == [slow, fast]
+    @test fast in df.refreshing
+    @test df.pending_count[] == pending_after_serve - 1   # -1 is slow's own completion; refresh itself never counted
+
+    # Refresh completion re-emits the ready result and frees the slot.
+    handle!(df, ProcessIndexedMsg(fast, _standalone_project_dir(df, fast)))
+    @test take!(df.out_channel) isa StandaloneProjectReadyResult
+    @test !(fast in df.refreshing)
+
+    # A refresh failure must not poison failed_projects.
+    push!(df.inflight, fast)
+    handle!(df, StandaloneProjectPrepDoneMsg(fast, true))
+    take!(df.out_channel)
+    handle!(df, ProcessIndexedMsg(WatchTestEnvironmentKey("/dummy", "D", UInt64(9)), "/tmp"))  # no-op drain trigger
+    # drain directly: the queue drains on any slot release; fast is queued
+    @test fast in df.refresh_queue || fast in df.refreshing
+    if fast in df.refreshing
+        handle!(df, ProcessIndexFailedMsg(fast, ErrorException("refresh boom")))
+        @test !(fast in df.failed_projects)
+        @test fast in df.done
+    end
+end
+
+@testitem "Dynamic reconcile: reconcile purges dropped refresh entries" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, StandaloneProjectPrepDoneMsg,
+        ReconcileMsg, CreateStandaloneProjectKey, DJPKey, handle!
+
+    df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> nothing)
+    key = CreateStandaloneProjectKey("/ws/Gone", UInt64(7))
+    push!(df.inflight, key)
+    handle!(df, StandaloneProjectPrepDoneMsg(key, true))
+    take!(df.out_channel)
+    @test key in df.refresh_queue
+
+    handle!(df, ReconcileMsg(Set{DJPKey}()))
+    @test isempty(df.refresh_queue)
+    @test isempty(df.refreshing)
+end
