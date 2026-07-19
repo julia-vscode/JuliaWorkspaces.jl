@@ -508,7 +508,7 @@ git -C /home/pfitzseb/git/julia-vscode/scripts/packages/LanguageServer add src/l
 git -C /home/pfitzseb/git/julia-vscode/scripts/packages/LanguageServer commit -m "perf: run the initial workspace sweep off the dispatch loop"
 ```
 
-> **Deviation (committed `09057fe`):** implemented as a fire-and-forget `@async` in `initialized_notification` — no `_initial_publish_task` field was added. The test polls with `timedwait` instead of `wait(server._initial_publish_task)`. Task 4's Step-5 test must use the same `timedwait` pattern, not `wait(...)`.
+> **Deviation then REVERTED (`09057fe` → `4a3b2f2`):** first implemented as a fire-and-forget `@async` in `initialized_notification`. That crashed the server on startup with dynamic analysis on — the dispatch loop ran a queued `didOpen` while the async sweep was suspended mid-`derived_all_diagnostics`, and the `didOpen`'s `process_from_dynamic` → `set_input!` tripped Salsa's `derived_functions_active[] == 0` assertion (`default_storage.jl:500`). Only the dispatch loop may touch the Salsa runtime, so the sweep must run synchronously to completion inside `initialized_notification`. The task now runs the sweep synchronously and records the indexing-complete baseline (kept for Task 2). Off-loop sweeping is deferred to item #1 (debounce). Test `test_initialized_publish.jl` asserts the sweep is synchronous (published before return).
 
 ---
 
