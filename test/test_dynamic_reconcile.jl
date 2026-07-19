@@ -15,3 +15,36 @@
     @test _launch_priority(root_env) < _launch_priority(standalone)
     @test _launch_priority(standalone) < _launch_priority(testenv)
 end
+
+@testitem "Dynamic reconcile: cap limits concurrent launches" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg,
+        WatchTestEnvironmentKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=2, launcher=(df, djp) -> push!(launches, djp.key))
+
+    keys = [WatchTestEnvironmentKey("/ws/p$i", "P$i", UInt64(i)) for i in 1:5]
+    handle!(df, ReconcileMsg(Set{DJPKey}(keys)))
+
+    @test length(launches) == 2
+    @test length(df.launch_queue) == 3
+    @test length(df.launching) == 2
+    @test df.pending_count[] == 5          # queued work still counts as pending
+    @test isempty(intersect(Set(df.launch_queue), df.launching))
+end
+
+@testitem "Dynamic reconcile: cap 0 means unlimited" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg,
+        WatchTestEnvironmentKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=0, launcher=(df, djp) -> push!(launches, djp.key))
+
+    keys = [WatchTestEnvironmentKey("/ws/p$i", "P$i", UInt64(i)) for i in 1:5]
+    handle!(df, ReconcileMsg(Set{DJPKey}(keys)))
+
+    @test length(launches) == 5
+    @test isempty(df.launch_queue)
+end

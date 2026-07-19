@@ -349,8 +349,24 @@ struct DynamicFeature
     # child reports and to re-use the last percentage for reports without one.
     child_progress::Dict{DJPKey,Int}
     controller_fsm::FSM{DynamicControllerPhase}
+    # ── Launch concurrency cap ──
+    # Maximum number of concurrently *working* child processes (<= 0: unlimited).
+    max_concurrent_djps::Int
+    # Keys ready to launch but over the cap; drained best-`_launch_priority`
+    # first, insertion order as the final tiebreak.
+    launch_queue::Vector{DJPKey}
+    # Keys whose child has been launched and whose work item has not reached a
+    # terminal message yet — the set the cap counts (NOT `procs`: persistent
+    # children that finished indexing stay in `procs` without holding a slot).
+    launching::Set{DJPKey}
+    # Launch implementation; injectable so reactor tests observe launches
+    # without spawning processes (same seam pattern as `progress_callback`).
+    launcher::Function
 
-    function DynamicFeature(djp_mode::DynamicMode, store_path::String; download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM, progress_callback::Union{Nothing,Function}=nothing)
+    function DynamicFeature(djp_mode::DynamicMode, store_path::String;
+            download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
+            progress_callback::Union{Nothing,Function}=nothing,
+            max_concurrent_djps::Int=4, launcher::Function=_launch_process!)
         return new(
             djp_mode,
             store_path,
@@ -368,7 +384,11 @@ struct DynamicFeature
             Channel{Symbol}(100),
             progress_callback,
             Dict{DJPKey,Int}(),
-            dynamic_controller_fsm("dynamic_controller")
+            dynamic_controller_fsm("dynamic_controller"),
+            max_concurrent_djps,
+            Vector{DJPKey}(),
+            Set{DJPKey}(),
+            launcher,
         )
     end
 end
@@ -641,6 +661,36 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     return
 end
 
+_has_free_slot(df::DynamicFeature) =
+    df.max_concurrent_djps <= 0 || length(df.launching) < df.max_concurrent_djps
+
+# Construct the DJP for `key` and launch it, occupying a slot. The DJP is
+# derived from the key alone so queued keys carry no state that can go stale.
+function _launch_now!(df::DynamicFeature, key::DJPKey)
+    djp = if key isa WatchEnvironmentKey
+        DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
+    elseif key isa WatchTestEnvironmentKey
+        DynamicJuliaProcess(key, key.project_path, key.package_name, :watch_test_environment)
+    else
+        DynamicJuliaProcess(key, key.package_path, nothing, :create_standalone_project)
+    end
+    df.procs[key] = djp
+    push!(df.launching, key)
+    df.launcher(df, djp)
+    return
+end
+
+# Launch `key` if a slot is free, otherwise queue it.
+function _request_launch!(df::DynamicFeature, key::DJPKey)
+    if _has_free_slot(df)
+        _launch_now!(df, key)
+    else
+        _report_progress(df, _progress_key("index", key), "Queued for indexing...", 0)
+        push!(df.launch_queue, key)
+    end
+    return
+end
+
 """
     Base.run(df::DynamicFeature)
 
@@ -732,9 +782,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
     elseif df.djp_mode != DynamicOff
         @info "Launching DJP for remaining missing packages" project_path=key.project_path
         _report_progress(df, _progress_key("index", key), "Starting indexer for $(basename(key.project_path))...", 0)
-        djp = DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
-        df.procs[key] = djp
-        _launch_process!(df, djp)
+        _request_launch!(df, key)
     else
         @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=key.project_path
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
@@ -757,9 +805,7 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
     end
 
     _report_progress(df, _progress_key("index", key), "Starting indexer for the test environment of $(key.package_name)...", 0)
-    djp = DynamicJuliaProcess(key, key.project_path, key.package_name, :watch_test_environment)
-    df.procs[key] = djp
-    _launch_process!(df, djp)
+    _request_launch!(df, key)
 
     return false
 end
@@ -776,9 +822,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
     end
 
     _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
-    djp = DynamicJuliaProcess(key, key.package_path, nothing, :create_standalone_project)
-    df.procs[key] = djp
-    _launch_process!(df, djp)
+    _request_launch!(df, key)
 
     return false
 end
