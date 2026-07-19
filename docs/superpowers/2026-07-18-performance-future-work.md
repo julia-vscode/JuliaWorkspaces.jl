@@ -36,7 +36,11 @@ Why it's redundant: the mark re-derives the before-state the LS *already publish
 
 **Fix: port the parked LanguageServer commit `d83bcc2` (`sp/perf`).** Persistent `server._published_hashes` replaces the mark/diff double-sweep; `didChange` publishes only the edited file immediately and schedules a debounced `:publish_sweep` queue message (`SWEEP_DEBOUNCE_SECONDS`=0.4 trailing, `SWEEP_MAX_LATENCY_SECONDS`=3.0 cap, generation counter for staleness, drain guard re-enqueues behind queued messages). Watcher reconcile stays synchronous in `didOpen`/`didClose` (`test_indirect_files` depends on it). `jr_endpoint` widened to `Any` so tests inject a recording endpoint. Tests in `test/test_publish_debounce.jl`.
 
-Notes: this is a **LanguageServer.jl change** (the inventories work deliberately left LS.jl unmodified), independent of the inventories work and separately mergeable to main. The `get_diagnostics` it wraps is now the fast new engine, so the debounce + reverse-map compound. Decide via measured end-to-end keystroke latency whether 67 ms/sweep already suffices or the debounce is worth it.
+Notes: this is a **LanguageServer.jl change** (the inventories work deliberately left LS.jl unmodified), independent of the inventories work and separately mergeable to main.
+
+**Re-assessed 2026-07-19, after the Salsa verification fast path + env sharing landed: the debounce is clearly still needed — no longer "decide by measurement".** Post-landing per-keystroke numbers (repro workspace, warm): mark 0.0 ms (memoized floor, confirmed), edit apply 0.1 ms, `get_test_items` 0.3 ms, but the **diff sweep is ~157 ms best / ~243 ms median** — the doc's original 67 ms was from a different machine/branch state and never reproduced here (pre-fast-path this machine measured 334/544). At ~200 ms/sweep the serial dispatch loop saturates at ~4–5 keystrokes/s; sustained typing compounds queue latency. The debounce converts that to per-keystroke single-file publishes (~ms) plus at most one sweep per 0.4 s pause (3 s cap) — the only remaining structural fix for typing smoothness.
+
+Secondary finding from the same measurement: **~84 ms of the median sweep is GC** — the sweep still allocates heavily (the `derived_all_diagnostics` aggregator re-executes per edit: fresh 792-entry Dict + whole-Dict backdating `isequal`, see Targeted follow-ups). A changed-files push model or aggregator-free publish would attack that; the debounce makes it less urgent by paying it rarely.
 
 ## 2. DJP reconcile concurrency  *(startup cost in many-env workspaces; needs fresh work)*
 
