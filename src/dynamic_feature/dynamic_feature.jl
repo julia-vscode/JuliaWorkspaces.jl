@@ -893,6 +893,18 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
         return false
     end
 
+    # A test environment can only be produced by a child process; without
+    # dynamic indexing this work is terminal (best-effort readiness, like the
+    # watch-env DynamicOff branch).
+    if df.djp_mode == DynamicOff
+        @info "Test environment needs a dynamic child process but dynamic indexing is disabled; skipping" key
+        put!(df.out_channel, FailedResult(key))
+        push!(df.done, key)
+        _complete_work_item!(df, key)
+        _drain_launch_queue!(df)
+        return false
+    end
+
     _report_progress(df, _progress_key("index", key), "Starting indexer for the test environment of $(key.package_name)...", 0)
     _request_launch!(df, key)
 
@@ -938,7 +950,17 @@ function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
         put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
-        push!(df.refresh_queue, key)
+        # A refresh needs a child process, which dynamic-off mode never runs;
+        # the served (possibly stale) environment is all it gets.
+        df.djp_mode != DynamicOff && push!(df.refresh_queue, key)
+        _drain_launch_queue!(df)
+    elseif df.djp_mode == DynamicOff
+        # Creating the standalone project needs a child process; terminal
+        # without one (files fall back to the active project's environment).
+        @info "Standalone project needs a dynamic child process but dynamic indexing is disabled; skipping" key
+        put!(df.out_channel, FailedResult(key))
+        push!(df.done, key)
+        _complete_work_item!(df, key)
         _drain_launch_queue!(df)
     else
         _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)

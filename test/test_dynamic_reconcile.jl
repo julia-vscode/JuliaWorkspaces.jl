@@ -419,3 +419,47 @@ end
     @test skey in df.refreshing
     @test launches == [skey]
 end
+
+@testitem "Dynamic reconcile: DynamicOff never launches children" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicOff, WatchTestEnvironmentMsg,
+        StandaloneProjectPrepDoneMsg, WatchTestEnvironmentKey, CreateStandaloneProjectKey,
+        FailedResult, StandaloneProjectReadyResult, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicOff, mktempdir(); launcher=(df, djp) -> push!(launches, djp.key))
+
+    # Test-env work needs a child by definition: terminal FailedResult, no
+    # launch, accounting balanced, key remembered so reconciles don't re-spawn.
+    tkey = WatchTestEnvironmentKey("/ws/T", "T", UInt64(1))
+    Threads.atomic_add!(df.pending_count, 1)
+    handle!(df, WatchTestEnvironmentMsg(tkey))
+    @test isempty(launches)
+    @test isready(df.out_channel)   # non-blocking: a regression must fail, not hang
+    isready(df.out_channel) && @test take!(df.out_channel) isa FailedResult
+    @test df.pending_count[] == 0
+    @test tkey in df.done
+
+    # Standalone prep miss: same terminal handling, no child.
+    skey = CreateStandaloneProjectKey("/ws/S", UInt64(2))
+    push!(df.inflight, skey)
+    Threads.atomic_add!(df.pending_count, 1)
+    handle!(df, StandaloneProjectPrepDoneMsg(skey, false))
+    @test isempty(launches)
+    @test isready(df.out_channel)
+    isready(df.out_channel) && @test take!(df.out_channel) isa FailedResult
+    @test df.pending_count[] == 0
+    @test skey in df.done
+
+    # Standalone fast-lane hit: the stale env still gets served (no child
+    # needed), but no refresh may be queued -- children can never run.
+    fkey = CreateStandaloneProjectKey("/ws/F", UInt64(3))
+    push!(df.inflight, fkey)
+    Threads.atomic_add!(df.pending_count, 1)
+    handle!(df, StandaloneProjectPrepDoneMsg(fkey, true))
+    @test isready(df.out_channel)
+    isready(df.out_channel) && @test take!(df.out_channel) isa StandaloneProjectReadyResult
+    @test isempty(df.refresh_queue)
+    @test isempty(df.refreshing)
+    @test isempty(launches)
+    @test fkey in df.done
+end
