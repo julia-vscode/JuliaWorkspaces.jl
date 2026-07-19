@@ -355,6 +355,10 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
         ))
     end
 
+    # Standalone projects and test environments are fabricated only when
+    # workspace-environment resolution is enabled.
+    input_resolve_workspace_environments(rt) || return required
+
     # Package folders that aren't project folders and aren't deved need a standalone project DJP
     for package_uri in derived_package_folders(rt)
         package_uri in derived_project_folders(rt) && continue

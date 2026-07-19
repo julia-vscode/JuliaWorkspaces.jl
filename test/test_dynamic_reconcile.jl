@@ -117,3 +117,44 @@ end
     @test launches == [root_sa, testenv]      # standalone(1) then testenv(2) at depth 2
     @test df.launch_queue == [fixture]
 end
+
+@testitem "Dynamic reconcile: resolve_workspace_environments=false keeps only real envs" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText,
+        derived_required_dynamic_projects, WatchEnvironmentKey
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "P"
+    uuid = "11111111-1111-1111-1111-111111111111"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc"
+
+    [deps]
+    """
+    # A workspace project (watch-env key) plus a manifest-less package
+    # (standalone key) with a runtests.jl (test-env key).
+    files = [
+        TextFile(URI("file:///ws/Proj/Project.toml"), SourceText(project_toml, "toml")),
+        TextFile(URI("file:///ws/Proj/Manifest.toml"), SourceText(manifest_toml, "toml")),
+        TextFile(URI("file:///ws/Proj/src/P.jl"), SourceText("module P end", "julia")),
+        TextFile(URI("file:///ws/Bare/Project.toml"), SourceText(replace(project_toml, "\"P\"" => "\"Bare\"", "1111\"" => "2222\""), "toml")),
+        TextFile(URI("file:///ws/Bare/src/Bare.jl"), SourceText("module Bare end", "julia")),
+        TextFile(URI("file:///ws/Bare/test/runtests.jl"), SourceText("using Test", "julia")),
+    ]
+
+    jw_on = JuliaWorkspace()
+    foreach(f -> add_file!(jw_on, f), files)
+    req_on = derived_required_dynamic_projects(jw_on.runtime)
+
+    jw_off = JuliaWorkspace(resolve_workspace_environments=false)
+    foreach(f -> add_file!(jw_off, f), files)
+    req_off = derived_required_dynamic_projects(jw_off.runtime)
+
+    @test any(k -> !(k isa WatchEnvironmentKey), req_on)      # sanity: fabrication happens
+    @test all(k -> k isa WatchEnvironmentKey, req_off)        # ...and is fully disabled
+    @test !isempty(req_off)                                   # real projects still watched
+end

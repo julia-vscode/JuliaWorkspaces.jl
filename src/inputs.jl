@@ -8,6 +8,11 @@ Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
 
 Salsa.@declare_input input_env_ready(rt)::Bool
 
+# Whether the workspace fabricates environments (standalone projects for
+# manifest-less packages, merged test environments). When false only real
+# project environments are watched.
+Salsa.@declare_input input_resolve_workspace_environments(rt)::Bool
+
 # Lazy input for files that are pulled in via `include(...)` from a regular
 # JW file but are not themselves regular files. Initial content is read
 # synchronously from disc; the watcher callback (if any) is invoked once per

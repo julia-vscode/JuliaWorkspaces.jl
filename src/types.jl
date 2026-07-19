@@ -351,12 +351,15 @@ Create an empty workspace. To build one directly from folders on disc, use
   0–100 range); a report with `percentage >= 100` ends that operation's bar.
 - `max_concurrent_djps::Int`: Maximum number of concurrently working dynamic
   child processes (`0` disables the limit). Defaults to 4.
+- `resolve_workspace_environments::Bool`: When `false`, no standalone package
+  projects or test environments are created; only real project environments
+  are watched. Defaults to `true`.
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4)
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, resolve_workspace_environments::Bool=true)
         if store_path === nothing
             store_path = Scratch.@get_scratch!("store_path_v1")
         end
@@ -369,6 +372,7 @@ struct JuliaWorkspace
         set_input_files!(rt, Set{URI}())
         set_input_active_project!(rt, nothing)
         set_input_env_ready!(rt, false)
+        set_input_resolve_workspace_environments!(rt, resolve_workspace_environments)
         set_input_ready_project_environments!(rt, Set{WatchEnvironmentKey}())
         set_input_ready_test_environments!(rt, Dict{WatchTestEnvironmentKey,URI}())
         set_input_standalone_projects!(rt, Dict{CreateStandaloneProjectKey,URI}())
