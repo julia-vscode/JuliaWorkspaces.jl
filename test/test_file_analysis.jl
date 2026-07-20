@@ -549,6 +549,47 @@ end
     @test !any(d -> occursin("method matching", d.message) || occursin("method call error", d.message), fa.diagnostics)
 end
 
+@testitem "derived_file_analysis: a store fn imported and extended in one file checks both method sets" setup=[FileAnalysisWS] begin
+    # `import Base: show` + a 3-arg overload + a 2-arg call ALL in one file: the
+    # call's `func_ref` is a `Binding` wrapping Base.show's `FunctionStore`, whose
+    # method set is the store methods PLUS the workspace overload. Gate 1 must not
+    # check only the workspace (3-arg) arities and false-flag the valid 2-arg call
+    # (`show(io, x)` is a real Base method).
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "import Base: show\nshow(io::IO, x::Int, extra) = x\ng(io) = show(io, 5)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("method matching", d.message) || occursin("method call error", d.message), fa.diagnostics)
+
+    # Guard: a genuinely wrong arity (matching NO store method and NO overload)
+    # on the same imported+extended function must still flag.
+    jw2 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "import Base: size\nsize(x::Int, a, b, c) = a\ng() = size()\n",
+    ))
+    fa2 = JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B)
+    @test any(d -> occursin("method matching", d.message), fa2.diagnostics)
+
+    # A call matching ONLY the workspace overload's arity (no store method) is
+    # accepted through the workspace-arity branch even with a store present.
+    jw3 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "import Base: show\nshow(io::IO, x::Int, extra) = x\ng(io) = show(io, 1, 2)\n",
+    ))
+    fa3 = JuliaWorkspaces.derived_file_analysis(jw3.runtime, ROOT, B)
+    @test !any(d -> occursin("method matching", d.message) || occursin("method call error", d.message), fa3.diagnostics)
+
+    # DataTypeStore path: an imported+extended type. `Set([1])` matches a Base
+    # constructor; the workspace adds a 3-arg constructor. Neither call is flagged.
+    jw4 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "import Base: Set\nSet(a::Int, b::Int, c::Int) = a\nf() = Set([1])\nh() = Set(1, 2, 3)\n",
+    ))
+    fa4 = JuliaWorkspaces.derived_file_analysis(jw4.runtime, ROOT, B)
+    @test !any(d -> occursin("method matching", d.message) || occursin("method call error", d.message), fa4.diagnostics)
+end
+
 @testitem "derived_file_analysis: unresolved in-file imports are marked and reported" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """

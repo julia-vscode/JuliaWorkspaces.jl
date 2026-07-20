@@ -381,9 +381,30 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                     # have an unknowable arity — skip.
                     if tree_arities !== nothing && !call_has_splat(x)
                         arities = tree_arities(n, x)
-                        if !isempty(arities)
+                        # An unqualified import of a store function/type
+                        # (`import Base: show`) binds a `Binding` whose `.val` is
+                        # the store: its method set is the workspace overloads
+                        # (`tree_arities`, cross-file) PLUS the store's own
+                        # methods, which `tree_arities` omits. Accept a match
+                        # against EITHER set — else this file's partial view
+                        # false-flags a valid store-arity call.
+                        store = func_ref isa Binding &&
+                            (func_ref.val isa SymbolServer.FunctionStore || func_ref.val isa SymbolServer.DataTypeStore) ?
+                            func_ref.val : nothing
+                        if !isempty(arities) || store !== nothing
                             cc = call_nargs(x)
-                            any(a -> compare_f_call(a, cc), arities) || seterror!(x, IncorrectCallArgs, meta_dict)
+                            if any(a -> compare_f_call(a, cc), arities)
+                                # matches a workspace overload's arity
+                            elseif store !== nothing
+                                # Match against the store's own methods; decline
+                                # (no flag) if we can't resolve a scope for them.
+                                tls = retrieve_toplevel_scope(x, meta_dict)
+                                if tls isa Scope && !iterate_over_ss_methods(store, tls, env, m -> compare_f_call(func_nargs(m), cc))
+                                    seterror!(x, IncorrectCallArgs, meta_dict)
+                                end
+                            else
+                                seterror!(x, IncorrectCallArgs, meta_dict)
+                            end
                         end
                     end
                     return
