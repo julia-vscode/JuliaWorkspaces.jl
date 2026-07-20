@@ -1533,3 +1533,30 @@ end
     # sanity: an exported name is public too
     @test occursin("public", JuliaWorkspaces._unexported_import_note(mod, "tst_exp"))
 end
+
+@testitem "Completions: labelDetails carry exported/public/internal status" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: @uri_str
+    const SS = JuliaWorkspaces.SymbolServer
+    const SL = JuliaWorkspaces.StaticLint
+
+    # External module members: tag comes from the module's export/public lists.
+    mvr = SS.VarRef(nothing, :M)
+    gen(s) = SS.GenericStore(SS.VarRef(mvr, Symbol(s)), SS.FakeTypeName(SS.VarRef(nothing, :Any), SS.FakeTypeName[]), "")
+    vals = Dict{Symbol,Any}(:tst_exp => gen("tst_exp"), :tst_pub => gen("tst_pub"), :tst_int => gen("tst_int"))
+    mod = SS.ModuleStore(mvr, vals, "", [:tst_exp], [:tst_exp, :tst_pub], Symbol[])
+    env = SL.ExternalEnv(Dict(:M => mod), Dict{SS.VarRef,Vector{SS.VarRef}}(), Symbol[])
+    st = JuliaWorkspaces.SourceText("tst_", "julia"); cst = JuliaWorkspaces.CSTParser.parse("tst_")
+    state = JuliaWorkspaces._CompletionState(4, Dict{String,JuliaWorkspaces.CompletionResultItem}(), 4, 4, nothing, cst,
+        uri"file:///t.jl", st, JuliaWorkspaces.MetaDict(), env, :normal, Dict{String,Any}(), nothing, nothing, nothing, nothing,
+        Dict{String,Tuple{String,Int}}())
+    JuliaWorkspaces._collect_completions(mod, "tst_", state, true)   # inclexported ⇒ offer all
+    @test state.completions["tst_exp"].detail_description == "exported"
+    @test state.completions["tst_pub"].detail_description == "public"
+    @test state.completions["tst_int"].detail_description == "internal"
+
+    # Workspace bindings: exported/public tagged; internal/local untagged.
+    @test JuliaWorkspaces._completion_details_label(SL.Binding(cst, cst, nothing, [], false, true)) == "exported"
+    @test JuliaWorkspaces._completion_details_label(SL.Binding(cst, cst, nothing, [], true, false)) == "public"
+    @test JuliaWorkspaces._completion_details_label(SL.Binding(cst, cst, nothing, [], false, false)) === nothing
+end

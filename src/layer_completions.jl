@@ -364,11 +364,19 @@ function _completion_kind(b)
     end
 end
 
+# `labelDetails.description` tag for a completion item's API status. Workspace
+# names that are neither exported nor public get no tag (can't tell a
+# module-internal name from a local); external members carry `internal` since
+# there are no locals there — mirroring the hover footer.
+_api_status_label(status::Symbol) =
+    status === :exported ? "exported" :
+    status === :public   ? "public"   :
+    status === :internal ? "internal" : nothing
+
 function _completion_details_label(b)
     if b isa StaticLint.Binding
-        if b.is_public
-            return " (public)"
-        end
+        b.is_exported && return _api_status_label(:exported)
+        b.is_public && return _api_status_label(:public)
     end
     return nothing
 end
@@ -1267,13 +1275,18 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
             v = SymbolServer._lookup(v, symbols, true)
             v === nothing && continue
         end
+        # exported/public/internal tag for labelDetails.description (no locals here).
+        status_label = _api_status_label(
+            StaticLint.isexportedby(canonical_name, m) ? :exported :
+            StaticLint.ispublicby(canonical_name, m) ? :public : :internal)
         if StaticLint.isexportedby(canonical_name, m) || inclexported
             foreach(possible_names) do n
                 _add_completion_item(state, CompletionResultItem(
                     n, _completion_kind(v),
                     _completion_details_description(v),
                     v isa SymbolServer.SymStore ? _sanitize_docstring(v.doc) : nothing,
-                    _texteditfor(state, spartial, n)), spartial, priority)
+                    _texteditfor(state, spartial, n);
+                    detail_description=status_label), spartial, priority)
             end
         elseif dotcomps
             foreach(possible_names) do n
@@ -1281,10 +1294,13 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
                     n, _completion_kind(v),
                     _completion_details_description(v),
                     v isa SymbolServer.SymStore ? _sanitize_docstring(v.doc) : nothing,
-                    _texteditfor(state, spartial, string(m.name, ".", n))), spartial, priority)
+                    _texteditfor(state, spartial, string(m.name, ".", n));
+                    detail_description=status_label), spartial, priority)
             end
         elseif length(spartial) > 3 && !_variable_already_imported(m, canonical_name, state)
             if state.completion_mode === :import
+                # status is already stated by the import note; keep the docstring
+                # in labelDetails.description rather than a redundant status tag.
                 import_note = _unexported_import_note(m, canonical_name)
                 foreach(possible_names) do n
                     _add_completion_item(state, CompletionResultItem(
@@ -1303,6 +1319,7 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
                         v isa SymbolServer.SymStore ? _sanitize_docstring(v.doc) : nothing,
                         _texteditfor(state, spartial, string(m.name, ".", n));
                         filter_text=string(n),
+                        detail_description=status_label,
                         insert_text_format=InsertFormats.PlainText), spartial, priority)
                 end
             end
@@ -1378,7 +1395,7 @@ function _collect_completions(x::StaticLint.Scope, spartial, state::_CompletionS
                         _completion_details_description(b),
                         isempty(documentation) ? nothing : documentation,
                         _texteditfor(state, spartial, nn);
-                        detail_label=_completion_details_label(b)), spartial, priority)
+                        detail_description=_completion_details_label(b)), spartial, priority)
                 end
             end
         end
