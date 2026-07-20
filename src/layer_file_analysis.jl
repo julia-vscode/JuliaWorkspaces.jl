@@ -880,6 +880,22 @@ function _inventory_item_name(rt, ref::ItemRef)
     return nothing
 end
 
+# True when more than one inventory item in `ref.file` shares `ref.id` — the id
+# was minted for a single statement that declares several names (an `@enum`
+# type + its members, a tuple destructure `a, b = …`). For such an `ItemRef`
+# the id alone does NOT identify one declaration, so references/rename/highlight
+# must additionally match on the name (unlike the single-name case, where the
+# id-only join is what lets `f as g` aliases resolve through the SOURCE item).
+function _itemref_is_ambiguous(rt, ref::ItemRef)
+    n = 0
+    for it in derived_file_inventory(rt, ref.file).items
+        it.id == ref.id || continue
+        n += 1
+        n > 1 && return true
+    end
+    return false
+end
+
 # The module-level `Binding` that declares `target` in its OWN file's per-file
 # meta: materialize the item's defining EXPR (`derived_item_positions` — the
 # volatile leaf, request-time only) and find, inside it, the identifier whose
@@ -892,8 +908,7 @@ end
 # The recovered binding drives the old within-file `loose_refs` walk in the
 # DECLARING file (declaration sites + same-file uses), reproducing the
 # whole-closure references behavior for the file that owns the name.
-function _item_declaring_binding(rt, target::ItemRef, meta_dict)
-    name = _inventory_item_name(rt, target)
+function _item_declaring_binding(rt, target::ItemRef, meta_dict, name=_inventory_item_name(rt, target))
     name === nothing && return nothing
     bare = _bare_macro_name(name)
     entry = get(derived_item_positions(rt, target.file), target.id, nothing)
@@ -915,7 +930,7 @@ function _item_declaring_binding(rt, target::ItemRef, meta_dict)
 end
 
 """
-    each_reference(f, rt, target::ItemRef)
+    each_reference(f, rt, target::ItemRef, restrict_name=nothing)
 
 Call `f(ref_expr, uri, offset)` once per reference site of the tree-declared
 item `target`, aggregated at request time over the per-file `outbound`
@@ -946,7 +961,12 @@ a file references `target` through an `import` of its package, which is NOT an
 occurrence once. Cost is one (mostly backdated) per-file `outbound` check per
 file per root — a cold request-time walk, not a per-keystroke path.
 """
-function each_reference(f, rt, target::ItemRef)
+function each_reference(f, rt, target::ItemRef, restrict_name::Union{Nothing,AbstractString}=nothing)
+    # `restrict_name` is set only when `target`'s id is shared across several
+    # declarations (`_itemref_is_ambiguous`): then a site matches only when its
+    # resolved name equals it too, so `@enum` members / tuple-destructure names
+    # don't cross-contaminate. `nothing` keeps the id-only join (the alias case).
+    declname = restrict_name === nothing ? _inventory_item_name(rt, target) : restrict_name
     emitted = Set{Tuple{URI,Int,Int}}()
     emit = function (x::CSTParser.EXPR)
         loc = _get_file_loc(x, rt)
@@ -963,7 +983,7 @@ function each_reference(f, rt, target::ItemRef)
         for file in derived_tree_files(rt, root)
             analysis = derived_file_analysis(rt, root, file)
             if file == target.file
-                b = _item_declaring_binding(rt, target, analysis.meta)
+                b = _item_declaring_binding(rt, target, analysis.meta, declname)
                 b isa StaticLint.Binding || continue
                 # `loose_refs` can list the same node twice (a macro name lands
                 # in the binding's refs twice); dedupe by identity as
@@ -985,7 +1005,8 @@ function each_reference(f, rt, target::ItemRef)
                     r = StaticLint.refof(x, analysis.meta)
                     tr = r isa StaticLint.TreeRef ? r :
                         (r isa StaticLint.Binding && r.val isa StaticLint.TreeRef) ? r.val : nothing
-                    (tr !== nothing && tr.item == target) && emit(x)
+                    (tr !== nothing && tr.item == target &&
+                        (restrict_name === nothing || _bare_macro_name(tr.name) == _bare_macro_name(restrict_name))) && emit(x)
                     return
                 end
             end

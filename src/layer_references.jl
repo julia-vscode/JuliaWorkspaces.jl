@@ -239,25 +239,37 @@ end
 
 # Classify what the identifier `x` refers to, for the references/rename/highlight
 # entry points. Returns:
-#   (:tree, ItemRef)      — a MODULE-LEVEL name: resolved through the module tree
-#                           (a `TreeRef`, or an import binding whose `.val` is
-#                           one), OR a module-level binding declared in THIS file
-#                           (its item recovered from `derived_module_declared` of
-#                           the file's module path). References of these aggregate
-#                           cross-file via `each_reference`.
+#   (:tree, ItemRef, restrict_name) — a MODULE-LEVEL name: resolved through the
+#                           module tree (a `TreeRef`, or an import binding whose
+#                           `.val` is one), OR a module-level binding declared in
+#                           THIS file (its item recovered from
+#                           `derived_module_declared` of the file's module path).
+#                           References of these aggregate cross-file via
+#                           `each_reference`. `restrict_name` is a `String` only
+#                           when the `ItemRef`'s id is shared across several
+#                           declarations (`@enum` type + members, tuple
+#                           destructure) — then sites must match the name too;
+#                           `nothing` keeps the id-only join (the `f as g` alias).
 #   (:local, Binding)     — a non-module-level binding (function-local, argument,
 #                           comprehension var, …), OR an external import binding
 #                           with no tree item: references stay CURRENT-FILE
 #                           (`_for_each_ref` on the per-file meta).
 #   nothing               — no ref, or a store-backed leaf with no binding.
+# The name a references/rename/highlight query must ADDITIONALLY match, or
+# `nothing` when the item's id already identifies it uniquely. Only a shared-id
+# statement (`@enum` type + members, tuple destructure) is ambiguous; there the
+# query's own resolved `name` picks out the specific declaration.
+_tree_restrict_name(runtime, item::ItemRef, name::AbstractString) =
+    _itemref_is_ambiguous(runtime, item) ? String(name) : nothing
+
 function _reference_target(runtime, root::URI, uri::URI, x::CSTParser.EXPR, meta_dict)
     StaticLint.hasref(x, meta_dict) || return nothing
     r = StaticLint.refof(x, meta_dict)
 
     if r isa StaticLint.TreeRef
-        return r.item === nothing ? nothing : (:tree, r.item)
+        return r.item === nothing ? nothing : (:tree, r.item, _tree_restrict_name(runtime, r.item, r.name))
     elseif r isa StaticLint.Binding && r.val isa StaticLint.TreeRef
-        return r.val.item === nothing ? (:local, r) : (:tree, r.val.item)
+        return r.val.item === nothing ? (:local, r) : (:tree, r.val.item, _tree_restrict_name(runtime, r.val.item, r.val.name))
     elseif r isa StaticLint.Binding
         cst = derived_julia_legacy_syntax_tree(runtime, uri)
         fscope = cst isa CSTParser.EXPR ? StaticLint.scopeof(cst, meta_dict) : nothing
@@ -271,10 +283,12 @@ function _reference_target(runtime, root::URI, uri::URI, x::CSTParser.EXPR, meta
                 declared = derived_module_declared(runtime, root, p)
                 sv = CSTParser.str_value(x)
                 cand = get(declared, sv, nothing)
+                mname = sv
                 if cand === nothing && !startswith(sv, "@")
                     cand = get(declared, "@" * sv, nothing)
+                    mname = "@" * sv
                 end
-                cand !== nothing && cand.file == uri && return (:tree, cand)
+                cand !== nothing && cand.file == uri && return (:tree, cand, _tree_restrict_name(runtime, cand, mname))
             end
         end
         return (:local, r)
@@ -286,7 +300,8 @@ end
 # file's `loose_refs` (when `uri` owns the item) plus every `TreeRef`-target
 # match within `uri`'s own meta. Used by document highlight, which stays
 # current-file (no cross-root walk). `f(ref_expr, offset)` per site.
-function _each_current_file_ref(f, runtime, uri::URI, target::ItemRef, meta_dict)
+function _each_current_file_ref(f, runtime, uri::URI, target::ItemRef, meta_dict, restrict_name::Union{Nothing,AbstractString}=nothing)
+    declname = restrict_name === nothing ? _inventory_item_name(runtime, target) : restrict_name
     seen_offsets = Set{Int}()
     emit = function (x::CSTParser.EXPR)
         loc = _get_file_loc(x, runtime)
@@ -300,7 +315,7 @@ function _each_current_file_ref(f, runtime, uri::URI, target::ItemRef, meta_dict
     end
 
     if uri == target.file
-        b = _item_declaring_binding(runtime, target, meta_dict)
+        b = _item_declaring_binding(runtime, target, meta_dict, declname)
         if b isa StaticLint.Binding
             seen = Base.IdSet{CSTParser.EXPR}()
             for r in StaticLint.loose_refs(b, meta_dict)
@@ -320,7 +335,8 @@ function _each_current_file_ref(f, runtime, uri::URI, target::ItemRef, meta_dict
         r = StaticLint.refof(x, meta_dict)
         tr = r isa StaticLint.TreeRef ? r :
             (r isa StaticLint.Binding && r.val isa StaticLint.TreeRef) ? r.val : nothing
-        (tr !== nothing && tr.item == target) && emit(x)
+        (tr !== nothing && tr.item == target &&
+            (restrict_name === nothing || _bare_macro_name(tr.name) == _bare_macro_name(restrict_name))) && emit(x)
         return
     end
     return
@@ -580,7 +596,7 @@ function _get_references(runtime, uri::URI, offset::Int)
 
     tgt = _reference_target(runtime, root, uri, x, meta_dict)
     if tgt !== nothing && tgt[1] === :tree
-        each_reference(runtime, tgt[2]) do ref, ref_uri, o
+        each_reference(runtime, tgt[2], tgt[3]) do ref, ref_uri, o
             push!(results, ReferenceResult(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span)))
         end
     elseif tgt !== nothing && tgt[1] === :local
@@ -626,9 +642,12 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
         # confined to occurrences spelled with the item's own (bare) name; the
         # `as`-alias statement's source component still renames, the `g` uses do
         # not. This preserves the old rename's source-name-only behavior.
-        item_name = _inventory_item_name(runtime, tgt[2])
+        # Alias suppression restricts edits to the item's own (bare) name. For a
+        # shared-id item that name is the query's own (`tgt[3]`); otherwise it is
+        # the item's single declared name.
+        item_name = tgt[3] === nothing ? _inventory_item_name(runtime, tgt[2]) : tgt[3]
         target_bare = item_name === nothing ? nothing : _bare_macro_name(item_name)
-        each_reference(runtime, tgt[2]) do ref, ref_uri, o
+        each_reference(runtime, tgt[2], tgt[3]) do ref, ref_uri, o
             sv = CSTParser.str_value(ref)
             (target_bare === nothing || _bare_macro_name(sv) == target_bare) || return
             text = startswith(sv, "@") ? "@" * bare_name : bare_name
@@ -696,7 +715,7 @@ function _get_highlights(runtime, uri::URI, offset::Int)
     # file-local binding uses the old within-file `loose_refs`.
     tgt = _reference_target(runtime, root, uri, identifier, meta_dict)
     if tgt !== nothing && tgt[1] === :tree
-        _each_current_file_ref(runtime, uri, tgt[2], meta_dict) do ref, o
+        _each_current_file_ref(runtime, uri, tgt[2], meta_dict, tgt[3]) do ref, o
             kind = StaticLint.hasbinding(ref, meta_dict) ? :write : :read
             push!(results, HighlightResult(_offset_to_position(runtime, uri, o), _offset_to_position(runtime, uri, o + ref.span), kind))
         end

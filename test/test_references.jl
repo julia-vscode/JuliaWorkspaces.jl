@@ -345,6 +345,103 @@ end
     end
 end
 
+@testitem "References: rename an enum member touches only that member" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_rename_edits, get_references
+    using JuliaWorkspaces.URIs2: URI
+
+    # An `@enum` declares the type AND every member from one statement, so they
+    # share a walker id (and thus an `ItemRef`). References/rename must still
+    # resolve to the specific member by name — renaming `green` must not rewrite
+    # the enum type `Color` or a sibling member `red`.
+    source = """
+    module EnumRen
+    @enum Color red green blue
+    f() = green
+    g() = (red, green)
+    h() = Color
+    end
+    """
+    uri = URI("file:///enumren/src/EnumRen.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # `green`: declaration in the `@enum` (line 2) + two uses (f, g) = 3.
+    lines = split(source, '\n')
+    enum_line = 2
+    gcol = first(findfirst("green", lines[enum_line]))
+    gidx = string_index(source, enum_line, gcol)
+
+    refs = get_references(jw, uri, gidx)
+    @test length(refs) == 3
+
+    edits = get_rename_edits(jw, uri, gidx, "verde")
+    @test length(edits) == 3
+    @test all(e -> e.new_text == "verde", edits)
+    # Every edited range must currently span the text "green" — never `Color`
+    # (line 5) or the sibling member `red` (line 3). Position is 1-based.
+    for e in edits
+        line_text = lines[e.start.line]
+        @test line_text[e.start.column:(e.stop.column - 1)] == "green"
+    end
+end
+
+@testitem "References: rename a tuple-destructure name touches only that name" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_rename_edits, get_references
+    using JuliaWorkspaces.URIs2: URI
+
+    # `a, b = …` at module level declares both names from one statement, so they
+    # share a walker id (and `ItemRef`), exactly like `@enum` members. Renaming
+    # `a` must not rewrite the sibling `b`.
+    source = """
+    module TupRen
+    a, b = 1, 2
+    f() = a + b
+    g() = b
+    end
+    """
+    uri = URI("file:///tupren/src/TupRen.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    lines = split(source, '\n')
+    # Query `b` — the SECOND name of the shared-id statement. `_inventory_item_name`
+    # returns the first name (`a`), so the old id-only code would have resolved `b`
+    # to `a`'s binding and rewritten `a`; the fix must target `b` only.
+    # `b`: declaration (line 2) + two uses (f line 3, g line 4) = 3 occurrences.
+    bcol = first(findfirst("b", lines[2]))
+    bidx = string_index(source, 2, bcol)
+    refs = get_references(jw, uri, bidx)
+    @test length(refs) == 3
+
+    edits = get_rename_edits(jw, uri, bidx, "bb")
+    @test length(edits) == 3
+    @test all(e -> e.new_text == "bb", edits)
+    for e in edits
+        line_text = lines[e.start.line]
+        @test line_text[e.start.column:(e.stop.column - 1)] == "b"
+    end
+end
+
 @testitem "References: highlight basic" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_highlights
     using JuliaWorkspaces.URIs2: URI
@@ -784,6 +881,28 @@ end
     @test ("file:///RA2/src/use.jl", 2, 7) in refs      # first g()
     @test ("file:///RA2/src/use.jl", 2, 13) in refs     # second g()
     @test length(refs) == 6
+end
+
+@testitem "References: enum member across files stays disjoint from the type" setup=[RefAggWS] begin
+    SIB = URI("file:///RAEnum/src/sib.jl")
+    USE = URI("file:///RAEnum/src/use.jl")
+    sib = "module EnumSib\n@enum Color red green blue\nend\n"
+    use = "using .EnumSib: green, Color\nh() = green\nk() = Color\n"
+    jw = refagg_workspace("RAEnum", "55555555-1234-1234-1234-123456789abc",
+        "module RAEnum\ninclude(\"sib.jl\")\ninclude(\"use.jl\")\nend\n",
+        [SIB => sib, USE => use])
+
+    # The `@enum` type and every member share one walker id (one `ItemRef`).
+    # Cross-file, the outbound name filter must keep `green` references disjoint
+    # from `Color` references — the exact branch this fix added.
+    green_refs = refset(jw, USE, findfirst("green", use).start)
+    color_refs = refset(jw, USE, findfirst("Color", use).start)
+
+    @test isempty(intersect(Set(green_refs), Set(color_refs)))
+    @test ("file:///RAEnum/src/use.jl", 2, 7) in green_refs   # `green` in h()
+    @test !(("file:///RAEnum/src/use.jl", 2, 7) in color_refs)
+    @test ("file:///RAEnum/src/use.jl", 3, 7) in color_refs   # `Color` in k()
+    @test !(("file:///RAEnum/src/use.jl", 3, 7) in green_refs)
 end
 
 @testitem "References: rename a module-level function edits all files, not the alias" setup=[RefAggWS] begin
