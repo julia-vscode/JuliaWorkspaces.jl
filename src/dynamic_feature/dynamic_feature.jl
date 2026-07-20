@@ -422,7 +422,7 @@ end
 function _standalone_project_dir(df::DynamicFeature, key::CreateStandaloneProjectKey)
     parent = joinpath(dirname(df.store_path), "standalone-projects")
     name = basename(key.package_path)
-    path_hash = string(hash(key.package_path), base=16, pad=16)[1:8]
+    path_hash = string(hash(key.package_path) % UInt32, base=16, pad=8)
     prefix = string(name, "-", path_hash, "-")
     dir = joinpath(parent, string(prefix, string(key.content_hash, base=16, pad=16)))
     if isdir(parent)
