@@ -106,6 +106,22 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
     return TextFile(uri, SourceText(content, language_id))
 end
 
+"""
+    read_path_into_textdocuments(uri; ignore_io_errors=false, file_limit=nothing)
+        -> Union{Vector{TextFile}, Nothing}
+
+Read every workspace-relevant file (Julia sources, Project/Manifest, lint/format
+configs, Markdown) under the folder `uri` into `TextFile`s.
+
+When `file_limit` is set and the tree contains more than that many Julia files,
+returns `nothing` (the tree is deemed too large to load) — the count is checked
+before any content is read. Otherwise returns the collected `Vector{TextFile}`
+(possibly empty). Callers that pass a `file_limit` must handle the `nothing`
+return.
+
+With `ignore_io_errors`, a non-`file` URI yields an empty vector and unreadable
+files are skipped; otherwise both throw.
+"""
 function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_limit::Union{Nothing,Int}=nothing)
     result = TextFile[]
 
