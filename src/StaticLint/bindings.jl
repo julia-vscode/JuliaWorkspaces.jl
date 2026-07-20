@@ -14,14 +14,19 @@ mutable struct Binding
     val::Union{Binding,EXPR,SymbolServer.SymStore,TreeRef,Nothing}
     type::Union{Binding,SymbolServer.SymStore,Nothing}
     refs::Vector{Any}
+    # `export`/`public` declarations of this name in its module. exported ⇒
+    # public, mirroring the ModuleStore exportednames ⊆ publicnames model for
+    # cached packages so workspace and cached symbols share one API-status model.
     is_public::Bool
+    is_exported::Bool
 end
-Binding(x::EXPR) = Binding(CSTParser.get_name(x), x, nothing, [], false)
-Binding(name, val, type, refs) = Binding(name, val, type, refs, false)
+Binding(x::EXPR) = Binding(CSTParser.get_name(x), x, nothing, [], false, false)
+Binding(name, val, type, refs) = Binding(name, val, type, refs, false, false)
+Binding(name, val, type, refs, is_public::Bool) = Binding(name, val, type, refs, is_public, false)
 
 function Base.show(io::IO, b::Binding)
     printstyled(io, " Binding(", to_codeobject(b.name),
-        b.is_public ? "ᵖ" : "",
+        b.is_exported ? "ᵉ" : b.is_public ? "ᵖ" : "",
         b.type === nothing ? "" : "::($(b.type.name))",
         b.refs isa Vector ? " ($(length(b.refs)) refs))" : ")", color=:blue)
 end

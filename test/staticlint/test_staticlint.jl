@@ -4251,3 +4251,23 @@ end
     m = describe("g() = sqrt(1; foo=2)\n", "sqrt")
     @test occursin("keyword `foo`", m)
 end
+
+@testitem "correctly mark exported bindings" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof
+
+    if VERSION >= v"1.12"
+        cst, meta_dict = parse_and_pass("""
+            module M
+            f() = 1
+            g() = 2
+            h() = 3
+            export f
+            public g
+            end""")
+        sc = scopeof(cst.args[1], meta_dict)
+        # export ⇒ exported + public; public ⇒ public only; neither ⇒ internal.
+        @test sc.names["f"].is_exported && sc.names["f"].is_public
+        @test sc.names["g"].is_public && !sc.names["g"].is_exported
+        @test !sc.names["h"].is_public && !sc.names["h"].is_exported
+    end
+end

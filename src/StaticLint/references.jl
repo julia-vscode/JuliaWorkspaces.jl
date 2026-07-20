@@ -125,6 +125,10 @@ function resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
     if scopehasbinding(scope, mn)
         if x.parent.head === :public
             scope.names[mn].is_public = true
+        elseif x.parent.head === :export
+            # export ⇒ public
+            scope.names[mn].is_exported = true
+            scope.names[mn].is_public = true
         end
         setref!(x, scope.names[mn], meta_dict)
         resolved = true
