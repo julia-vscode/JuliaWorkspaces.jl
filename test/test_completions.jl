@@ -1,3 +1,35 @@
+@testitem "Completions: workspace tree names carry an exported/public tag" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    # `foo`/`baz` are declared in a SIBLING file, so they reach the completion
+    # only through the module tree (`_add_visible_name_completion`) — not a
+    # local scope binding. The exported one must be tagged, matching hover; the
+    # internal one gets no tag.
+    project_toml = "name = \"CompTag\"\nuuid = \"a2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc\"\n\n[deps]\n"
+    entry = "module CompTag\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n"
+    a = "export item_exp\nitem_exp() = 1\nitem_int() = 3\n"
+    b = "g() = item\n"   # complete the shared `item` prefix
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///comptag/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///comptag/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///comptag/src/CompTag.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///comptag/src/a.jl"), SourceText(a, "julia")))
+    b_uri = URI("file:///comptag/src/b.jl")
+    add_file!(jw, TextFile(b_uri, SourceText(b, "julia")))
+
+    # Cursor right after the `item` partial in `g() = item`.
+    result = get_completions(jw, b_uri, first(findfirst("item", b)) + 4)
+    exp_item = filter(i -> i.label == "item_exp", result.items)
+    int_item = filter(i -> i.label == "item_int", result.items)
+    @test length(exp_item) == 1
+    @test exp_item[1].detail_description == "exported"   # exported ⇒ tagged
+    @test length(int_item) == 1
+    @test int_item[1].detail_description === nothing      # internal ⇒ no tag
+end
+
 @testitem "Completions: latex completions" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI
@@ -398,6 +430,58 @@ end
     # Case-sensitive when prefix has uppercase
     @test is_completion_match("Base", "Bas")
     @test !is_completion_match("base", "Bas")
+    # Fuzzy matches: transposition/omission typos reach their target
+    @test is_completion_match("length", "lenght")
+    @test is_completion_match("println", "pritnln")
+    @test is_completion_match("Vector", "Vecotr")
+    @test is_completion_match("filter", "fitler")
+    @test is_completion_match("@test", "@tset")
+    # ...but unrelated names stay below the cutoff
+    @test !is_completion_match("Regex", "pri")
+    @test !is_completion_match("setfield!", "shuffel")
+end
+
+@testitem "Completions: fuzzy match surfaces typo'd store symbols" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    module FuzzyComp
+
+    lenght
+    pri
+
+    end
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///fuzzycomp/src/FuzzyComp.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    function string_index(src, line, col)
+        lines = split(src, '\n')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    # Typo'd partial "lenght" (line 3, col 7): no prefix match exists, the
+    # fuzzy tier surfaces `length`
+    index = string_index(source, 3, 7)
+    result = get_completions(jw, uri, index)
+    @test any(item -> item.label == "length", result.items)
+
+    # Partial "pri" (line 4, col 4): prefix matches (print, println, ...) must
+    # rank above the fuzzy-only match `pi`
+    index = string_index(source, 4, 4)
+    result = get_completions(jw, uri, index)
+    print_idx = findfirst(i -> i.label == "print", result.items)
+    pi_idx = findfirst(i -> i.label == "pi", result.items)
+    @test print_idx !== nothing
+    @test pi_idx !== nothing
+    @test print_idx < pi_idx
 end
 
 @testitem "Completions: relevance ranking unit" begin
@@ -922,6 +1006,7 @@ end
     state = JuliaWorkspaces._CompletionState(
         3, Dict{String,JuliaWorkspaces.CompletionResultItem}(), 3, 3, nothing, cst,
         uri"file:///t.jl", st, JuliaWorkspaces.MetaDict(), env, :normal, Dict{String,Any}(), nothing,
+        nothing, nothing, nothing,
         Dict{String,Tuple{String,Int}}())
 
     JuliaWorkspaces._collect_completions(mod, "tst", state, true)
@@ -1072,4 +1157,438 @@ end
     else_fields = sort([i.label for i in get_completions(jw, uri, dots[2][end]).items])
     @test if_fields == ["field1"]
     @test else_fields == ["field2"]
+end
+
+# --- Per-file analyses + module visibility (inventories milestone) -----------
+
+@testitem "Completions: unqualified completion sees sibling-file names" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    # entry file declares the package module, includes a sibling and a leaf;
+    # module-level names from the entry file and colon-imported sibling names
+    # must be offered in the leaf even though the leaf's own meta no longer
+    # reaches the module scope.
+    function make_ws(leafsrc; host="crossfile1")
+        project_toml = """
+        name = "MainPkg"
+        uuid = "12345678-1234-1234-1234-123456789abc"
+        version = "0.1.0"
+        """
+        manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+        entry = """
+        module MainPkg
+        include("sib.jl")
+        include("leaf.jl")
+        using .Sib: exported_fn
+        mainfn(x) = 2x
+        end
+        """
+        sib = """
+        module Sib
+        export exported_fn, @mymac
+        exported_fn(x) = x
+        unexported_fn(x) = x
+        macro mymac(x) x end
+        struct SibStruct
+            fielda::Int
+        end
+        end
+        """
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///$host/Project.toml"), SourceText(project_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///$host/Manifest.toml"), SourceText(manifest_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///$host/src/MainPkg.jl"), SourceText(entry, "julia")))
+        add_file!(jw, TextFile(URI("file:///$host/src/sib.jl"), SourceText(sib, "julia")))
+        add_file!(jw, TextFile(URI("file:///$host/src/leaf.jl"), SourceText(leafsrc, "julia")))
+        return jw, URI("file:///$host/src/leaf.jl")
+    end
+
+    # module-level function declared in the entry file
+    leaf1 = "mainf\n"
+    jw1, uri1 = make_ws(leaf1; host="crossfile1")
+    labels1 = [i.label for i in get_completions(jw1, uri1, findfirst("mainf\n", leaf1)[end]).items]
+    @test "mainfn" in labels1
+
+    # colon-imported sibling function (visible at module level via the entry file)
+    leaf2 = "exported_f\n"
+    jw2, uri2 = make_ws(leaf2; host="crossfile2")
+    labels2 = [i.label for i in get_completions(jw2, uri2, findfirst("exported_f\n", leaf2)[end]).items]
+    @test "exported_fn" in labels2
+
+    # a file-local binding shadows a same-named visibility entry: exactly one item
+    leaf3 = """
+    function exported_fn(y)
+        y
+    end
+    exported_f
+    """
+    jw3, uri3 = make_ws(leaf3; host="crossfile3")
+    items3 = get_completions(jw3, uri3, findfirst("exported_f\n", leaf3)[end]).items
+    @test count(i -> i.label == "exported_fn", items3) == 1
+
+    # rule 4: the enclosing module's own name (self-binding) appears exactly once
+    leaf4 = "MainPk\n"
+    jw4, uri4 = make_ws(leaf4; host="crossfile4")
+    items4 = get_completions(jw4, uri4, findfirst("MainPk\n", leaf4)[end]).items
+    @test count(i -> i.label == "MainPkg", items4) == 1
+
+    # Base exported names still come from the env stores
+    leaf5 = "printl\n"
+    jw5, uri5 = make_ws(leaf5; host="crossfile5")
+    labels5 = [i.label for i in get_completions(jw5, uri5, findfirst("printl\n", leaf5)[end]).items]
+    @test "println" in labels5
+end
+
+@testitem "Completions: cross-file items carry their defining-file docstring" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, update_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "DocPkg"
+    uuid = "d2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    entry = """
+    module DocPkg
+    include("sib.jl")
+    include("leaf.jl")
+    using .Sib
+    end
+    """
+    sib = """
+    module Sib
+    export documented_fn
+    \"\"\"
+    documented_fn does a thing
+    \"\"\"
+    documented_fn(x) = x
+    end
+    """
+    leaf = "documented_f\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///docpkg/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///docpkg/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///docpkg/src/DocPkg.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///docpkg/src/sib.jl"), SourceText(sib, "julia")))
+    leaf_uri = URI("file:///docpkg/src/leaf.jl")
+    add_file!(jw, TextFile(leaf_uri, SourceText(leaf, "julia")))
+
+    # The completion for a sibling-declared name carries its docstring UPFRONT
+    # (no completionItem/resolve handler exists) — resolved request-time from
+    # the declaring file via `item_documentation`.
+    item = only(filter(i -> i.label == "documented_fn",
+        get_completions(jw, leaf_uri, findfirst("documented_f\n", leaf)[end]).items))
+    @test item.documentation !== nothing
+    @test occursin("documented_fn does a thing", item.documentation)
+
+    # Editing ONLY the docstring in the declaring file surfaces in a fresh
+    # completion (docs live outside the inventory; the position leaf reparses).
+    update_file!(jw, TextFile(URI("file:///docpkg/src/sib.jl"),
+        SourceText(replace(sib, "does a thing" => "does a thing EDITED"), "julia")))
+    item2 = only(filter(i -> i.label == "documented_fn",
+        get_completions(jw, leaf_uri, findfirst("documented_f\n", leaf)[end]).items))
+    @test item2.documentation !== nothing
+    @test occursin("does a thing EDITED", item2.documentation)
+end
+
+@testitem "Completions/Hover: interpolated docstrings stringify (no MethodError)" begin
+    # A docstring containing `$(...)` interpolation does NOT parse as a plain
+    # String literal — its payload `to_codeobject`s to a `:string` `Expr`. The
+    # doc extraction (`item_documentation`) must yield a `String` so neither the
+    # completion path (which passed the raw value to `_sanitize_docstring`, the
+    # original crash) nor the hover path chokes.
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "DocInterp"
+    uuid = "e3345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    entry = """
+    module DocInterp
+    include("sib.jl")
+    include("leaf.jl")
+    using .Sib
+    end
+    """
+    # docstring with STRING INTERPOLATION in the payload
+    sib = """
+    module Sib
+    export Colex
+    \"\"\"
+        \$(@__MODULE__()).Colex <: Base.Order.Ordering
+    The colexicographic ordering for `SmallBitSet`.
+    See also [`\$(@__MODULE__()).Lex`](@ref).
+    \"\"\"
+    struct Colex end
+    end
+    """
+    leaf = "Col\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///docinterp/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///docinterp/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///docinterp/src/DocInterp.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///docinterp/src/sib.jl"), SourceText(sib, "julia")))
+    leaf_uri = URI("file:///docinterp/src/leaf.jl")
+    add_file!(jw, TextFile(leaf_uri, SourceText(leaf, "julia")))
+    sib_uri = URI("file:///docinterp/src/sib.jl")
+
+    # Completion: must NOT crash and must carry a sane String docstring.
+    item = only(filter(i -> i.label == "Colex",
+        get_completions(jw, leaf_uri, findfirst("Col\n", leaf)[end]).items))
+    @test item.documentation isa String
+    @test occursin("colexicographic ordering", item.documentation)
+
+    # Hover on the defining struct name: must NOT crash and render the doc.
+    hover = get_hover_text(jw, sib_uri, findfirst("struct Colex", sib)[end])
+    @test hover isa String
+    @test occursin("colexicographic ordering", hover)
+end
+
+@testitem "Completions: dot-completion on a workspace module lists its names" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "MainPkg"
+    uuid = "12345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    entry = """
+    module MainPkg
+    include("sib.jl")
+    include("leaf.jl")
+    end
+    """
+    sib = """
+    module Sib
+    export exported_fn, @mymac
+    exported_fn(x) = x
+    unexported_fn(x) = x
+    macro mymac(x) x end
+    struct SibStruct
+        fielda::Int
+    end
+    end
+    """
+    leaf = """
+    function leaffn()
+        Sib.
+    end
+    """
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsdot/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsdot/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsdot/src/MainPkg.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///wsdot/src/sib.jl"), SourceText(sib, "julia")))
+    add_file!(jw, TextFile(URI("file:///wsdot/src/leaf.jl"), SourceText(leaf, "julia")))
+    uri = URI("file:///wsdot/src/leaf.jl")
+
+    idx = findfirst("Sib.\n", leaf)[end]
+    labels = [i.label for i in get_completions(jw, uri, idx).items]
+    # old (whole-closure) behavior: ALL names, not just exported ones —
+    # matched by the per-file path (probe-verified)
+    @test "exported_fn" in labels
+    @test "unexported_fn" in labels
+    @test "SibStruct" in labels
+    # deferred Task-1 minor: member macro resolution through the tree
+    @test "@mymac" in labels
+    # the module's self-binding is offered exactly once
+    @test count(==("Sib"), labels) <= 1
+
+    # partial dot-completion filters
+    leaf_p = """
+    function leaffn()
+        Sib.expo
+    end
+    """
+    jwp = JuliaWorkspace()
+    add_file!(jwp, TextFile(URI("file:///wsdotp/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jwp, TextFile(URI("file:///wsdotp/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jwp, TextFile(URI("file:///wsdotp/src/MainPkg.jl"), SourceText(entry, "julia")))
+    add_file!(jwp, TextFile(URI("file:///wsdotp/src/sib.jl"), SourceText(sib, "julia")))
+    add_file!(jwp, TextFile(URI("file:///wsdotp/src/leaf.jl"), SourceText(leaf_p, "julia")))
+    urip = URI("file:///wsdotp/src/leaf.jl")
+    idxp = findfirst("Sib.expo", leaf_p)[end]
+    labelsp = [i.label for i in get_completions(jwp, urip, idxp).items]
+    @test "exported_fn" in labelsp
+end
+
+@testitem "Completions: dot-completion on an external module through per-file refs" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "MainPkg"
+    uuid = "12345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    entry = """
+    module MainPkg
+    include("leaf.jl")
+    end
+    """
+    # `Base` resolves to the env-store stand-in in per-file meta
+    leaf = """
+    function leaffn()
+        Base.r
+    end
+    """
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///extdot/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///extdot/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///extdot/src/MainPkg.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///extdot/src/leaf.jl"), SourceText(leaf, "julia")))
+    uri = URI("file:///extdot/src/leaf.jl")
+
+    idx = findfirst("Base.r", leaf)[end]
+    labels = [i.label for i in get_completions(jw, uri, idx).items]
+    @test "rand" in labels
+end
+
+@testitem "Completions: struct fields through tree-resolved types" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    # the struct is declared in the ENTRY file; the leaf sees it only through
+    # the module tree (its ref is a struct-kind TreeRef with an ItemRef)
+    function make_ws(leafsrc; host)
+        project_toml = """
+        name = "MainPkg"
+        uuid = "12345678-1234-1234-1234-123456789abc"
+        version = "0.1.0"
+        """
+        manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+        entry = """
+        module MainPkg
+        struct MainStruct
+            fielda::Int
+            fieldb::String
+        end
+        include("leaf.jl")
+        end
+        """
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///$host/Project.toml"), SourceText(project_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///$host/Manifest.toml"), SourceText(manifest_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///$host/src/MainPkg.jl"), SourceText(entry, "julia")))
+        add_file!(jw, TextFile(URI("file:///$host/src/leaf.jl"), SourceText(leafsrc, "julia")))
+        return jw, URI("file:///$host/src/leaf.jl")
+    end
+
+    # annotated parameter
+    leaf1 = """
+    function leafg(z::MainStruct)
+        z.
+        1 + 1
+    end
+    """
+    jw1, uri1 = make_ws(leaf1; host="treestruct1")
+    idx1 = findfirst("z.\n", leaf1)[end]
+    @test sort([i.label for i in get_completions(jw1, uri1, idx1).items]) == ["fielda", "fieldb"]
+
+    # constructor-call assignment
+    leaf2 = """
+    function leafh()
+        x = MainStruct(1, "a")
+        x.
+        1 + 1
+    end
+    """
+    jw2, uri2 = make_ws(leaf2; host="treestruct2")
+    idx2 = findfirst("x.\n", leaf2)[end]
+    @test sort([i.label for i in get_completions(jw2, uri2, idx2).items]) == ["fielda", "fieldb"]
+
+    # type-asserted assignment
+    leaf3 = """
+    function leafi(w)
+        y = w::MainStruct
+        y.fie
+        1 + 1
+    end
+    """
+    jw3, uri3 = make_ws(leaf3; host="treestruct3")
+    idx3 = findfirst("y.fie", leaf3)[end]
+    @test sort([i.label for i in get_completions(jw3, uri3, idx3).items]) == ["fielda", "fieldb"]
+end
+
+@testitem "Completions: import-mode member completions on a stdlib" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "MainPkg"
+    uuid = "12345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    entry = """
+    module MainPkg
+    include("leaf.jl")
+    end
+    """
+    leaf = """
+    import Base: floo
+    """
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///impstdlib/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///impstdlib/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///impstdlib/src/MainPkg.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///impstdlib/src/leaf.jl"), SourceText(leaf, "julia")))
+    uri = URI("file:///impstdlib/src/leaf.jl")
+
+    idx = findfirst("floo\n", leaf)[end]
+    labels = [i.label for i in get_completions(jw, uri, idx).items]
+    @test "floor" in labels
+end
+
+@testitem "Completions: public vs internal unexported symbols get distinct import notes" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+    const SS = JuliaWorkspaces.SymbolServer
+
+    # tst_exp exported, tst_pub public-but-unexported, tst_int internal.
+    # (values are irrelevant to the note; ispublicby only needs the name present)
+    vals = Dict{Symbol,Any}(:tst_exp => nothing, :tst_pub => nothing, :tst_int => nothing)
+    mod = SS.ModuleStore(SS.VarRef(nothing, :M), vals, "",
+                         [:tst_exp], [:tst_exp, :tst_pub], Symbol[])
+
+    @test occursin("public (but unexported)", JuliaWorkspaces._unexported_import_note(mod, "tst_pub"))
+    @test occursin("internal", JuliaWorkspaces._unexported_import_note(mod, "tst_int"))
+    # sanity: an exported name is public too
+    @test occursin("public", JuliaWorkspaces._unexported_import_note(mod, "tst_exp"))
+end
+
+@testitem "Completions: labelDetails carry exported/public/internal status" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: @uri_str
+    const SS = JuliaWorkspaces.SymbolServer
+    const SL = JuliaWorkspaces.StaticLint
+
+    # External module members: tag comes from the module's export/public lists.
+    mvr = SS.VarRef(nothing, :M)
+    gen(s) = SS.GenericStore(SS.VarRef(mvr, Symbol(s)), SS.FakeTypeName(SS.VarRef(nothing, :Any), SS.FakeTypeName[]), "")
+    vals = Dict{Symbol,Any}(:tst_exp => gen("tst_exp"), :tst_pub => gen("tst_pub"), :tst_int => gen("tst_int"))
+    mod = SS.ModuleStore(mvr, vals, "", [:tst_exp], [:tst_exp, :tst_pub], Symbol[])
+    env = SL.ExternalEnv(Dict(:M => mod), Dict{SS.VarRef,Vector{SS.VarRef}}(), Symbol[])
+    st = JuliaWorkspaces.SourceText("tst_", "julia"); cst = JuliaWorkspaces.CSTParser.parse("tst_")
+    state = JuliaWorkspaces._CompletionState(4, Dict{String,JuliaWorkspaces.CompletionResultItem}(), 4, 4, nothing, cst,
+        uri"file:///t.jl", st, JuliaWorkspaces.MetaDict(), env, :normal, Dict{String,Any}(), nothing, nothing, nothing, nothing,
+        Dict{String,Tuple{String,Int}}())
+    JuliaWorkspaces._collect_completions(mod, "tst_", state, true)   # inclexported ⇒ offer all
+    @test state.completions["tst_exp"].detail_description == "exported"
+    @test state.completions["tst_pub"].detail_description == "public"
+    @test state.completions["tst_int"].detail_description == "internal"
+
+    # Workspace bindings: exported/public tagged; internal/local untagged.
+    @test JuliaWorkspaces._completion_details_label(SL.Binding(cst, cst, nothing, [], false, true)) == "exported"
+    @test JuliaWorkspaces._completion_details_label(SL.Binding(cst, cst, nothing, [], true, false)) == "public"
+    @test JuliaWorkspaces._completion_details_label(SL.Binding(cst, cst, nothing, [], false, false)) === nothing
 end

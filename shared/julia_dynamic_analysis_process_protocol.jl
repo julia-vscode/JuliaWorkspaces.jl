@@ -14,6 +14,7 @@ end
 @dict_readable struct CreateStandaloneProjectParams <: JSONRPC.Outbound
     packagePath::String
     storePath::String
+    projectDir::String
 end
 
 @dict_readable struct IndexProgressParams <: JSONRPC.Outbound

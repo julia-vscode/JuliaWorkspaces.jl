@@ -280,3 +280,106 @@ end
     # A matrix literal resolves the type-matching `join` overload.
     @test labels("x = join([1 2; 3 4], '\\n')") == ["iterator=", "delim="]
 end
+
+@testitem "Misc: get_inlay_hints combined type and parameter hints (old-vs-new parity)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_inlay_hints, InlayHintConfig, InlayHintResult
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "IHCombo"
+    uuid = "a2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    source = """
+    module IHCombo
+    foo(alpha, beta) = alpha + beta
+    x = foo(1, 2)
+    s = "hi"
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ihc/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///ihc/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    uri = URI("file:///ihc/src/IHCombo.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    config = InlayHintConfig(true, true, :all)
+    hints = get_inlay_hints(jw, uri, 1, ncodeunits(source) + 1, config)
+
+    # Captured from the whole-closure meta path before the per-file migration:
+    # the call arguments get parameter-name hints, and the `s = "hi"` binding
+    # gets a `::String` type hint (the `x = foo(...)` binding's return type is
+    # not inferred, so it gets none). Per-file meta must reproduce this exactly.
+    got = [(h.label, h.kind, h.position.line, h.position.column) for h in hints]
+    @test got == [
+        ("alpha=", :parameter, 3, 9),
+        ("beta=", :parameter, 3, 12),
+        ("::String", :type, 4, 2),
+    ]
+end
+
+@testitem "Misc: get_static_lint_data returns per-file analysis meta" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_static_lint_data, get_best_root_for_uri
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "MultiF"
+    uuid = "b2345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    main = """
+    module MultiF
+    include("helper.jl")
+    g() = 1
+    end
+    """
+    helper = "h(z) = z + 1\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///mf/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///mf/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    muri = URI("file:///mf/src/MultiF.jl")
+    huri = URI("file:///mf/src/helper.jl")
+    add_file!(jw, TextFile(muri, SourceText(main, "julia")))
+    add_file!(jw, TextFile(huri, SourceText(helper, "julia")))
+
+    d = get_static_lint_data(jw, muri)
+    @test d !== nothing
+    @test d.root == muri
+
+    # The returned meta is the CURRENT-FILE per-file analysis meta, not the
+    # merged whole-closure meta (which would also carry the sibling file's
+    # EXPRs). Identity against `derived_file_analysis(...).meta` is the contract.
+    perfile = JuliaWorkspaces.derived_file_analysis(jw.runtime, d.root, muri).meta
+    @test d.meta_dict === perfile
+
+    # `workspace_packages` is vestigial post-migration (always empty).
+    @test d.workspace_packages == Dict{String,Any}()
+    @test d.env !== nothing
+
+    # No-root file returns nothing.
+    @test get_static_lint_data(jw, URI("file:///elsewhere/x.jl")) === nothing
+end

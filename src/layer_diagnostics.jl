@@ -13,6 +13,10 @@ function _is_env_dependent_diagnostic(d::Diagnostic)
     d.source != "StaticLint.jl" && return false
     startswith(d.message, "Missing reference:") && return true
     startswith(d.message, "Failed to resolve `") && return true
+    # Detailed method-call errors (`describe_call_mismatch`) replace the static
+    # `IncorrectCallArgs` message but are just as env-dependent (method sets need
+    # package symbols) — suppress them until the environment is ready too.
+    startswith(d.message, "No method matching") && return true
     return d.message in _ENV_DEPENDENT_LINT_MESSAGES
 end
 
@@ -146,7 +150,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         end
 
         if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "static-lint", true) == true
-            sl = derived_static_lint_diagnostics(rt, uri)
+            sl = derived_new_static_lint_diagnostics(rt, uri)
             env_ready = derived_file_env_ready(rt, uri)
             if env_ready
                 append!(results, sl)

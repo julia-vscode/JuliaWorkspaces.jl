@@ -1,6 +1,60 @@
+# Per-module extended-method contributions, cached by store `objectid`. A
+# store's contents are immutable once loaded, so its contributions never
+# change. Stdlib stores are const, but PACKAGE stores are re-created on
+# re-index — so the cache holds only a `WeakRef` to each store (keyed by
+# `objectid`, a value that does not pin the store): once a re-created/dropped
+# store is otherwise unreferenced, its entry — and the whole symbol table it
+# would have pinned — can be collected. The `=== m` guard rejects a stale
+# entry should an `objectid` be reused after collection. Dead entries are
+# swept opportunistically so the map can't grow without bound across
+# re-indexes.
+const _EXTENDS_CACHE = Dict{UInt,Tuple{WeakRef,Vector{Pair{SymbolServer.VarRef,SymbolServer.VarRef}}}}()
+const _EXTENDS_CACHE_LOCK = ReentrantLock()
+const _EXTENDS_CACHE_SWEEP_AT = 512
+
+function _module_extends_contributions(m::SymbolServer.ModuleStore)
+    oid = objectid(m)
+    @lock _EXTENDS_CACHE_LOCK begin
+        hit = get(_EXTENDS_CACHE, oid, nothing)
+        hit !== nothing && hit[1].value === m && return hit[2]
+    end
+    tmp = Dict{SymbolServer.VarRef,Vector{SymbolServer.VarRef}}()
+    SymbolServer.collect_extended_methods(m, tmp, m.name)
+    # collect_extended_methods seeds each vector with `extends.parent`; keep
+    # only the per-module contributions so they can be merged per environment
+    contribs = Pair{SymbolServer.VarRef,SymbolServer.VarRef}[]
+    for (ext, vec) in tmp
+        for mn in @view vec[2:end]
+            push!(contribs, ext => mn)
+        end
+    end
+    @lock _EXTENDS_CACHE_LOCK begin
+        if length(_EXTENDS_CACHE) >= _EXTENDS_CACHE_SWEEP_AT
+            filter!(kv -> kv.second[1].value !== nothing, _EXTENDS_CACHE)
+        end
+        _EXTENDS_CACHE[oid] = (WeakRef(m), contribs)
+    end
+    return contribs
+end
+
+# Equivalent to `SymbolServer.collect_extended_methods(store)`, but assembled
+# from the per-module cache so shared module stores are only ever walked once.
+function _collect_extended_methods_shared(store)
+    extendeds = Dict{SymbolServer.VarRef,Vector{SymbolServer.VarRef}}()
+    for (_, m) in store
+        for (ext, mn) in _module_extends_contributions(m)
+            push!(get!(() -> SymbolServer.VarRef[ext.parent], extendeds, ext), mn)
+        end
+    end
+    return extendeds
+end
+
 function _stdlib_only_env()
-    new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
-    return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), collect(keys(new_store)))
+    # Shallow copy: the entries alias the immutable baked stdlib stores.
+    # Nothing mutates store contents after construction (scopes and other
+    # environments already alias these instances).
+    new_store = copy(SymbolServer.stdlibs)
+    return StaticLint.ExternalEnv(new_store, _collect_extended_methods_shared(new_store), collect(keys(new_store)))
 end
 
 # ─── Per-key readiness wrappers ──────────────────────────────────────────────
@@ -60,7 +114,8 @@ Salsa.@derived function derived_environment(rt, uri)
     project = derived_project(rt, uri)
 
     if project === nothing
-        return _stdlib_only_env()
+        # Reuse the memoized instance instead of building a fresh env per key.
+        return derived_stdlib_only_env(rt)
     end
 
     metadata_packages = SymbolServer.Package[]
@@ -79,7 +134,10 @@ Salsa.@derived function derived_environment(rt, uri)
         end
     end
 
-    new_store = SymbolServer.recursive_copy(SymbolServer.stdlibs)
+    # Shallow copy: stdlib entries alias the shared baked stores, package
+    # entries alias the memoized metadata inputs (which were always shared
+    # across environments). Only the top-level Dict is per-project.
+    new_store = copy(SymbolServer.stdlibs)
 
     for i in metadata_packages
         new_store[Symbol(i.name)] = i.val
@@ -95,7 +153,7 @@ Salsa.@derived function derived_environment(rt, uri)
         end
     end
 
-    return StaticLint.ExternalEnv(new_store, SymbolServer.collect_extended_methods(new_store), project_deps)
+    return StaticLint.ExternalEnv(new_store, _collect_extended_methods_shared(new_store), project_deps)
 end
 
 Salsa.@derived function derived_workspace_deved_packages(rt, project_uri)
@@ -308,6 +366,10 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
             project.content_hash,
         ))
     end
+
+    # Standalone projects and test environments are fabricated only when
+    # workspace-environment resolution is enabled.
+    input_resolve_workspace_environments(rt) || return required
 
     # Package folders that aren't project folders and aren't deved need a standalone project DJP
     for package_uri in derived_package_folders(rt)

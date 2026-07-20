@@ -68,6 +68,102 @@ end
     end
 end
 
+@testitem "infer cross-file constructor through a TreeRef callee" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, refof, TreeRef
+    using JuliaWorkspaces.URIs2: URI
+    const DataTypeStore = JuliaWorkspaces.SymbolServer.DataTypeStore
+
+    root = URI("file:///t/src/Root.jl")
+    stale = URI("file:///t/src/stale.jl")
+    jw = ws_files(
+        root => "module Root\nusing Base: PkgId\ninclude(\"stale.jl\")\nend\n",
+        stale => "function f(newmods)\n    for M in newmods\n        key = PkgId(M)\n        Base.insert_extension_triggers(key)\n    end\nend\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, stale)
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, stale)
+
+    # The `PkgId` callee resolves cross-file to a TreeRef (not a Binding/store).
+    pkgid = only(find_identifiers(cst, "PkgId"))
+    @test refof(pkgid, fa.meta) isa TreeRef
+
+    # `key = PkgId(M)` must infer `key::PkgId`, not fall back to a by-use guess.
+    keyb = find_binding(cst, fa.meta, "key")
+    @test keyb !== nothing
+    @test keyb.type isa DataTypeStore
+    @test occursin("PkgId", string(keyb.type.name))
+
+    # ...and the method call on `key` no longer false-flags.
+    @test isempty(fa.diagnostics)
+end
+
+@testitem "infer qualified constructor (getfield callee)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof
+    const DataTypeStore = JuliaWorkspaces.SymbolServer.DataTypeStore
+
+    let (cst, meta_dict) = parse_and_pass("function f(m)\n    key = Base.PkgId(m)\n    key\nend\n")
+        keyb = find_binding(cst, meta_dict, "key")
+        @test keyb !== nothing
+        @test keyb.type isa DataTypeStore
+        @test occursin("PkgId", string(keyb.type.name))
+    end
+end
+
+@testitem "infer cross-file type annotation through a TreeRef" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, Binding
+    using JuliaWorkspaces.URIs2: URI
+    const DataTypeStore = JuliaWorkspaces.SymbolServer.DataTypeStore
+    const CST = JuliaWorkspaces.CSTParser
+
+    root = URI("file:///t/src/Root.jl")
+    g = URI("file:///t/src/g.jl")
+    jw = ws_files(
+        root => "module Root\nusing Base: PkgId\ninclude(\"g.jl\")\nend\n",
+        g => "g(x::PkgId) = x\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, g)
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, g)
+
+    # the `x::PkgId` arg binding (attached to the `::` decl) narrows to PkgId,
+    # even though the annotation resolved cross-file to a TreeRef.
+    argdecl = find_first(x -> CST.isdeclaration(x) && bindingof(x, fa.meta) isa Binding, cst)
+    @test argdecl !== nothing
+    argb = bindingof(argdecl, fa.meta)
+    @test argb.type isa DataTypeStore
+    @test occursin("PkgId", string(argb.type.name))
+end
+
+@testitem "method through a const type alias with an unresolved base" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # `const A = Foo{Int}` is a type alias (a `curly` is always a type
+    # application), so `A(x) = ...` is a valid constructor definition — even when
+    # the base `Foo` doesn't resolve to a datatype store (e.g. a foreign
+    # parametric like Revise's `OrderedDict{Module,ExprsInfos}`). It must not
+    # false-flag "Cannot define function ; it already has a value."
+    root = URI("file:///t/src/M.jl")
+    f = URI("file:///t/src/t.jl")
+    jw = ws_files(
+        root => "module M\ninclude(\"t.jl\")\nend\n",
+        f => "const A = Foo{Int}\nA(x::Int) = A()\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, f)
+    @test !any(d -> occursin("Cannot define function", d.message), fa.diagnostics)
+end
+
+@testitem "infer property-destructure loop variable field types" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: CoreTypes
+    # `for (; a, b) in coll` must infer each variable's OWN field type from the
+    # element type of `coll`, not the whole element type for every variable
+    # (Revise's `for (; reeval, mod, exs_infos, …) in reeval_infos`).
+    let (cst, meta_dict) = parse_and_pass(
+            "struct RI\n    a::Int\n    b::String\nend\nris = RI[]\nfor (; a, b) in ris\n    a\n    b\nend\n")
+        ba = find_binding(cst, meta_dict, "a")
+        bb = find_binding(cst, meta_dict, "b")
+        @test ba !== nothing && CoreTypes.isint(ba.type)
+        @test bb !== nothing && CoreTypes.isstring(bb.type)
+    end
+end
+
 @testitem "infer_module" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: bindingof
     let (cst, meta_dict) = parse_and_pass("module A end")
@@ -373,6 +469,29 @@ end
         @test mx.ref.type.name.name.name == :DataType
         my = getmeta(cst.args[4], meta_dict)
         @test my.ref.type.name.name.name == :Float64
+    end
+end
+
+@testitem "typed tuple-destructure arg infers element types positionally" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, headof, Binding
+    CSTParser = JuliaWorkspaces.CSTParser
+    walk(f, x) = (f(x); x.args !== nothing && foreach(a -> walk(f, a), x.args))
+
+    # `(a, b)::Tuple{T1, T2}` (e.g. Revise's
+    # `location_string((file, line)::Tuple{AbstractString, Any},)`) must give each
+    # element its POSITIONAL parameter type, not the whole `Tuple{...}` type.
+    let (cst, meta_dict) = parse_and_pass("""
+        location_string((file, line)::Tuple{AbstractString, Any},) = abspath(file)
+        """)
+        types = Dict{String,Any}()
+        walk(cst) do x
+            if headof(x) === :IDENTIFIER
+                b = bindingof(x, meta_dict)
+                b isa Binding && b.type !== nothing && (types[CSTParser.valof(x)] = b.type)
+            end
+        end
+        @test types["file"].name.name.name == :AbstractString
+        @test types["line"].name.name.name == :Any
     end
 end
 

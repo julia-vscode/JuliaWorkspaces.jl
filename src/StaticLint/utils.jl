@@ -36,9 +36,16 @@ function clear_scope(x::EXPR, meta_dict)
         empty!(scopeof(x, meta_dict).names)
         if headof(x) === :file && scopeof(x, meta_dict).modules isa Dict && scopehasmodule(scopeof(x, meta_dict), :Base) && scopehasmodule(scopeof(x, meta_dict), :Core)
             m1, m2 = getscopemodule(scopeof(x, meta_dict), :Base), getscopemodule(scopeof(x, meta_dict), :Core)
+            # per-file traversal mode: the tree context seeded by semantic_pass
+            # must survive the scope reset (isa-guarded so a user module
+            # literally named `__tree__` is neither preserved here nor able to
+            # impersonate the context)
+            ctx = scopehasmodule(scopeof(x, meta_dict), :__tree__) ? getscopemodule(scopeof(x, meta_dict), :__tree__) : nothing
+            ctx isa AbstractModuleContext || (ctx = nothing)
             empty!(scopeof(x, meta_dict).modules)
             addmoduletoscope!(scopeof(x, meta_dict), m1, meta_dict)
             addmoduletoscope!(scopeof(x, meta_dict), m2, meta_dict)
+            ctx === nothing || addmoduletoscope!(scopeof(x, meta_dict), ctx, :__tree__)
         else
             scopeof(x, meta_dict).modules = nothing
         end
@@ -190,6 +197,19 @@ isexportedby(k::String, m::SymbolServer.ModuleStore) = isexportedby(Symbol(k), m
 isexportedby(x::EXPR, m::SymbolServer.ModuleStore) = isexportedby(isidentifier(x) ? valofid(x) : valof(x), m)
 isexportedby(k, m::SymbolServer.ModuleStore) = false
 
+# Export/public status of a workspace-defined binding — the same predicate over
+# the other kind of resolved reference, so consumers treat imported and
+# in-workspace names uniformly.
+isexportedby(b::Binding) = b.is_exported
+
+# Public API surface (`export` ∪ `public`), a superset of `isexportedby`. Use
+# this for API-surface decisions (hover status, qualified-access completion);
+# use `isexportedby` for `using`-scope, which imports exported names only.
+ispublicby(k::Symbol, m::SymbolServer.ModuleStore) = haskey(m, k) && k in m.publicnames
+ispublicby(k::String, m::SymbolServer.ModuleStore) = ispublicby(Symbol(k), m)
+ispublicby(k, m::SymbolServer.ModuleStore) = false
+ispublicby(b::Binding) = b.is_public
+
 function retrieve_toplevel_scope(x::EXPR, meta_dict)
     if scopeof(x, meta_dict) !== nothing && is_toplevel_scope(x)
         return scopeof(x, meta_dict)
@@ -227,8 +247,18 @@ end
 # f is a function that returns `true` if we want to break early from the loop
 
 iterate_over_ss_methods(b, tls, env, f) = false
+
+# Structural de-dup key for a MethodStore, mirroring `SymbolServer._samestore`
+# (which matches on file/line/sig). `MethodStore` has no structural `Base.==`/
+# `Base.hash`, so distinct-but-equal stores — e.g. a stdlib method baked into the
+# core store by `load_core` AND provided again by an in-scope extension package —
+# only collapse under this key, not under identity (`===`).
+_ss_method_key(m::SymbolServer.MethodStore) = (m.file, m.line, m.sig)
+
 function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env::ExternalEnv, f)
+    seen = Set{Tuple{String,Int32,Vector{Pair{Any,Any}}}}()
     for m in b.methods
+        push!(seen, _ss_method_key(m))
         ret = f(m)
         ret && return true
     end
@@ -244,6 +274,13 @@ function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env:
                     !(rootmod isa SymbolServer.ModuleStore) && continue
                     if haskey(rootmod.vals, b.extends.name) && (rootmod.vals[b.extends.name] isa SymbolServer.FunctionStore || rootmod.vals[b.extends.name] isa SymbolServer.DataTypeStore)# check package is available and has ref
                         for m in rootmod.vals[b.extends.name].methods #
+                            # Skip a method already yielded from `b.methods` or an
+                            # earlier extension: functions whose stdlib methods are
+                            # baked into the core store AND provided by an in-scope
+                            # extension would otherwise be visited twice.
+                            k = _ss_method_key(m)
+                            k in seen && continue
+                            push!(seen, k)
                             ret = f(m)
                             ret && return true
                         end
@@ -261,7 +298,9 @@ function iterate_over_ss_methods(b::SymbolServer.DataTypeStore, tls::Scope, env:
     elseif b.name isa SymbolServer.FakeTypeName
         bname = b.name.name
     end
+    seen = Set{Tuple{String,Int32,Vector{Pair{Any,Any}}}}()
     for m in b.methods
+        push!(seen, _ss_method_key(m))
         ret = f(m)
         ret && return true
     end
@@ -277,6 +316,11 @@ function iterate_over_ss_methods(b::SymbolServer.DataTypeStore, tls::Scope, env:
                     !(rootmod isa SymbolServer.ModuleStore) && continue
                     if haskey(rootmod.vals, bname.name) && (rootmod.vals[bname.name] isa SymbolServer.FunctionStore || rootmod.vals[bname.name] isa SymbolServer.DataTypeStore)# check package is available and has ref
                         for m in rootmod.vals[bname.name].methods #
+                            # Skip a method already yielded from `b.methods` or an
+                            # earlier extension (see the FunctionStore variant).
+                            k = _ss_method_key(m)
+                            k in seen && continue
+                            push!(seen, k)
                             ret = f(m)
                             ret && return true
                         end

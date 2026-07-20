@@ -14,6 +14,14 @@ function setref!(x::EXPR, binding::Nothing, meta_dict)
     getmeta(x, meta_dict).ref = nothing
 end
 
+# Per-file traversal mode: a name resolved through the module tree. Plain
+# data — deliberately no `Binding.refs` push (the cross-file reference table
+# is aggregated from these refs separately, not through shared mutation).
+function setref!(x::EXPR, tr::TreeRef, meta_dict)
+    ensuremeta(x, meta_dict)
+    getmeta(x, meta_dict).ref = tr
+end
+
 # Main function to be called. Given the `state` tries to determine what `x`
 # refers to. If it remains unresolved and is in a delayed evaluation scope
 # (i.e. a function) it gets pushed to list (.urefs) to be resolved after we've
@@ -117,11 +125,26 @@ function resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
     if scopehasbinding(scope, mn)
         if x.parent.head === :public
             scope.names[mn].is_public = true
+        elseif x.parent.head === :export
+            # export ⇒ public
+            scope.names[mn].is_exported = true
+            scope.names[mn].is_public = true
         end
         setref!(x, scope.names[mn], meta_dict)
         resolved = true
     elseif scope.modules isa Dict && length(scope.modules) > 0
-        for m in values(scope.modules)
+        # Explicit rule: the `:__tree__` context (per-file traversal mode)
+        # resolves BEFORE the global stores. A module-level declared name
+        # shadows a Base/Core export in Julia, and the old whole-closure pass
+        # got the same precedence from its merged scope `names`; iterating
+        # `values(scope.modules)` alone reached the tree handle before
+        # `:Base` only by Symbol-hash iteration-order accident.
+        tree_ctx = get(scope.modules, :__tree__, nothing)
+        if tree_ctx !== nothing
+            resolve_ref_from_module(x, tree_ctx, state) && return true
+        end
+        for (k, m) in scope.modules
+            k === :__tree__ && continue
             resolved = resolve_ref_from_module(x, m, state)
             resolved && return true
         end
@@ -321,6 +344,11 @@ function resolve_getfield(x::EXPR, b::Binding, state::TraverseState)::Bool
     resolved = false
     if b.val isa Binding
         resolved = resolve_getfield(x, b.val, state)
+    elseif b.val isa TreeRef
+        # per-file traversal mode only (a Binding's val can only be a TreeRef
+        # there): an import-bound module name (`import .Sib` + `Sib.f()`)
+        # stores its tree target as plain data — continue through it.
+        resolved = resolve_getfield(x, b.val, state)
     elseif b.val isa SymbolServer.ModuleStore || (b.val isa EXPR && CSTParser.defines_module(b.val))
         resolved = resolve_getfield(x, b.val, state)
     elseif b.type isa Binding
@@ -333,6 +361,45 @@ end
 
 function resolve_getfield(x::EXPR, parent_type, state::TraverseState)::Bool
     hasref(x, state.meta_dict)
+end
+
+"""
+    resolve_getfield(x::EXPR, tr::TreeRef, state::TraverseState)::Bool
+
+Per-file traversal mode only: the getfield LHS resolved through the module
+tree to a plain-data `TreeRef` (`Sib` in `Sib.f()` — directly as its
+`Meta.ref`, or through an import binding's `val`). The concrete lookup lives
+outside StaticLint: `qualified_module_target` (layer_file_analysis.jl) turns
+the LHS `TreeRef` back into something resolvable — a (possibly cross-root)
+module context for tree/workspace-package modules, or the env `ModuleStore`
+for external stand-ins — and the member then resolves through the same
+machinery import paths use (`_get_field` for contexts; the existing
+`ModuleStore` arm for stores, so env-backed members behave exactly as in the
+whole-closure pass). A member miss, or a `tr` that doesn't denote a module,
+leaves `x` ref-less — matching the old getfield arms' miss behavior.
+
+Unreachable in the whole-closure pass: `TreeRef`s are only ever constructed
+in per-file mode, and the lookup additionally requires a seeded `:__tree__`
+scope context (gone even in per-file mode's post-pass steps, which strip the
+handles — those steps then no-op here via the `nothing` context).
+"""
+function resolve_getfield(x::EXPR, tr::TreeRef, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
+    hasref(x, meta_dict) && return true
+    CSTParser.is_id_or_macroname(x) || return false
+    ctx = enclosing_tree_context(state.scope)
+    ctx === nothing && return false
+    target = qualified_module_target(ctx, tr)
+    target === nothing && return false
+    if target isa SymbolServer.ModuleStore
+        return resolve_getfield(x, target, state)
+    end
+    cand = _get_field(target, x, state)
+    cand === nothing && return false
+    # `cand` is a plain-data TreeRef, or a module context whose setref!
+    # stores its plain-data stand-in — never a runtime handle in meta.
+    setref!(x, cand, meta_dict)
+    return true
 end
 
 function is_overloaded(val::SymbolServer.SymStore, scope::Scope)

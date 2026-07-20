@@ -1,3 +1,127 @@
+@testitem "SymbolServer: Core-in-Base re-exports resolve (invokelatest; julia#60046)" begin
+    using JuliaWorkspaces.SymbolServer: getenvtree, symbols, _lookup, VarRef,
+        FunctionStore, DataTypeStore
+
+    # Build the Base/Core stores with the *live* crawler. We call getenvtree/symbols
+    # directly rather than reading the module-level `stdlibs` const, because that
+    # const is baked at precompile time; exercising the crawler is what actually
+    # verifies the current symbols.jl code path.
+    env = getenvtree([:Base, :Core])
+    symbols(env)
+    base = env[:Base]
+
+    # On 1.12 `names(Base)` spuriously lists Core-owned bindings (JuliaLang/julia#60046).
+    # `invokelatest` is owned by Core and NOT exported by Core. With no Core-in-Base
+    # filter, it falls through the re-export branches and is aliased into Base as a
+    # cheap VarRef to Core; it must be present, stay exported from Base, and resolve
+    # to Core's function. (Before removing the filter this name was dropped entirely
+    # and never resolved — the bug this guards against.)
+    @test haskey(base.vals, :invokelatest)
+    @test :invokelatest in base.exportednames
+    entry = base.vals[:invokelatest]
+    if entry isa VarRef
+        # On 1.12 it's a cheap VarRef alias into Core (not a duplicated store).
+        @test _lookup(entry, env, true) isa FunctionStore
+    else
+        @test entry isa FunctionStore
+    end
+
+    # A representative Core-exported re-export must still resolve (no regression).
+    @test haskey(base.vals, :Bool)
+
+    # Note: with the Core-in-Base filter removed wholesale, Core type aliases
+    # (`Memory`, `MemoryRef`, `Cvoid`, ...) are duplicated into Base as full
+    # DataTypeStores via the shadow-rename branch. That redundant duplication is
+    # an accepted tradeoff of the simpler filter-free crawler, so we deliberately
+    # do NOT assert against it here.
+
+    # Method completeness for Core-owned *concrete* types re-exported/aliased by
+    # Base. `cache_methods` (run during the Core crawl, which precedes Base) seeds
+    # Base's entry with the type's Base-defined extension methods
+    # (`String(::Vector{UInt8})`, the `Int` constructors, …). The DataType-branch
+    # guard in `symbols` must NOT clobber that seeded, method-carrying store with a
+    # fresh (method-poor) shadow `DataTypeStore` or a `VarRef` — otherwise the
+    # linter's identity-based type checks (`check_call`, `check_kw_default`) stop
+    # matching valid calls/defaults. Regression guard for that.
+    let s = base.vals[:String]
+        @test s isa FunctionStore
+        @test any(m -> occursin("Array", string(m.sig)) || occursin("Vector", string(m.sig)), s.methods)
+    end
+    # `Int` (a *concrete* alias of `Int64`; `nameof(Int64) === :Int64 ≠ :Int`, so it
+    # hits the shadow-rename branch) is likewise preserved as its seeded
+    # method-carrying `FunctionStore`, whose `.extends` resolves back to the
+    # canonical `Core.Int`.
+    @test base.vals[:Int] isa FunctionStore
+    # A *parametric* alias (`Vector` = `Array{T,1} where T`) must instead stay a
+    # `DataTypeStore` — arg-type inference needs its type structure to match e.g.
+    # `v::Vector{UInt8}`. The `!(x isa UnionAll)` half of the guard keeps the
+    # parametric case out of the preserve-branch.
+    @test base.vals[:Vector] isa DataTypeStore
+
+    # A parametric Core-owned type re-exported by Base under its OWN name (`Ref`,
+    # `nameof(Ref) === :Ref`, so the shadow-rename branch's `nameof !== s` misses
+    # it) must still carry its constructor methods — NOT resolve to a `VarRef` to
+    # the method-poor `Core.Ref` (its constructors are attributed to Base).
+    # Otherwise call-checking a constructor call like `Ref(5.0)` finds no methods.
+    #
+    # On 1.12 `Ref` is (intentionally) in `names(Base)`, so it reaches the
+    # `x isa UnionAll` branch in `symbols` and is stored as a `DataTypeStore`. On
+    # 1.11 `Ref` is absent from `names(Base)`, never hits that branch, and instead
+    # resolves to a method-carrying `FunctionStore`. Either way the invariant is
+    # that the store is present with its constructor methods.
+    let rref = base.vals[:Ref]
+        @test rref isa (VERSION >= v"1.12" ? DataTypeStore : FunctionStore)
+        @test !isempty(rref.methods)
+    end
+end
+
+@testitem "SymbolServer: Core-level intrinsics forward to Core.Intrinsics" begin
+    using JuliaWorkspaces.SymbolServer: load_core, _lookup, VarRef, FunctionStore
+
+    # Exercise the *live* crawler (via load_core), not the baked `stdlibs` const.
+    # Intrinsics report `parentmodule(x) === Core` even though they live in
+    # `Core.Intrinsics`. Pre-fix the own-function test misclassified a Core-level
+    # intrinsic (e.g. `Core.add_int`) as Core-owned and emitted a duplicate,
+    # 0-method `FunctionStore` in `cache[:Core]`. The fix classifies an intrinsic
+    # as "own" only at `Core.Intrinsics`, so accessed off `Core` it forwards to
+    # `VarRef(VarRef(Core.Intrinsics), name)` which resolves to the owned store
+    # (holding the synthetic intrinsic method).
+    env = load_core()
+    core = env[:Core]
+    intrinsics = env[:Core][:Intrinsics]
+
+    # Every intrinsic reachable as `Core.<name>` (parentmodule === Core) must, in
+    # `cache[:Core]`, be a VarRef forwarding to the Core.Intrinsics store that
+    # carries the method — NOT a 0-method own FunctionStore.
+    core_level = Symbol[]
+    for n in names(Core.Intrinsics; all = true)
+        isdefined(Core.Intrinsics, n) || continue
+        getglobal(Core.Intrinsics, n) isa Core.IntrinsicFunction || continue
+        (isdefined(Core, n) && getglobal(Core, n) isa Core.IntrinsicFunction) || continue
+        push!(core_level, n)
+    end
+    @test !isempty(core_level)   # there are Core-level-accessible intrinsics
+    for s in core_level
+        entry = core.vals[s]
+        @test entry isa VarRef                      # forwarded, not an own store
+        resolved = _lookup(entry, env, true)
+        @test resolved isa FunctionStore
+        @test length(resolved.methods) >= 1         # resolves to the store WITH the method
+        @test resolved === intrinsics.vals[s]       # specifically the Core.Intrinsics-owned store
+    end
+
+    # Spot-check the two previously hardcoded names still work purely from the crawl.
+    for s in (:add_int, :sle_int)
+        @test s in core_level
+        @test core.vals[s] isa VarRef
+    end
+
+    # No regression: the Core.Intrinsics-owned store itself is a real FunctionStore
+    # with its method (not turned into a VarRef).
+    @test intrinsics.vals[:add_int] isa FunctionStore
+    @test length(intrinsics.vals[:add_int].methods) >= 1
+end
+
 @testitem "SymbolServer: method_world reads the right field" begin
     using JuliaWorkspaces.SymbolServer: method_world
 
@@ -343,7 +467,7 @@ end
 
     for T in (MethodStore, DataTypeStore, Pair{Int,String}, Dict{Symbol,Any})
         ur = Base.unwrap_unionall(T)
-        d = DataTypeStore(T, nameof(ur), @__MODULE__, false)
+        d = DataTypeStore(T, nameof(ur), @__MODULE__)
         @test length(d.types) == length(d.fieldnames) == fieldcount(ur)
         @test !any(t -> t isa Type, d.types)        # no raw types leaked in
         io = IOBuffer(); write(io, d); seekstart(io); read(io)   # must round-trip
@@ -355,7 +479,7 @@ end
         Any[],                  # parameters
         Any[],                  # fieldtypes
         Any[:a, :b],            # fieldnames
-        MethodStore[], "", false,
+        MethodStore[], "",
     )
     @test length(dts.types) == 2
     @test all(t -> t isa FakeTypeName, dts.types)
@@ -813,6 +937,51 @@ end
     @test CacheStore.read(IOBuffer(take!(io))) == ft
 end
 
+@testitem "SymbolServer: always-available Base functions with stdlib-only methods get re-attached" begin
+    using JuliaWorkspaces.SymbolServer: load_core, FunctionStore
+
+    # Exercise the *live* crawler (via load_core), not the baked `stdlibs` const.
+    # rand/randn (methods in Random) and kron/kron! (methods in LinearAlgebra) are
+    # Base-owned and always-available, but the Core+Base crawl attributes each method
+    # to its defining module and drops the stdlib-defined ones, leaving these stores
+    # method-incomplete. load_core re-attaches the dropped stdlib methods generically.
+    base = load_core()[:Base]
+
+    for s in (:rand, :randn, :kron, :kron!)
+        entry = base[s]
+        @test entry isa FunctionStore
+        @test !isempty(entry.methods)
+    end
+
+    # `kron` is the partial case the old hand-maintained rand/randn/kron! appends
+    # missed entirely: the crawl kept its single Base method but dropped ~16
+    # LinearAlgebra methods, so pre-fix `kron` had exactly 1 method here.
+    @test length(base[:kron].methods) >= (VERSION >= v"1.12" ? 16 : 13)
+    # Regression on the previously hand-appended, fully-external functions.
+    @test length(base[:rand].methods) >= 20    # all from Random
+    @test length(base[:randn].methods) >= 10   # all from Random
+    @test length(base[:kron!].methods) >= (VERSION >= v"1.12" ? 10 : 9)   # all from LinearAlgebra
+
+    # The re-attach must be scoped to the always-available sysimage stdlibs. load_core
+    # runs during JuliaWorkspaces' precompile with its whole dependency tree loaded, so
+    # an unscoped re-attach leaks methods from those deps (Dates, LibGit2, CSTParser,
+    # CommonMark, JuliaFormatter, Salsa, JSONRPC, …) into the shipped Base store. Assert
+    # no Base FunctionStore holds a method attributed to one of those known leakers.
+    # (Legit sources are Base and its submodules — Math, Iterators, … — plus the
+    # allow-listed stdlibs and their submodules like LinearAlgebra.BLAS.)
+    present_mods = Set{Symbol}()
+    for (_, st) in base.vals
+        st isa FunctionStore || continue
+        for m in st.methods
+            push!(present_mods, m.mod)
+        end
+    end
+    for bad in (:Dates, :LibGit2, :CSTParser, :CommonMark, :JuliaFormatter, :Salsa,
+                :JSONRPC, :Crayons, :SymbolServer, :Base64, :Markdown, :Test)
+        @test !(bad in present_mods)
+    end
+end
+
 @testitem "SymbolServer: unsorted_names enumerates bindings committed in the calling frame" begin
     using JuliaWorkspaces.SymbolServer: unsorted_names
 
@@ -827,4 +996,58 @@ end
         return unsorted_names(m; all=true)
     end
     @test :nonexported_helper in commit_then_enumerate()
+end
+
+@testitem "SymbolServer: ModuleStore splits exported vs public names" begin
+    using JuliaWorkspaces.SymbolServer: ModuleStore
+    # `public` is a 1.11+ keyword; the exported/public split only exists there.
+    if isdefined(Base, :ispublic)
+        m = Module(:ExportPublicSplit)
+        Core.eval(m, Meta.parseall("export ex_fn\npublic pub_fn\nex_fn() = 1\npub_fn() = 2\ninternal_fn() = 3\n"))
+        ms = ModuleStore(m)
+
+        # exportednames = true exports only; publicnames = exported ∪ public.
+        @test :ex_fn in ms.exportednames
+        @test :ex_fn in ms.publicnames
+        @test !(:pub_fn in ms.exportednames)   # public-but-not-exported: NOT an export
+        @test :pub_fn in ms.publicnames        # ...but is public
+        @test !(:internal_fn in ms.exportednames)
+        @test !(:internal_fn in ms.publicnames)
+    else
+        @test true
+    end
+end
+
+@testitem "SymbolServer: back-compat ModuleStore shim does not alias the two name lists" begin
+    using JuliaWorkspaces.SymbolServer: ModuleStore, VarRef
+    # The old positional form (with the dropped `exported::Bool`) seeds both
+    # name lists from one argument. They must be SEPARATE arrays, or a later
+    # `push!` to one (e.g. load_core's `:include`/`:ccall` fixups) mutates both.
+    names = [:a, :b]   # a Vector{Symbol}: `convert` would NOT de-alias this
+    ms = ModuleStore(VarRef(nothing, :M), Dict{Symbol,Any}(), "", true, names, Symbol[])
+    @test ms.exportednames == [:a, :b]
+    @test ms.publicnames == [:a, :b]
+    @test ms.exportednames !== ms.publicnames
+    push!(ms.publicnames, :c)
+    @test :c in ms.publicnames
+    @test !(:c in ms.exportednames)   # push to one must not affect the other
+end
+
+@testitem "SymbolServer: exportednames/publicnames survive a cache round-trip" begin
+    using JuliaWorkspaces.SymbolServer: CacheStore, ModuleStore, FunctionStore, VarRef, MethodStore, Package
+
+    mvr = VarRef(nothing, :M)
+    fs_pub = FunctionStore(VarRef(mvr, :pubf), MethodStore[], "", VarRef(mvr, :pubf))  # public, not exported
+    fs_exp = FunctionStore(VarRef(mvr, :expf), MethodStore[], "", VarRef(mvr, :expf))  # exported
+    ms = ModuleStore(mvr, Dict{Symbol,Any}(:pubf => fs_pub, :expf => fs_exp),
+                     "", [:expf], [:expf, :pubf], Symbol[])
+    pkg = Package("M", ms, Base.UUID(UInt128(1)), nothing)
+
+    io = IOBuffer(); CacheStore.write(io, pkg); seekstart(io)
+    r = CacheStore.read(io).val
+
+    # exported ⊆ public; the split must survive serialization.
+    @test r.exportednames == [:expf]
+    @test sort(r.publicnames) == [:expf, :pubf]
+    @test haskey(r.vals, :pubf) && haskey(r.vals, :expf)
 end

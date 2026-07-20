@@ -22,6 +22,7 @@ CancellationTokens = "2e8d271d-f2e2-407b-a864-17eb2156783e"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+FileWatching = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
 
 [extras]
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
@@ -45,6 +46,7 @@ CSTParser = "3.3"
 CancellationTokens = "2"
 InteractiveUtils = "<0.0.1, 1"
 Sockets = "<0.0.1, 1"
+FileWatching = "1.11.0"
 
 [targets]
 test = ["JSON", "Test", "TestItemRunner"]

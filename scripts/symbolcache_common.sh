@@ -1,8 +1,8 @@
 # Shared symbol-cache layout constants, sourced by the *_symbolcache.sh scripts.
-# STORE_VERSION is the "vN" path element under store/. Bump here when the hosted
-# layout changes. Keep in sync with CACHE_STORE_VERSION in
-# shared/symbolserver/utils.jl (the Julia copy).
-STORE_VERSION="${SYMBOLCACHE_STORE_VERSION:-v2}"
+# STORE_VERSION is the "vN" path element under store/. This is the shell copy of
+# the Julia CACHE_FORMAT_VERSION (shared/symbolserver/utils.jl) — the one place
+# that must be bumped by hand to match "v<CACHE_FORMAT_VERSION>".
+STORE_VERSION="${SYMBOLCACHE_STORE_VERSION:-v3}"
 STORE_PREFIX="store/${STORE_VERSION}"
 
 # Cache-Control headers for uploads (rclone --header-upload). Immutable artifacts

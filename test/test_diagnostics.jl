@@ -16,6 +16,51 @@
     @test diags[1].source == "JuliaSyntax.jl"
 end
 
+@testitem "Diagnostic equality distinguishes empty ranges by position" begin
+    using JuliaWorkspaces: Diagnostic
+
+    # Empty UnitRanges compare equal regardless of position (`24:23 == 23:22`).
+    # Diagnostic equality/hash must still tell an empty range at one position
+    # from an empty range at another, or Salsa backdating keeps a stale range.
+    a = Diagnostic(24:23, :error, "Expected `end`", nothing, Symbol[], "JuliaSyntax.jl")
+    b = Diagnostic(23:22, :error, "Expected `end`", nothing, Symbol[], "JuliaSyntax.jl")
+
+    @test a != b
+    @test !isequal(a, b)
+    @test hash(a) != hash(b)
+
+    # Same position still compares equal (backdating must still work normally).
+    c = Diagnostic(23:22, :error, "Expected `end`", nothing, Symbol[], "JuliaSyntax.jl")
+    @test b == c
+    @test isequal(b, c)
+    @test hash(b) == hash(c)
+end
+
+@testitem "Syntax diagnostics: EOF range not left stale after trailing-trivia edit" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, update_file!, get_diagnostic, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # Unterminated blocks make JuliaSyntax report an empty EOF-marker range.
+    # Deleting the trailing space shifts that empty range by one; the stale
+    # range must not survive (its offset would exceed the shortened content and
+    # crash the consumer's offset->position conversion), which happened while
+    # editing the end of a file.
+    u = URI("file:/edit.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("module M\nfunction f()\n ", "julia")))  # 23 bytes
+    get_diagnostic(jw, u)  # cache diagnostics (empty range 24:23) at length 23
+
+    update_file!(jw, TextFile(u, SourceText("module M\nfunction f()\n", "julia")))  # 22 bytes
+    diags = get_diagnostic(jw, u)
+    n = 22
+
+    @test !isempty(diags)
+    for d in diags
+        @test first(d.range) <= n + 1   # stale 24:23 would give first=24 > 23
+        @test last(d.range) <= n + 1
+    end
+end
+
 @testitem "Basic synta error 2" begin
     using JuliaWorkspaces.URIs2: URI
 
@@ -1518,4 +1563,71 @@ end
 
     diags2 = get_diagnostic(jw2, URI("file:///missrefall2/src/MissRefAll.jl"))
     @test !any(d -> d.message == "Missing reference: this_name_surely_does_not_exist_xyz", diags2)
+end
+
+@testitem "static-lint: a project-less root publishes no diagnostics (parity with old)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # A loose file with NO project and no active project (the LS-startup
+    # no-active-project window). The old whole-closure query bails empty in
+    # this case; the migrated per-file consumer must too — otherwise every
+    # real-package import flashes a "Failed to resolve …" false positive.
+    script = URI("file:///loose/script.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(script, SourceText("import JSON\nf(x) = x == nothing\n", "julia")))
+    rt = jw.runtime
+
+    @test JuliaWorkspaces.derived_project_uri_for_root(rt, script) === nothing
+
+    new = JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, script)
+    old = JuliaWorkspaces.derived_static_lint_diagnostics(rt, script)
+    @test isempty(old)          # old query bails empty (project_uri === nothing)
+    @test new == old            # migrated query matches
+    @test isempty(new)
+
+    # ... and the per-file analysis itself still runs (stdlib fallback), so
+    # the suppression lives in the consumer query, not the analysis — the
+    # analysis would otherwise carry the false-positive flash
+    fa = JuliaWorkspaces.derived_file_analysis(rt, script, script)
+    @test any(d -> startswith(d.message, "Failed to resolve"), fa.diagnostics)
+
+    # published diagnostics carry no static-lint flash
+    diags = get_diagnostic(jw, script)
+    @test !any(d -> d.source == "StaticLint.jl", diags)
+    @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
+end
+
+@testitem "static-lint: setting the active project restores diagnostics (new == old)" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Same loose file, but now an active project is set: the root's project
+    # URI is non-nothing, so the migrated consumer stops suppressing and
+    # matches the old query exactly.
+    env_dir = URI("file:///env")
+    script = URI("file:///loose/script.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///env/Project.toml"), SourceText("""
+    name = "Env"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0012"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///env/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(script, SourceText("import JSON\nf(x) = x == nothing\n", "julia")))
+    JuliaWorkspaces.set_active_project!(jw, env_dir)
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+    rt = jw.runtime
+
+    @test JuliaWorkspaces.derived_project_uri_for_root(rt, script) !== nothing
+
+    new = JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, script)
+    old = JuliaWorkspaces.derived_static_lint_diagnostics(rt, script)
+    @test new == old            # parity restored
+    @test !isempty(new)         # diagnostics now appear
+    @test any(d -> occursin("JSON", d.message), new)  # the real-package import now flags
 end

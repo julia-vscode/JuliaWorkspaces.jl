@@ -25,9 +25,13 @@ include("inputs.jl")
 include("layer_files.jl")
 include("layer_syntax_trees.jl")
 include("layer_includes.jl")
+include("layer_inventory.jl")
+include("layer_module_tree.jl")
+include("layer_visibility.jl")
 
 include("StaticLint/StaticLint.jl")
 
+include("layer_file_analysis.jl")
 include("layer_static_lint.jl")
 include("layer_projects.jl")
 include("layer_environment.jl")

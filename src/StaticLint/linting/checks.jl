@@ -109,13 +109,25 @@ LintOptions(::Colon) = LintOptions(fill(true, length(default_options))...)
 LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
     LintOptions(something.(options, default_options)...)
 
-function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict)
+# `tree_visible` (per-file traversal mode only, `nothing` in the
+# whole-closure pass): a `(name::String, x::EXPR) -> Bool` predicate over
+# the tree-context visible names AT THE CALL SITE `x` (the site matters:
+# a call inside a module declared in the analyzed file resolves against
+# that module's visibility, not the file's own splice path). When the
+# callee of a call is ALSO visible through the tree context, the file
+# provably sees only a partial method set (other files of the module may
+# add methods, forward declarations get their methods elsewhere), so the
+# method-set lints (`FunctionHasNoMethods`/`IncorrectCallArgs`) must
+# decline — the lost true-positive direction (a genuinely method-less
+# module-level function) is sanctioned conservatism of the per-file
+# architecture.
+function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing)
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
     is_test_throws_macrocall(x, env, meta_dict) && return
 
     # Do checks
-    opts.call && check_call(x, env, meta_dict)
+    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
     opts.constif && check_if_conds(x, meta_dict)
@@ -132,7 +144,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict)
 
     if x.args !== nothing
         for i in 1:length(x.args)
-            check_all(x.args[i], opts, env, meta_dict)
+            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities)
         end
     end
 end
@@ -151,6 +163,15 @@ function _typeof(x, state)
         return CoreTypes.DataType
     elseif x isa SymbolServer.FunctionStore
         return CoreTypes.Function
+    elseif x isa TreeRef
+        # per-file traversal mode: map the tree item kind
+        if x.kind === :function || x.kind === :macro
+            return CoreTypes.Function
+        elseif x.kind === :struct || x.kind === :mutable_struct || x.kind === :abstract || x.kind === :primitive
+            return CoreTypes.DataType
+        elseif x.kind === :module
+            return CoreTypes.Module
+        end
     end
 end
 
@@ -315,6 +336,9 @@ function compare_f_call(
     return true
 end
 
+compare_f_call(ref::MethodArity, act) =
+    compare_f_call((ref.minargs, ref.maxargs, ref.kws, ref.kwsplat), act)
+
 function is_something_with_methods(x::Binding)
     (CoreTypes.isfunction(x.type) && x.val isa EXPR) ||
     (CoreTypes.isdatatype(x.type) && x.val isa EXPR && CSTParser.defines_struct(x.val)) ||
@@ -323,7 +347,7 @@ end
 is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} = true
 is_something_with_methods(x) = false
 
-function check_call(x, env::ExternalEnv, meta_dict)
+function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
@@ -334,6 +358,69 @@ function check_call(x, env::ExternalEnv, meta_dict)
         # find the function we're dealing with
         func_ref = refof_call_func(x, meta_dict)
         func_ref === nothing && return
+
+        # Per-file mode partial-method-set gate (see `check_all`'s docs):
+        # a Binding-backed callee whose name is also tree-visible has an
+        # unknowable-from-this-file method set — decline. Store-backed
+        # callees (env) keep their full method sets and stay checked.
+        # A tree-visible workspace callee — a local `Binding` whose name is also
+        # tree-visible (methods may span sibling files), OR a `TreeRef` to a
+        # function/macro/struct defined only in sibling files.
+        if tree_visible !== nothing &&
+           (func_ref isa Binding ||
+            (func_ref isa TreeRef && func_ref.kind in (:function, :macro, :struct, :mutable_struct)))
+            name = CSTParser.get_name(x)
+            if name isa EXPR && isidentifier(name)
+                n = valofid(name)
+                if n !== nothing && tree_visible(n, x)
+                    # The local `func_ref` sees only THIS file's methods of a
+                    # tree-visible name, but the tree knows all of them. Check the
+                    # argument count against the full cross-file arity set
+                    # (`tree_arities`); a positional TYPE check of a cross-file
+                    # callee is deferred (needs sibling analyses). Splatted calls
+                    # have an unknowable arity — skip.
+                    if tree_arities !== nothing && !call_has_splat(x)
+                        arities = tree_arities(n, x)
+                        # An unqualified import of a store function/type
+                        # (`import Base: show`) binds a `Binding` whose `.val` is
+                        # the store: its method set is the workspace overloads
+                        # (`tree_arities`, cross-file) PLUS the store's own
+                        # methods, which `tree_arities` omits. Accept a match
+                        # against EITHER set — else this file's partial view
+                        # false-flags a valid store-arity call.
+                        store = func_ref isa Binding &&
+                            (func_ref.val isa SymbolServer.FunctionStore || func_ref.val isa SymbolServer.DataTypeStore) ?
+                            func_ref.val : nothing
+                        if !isempty(arities) || store !== nothing
+                            cc = call_nargs(x)
+                            if any(a -> compare_f_call(a, cc), arities)
+                                # matches a workspace overload's arity
+                            elseif store !== nothing
+                                # Match against the store's own methods; decline
+                                # (no flag) if we can't resolve a scope for them.
+                                tls = retrieve_toplevel_scope(x, meta_dict)
+                                if tls isa Scope && !iterate_over_ss_methods(store, tls, env, m -> compare_f_call(func_nargs(m), cc))
+                                    seterror!(x, IncorrectCallArgs, meta_dict)
+                                end
+                            else
+                                seterror!(x, IncorrectCallArgs, meta_dict)
+                            end
+                        end
+                    end
+                    return
+                end
+            end
+        end
+
+        # Per-file mode partial-method-set gate for a STORE-backed callee that a
+        # workspace file extends (`Base.relpath(::AbstractString, ::PkgData)` in a
+        # sibling): the overload lives in that file's `scope.overloaded` and is not
+        # in the env store's method set, so this file sees only a partial set —
+        # decline rather than false-positive. `tree_extended` (per-file mode only)
+        # confirms `func_ref` is the function actually extended.
+        if tree_extended !== nothing && (func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore)
+            tree_extended(func_ref, x) && return
+        end
 
         if is_something_with_methods(func_ref) && !(func_ref isa Binding && func_ref.val isa EXPR && func_ref.val.head === :macro)
             # intentionally empty
@@ -465,6 +552,204 @@ function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv,
     return true # We shouldn't get here
 end
 
+# ── Detailed "possible method call error" messages ─────────────────────────
+# `check_call` flags a call with the bare `IncorrectCallArgs` code; these build a
+# human-readable reason at render time (see `describe_call_mismatch`), reusing the
+# same arg-count / arg-type machinery `sig_match_any` uses so the reason can never
+# disagree with the flag.
+
+# Short, readable name of a type value (as produced by `call_arg_types` /
+# `_resolve_type_expr` / a MethodStore sig slot). Strips the noisy `Core.` prefix.
+function _format_type(@nospecialize(t))
+    s = t === nothing ? "Any" :
+        t isa SymbolServer.DataTypeStore ? string(t.name) :
+        t isa Binding ? (t.name isa EXPR ? valofid(t.name) : string(t.name)) :
+        string(t)
+    s === nothing && (s = "Any")
+    startswith(s, "Core.") ? s[6:end] : s
+end
+
+# The callee name of a call, as written (`f`, `Base.foo`), or `nothing`.
+function _call_name_str(call::EXPR)
+    n = CSTParser.get_name(call)
+    n isa EXPR || return nothing
+    return string(to_codeobject(n))
+end
+
+# Candidate methods of a call's callee — store `MethodStore`s and/or workspace
+# method `EXPR`s — mirroring `sig_match_any`'s enumeration but without the match
+# filter. Returns `nothing` for a callee shape we can't enumerate confidently.
+function _candidate_methods(call::EXPR, env::ExternalEnv, meta_dict)
+    func_ref = refof_call_func(call, meta_dict)
+    func_ref === nothing && return nothing
+    fuel = 20
+    while func_ref isa Binding && func_ref.val isa Binding && fuel > 0
+        func_ref = func_ref.val
+        fuel -= 1
+    end
+    if func_ref isa Binding && (func_ref.val isa SymbolServer.FunctionStore || func_ref.val isa SymbolServer.DataTypeStore)
+        func_ref = func_ref.val
+    end
+    cands = Any[]
+    if func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore
+        tls = retrieve_toplevel_scope(call, meta_dict)
+        if tls isa Scope
+            iterate_over_ss_methods(func_ref, tls, env, m -> (push!(cands, m); false))
+        else
+            append!(cands, func_ref.methods)
+        end
+    elseif func_ref isa Binding && (CoreTypes.isfunction(func_ref.type) || CoreTypes.isdatatype(func_ref.type))
+        if func_ref.val isa EXPR && defines_function(func_ref.val) &&
+           !(parentof(func_ref.val) isa EXPR && CSTParser.ismacrocall(parentof(func_ref.val)))
+            push!(cands, func_ref.val)
+        end
+        for ref in func_ref.refs
+            m = get_method(ref)
+            m === nothing && continue
+            if m isa SymbolServer.FunctionStore
+                append!(cands, m.methods)
+            elseif m isa EXPR
+                push!(cands, m)
+            end
+        end
+    else
+        return nothing
+    end
+    return cands
+end
+
+_cand_nargs(m::SymbolServer.MethodStore, env, meta_dict) = MethodArity(func_nargs(m)...)
+_cand_nargs(m::EXPR, env, meta_dict) =
+    MethodArity((CSTParser.defines_struct(m) ? struct_nargs(m, env, meta_dict) : func_nargs(m, env, meta_dict))...)
+
+# Expected type of positional slot `i` (1-based) of candidate `m` at a call of
+# `nargs` positional arguments, or `nothing` when it can't be pinned down
+# (untyped arg, splat/vararg element, out of range) — matching `match_method`'s
+# leniency so a mismatch is only ever asserted where the matcher rejected it.
+function _expected_arg_type(m::SymbolServer.MethodStore, i::Int, nargs::Int, store, meta_dict)
+    sig = m.sig
+    n = length(sig)
+    n == 0 && return nothing
+    if last(sig)[2] isa SymbolServer.FakeTypeofVararg
+        va = last(sig)[2]
+        i <= n - 1 && return sig[i][2]
+        return isdefined(va, :T) ? va.T : nothing
+    end
+    i <= n ? sig[i][2] : nothing
+end
+function _expected_arg_type(m::EXPR, i::Int, nargs::Int, store, meta_dict)
+    sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(m))
+    (sig isa EXPR && sig.args !== nothing) || return nothing
+    decls = EXPR[]
+    for j in 2:length(sig.args)
+        a = unwrap_nospecialize(sig.args[j])
+        isparameters(a) && continue
+        push!(decls, a)
+    end
+    i <= length(decls) || return nothing
+    a = decls[i]
+    (issplat(a) || is_explicit_vararg_decl(a)) && return nothing
+    (isdeclaration(a) && length(a.args) >= 2) || return nothing
+    return _resolve_type_expr(a.args[2], store, meta_dict)
+end
+
+# Render the arity constraint of a set of `func_nargs`-style tuples for a message.
+function _arity_desc(counts)
+    mins = sort!(unique(c.minargs for c in counts))
+    unbounded = any(c.maxargs == typemax(Int) for c in counts)
+    if unbounded
+        return string("at least ", minimum(mins))
+    elseif length(mins) == 1 && all(c.maxargs == mins[1] for c in counts)
+        return string(mins[1])
+    else
+        lo = minimum(c.minargs for c in counts)
+        hi = maximum(c.maxargs for c in counts)
+        return lo == hi ? string(lo) : string(lo, " to ", hi)
+    end
+end
+
+"""
+    describe_call_mismatch(call::EXPR, env, meta_dict) -> Union{Nothing,String}
+
+A specific message for a call `check_call` flagged with `IncorrectCallArgs`:
+`No method matching \\\`f(::T1, ::T2)\\\`.` plus the closest reason — an argument
+count mismatch, an unsupported keyword, or a positional type mismatch (naming the
+argument, the inferred type, and the expected type). Returns `nothing` when no
+specific reason is derivable (splatted call, unusual callee shape), so the caller
+keeps the generic wording.
+"""
+function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_arities=nothing)
+    call_has_splat(call) && return nothing
+    # `cand_arities` (cross-file arity set, from `derived_method_arities`) drives
+    # the arg-count / keyword reason for a callee whose method set spans files —
+    # the local candidate EXPRs are then incomplete, so skip the type branch. With
+    # no `cand_arities`, enumerate the local candidates (store methods / local
+    # method EXPRs) and do the full arity + keyword + positional-type analysis.
+    cands = cand_arities === nothing ? _candidate_methods(call, env, meta_dict) : nothing
+    cand_arities === nothing && (cands === nothing || isempty(cands)) && return nothing
+    name = _call_name_str(call)
+    name === nothing && return nothing
+    store = getsymbols(env)
+
+    act_min, act_max, act_kws = call_nargs(call)
+    nargs = act_min # no splat ⇒ min == max
+    inferred, _ = call_arg_types(call, false, meta_dict, store)
+
+    header = string("No method matching `", name, "(",
+        join((string("::", _format_type(t)) for t in inferred), ", "),
+        isempty(act_kws) ? "" : string("; ", join(act_kws, ", ")), ")`.")
+
+    counts = cand_arities === nothing ? [_cand_nargs(c, env, meta_dict) for c in cands] : cand_arities
+    isempty(counts) && return nothing
+
+    arity_ok = [i for i in eachindex(counts) if counts[i].minargs <= nargs <= counts[i].maxargs]
+    if isempty(arity_ok)
+        return string(header, " Expected ", _arity_desc(counts), " argument",
+            _arity_desc(counts) == "1" ? "" : "s", ", got ", nargs, ".")
+    end
+
+    # keyword: a passed keyword no arity-matching candidate accepts
+    if !isempty(act_kws)
+        accepts(i, kw) = counts[i].kwsplat || kw in counts[i].kws
+        for kw in act_kws
+            any(i -> accepts(i, kw), arity_ok) || return string(header, " Unsupported keyword `", kw, "`.")
+        end
+    end
+
+    # positional type: only with real candidate EXPRs/MethodStores in hand
+    # (the cross-file arity path has no per-method types — that is Part B).
+    cands === nothing && return header
+
+    # closest arity/keyword-ok candidate with a known mismatch
+    kw_ok = [i for i in arity_ok if counts[i].kwsplat || all(kw in counts[i].kws for kw in act_kws)]
+    consider = isempty(kw_ok) ? arity_ok : kw_ok
+    best_i, best_slot, best_got, best_exp, best_count = 0, 0, nothing, nothing, typemax(Int)
+    for i in consider
+        mism = 0
+        first_slot = 0
+        for s in 1:nargs
+            exp = _expected_arg_type(cands[i], s, nargs, store, meta_dict)
+            exp === nothing && continue
+            got = s <= length(inferred) ? inferred[s] : nothing
+            if !_has_type_intersection(got, exp, store, meta_dict)
+                mism += 1
+                first_slot == 0 && (first_slot = s)
+            end
+        end
+        if mism > 0 && mism < best_count
+            best_count = mism
+            best_i, best_slot = i, first_slot
+            best_exp = _expected_arg_type(cands[i], first_slot, nargs, store, meta_dict)
+            best_got = first_slot <= length(inferred) ? inferred[first_slot] : nothing
+        end
+    end
+    if best_slot > 0
+        return string(header, " At argument ", best_slot, ": expected `",
+            _format_type(best_exp), "`, got `", _format_type(best_got), "`.")
+    end
+    return header
+end
+
 function get_method(name::EXPR)
     f = maybe_get_parent_fexpr(name, x -> CSTParser.defines_function(x) || CSTParser.defines_struct(x) || CSTParser.defines_macro(x))
     if f !== nothing && CSTParser.get_name(f) == name
@@ -561,18 +846,24 @@ function check_is_used_in_getindex(expr, lhs, arr, meta_dict)
     return false
 end
 
+# `nothing` is Core-owned but re-exported by Base. Depending on how the crawl
+# represents the re-export, a use can resolve to either the Core or the Base
+# store entry — two distinct `GenericStore` instances that don't compare equal —
+# so matching only against `Core[:nothing]` misses uses that resolve through
+# Base. Accept either.
+function _refers_to_nothing(@nospecialize(r), env::ExternalEnv)
+    r === nothing && return false
+    syms = getsymbols(env)
+    r == syms[:Core][:nothing] && return true
+    return haskey(syms[:Base], :nothing) && r == syms[:Base][:nothing]
+end
+
 function check_nothing_equality(x::EXPR, env::ExternalEnv, meta_dict)
     if isbinarycall(x) && length(x.args) == 3
-        _nothing = getsymbols(env)[:Core][:nothing]
-        if valof(x.args[1]) == "==" && (
-                (valof(x.args[2]) == "nothing" && refof(x.args[2], meta_dict) == _nothing) ||
-                (valof(x.args[3]) == "nothing" && refof(x.args[3], meta_dict) == _nothing)
-            )
+        _is_nothing(a) = valof(a) == "nothing" && _refers_to_nothing(refof(a, meta_dict), env)
+        if valof(x.args[1]) == "==" && (_is_nothing(x.args[2]) || _is_nothing(x.args[3]))
             seterror!(x.args[1], NothingEquality, meta_dict)
-        elseif valof(x.args[1]) == "!=" && (
-                (valof(x.args[2]) == "nothing" && refof(x.args[2], meta_dict) == _nothing) ||
-                (valof(x.args[3]) == "nothing" && refof(x.args[3], meta_dict) == _nothing)
-            )
+        elseif valof(x.args[1]) == "!=" && (_is_nothing(x.args[2]) || _is_nothing(x.args[3]))
             seterror!(x.args[1], NothingNotEq, meta_dict)
         end
     end
@@ -1081,7 +1372,9 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
 end
 
 function is_mask_binding_of_datatype(b::Binding, meta_dict)
-    b.val isa EXPR && CSTParser.isassignment(b.val) && (rhsref = refof(b.val.args[2], meta_dict)) !== nothing && (rhsref isa SymbolServer.DataTypeStore || (rhsref.val isa EXPR && rhsref.val isa SymbolServer.DataTypeStore) || (rhsref.val isa EXPR && CSTParser.defines_datatype(rhsref.val)))
+    # the `isa Binding` guard keeps the `.val` accesses off ref types without
+    # that field (e.g. a per-file-mode TreeRef)
+    b.val isa EXPR && CSTParser.isassignment(b.val) && (rhsref = refof(b.val.args[2], meta_dict)) !== nothing && (rhsref isa SymbolServer.DataTypeStore || (rhsref isa Binding && ((rhsref.val isa EXPR && rhsref.val isa SymbolServer.DataTypeStore) || (rhsref.val isa EXPR && CSTParser.defines_datatype(rhsref.val)))))
 end
 
 # check whether a and b are in all the same :if blocks and in the same branches

@@ -1,0 +1,1016 @@
+# Layer 3 of the inventory architecture: the per-file analysis bridge. This
+# file supplies the RESOLUTION CONTEXT that StaticLint's per-file traversal
+# mode (`semantic_pass(...; module_context=...)`) uses to resolve non-local
+# names through the module tree (`derived_module_visible_names_idfree` +
+# per-name `derived_visible_item`, layer_visibility.jl) instead of the
+# cross-file scope graph.
+#
+# `TreeModuleContext` is a handle, deliberately NOT plain data: it holds the
+# Salsa runtime and lives only inside a running analysis (like
+# `Toplevel.runtime` does). It must never be stored in a derived value —
+# everything that ends up in refs is the plain-data `StaticLint.TreeRef`.
+
+"""
+    TreeModuleContext(rt, root::URI, path::Vector{String})
+
+The module-tree resolution handle for one per-file analysis: names that are
+not local to the analyzed file resolve through the id-free
+`derived_module_visible_names_idfree(rt, root, path)`, with the declaring
+`ItemRef` filled in per referenced name from `derived_visible_item` (see
+`_tree_ref_for`). `path` is the module the file's code lives in
+(`derived_file_module_path` for the file's top level; a CHILD context —
+path extended by the module name — for each `module` declared inside the
+analyzed file, see `StaticLint.seed_module_scope_context!`).
+
+`item_cache` memoizes the per-name `derived_visible_item` lookups for the
+DURATION of one analysis (keyed by `(path, name)`, shared with child
+contexts): the Salsa dependency is recorded once per distinct name, not once
+per reference site. Never stored in a derived value, like the context itself.
+"""
+struct TreeModuleContext{RT} <: StaticLint.AbstractModuleContext
+    rt::RT
+    root::URI
+    path::Vector{String}
+    item_cache::Dict{Tuple{Vector{String},String},Union{Nothing,ItemRef}}
+end
+
+TreeModuleContext(rt, root::URI, path::Vector{String}) =
+    TreeModuleContext(rt, root, path, Dict{Tuple{Vector{String},String},Union{Nothing,ItemRef}}())
+
+StaticLint.child_module_context(ctx::TreeModuleContext, name::String) =
+    TreeModuleContext(ctx.rt, ctx.root, vcat(ctx.path, [name]), ctx.item_cache)
+
+StaticLint.parent_module_context(ctx::TreeModuleContext) =
+    isempty(ctx.path) ? nothing :
+    TreeModuleContext(ctx.rt, ctx.root, ctx.path[1:end - 1], ctx.item_cache)
+
+# The context a module-kinded TreeRef denotes: same two-candidate validation
+# as `_denoted_tree_module_path` (extended path first — `origin_module` is
+# the declaring module for `:declared` names but the target module itself
+# for whole-module import bindings), through the id-free
+# `derived_module_exists` selector.
+function StaticLint.module_context_at(ctx::TreeModuleContext, ref::StaticLint.TreeRef)
+    ref.kind === :module || return nothing
+    extended = vcat(ref.origin_module, [ref.name])
+    if derived_module_exists(ctx.rt, ctx.root, extended)
+        return TreeModuleContext(ctx.rt, ctx.root, extended, ctx.item_cache)
+    elseif !isempty(ref.origin_module) && derived_module_exists(ctx.rt, ctx.root, ref.origin_module)
+        return TreeModuleContext(ctx.rt, ctx.root, ref.origin_module, ctx.item_cache)
+    end
+    return nothing
+end
+
+StaticLint.context_tree_ref(ctx::TreeModuleContext) = _context_tree_ref(ctx)
+
+# The names of the modules DECLARED IN the analyzed file that enclose `x`,
+# outermost-first, read off the scope chain (works after
+# `strip_module_contexts!` — module nesting survives the handle strip).
+# `vcat(splice_path, this)` is `x`'s absolute module path.
+function _in_file_module_names(x, meta_dict)
+    names = String[]
+    s = StaticLint.retrieve_scope(x, meta_dict)
+    while s isa StaticLint.Scope
+        if s.expr isa CSTParser.EXPR && CSTParser.defines_module(s.expr)
+            mn = CSTParser.get_name(s.expr)
+            nm = mn isa CSTParser.EXPR && CSTParser.isidentifier(mn) ? StaticLint.valofid(mn) : nothing
+            nm !== nothing && pushfirst!(names, nm)
+        end
+        s = CSTParser.parentof(s)
+    end
+    return names
+end
+
+# The declaring ItemRef for `name` visible at `ctx.path`, through the
+# analysis-local cache (one `derived_visible_item` call per distinct name).
+function _cached_visible_item(ctx::TreeModuleContext, name::String)
+    return get!(ctx.item_cache, (ctx.path, name)) do
+        derived_visible_item(ctx.rt, ctx.root, ctx.path, name)
+    end
+end
+
+# The TreeRef for a hit against the id-free visible-names face: the item is
+# filled per-name from `derived_visible_item` — but only for names that can
+# actually carry one. `:external_symbol` names never do (the environment has
+# no ItemRefs), and `:unknown` (a colon-list member the target doesn't
+# declare) never does either; skipping the query for them avoids creating
+# per-name Salsa nodes that could only ever answer `nothing`.
+function _tree_ref_for(ctx::TreeModuleContext, name::String, vnf)
+    item = (vnf.kind === :external_symbol || vnf.kind === :unknown) ? nothing :
+        _cached_visible_item(ctx, name)
+    return StaticLint.TreeRef(name, vnf.kind, item, vnf.origin_module)
+end
+
+# The plain-data stand-in for the module `ctx` denotes — what a reference to
+# the module itself (e.g. an import-path component) gets as its ref.
+function _context_tree_ref(ctx::TreeModuleContext)
+    isempty(ctx.path) && return StaticLint.TreeRef("", :module, nothing, String[])
+    return StaticLint.TreeRef(ctx.path[end], :module, _module_declared_at(ctx.rt, ctx.root, ctx.path), ctx.path[1:end - 1])
+end
+
+# A module context is never stored in meta: setting it as a ref stores the
+# plain-data TreeRef it denotes instead (reached from `resolve_import_block`,
+# which setref!s whatever `_get_field` resolved an import-path component to).
+StaticLint.setref!(x::CSTParser.EXPR, ctx::TreeModuleContext, meta_dict) =
+    StaticLint.setref!(x, _context_tree_ref(ctx), meta_dict)
+
+"""
+    StaticLint.resolve_ref_from_module(x, ctx::TreeModuleContext, state) -> Bool
+
+Resolve the identifier `x` through the module tree: hit-test its name
+against the id-free `derived_module_visible_names_idfree(ctx.rt, ctx.root,
+ctx.path)` and, on a hit, set a plain-data `TreeRef` whose `item` comes from
+the per-name `derived_visible_item` (via `_tree_ref_for`). The split is the
+invalidation contract: an item-id shift elsewhere backdates the id-free face
+and every per-name item except the genuinely shifted ones, so only analyses
+referencing a shifted name re-execute. Reached with ZERO changes to
+`resolve_ref`'s scope walk: the per-file pass seeds `:__tree__ => ctx` into
+the root scope's (and each in-file module scope's) `.modules` Dict, whose
+values `resolve_ref` already tries via `resolve_ref_from_module` after
+file-local names miss.
+"""
+function StaticLint.resolve_ref_from_module(x1::CSTParser.EXPR, ctx::TreeModuleContext, state::StaticLint.TraverseState)::Bool
+    meta_dict = state.meta_dict
+    StaticLint.hasref(x1, meta_dict) && return true
+    CSTParser.isidentifier(x1) || return false
+    name = StaticLint.valofid(x1)
+    name === nothing && return false
+
+    # exact-key lookup only: macros are stored WITH the `@` prefix throughout
+    # the inventory layers, so a macro reference ("@mymac") hits directly and
+    # a bare "mymac" against a macro-only name correctly misses.
+    visible = derived_module_visible_names_idfree(ctx.rt, ctx.root, ctx.path)
+    vn = get(visible, name, nothing)
+    vn === nothing && return false
+    StaticLint.setref!(x1, _tree_ref_for(ctx, name, vn), meta_dict)
+    return true
+end
+
+# See `StaticLint.tree_context_declares_datatype`'s docstring: `name` resolves
+# to a datatype through this context iff it is visible here with a datatype
+# kind. Consulting the id-free visible-names face (the same query
+# `resolve_ref_from_module` uses) keeps this consistent with how the name will
+# actually resolve — if a reference would resolve to a datatype TreeRef, the
+# defining constructor must not shadow it with a local function binding — and
+# adds no coarser Salsa dependency than the per-file analysis already has.
+function StaticLint.tree_context_declares_datatype(ctx::TreeModuleContext, name::String)::Bool
+    visible = derived_module_visible_names_idfree(ctx.rt, ctx.root, ctx.path)
+    vn = get(visible, name, nothing)
+    vn === nothing && return false
+    return _is_datatype_kind(vn.kind)
+end
+
+# The tree path of the module a module-kinded VisibleName DENOTES, or
+# `nothing` when it isn't a module of this root's tree (external and
+# workspace-package modules chain no further in-file). `VisibleName` doesn't
+# carry the denoted path directly — `origin_module` is the declaring module
+# for `:declared` names but the target module itself for whole-module
+# bindings — so both candidates are validated against the tree, extended
+# path first (the only ambiguous case, an alias colliding with an equally
+# named submodule of the target, is resolved in the submodule's favor).
+# Existence is checked through the id-free `derived_module_exists` selector,
+# NOT the whole tree value: this helper runs inside the per-file analysis
+# frame, and a whole-tree dependency would re-run every import-bearing
+# analysis on any tree-value change anywhere in the root.
+function _denoted_tree_module_path(ctx::TreeModuleContext, name::String, vn)
+    extended = vcat(vn.origin_module, [name])
+    derived_module_exists(ctx.rt, ctx.root, extended) && return extended
+    if !isempty(vn.origin_module) && derived_module_exists(ctx.rt, ctx.root, vn.origin_module)
+        return vn.origin_module
+    end
+    return nothing
+end
+
+"""
+    StaticLint._get_field(par::TreeModuleContext, arg, state, visited)
+
+Import-path resolution through the tree (the per-file counterpart of the
+`Scope`/`ModuleStore` methods): the analyzed file's own `using`/`import`
+statements re-resolve their path components through the module context
+rather than cross-file scope walks. A component naming a module of this
+root's tree resolves to a CHILD `TreeModuleContext` (so the walk can
+continue into it); anything else visible resolves to its plain-data
+`TreeRef`; a miss returns `nothing` (the standard unresolved-import path).
+"""
+function StaticLint._get_field(par::TreeModuleContext, arg, state, visited=Base.IdSet{Any}())
+    name = CSTParser.str_value(arg)
+    (name isa String && !isempty(name)) || return nothing
+    visible = derived_module_visible_names_idfree(par.rt, par.root, par.path)
+    vn = get(visible, name, nothing)
+    vn === nothing && return nothing
+    if vn.kind === :module
+        child = _denoted_tree_module_path(par, name, vn)
+        child !== nothing && return TreeModuleContext(par.rt, par.root, child, par.item_cache)
+        # Not a module of THIS root's tree: a module-kinded visible name may
+        # denote a WORKSPACE PACKAGE the origin module imported (the
+        # `using ..JSONRPC: ...` pattern — the parent binds `JSONRPC` via its
+        # own `import JSONRPC`). Continue the walk CROSS-ROOT into the
+        # package's tree. Fresh item cache: the cache is keyed (path, name)
+        # without a root, so sharing it across roots could alias entries.
+        wp = _workspace_package_context(par, name, vn)
+        wp !== nothing && return wp
+    end
+    return _tree_ref_for(par, name, vn)
+end
+
+# The cross-root context for a module-kinded visible name that denotes a
+# workspace package (validated against `derived_workspace_package_roots` and
+# the package root's own tree). Both denoted-path candidates are tried, in
+# the same order as `_denoted_tree_module_path`: `origin_module` is the
+# TARGET path for whole-module import bindings (`["JSONRPC"]`, or
+# `["JSONRPC", "JSON"]` for a continued sub-path) but the declaring module
+# for other origins, where extending by the name itself may be the match.
+function _workspace_package_context(ctx::TreeModuleContext, name::String, vn)
+    roots = derived_workspace_package_roots(ctx.rt)
+    for cand in (vcat(vn.origin_module, [name]), vn.origin_module)
+        isempty(cand) && continue
+        entry = get(roots, cand[1], nothing)
+        entry === nothing && continue
+        # tolerate alias/self-binding shapes: `["JSONRPC"]` and the packaged
+        # module path coincide for whole-module bindings
+        if derived_module_exists(ctx.rt, entry, cand)
+            return TreeModuleContext(ctx.rt, entry, cand,
+                Dict{Tuple{Vector{String},String},Union{Nothing,ItemRef}}())
+        end
+    end
+    return nothing
+end
+
+# Qualified-use entry point (`qualified_module_target` interface): the
+# resolvable stand-in for the module a getfield LHS `tr` denotes.
+#
+# - `:module` — a module of a workspace tree: this root first
+#   (`module_context_at`, the same two-candidate `origin_module` validation
+#   used everywhere), then cross-root as a workspace package
+#   (`_workspace_package_context` reads only `tr.origin_module`, which
+#   `TreeRef` carries just like `VisibleName`).
+# - `:external_symbol` — MAY denote an env module (a whole-module
+#   `using`/`import` bring-in binds the module under kind
+#   `:external_symbol`): for a self-named binding (`name == origin_module`'s
+#   last segment — whole-module `using JSON`/`using Base.Iterators` shapes)
+#   the origin path IS the module path; otherwise the name may be an
+#   exported/member submodule extending it. `_resolve_external_module`
+#   returns `nothing` unless the walk lands on an actual `ModuleStore`, so
+#   non-module names (`parse` from `using JSON: parse`) can never leak a
+#   parent store. Known miss: an ALIAS of an external module bound in a
+#   SIBLING file (`import JSON as J` there, `J.parse` here) is not
+#   recognizable from the TreeRef alone (name matches neither shape) and
+#   stays unresolved.
+# - `:external_module` — the post-strip stand-in shape (origin_module
+#   EXCLUDES the name); handled for completeness, unreachable during the
+#   pass (the strip runs after all resolution steps).
+#
+# The returned `ModuleStore` is consumed transiently by `resolve_getfield`'s
+# ModuleStore arm and never stored (leaf member stores in refs are fine,
+# module-store refs are rewritten by `_strip_module_stores!` — both exactly
+# as the env-backed paths already behave).
+function StaticLint.qualified_module_target(ctx::TreeModuleContext, tr::StaticLint.TreeRef)
+    if tr.kind === :module
+        target = StaticLint.module_context_at(ctx, tr)
+        target !== nothing && return target
+        return _workspace_package_context(ctx, tr.name, tr)
+    elseif tr.kind === :external_module
+        return _resolve_external_module(ctx.rt, ctx.root, vcat(tr.origin_module, [tr.name]))
+    elseif tr.kind === :external_symbol && !isempty(tr.origin_module)
+        if tr.name == tr.origin_module[end]
+            return _resolve_external_module(ctx.rt, ctx.root, tr.origin_module)
+        end
+        return _resolve_external_module(ctx.rt, ctx.root, vcat(tr.origin_module, [tr.name]))
+    end
+    return nothing
+end
+
+# Absolute-import entry point (`workspace_package_context` interface): the
+# context for the workspace package named `name` itself. Fresh item cache —
+# see `_workspace_package_context` for why the cache never crosses roots.
+function StaticLint.workspace_package_context(ctx::TreeModuleContext, name::String)
+    roots = derived_workspace_package_roots(ctx.rt)
+    entry = get(roots, name, nothing)
+    entry === nothing && return nothing
+    derived_module_exists(ctx.rt, entry, [name]) || return nothing
+    return TreeModuleContext(ctx.rt, entry, [name],
+        Dict{Tuple{Vector{String},String},Union{Nothing,ItemRef}}())
+end
+
+# Import-arg marking for a component that resolved to a module context:
+# mirrors the whole-closure `_mark_import_arg`, minus everything that would
+# leak the handle or another file's objects into meta. The binding's val is
+# the context's plain-data `TreeRef` (leaf components that resolve directly
+# to a TreeRef take the GENERIC `_mark_import_arg`, which stores them the
+# same way — `Binding.val` admits `TreeRef`). No `scope.modules` entry is
+# added for `using`: a `using` statement is necessarily module-toplevel, so
+# its bring-ins are already part of this module's
+# `derived_module_visible_names` — the seeded context covers them.
+function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged, meta_dict)
+    CSTParser.is_id_or_macroname(arg) || return
+    if StaticLint.bindingof(arg, meta_dict) === nothing
+        StaticLint.ensuremeta(arg, meta_dict)
+        StaticLint.getmeta(arg, meta_dict).binding = StaticLint.Binding(arg, _context_tree_ref(par), StaticLint.CoreTypes.Module, [])
+        StaticLint.setref!(arg, StaticLint.bindingof(arg, meta_dict), meta_dict)
+    end
+    if !usinged
+        # import binds the name in the current scope — except under `as`,
+        # where only the alias is bound (matching `_mark_import_arg`)
+        if !(CSTParser.parentof(arg) isa CSTParser.EXPR && CSTParser.parentof(CSTParser.parentof(arg)) isa CSTParser.EXPR && CSTParser.headof(CSTParser.parentof(CSTParser.parentof(arg))) === :as)
+            state.scope.names[StaticLint.valofid(arg)] = StaticLint.bindingof(arg, meta_dict)
+        end
+    end
+    return
+end
+
+# --- The frozen per-file analysis value --------------------------------------
+
+"""
+    OutboundRef
+
+One aggregated outbound reference of an analyzed file: a name the per-file
+pass resolved THROUGH the module tree (a `StaticLint.TreeRef`-valued ref),
+aggregated by `(name, origin_module)`. Plain data (`@auto_hash_equals`):
+`target` is the declaring `ItemRef` when the name traces back to a tree
+declaration, `nothing` for external/env-backed targets; `count` is the
+number of reference sites in this file. Positions are request-time work —
+nothing here (or anywhere in this layer) depends on `derived_item_positions`.
+"""
+@auto_hash_equals struct OutboundRef
+    name::String
+    target::Union{Nothing,ItemRef}
+    origin_module::Vector{String}
+    count::Int
+end
+
+"""
+    FileAnalysis
+
+The frozen result of one per-file semantic analysis (`derived_file_analysis`).
+
+- `meta`: StaticLint meta (local scopes/bindings/refs), for THIS file's
+  EXPRs only — the per-file pass follows no includes and merges no other
+  file's meta, so no foreign `EXPR`/`Binding` is reachable from it.
+- `outbound`: the plain-data outbound-reference table (direct tree-resolved
+  refs AND import-bound sites whose binding val is a tree target, see
+  `_collect_outbound`), sorted by `(name, origin_module)`.
+- `diagnostics`: the file's lint diagnostics (`check_all` + `collect_hints`).
+
+Deliberately NOT `@auto_hash_equals` (unlike `OutboundRef`): `meta` is keyed
+by `objectid` of this file's EXPRs, so identity equality is intended — the
+value is effectively keyed on this file's content (an unchanged file keeps
+the memoized value; a changed file re-runs the pass and produces fresh keys
+wholesale), and there is nothing meaningful for a structural comparison to
+early-exit on.
+
+Purity: no `TreeModuleContext`/runtime handle survives in `meta`
+(`semantic_pass` ends its per-file mode with `strip_module_contexts!`), and
+no `ModuleStore`/`ExternalEnv` does either (`_strip_module_stores!` removes
+the seeded Base/Core scope entries and rewrites module-store-valued
+refs/vals into plain-data `TreeRef` stand-ins). Leaf symbol stores (e.g. a
+`FunctionStore` ref for a Base function) are kept: they are small per-symbol
+values, not the identity-compared env containers, and the query depends on
+`derived_environment` anyway, so an env change recomputes them.
+"""
+struct FileAnalysis
+    meta::Dict{UInt64,StaticLint.Meta}
+    outbound::Vector{OutboundRef}
+    diagnostics::Vector{Diagnostic}
+end
+
+_empty_file_analysis() = FileAnalysis(Dict{UInt64,StaticLint.Meta}(), OutboundRef[], Diagnostic[])
+
+# The full path of a `SymbolServer.VarRef` chain, root-first.
+function _var_ref_path(vr::SymbolServer.VarRef)
+    segs = String[]
+    while vr !== nothing
+        pushfirst!(segs, String(vr.name))
+        vr = vr.parent
+    end
+    return segs
+end
+
+# The plain-data stand-in for a `ModuleStore` that must not survive in a
+# frozen meta: a `TreeRef` with the store's own path (no `ItemRef` — the
+# environment has none). Kind `:external_module`, NOT `:module`, so
+# env-store stand-ins stay distinguishable from tree-resolved module refs
+# (which carry `:module` and usually an ItemRef); nothing dispatches on the
+# stand-in's kind during the pass — it is only created after all lint steps
+# and the outbound extraction have run.
+function _module_store_tree_ref(m::SymbolServer.ModuleStore)
+    segs = _var_ref_path(m.name)
+    return StaticLint.TreeRef(segs[end], :external_module, nothing, segs[1:end - 1])
+end
+
+"""
+    _strip_module_stores!(meta_dict)
+
+Remove every `SymbolServer.ModuleStore` reachable from `meta_dict` before it
+is frozen into a `FileAnalysis`: the Base/Core stores `semantic_pass` seeds
+into the root scope's (and each in-file module scope's) `.modules`, plus any
+store a `using`/`import` of an external module added, are deleted; a
+`Meta.ref`/`Binding.val` that IS a module store (an identifier naming the
+module, e.g. the `Base` in `Base.sqrt`) is rewritten to its plain-data
+`TreeRef` stand-in so the name stays resolved. Runs AFTER `check_all` /
+`collect_hints` (which still read the seeded scopes) and AFTER the outbound
+extraction (so env-resolved module names never masquerade as tree-resolved
+outbound references). The `:__tree__` context handles are already gone at
+this point — `semantic_pass` strips them itself in per-file mode.
+"""
+function _strip_module_stores!(meta_dict::Dict{UInt64,StaticLint.Meta})
+    for m in values(meta_dict)
+        s = m.scope
+        if s isa StaticLint.Scope && s.modules isa Dict
+            for (k, v) in collect(s.modules)
+                v isa SymbolServer.ModuleStore && delete!(s.modules, k)
+            end
+        end
+        if m.ref isa SymbolServer.ModuleStore
+            m.ref = _module_store_tree_ref(m.ref)
+        end
+        b = m.binding
+        if b isa StaticLint.Binding && b.val isa SymbolServer.ModuleStore
+            b.val = _module_store_tree_ref(b.val)
+        end
+    end
+    return
+end
+
+# Aggregate every tree-resolved reference site in `meta_dict` by
+# (name, origin_module). Two shapes count:
+# - a `Meta.ref` that IS a `TreeRef` (plain tree resolution, and body uses
+#   of colon-list-imported names, which the tree binds under the BOUND
+#   name — so an `f as g` alias surfaces its uses as `g` rows);
+# - a `Meta.ref` that is a file-local `Binding` whose `.val isa TreeRef` —
+#   the import-statement components themselves (colon-list leaves, their
+#   `as`-aliases, and a whole-module import's module-name component), whose
+#   binding val carries the tree target. These are counted under the
+#   TreeRef's own (SOURCE) name so M4's "who references X" aggregation sees
+#   them.
+# Aliased names therefore surface under DIFFERENT row names depending on
+# where the use sits relative to the file boundary: uses in a file that
+# imported `f as g` CROSS-FILE (through the tree's visible names) appear as
+# `g` rows, while the import statement's own components in the declaring
+# file appear under the source name `f` — the two rows carry the SAME
+# declaring `ItemRef`, so an M4 "who references X" aggregation must join on
+# `target`, never on the row name.
+# The nameless root-context stand-in (`TreeRef("", :module, ...)`, produced
+# for import components denoting the synthetic tree root) is skipped as
+# noise.
+function _collect_outbound(meta_dict::Dict{UInt64,StaticLint.Meta})
+    acc = Dict{Tuple{String,Vector{String}},Tuple{Union{Nothing,ItemRef},Int}}()
+    for m in values(meta_dict)
+        ref = m.ref
+        r = if ref isa StaticLint.TreeRef
+            ref
+        elseif ref isa StaticLint.Binding && ref.val isa StaticLint.TreeRef
+            ref.val
+        else
+            nothing
+        end
+        r === nothing && continue
+        isempty(r.name) && continue
+        key = (r.name, r.origin_module)
+        prev = get(acc, key, nothing)
+        if prev === nothing
+            acc[key] = (r.item, 1)
+        else
+            # same-key TreeRefs agree on the item by construction (one tree
+            # snapshot); keep the first non-nothing one defensively
+            acc[key] = (prev[1] === nothing ? r.item : prev[1], prev[2] + 1)
+        end
+    end
+    outbound = OutboundRef[OutboundRef(k[1], v[1], k[2], v[2]) for (k, v) in acc]
+    sort!(outbound; by=o -> (o.name, o.origin_module))
+    return outbound
+end
+
+# The per-file slice of `derived_static_lint_diagnostics_for_root`'s
+# hint-translation loop (layer_static_lint.jl), over an already-linted meta:
+# `collect_hints` with the file's configured missing-ref mode, then the same
+# errortoken / missing-ref / UnresolvedImport / LintCodes translation. A
+# `Vector` (not the old per-root `Set`): a single file analyzed once cannot
+# produce the cross-root duplicates the Set deduplicated, and the CST
+# traversal order keeps the result deterministic.
+# Cross-file arity set for a call whose callee is a tree-visible workspace
+# function (the case `check_call` argument-count-checks against the full method
+# set), or `nothing` when the callee isn't such a function — then the render path
+# uses the local `describe_call_mismatch` instead.
+function _call_cross_file_arities(rt, root, path, call, meta_dict)
+    root === nothing && return nothing
+    func_ref = StaticLint.refof_call_func(call, meta_dict)
+    (func_ref isa StaticLint.Binding || func_ref isa StaticLint.TreeRef) || return nothing
+    nm = CSTParser.get_name(call)
+    (nm isa CSTParser.EXPR && StaticLint.isidentifier(nm)) || return nothing
+    name = StaticLint.valofid(nm)
+    name === nothing && return nothing
+    p = vcat(path, _in_file_module_names(call, meta_dict))
+    haskey(derived_module_visible_names_idfree(rt, root, p), name) || return nothing
+    return derived_method_arities(rt, root, p, name)
+end
+
+function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[])
+    diagnostics = Diagnostic[]
+
+    # Names the project declares as dependencies, for the UnresolvedImport
+    # message split (same computation as the whole-closure pass; empty
+    # without a project).
+    project = project_uri === nothing ? nothing : derived_project(rt, project_uri)
+    declared_deps = project === nothing ? Set{String}() :
+        Set{String}(Iterators.flatten((
+            keys(project.regular_packages),
+            keys(project.stdlib_packages),
+            keys(project.deved_packages),
+        )))
+
+    missingrefs = _missingrefs_from_config(lint_config)
+    # per-file mode: no merged workspace-package meta, cross-file names come
+    # from the tree
+    workspace_packages = Dict{String,Any}()
+    errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
+
+    for err in errs
+        rng = err[1]+1:err[1]+err[2].span+1
+        if StaticLint.headof(err[2]) === :errortoken
+            # parse errors are the syntax layer's job (matching the
+            # whole-closure pass)
+        elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
+            push!(diagnostics, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
+        elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) === StaticLint.UnresolvedImport
+            name = CSTParser.str_value(err[2])
+            cause = name in declared_deps ?
+                "`$name` is a declared dependency but its symbols could not be indexed." :
+                "Failed to resolve `$name`."
+            consequence = StaticLint.is_in_wildcard_import(err[2]) ?
+                "Missing-reference checks are disabled in this scope and all nested scopes." :
+                "Anything imported through this statement is assumed to exist and will not be checked."
+            push!(diagnostics, Diagnostic(rng, :warning, "$cause $consequence", nothing, Symbol[], "StaticLint.jl"))
+        elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
+            code = StaticLint.errorof(err[2], meta_dict)
+            description = get(StaticLint.LintCodeDescriptions, code, "")
+            if code === StaticLint.IncorrectCallArgs
+                # For a tree-visible workspace callee, describe from the full
+                # cross-file arity set (the local candidates are incomplete);
+                # otherwise from the local candidates (store/local methods).
+                ar = _call_cross_file_arities(rt, root, path, err[2], meta_dict)
+                detail = ar !== nothing ?
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar) :
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict)
+                detail !== nothing && (description = detail)
+            end
+            severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
+                :hint, Symbol[:unnecessary]
+            else
+                :information, Symbol[]
+            end
+            code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
+            push!(diagnostics, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
+        end
+    end
+
+    return diagnostics
+end
+
+# The bare name symbol of a store-backed function/type (`Base.Filesystem.relpath`
+# → `:relpath`), or `nothing`.
+_store_name_symbol(f::SymbolServer.FunctionStore) = f.name isa SymbolServer.VarRef ? f.name.name : nothing
+function _store_name_symbol(d::SymbolServer.DataTypeStore)
+    n = d.name
+    n isa SymbolServer.FakeTypeName && (n = n.name)
+    n isa SymbolServer.VarRef ? n.name : nothing
+end
+_store_name_symbol(@nospecialize(_)) = nothing
+
+# Resolve a written qualifier + name (`["Base"], :relpath`) to its store via the
+# env symbols, following a `VarRef`. Returns the store or `nothing`.
+function _resolve_qualified_store(env, qualifier::Vector{String}, name_sym::Symbol)
+    isempty(qualifier) && return nothing
+    syms = StaticLint.getsymbols(env)
+    store = get(syms, Symbol(qualifier[1]), nothing)
+    store isa SymbolServer.ModuleStore || return nothing
+    for i in 2:length(qualifier)
+        sub = StaticLint.maybe_lookup(get(store.vals, Symbol(qualifier[i]), nothing), env)
+        sub isa SymbolServer.ModuleStore || return nothing
+        store = sub
+    end
+    val = get(store.vals, name_sym, nothing)
+    val === nothing && return nothing
+    return StaticLint.maybe_lookup(val, env)
+end
+
+# Do `a` and `b` denote the same store-backed function/type? Functions compare by
+# `extends` (the canonical VarRef of the extended generic); types by name.
+_same_store_target(a::SymbolServer.FunctionStore, b::SymbolServer.FunctionStore) = a.extends == b.extends
+_same_store_target(a::SymbolServer.DataTypeStore, b::SymbolServer.DataTypeStore) = a.name == b.name
+_same_store_target(@nospecialize(_), @nospecialize(_)) = false
+
+# Workspace method extensions that actually extend the store-backed function/type
+# `func_ref` (e.g. a sibling `Base.relpath(::AbstractString, ::PkgData)`): a
+# workspace external extension named the same whose written qualifier resolves (in
+# `env`) to the same underlying function/type. Used by hover (to list them) and
+# the method-call lint (to decline for a callee whose method set this file only
+# partially sees).
+function _matching_workspace_extensions(rt, root, env, func_ref)
+    env === nothing && return ExternalExtension[]
+    name_sym = _store_name_symbol(func_ref)
+    name_sym === nothing && return ExternalExtension[]
+    name = String(name_sym)
+    # Cheap, stable-valued gate: skip the per-name query (and its dependency) for
+    # the common case of a store function the workspace never extends.
+    name in derived_external_extension_names(rt, root) || return ExternalExtension[]
+    exts = derived_external_method_extensions(rt, root, name)
+    isempty(exts) && return exts
+    return filter(exts) do e
+        resolved = _resolve_qualified_store(env, e.qualifier, name_sym)
+        resolved !== nothing && _same_store_target(resolved, func_ref)
+    end
+end
+
+_store_extended_in_workspace(rt, root, env, func_ref) =
+    !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
+
+"""
+    derived_file_analysis(rt, root::URI, file::URI) -> FileAnalysis
+
+Run StaticLint's per-file traversal (`semantic_pass(...; module_context)`)
+over `file` as spliced into `root`'s module tree, and freeze the result:
+the file's own meta, the plain-data outbound-reference table, and the
+file's lint diagnostics — the per-file counterpart of
+`derived_static_lint_meta_for_root` + `derived_static_lint_diagnostics_for_root`'s
+whole-closure tail. Returns an empty `FileAnalysis` when `file` is not
+spliced under `root` (`derived_file_module_path` returns `nothing`).
+
+Late passes: `check_all`, `resolve_remaining_getfields!`, and
+`mark_unresolved_imports!` run in the old tail's order, AFTER
+`semantic_pass` — which, in per-file mode, has already stripped the seeded
+`:__tree__` context handles from the meta's scopes. That placement is
+correct because none of the three needs tree resolution: they dispatch on
+`Binding`s / stored errors (late getfield resolution guards on
+`lhsref isa Binding`, so a `TreeRef` LHS is skipped; import marking only
+reads refs and sets errors). Any FUTURE post-pass step that DOES need tree
+resolution must re-seed a fresh `TreeModuleContext` first (see the comment
+at `semantic_pass`'s strip call site).
+
+## Cutoff analysis
+
+The query depends on this file's CST (`derived_julia_legacy_syntax_tree`),
+the id-free path selector (`derived_file_module_path` — deliberately NOT
+`derived_module_tree(rt, root).file_modules[file]`, whose whole-tree value
+changes on every tree-table change anywhere in the root), the id-free
+visible-names faces of the modules the file's names resolve through
+(`derived_module_visible_names_idfree`) plus one per-name
+`derived_visible_item` for each DISTINCT tree-declared name the file
+actually references, the per-module import-component selectors
+(`derived_module_exists`/`derived_module_declared_at`), the file's lint
+configuration, and the environment. Nothing in the analysis frame reads the
+whole `derived_module_tree` value. Consequences:
+
+- A body edit in a SIBLING file: that file's inventory backdates → the
+  module tree backdates → every selector backdates → this analysis is
+  untouched.
+- A top-level edit in a sibling that shifts item ids but not the name/kind
+  sets (e.g. reordering two same-kind declarations): the tree — and the
+  FULL `derived_module_visible_names`, whose `VisibleName.item`s carry the
+  shifted ids — re-execute with changed values, but the id-free faces and
+  the per-name items of unshifted names backdate → only analyses that
+  reference an actually-shifted name re-execute, and those MUST (their
+  outbound `ItemRef`s change).
+"""
+Salsa.@derived function derived_file_analysis(rt, root, file)
+    @debug "derived_file_analysis" root=root file=file
+
+    path = derived_file_module_path(rt, root, file)
+    path === nothing && return _empty_file_analysis()
+
+    # TODO Same provisional project lookup as the whole-closure pass.
+    project_uri = derived_project_uri_for_root(rt, root)
+    # No project yet (e.g. a standalone package whose DJP is still computing):
+    # the memoized stdlib-only env keeps locally-defined and stdlib names
+    # resolving — same fallback (and same identity-sharing rationale) as
+    # `derived_static_lint_meta_for_root`.
+    env = project_uri === nothing ? derived_stdlib_only_env(rt) : derived_environment(rt, project_uri)
+
+    cst = derived_julia_legacy_syntax_tree(rt, file)
+    meta_dict = Dict{UInt64,StaticLint.Meta}()
+
+    ctx = TreeModuleContext(rt, root, path)
+    StaticLint.semantic_pass(file, cst, env, meta_dict, rt; module_context=ctx)
+
+    # Cross-file wildcard-using suppression: if the module this file is
+    # spliced into has a failed wildcard `using` ANYWHERE (typically in the
+    # entry file), the whole-closure pass suppressed bare missing-ref hints
+    # throughout the module via the shared scope's
+    # `unresolved_wildcard_import` flag. Per-file, the file's root scope
+    # stands in for the module interior — setting the flag there reproduces
+    # the suppression exactly: `in_unresolved_wildcard_import_scope`'s walk
+    # still stops at modules DECLARED INSIDE this file, so their contents
+    # keep their hints (matching the old pass's module-boundary rule). The
+    # file's OWN failed wildcard usings need no help — `semantic_pass` +
+    # `mark_unresolved_imports!` set the flag locally, as always.
+    if derived_module_unresolved_wildcard_using(rt, root, path)
+        fscope = StaticLint.scopeof(cst, meta_dict)
+        fscope isa StaticLint.Scope && (fscope.unresolved_wildcard_import = true)
+    end
+
+    # The per-file slice of the whole-closure pass's tail
+    # (`derived_static_lint_meta_for_root`, layer_static_lint.jl), in the
+    # same order, minus the closure loop: this file is the only file.
+    # `tree_visible` gates the method-set lints
+    # (FunctionHasNoMethods/IncorrectCallArgs): a callee that is also visible
+    # through the tree context provably has a method set this file only
+    # partially sees (forward declarations, methods in sibling files), so
+    # those checks decline rather than false-positive — see `check_all`'s
+    # docs. Visibility is checked at the CALL SITE's module path (the file's
+    # splice path extended by any modules declared in the file around the
+    # call), read off the scope chain — the `:__tree__` handles are already
+    # stripped at check time, but the module NESTING is still in the scopes.
+    # The id-free visible-names faces are dependencies the analysis frame
+    # already takes for the modules it touches.
+    lint_config = derived_lint_configuration(rt, file)
+    tree_visible = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        haskey(derived_module_visible_names_idfree(rt, root, p), name)
+    end
+    # A store-backed callee (Base/stdlib/package function) that a workspace file
+    # extends: its overload isn't in the env store, so decline the method-call
+    # lint rather than false-positive (see `_store_extended_in_workspace`).
+    tree_extended = (func_ref, x) -> _store_extended_in_workspace(rt, root, env, func_ref)
+    # `tree_arities` lets the method-call lint check a tree-visible workspace
+    # callee's ARGUMENT COUNT against its full cross-file method set (the local
+    # `func_ref` sees only this file's methods). Plain-data arities from the
+    # inventory — no dependency on sibling analyses. (Positional-type checking of
+    # such callees is deferred; see the cross-file-method-checks design doc.)
+    tree_arities = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        derived_method_arities(rt, root, p, name)
+    end
+    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities)
+
+    # Late getfield reference resolution — mutates meta_dict, so it must run
+    # here, while we still own it (no workspace-package meta in per-file
+    # mode, hence the empty dict).
+    StaticLint.resolve_remaining_getfields!(cst, env, Dict{String,Any}(), meta_dict)
+
+    # Late import-failure marking (in-pass failures may be retried via
+    # `state.resolveonly`, so this can only run after the pass).
+    StaticLint.mark_unresolved_imports!(cst, meta_dict)
+
+    diagnostics = _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root, path)
+
+    # Extract outbound BEFORE the store strip: the strip rewrites env-store
+    # module refs into TreeRef stand-ins, which must not be counted as
+    # tree-resolved outbound references.
+    outbound = _collect_outbound(meta_dict)
+
+    _strip_module_stores!(meta_dict)
+
+    return FileAnalysis(meta_dict, outbound, diagnostics)
+end
+
+"""
+    derived_new_static_lint_diagnostics(rt, uri) -> Set{Diagnostic}
+
+The per-file consumer face of static-lint diagnostics: for every root `uri`
+belongs to (`derived_roots_for_uri`), take that root's per-file analysis
+diagnostics (`derived_file_analysis(rt, root, uri).diagnostics`) and union
+them into a `Set`. The cross-root union/dedup reproduces the old
+`derived_static_lint_diagnostics` behavior exactly — the same diagnostic can
+be produced from multiple roots via includes, and a file in no root yields
+an empty set. The per-file provenance is what makes a per-keystroke edit cost
+one analysis (the edited file's own) instead of a whole-closure re-lint.
+
+A root with no project (`derived_project_uri_for_root === nothing`) publishes
+NOTHING — matching the old `derived_static_lint_diagnostics_for_root`, which
+bails empty in that case. The per-file ANALYSIS still runs against the
+stdlib-only env fallback (so other consumers keep working), but its
+diagnostics are suppressed here: while a root has no project (e.g. a loose
+file during the LS-startup no-active-project window), every real-package
+import would otherwise flash a "Failed to resolve …" false positive. Once a
+project is active, `new == old` again.
+
+Test-setup parity: the whole-closure pass feeds `derived_test_setup_bindings`
+into `semantic_pass(...; test_setups=…)`; the per-file pass
+(`derived_file_analysis`) passes none. This is behavior-identical TODAY
+because test-setup detection has a verified pre-existing off-by-one (the
+`args[2]` line-info placeholder — setups are never recognized on this
+lineage). Do NOT fix the off-by-one here: it re-opens the stale-EXPR channel;
+it is a ledgered follow-up.
+"""
+Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
+    @debug "derived_new_static_lint_diagnostics" uri=uri
+
+    res = Set{Diagnostic}()
+    for root in derived_roots_for_uri(rt, uri)
+        # A project-less root contributes no diagnostics (parity with the old
+        # per-root query, layer_static_lint.jl).
+        derived_project_uri_for_root(rt, root) === nothing && continue
+        union!(res, derived_file_analysis(rt, root, uri).diagnostics)
+    end
+    return res
+end
+
+"""
+    item_documentation(rt, ref::ItemRef) -> Union{Nothing,String}
+
+The docstring attached to a tree-declared inventory item, materialized at
+request time from the item's DEFINING file. Plain function (never a derived
+value): it reaches `derived_item_positions` — the volatile leaf that nothing
+in layers 1–3 may depend on — to recover the item's syntax node, then walks
+the node's parent chain in the file's CST for a doc-wrapper macrocall (the
+implicit `:globalrefdoc`, an explicit `@doc`, or a `const`-wrapper's docs) and
+reuses the hover layer's docstring extraction on it.
+
+Docs deliberately live OUTSIDE the inventory (spec: a docstring edit must not
+invalidate dependents — the inventory value stays `isequal`, so every
+consumer backdates). This helper is the sanctioned path that re-attaches them
+at the last mile: hovering a file that references `ref` re-runs no analysis
+when only `ref`'s docstring changed, yet serves the fresh text (the
+`derived_item_positions` reparse is a leaf recompute of the defining file
+only).
+
+Returns `nothing` when the item has no position (stale ref) or no docstring.
+"""
+function item_documentation(rt, ref::ItemRef)
+    entry = get(derived_item_positions(rt, ref.file), ref.id, nothing)
+    entry === nothing && return nothing
+    expr = entry.expr
+
+    # `string(...)` guarantees a `String` even for INTERPOLATED docstrings,
+    # whose payload `to_codeobject` yields a `:string` `Expr` rather than a
+    # plain `String` literal. Every consumer (hover + completion) then gets a
+    # `String`, and the rendered text stays byte-identical to the old
+    # whole-closure hover path, which likewise `string(...)`-wrapped this
+    # `to_codeobject` result.
+    doc_expr = _maybe_get_doc_expr(expr)
+    if _is_doc_expr(doc_expr)
+        return string(CSTParser.to_codeobject(_get_doc_payload_expr(doc_expr)))
+    end
+    # `const`/`global` wrappers carry the docstring one level up (the item
+    # node is the assignment inside the `const`).
+    p = CSTParser.parentof(expr)
+    if p isa CSTParser.EXPR && _is_const_expr(p) && _expr_has_preceding_docs(p)
+        return string(CSTParser.to_codeobject(_get_doc_payload_expr(_maybe_get_doc_expr(p))))
+    end
+    return nothing
+end
+
+# ============================================================================
+# References aggregation (M4): "who references this item?" as a request-time
+# join over the per-file outbound tables.
+# ============================================================================
+
+# A generic pre-order EXPR walk (request-time only). `f(x)` is called for
+# every node in `x`'s subtree.
+function _walk_exprs(f, x::CSTParser.EXPR)
+    f(x)
+    if length(x) > 0
+        for a in x
+            _walk_exprs(f, a)
+        end
+    end
+    return
+end
+
+# The bare (leading-`@`-stripped) spelling of a name. Macros are `@`-prefixed
+# throughout the inventory/tree, but a macro's DEFINITION identifier and its
+# `Binding` carry the bare form — so occurrences of one logical macro compare
+# equal only on their bare spelling.
+_bare_macro_name(s::AbstractString) = startswith(s, "@") ? s[nextind(s, 1):end] : s
+
+# The declared name of an inventory item, from its file's inventory
+# (`@`-prefixed for macros). `nothing` when the id is absent (stale ref).
+function _inventory_item_name(rt, ref::ItemRef)
+    for it in derived_file_inventory(rt, ref.file).items
+        it.id == ref.id && return it.name
+    end
+    return nothing
+end
+
+# True when more than one inventory item in `ref.file` shares `ref.id` — the id
+# was minted for a single statement that declares several names (an `@enum`
+# type + its members, a tuple destructure `a, b = …`). For such an `ItemRef`
+# the id alone does NOT identify one declaration, so references/rename/highlight
+# must additionally match on the name (unlike the single-name case, where the
+# id-only join is what lets `f as g` aliases resolve through the SOURCE item).
+function _itemref_is_ambiguous(rt, ref::ItemRef)
+    n = 0
+    for it in derived_file_inventory(rt, ref.file).items
+        it.id == ref.id || continue
+        n += 1
+        n > 1 && return true
+    end
+    return false
+end
+
+# The module-level `Binding` that declares `target` in its OWN file's per-file
+# meta: materialize the item's defining EXPR (`derived_item_positions` — the
+# volatile leaf, request-time only) and find, inside it, the identifier whose
+# bare spelling matches the item's declared name and that carries the binding
+# (directly, or as a self-ref). The name match (rather than "first binding in
+# the subtree") is essential: a function/struct signature also binds its
+# parameters/fields, which must not be mistaken for the declaration. Returns
+# `nothing` when the item has no position or no such binding.
+#
+# The recovered binding drives the old within-file `loose_refs` walk in the
+# DECLARING file (declaration sites + same-file uses), reproducing the
+# whole-closure references behavior for the file that owns the name.
+function _item_declaring_binding(rt, target::ItemRef, meta_dict, name=_inventory_item_name(rt, target))
+    name === nothing && return nothing
+    bare = _bare_macro_name(name)
+    entry = get(derived_item_positions(rt, target.file), target.id, nothing)
+    entry === nothing && return nothing
+
+    result = nothing
+    _walk_exprs(entry.expr) do x
+        result === nothing || return
+        CSTParser.is_id_or_macroname(x) || return
+        _bare_macro_name(CSTParser.str_value(x)) == bare || return
+        if StaticLint.hasbinding(x, meta_dict)
+            result = StaticLint.bindingof(x, meta_dict)
+        elseif StaticLint.hasref(x, meta_dict) && StaticLint.refof(x, meta_dict) isa StaticLint.Binding
+            result = StaticLint.refof(x, meta_dict)
+        end
+        return
+    end
+    return result
+end
+
+"""
+    each_reference(f, rt, target::ItemRef, restrict_name=nothing)
+
+Call `f(ref_expr, uri, offset)` once per reference site of the tree-declared
+item `target`, aggregated at request time over the per-file `outbound`
+tables. This is a PLAIN function (never a `Salsa.@derived`): its result is
+keyed on an `ItemRef`, which is volatile by design, so it must not seed a
+derived value.
+
+For every root in the workspace and every file spliced into that root:
+
+- the DECLARING file (`file == target.file`) contributes the old within-file
+  `loose_refs` walk of the item's module-level binding — its declaration
+  site(s) and same-file uses;
+- any OTHER file contributes only when its `outbound` table has a row whose
+  `target == target` — **the join is on the `ItemRef`, never the row name**.
+  Cross-file aliases (`using .Sib: f as g`) surface their uses under the
+  BOUND name (`g`) but carry the SOURCE's `ItemRef` as `target`, so joining
+  on `target` finds the `g`-call sites when asked for references of `f`
+  (which the old whole-closure pass missed). Matching files are walked and
+  every identifier whose `refof` is a `TreeRef` — or a `Binding` whose `.val`
+  is a `TreeRef` (import/alias statement components) — with `item == target`
+  is emitted.
+
+All workspace roots are scanned (not just `derived_roots_for_uri(target.file)`):
+a file references `target` through an `import` of its package, which is NOT an
+`include` edge, so include-reachability alone would miss cross-root consumers
+(the old merged-deved-package behavior). Sites are deduped by
+`(uri, offset, span)`, so a file spliced into several roots contributes each
+occurrence once. Cost is one (mostly backdated) per-file `outbound` check per
+file per root — a cold request-time walk, not a per-keystroke path.
+"""
+function each_reference(f, rt, target::ItemRef, restrict_name::Union{Nothing,AbstractString}=nothing)
+    # `restrict_name` is set only when `target`'s id is shared across several
+    # declarations (`_itemref_is_ambiguous`): then a site matches only when its
+    # resolved name equals it too, so `@enum` members / tuple-destructure names
+    # don't cross-contaminate. `nothing` keeps the id-only join (the alias case).
+    declname = restrict_name === nothing ? _inventory_item_name(rt, target) : restrict_name
+    emitted = Set{Tuple{URI,Int,Int}}()
+    emit = function (x::CSTParser.EXPR)
+        loc = _get_file_loc(x, rt)
+        loc === nothing && return
+        uri, o = loc
+        key = (uri, o, x.span)
+        key in emitted && return
+        push!(emitted, key)
+        f(x, uri, o)
+        return
+    end
+
+    for root in derived_roots(rt)
+        for file in derived_tree_files(rt, root)
+            analysis = derived_file_analysis(rt, root, file)
+            if file == target.file
+                b = _item_declaring_binding(rt, target, analysis.meta, declname)
+                b isa StaticLint.Binding || continue
+                # `loose_refs` can list the same node twice (a macro name lands
+                # in the binding's refs twice); dedupe by identity as
+                # `_for_each_ref` does.
+                seen = Base.IdSet{CSTParser.EXPR}()
+                for r in StaticLint.loose_refs(b, analysis.meta)
+                    if r isa CSTParser.EXPR && !(r in seen)
+                        push!(seen, r)
+                        emit(r)
+                    end
+                end
+            else
+                any(o -> o.target == target, analysis.outbound) || continue
+                cst = derived_julia_legacy_syntax_tree(rt, file)
+                cst isa CSTParser.EXPR || continue
+                _walk_exprs(cst) do x
+                    CSTParser.is_id_or_macroname(x) || return
+                    StaticLint.hasref(x, analysis.meta) || return
+                    r = StaticLint.refof(x, analysis.meta)
+                    tr = r isa StaticLint.TreeRef ? r :
+                        (r isa StaticLint.Binding && r.val isa StaticLint.TreeRef) ? r.val : nothing
+                    (tr !== nothing && tr.item == target &&
+                        (restrict_name === nothing || _bare_macro_name(tr.name) == _bare_macro_name(restrict_name))) && emit(x)
+                    return
+                end
+            end
+        end
+    end
+    return
+end

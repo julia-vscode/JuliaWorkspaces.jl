@@ -35,8 +35,8 @@ function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProject
 end
 
 function create_standalone_project_request(params::JuliaDynamicAnalysisProtocol.CreateStandaloneProjectParams, state::JuliaDynamicAnalysisProcessState, token)
-    tmp = mktempdir()
-    Pkg.activate(tmp)
+    mkpath(params.projectDir)
+    Pkg.activate(params.projectDir)
 
     try
         Pkg.develop(path=params.packagePath)

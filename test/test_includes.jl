@@ -289,6 +289,100 @@ end
     @test count(d -> contains(d.message, "Missing reference: undefined_symbol"), diags) == 1
 end
 
+@testitem "reverse include map: child maps to all including parents" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///revmap/src/Pkg.jl")
+    a_uri = URI("file:///revmap/src/a.jl")
+    b_uri = URI("file:///revmap/src/b.jl")
+    shared_uri = URI("file:///revmap/src/shared.jl")
+    other_root_uri = URI("file:///revmap/src/other.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\ninclude(\"a.jl\")\ninclude(\"shared.jl\")\nend", "julia")))
+    add_file!(jw, TextFile(a_uri, SourceText("include(\"b.jl\")", "julia")))
+    add_file!(jw, TextFile(b_uri, SourceText("g() = 2", "julia")))
+    add_file!(jw, TextFile(shared_uri, SourceText("s() = 1", "julia")))
+    add_file!(jw, TextFile(other_root_uri, SourceText("include(\"shared.jl\")", "julia")))
+
+    rt = jw.runtime
+    revmap = JuliaWorkspaces.derived_reverse_include_map(rt)
+
+    @test revmap[a_uri] == Set([root_uri])
+    @test revmap[b_uri] == Set([a_uri])
+    @test revmap[shared_uri] == Set([root_uri, other_root_uri])
+    # Files that nothing includes are not keys.
+    @test !haskey(revmap, root_uri)
+    @test !haskey(revmap, other_root_uri)
+end
+
+@testitem "reverse include map: missing include targets keep their parents" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///revmapmissing/src/Pkg.jl")
+    missing_uri = URI("file:///revmapmissing/src/missing.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\ninclude(\"missing.jl\")\nend", "julia")))
+
+    rt = jw.runtime
+    # The target has no content, but the edge must still be present so
+    # roots_for_uri can find the root of a not-yet-created include target.
+    @test JuliaWorkspaces.derived_reverse_include_map(rt)[missing_uri] == Set([root_uri])
+    @test JuliaWorkspaces.derived_roots_for_uri(rt, missing_uri) == Set([root_uri])
+end
+
+@testitem "include graph: roots_for_uri terminates on include cycles" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # A cycle below a root: root -> a <-> b
+    root_uri = URI("file:///revmapcycle/src/Pkg.jl")
+    a_uri = URI("file:///revmapcycle/src/a.jl")
+    b_uri = URI("file:///revmapcycle/src/b.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\ninclude(\"a.jl\")\nend", "julia")))
+    add_file!(jw, TextFile(a_uri, SourceText("include(\"b.jl\")", "julia")))
+    add_file!(jw, TextFile(b_uri, SourceText("include(\"a.jl\")", "julia")))
+
+    rt = jw.runtime
+    @test JuliaWorkspaces.derived_roots_for_uri(rt, b_uri) == Set([root_uri])
+    @test JuliaWorkspaces.derived_roots_for_uri(rt, a_uri) == Set([root_uri])
+
+    # A detached two-file cycle has no roots at all; the walk must terminate.
+    c_uri = URI("file:///revmapcycle/src/c.jl")
+    d_uri = URI("file:///revmapcycle/src/d.jl")
+    add_file!(jw, TextFile(c_uri, SourceText("include(\"d.jl\")", "julia")))
+    add_file!(jw, TextFile(d_uri, SourceText("include(\"c.jl\")", "julia")))
+    @test JuliaWorkspaces.derived_roots_for_uri(rt, c_uri) == Set{URI}()
+end
+
+@testitem "include graph: roots_for_uri records O(1) dependencies" begin
+    using JuliaWorkspaces.URIs2: URI
+    import JuliaWorkspaces.Salsa
+
+    root_uri = URI("file:///revmapdeps/src/Pkg.jl")
+    a_uri = URI("file:///revmapdeps/src/a.jl")
+    b_uri = URI("file:///revmapdeps/src/b.jl")
+    other_uri = URI("file:///revmapdeps/src/other.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\ninclude(\"a.jl\")\nend", "julia")))
+    add_file!(jw, TextFile(a_uri, SourceText("include(\"b.jl\")", "julia")))
+    add_file!(jw, TextFile(b_uri, SourceText("g() = 2", "julia")))
+    add_file!(jw, TextFile(other_uri, SourceText("h() = 3", "julia")))
+
+    rt = jw.runtime
+    @test JuliaWorkspaces.derived_roots_for_uri(rt, b_uri) == Set([root_uri])
+
+    # The per-file node must depend only on the shared reverse map and the roots
+    # set — not on every file's include list (that made verification O(n²) over
+    # the whole workspace).
+    key_type = Salsa.DerivedKey{typeof(JuliaWorkspaces.derived_roots_for_uri), Tuple{typeof(b_uri)}}
+    cache = rt.storage.derived_function_maps[key_type]
+    @test length(cache[(b_uri,)].dependencies) <= 3
+end
+
 @testitem "include closure: content-stable presence predicate" begin
     using JuliaWorkspaces.URIs2: URI
 

@@ -8,6 +8,11 @@ Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
 
 Salsa.@declare_input input_env_ready(rt)::Bool
 
+# Whether the workspace fabricates environments (standalone projects for
+# manifest-less packages, merged test environments). When false only real
+# project environments are watched.
+Salsa.@declare_input input_resolve_workspace_environments(rt)::Bool
+
 # Lazy input for files that are pulled in via `include(...)` from a regular
 # JW file but are not themselves regular files. Initial content is read
 # synchronously from disc; the watcher callback (if any) is invoked once per
@@ -85,9 +90,11 @@ Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, versio
 
             # @info "Lazy load package metadata for" name uuid version git_tree_sha1 cache_path
 
+            push!(ctx.dynamic_feature.loaded_pkg_metadata, PkgCacheKey((name, uuid, version, git_tree_sha1)))
+
             return package_data
         else
-            push!(ctx.dynamic_feature.missing_pkg_metadata, @NamedTuple{name::Symbol,uuid::UUID,version::VersionNumber,git_tree_sha1::Union{String,Nothing}}((name,uuid,version,git_tree_sha1)))
+            push!(ctx.dynamic_feature.missing_pkg_metadata, PkgCacheKey((name, uuid, version, git_tree_sha1)))
             # @info "Queued package metadata loading" name uuid version git_tree_sha1
             return nothing
         end

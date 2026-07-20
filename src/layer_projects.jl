@@ -134,7 +134,10 @@ Salsa.@derived function derived_project(rt, uri)
     project_file = toml_files.project_file
     manifest_file = toml_files.manifest_file
 
-    if manifest_file === nothing || manifest_file.scheme != "file"
+    # A folder without a Project file is not a project, even if it has a
+    # Manifest.toml (e.g. a DJP-created temp project directory whose
+    # Project.toml is missing or was deleted).
+    if project_file === nothing || manifest_file === nothing || manifest_file.scheme != "file"
         return nothing
     end
 
@@ -192,7 +195,10 @@ Salsa.@derived function derived_project(rt, uri)
 
             uri_of_deved_package = filepath2uri(path_of_deved_package)
 
-            version_of_deved_package = v_entry[1]["version"]
+            # A deved-package manifest entry may omit `version` (it is pinned by
+            # the deved path, not a registered version), e.g. Julia's own
+            # `test/project`. Default to "" rather than indexing unconditionally.
+            version_of_deved_package = get(v_entry[1], "version", "")
 
             deved_packages[k_entry] = JuliaProjectEntryDevedPackage(k_entry, uuid_of_deved_package, uri_of_deved_package, version_of_deved_package)
         elseif haskey(v_entry[1], "git-tree-sha1") && haskey(v_entry[1], "uuid") && haskey(v_entry[1], "version")

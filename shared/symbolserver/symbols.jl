@@ -11,12 +11,29 @@ struct ModuleStore <: SymStore
     name::VarRef
     vals::Dict{Symbol,Any}
     doc::String
-    exported::Bool
+    # A binding's export/public status is a (module, name) property recorded here
+    # for every name — including re-exports whose value is a bare `VarRef` and so
+    # can't carry its own flag. exported ⊆ public.
     exportednames::Vector{Symbol}
+    publicnames::Vector{Symbol}
     used_modules::Vector{Symbol}
 end
 
-ModuleStore(m) = ModuleStore(VarRef(m), Dict{Symbol,Any}(), _doc(m, nameof(m)), true, unsorted_names(m), Symbol[])
+# Back-compat positional form: the old `exported::Bool` (slot 4) is dropped, and
+# the old single `exportednames` list seeds both name lists. `copy` keeps the
+# two lists from aliasing the same array — a later `push!` to one (e.g. the
+# `:include`/`:ccall` fixups in `load_core`) must not silently mutate the other.
+ModuleStore(name::VarRef, vals, doc, ::Bool, exportednames, used_modules) =
+    ModuleStore(name, vals, doc, exportednames, copy(exportednames), used_modules)
+
+function ModuleStore(m)
+    # `names(m)` (all=false) is exactly the public set (exported ∪ public) on
+    # 1.11+, and the exported set pre-1.11 — so it already IS `publicnames`;
+    # exported is the strict subset.
+    ns = unsorted_names(m)
+    ModuleStore(VarRef(m), Dict{Symbol,Any}(), _doc(m, nameof(m)),
+        filter(s -> _isexported(m, s), ns), ns, Symbol[])
+end
 Base.getindex(m::ModuleStore, k) = m.vals[k]
 Base.setindex!(m::ModuleStore, v, k) = (m.vals[k] = v)
 Base.haskey(m::ModuleStore, k) = haskey(m.vals, k)
@@ -62,16 +79,15 @@ struct DataTypeStore <: SymStore
     fieldnames::Vector{Any}
     methods::Vector{MethodStore}
     doc::String
-    exported::Bool
-    function DataTypeStore(names, super, parameters, fieldtypes, fieldnames, methods, doc, exported)
+    function DataTypeStore(names, super, parameters, fieldtypes, fieldnames, methods, doc)
         if length(fieldtypes) < length(fieldnames)
             append!(fieldtypes, [FakeTypeName(Any) for _ in 1:(length(fieldnames)-length(fieldtypes))])
         end
-        new(names, super, parameters, fieldtypes, fieldnames, methods, doc, exported)
+        new(names, super, parameters, fieldtypes, fieldnames, methods, doc)
     end
 end
 
-function DataTypeStore(@nospecialize(t), symbol, parent_mod, exported)
+function DataTypeStore(@nospecialize(t), symbol, parent_mod)
     ur_t = Base.unwrap_unionall(t)
     parameters = if isdefined(ur_t, :parameters)
         map(ur_t.parameters) do p
@@ -89,7 +105,7 @@ function DataTypeStore(@nospecialize(t), symbol, parent_mod, exported)
         []
     end
     fieldnames = has_fields ? collect(Base.fieldnames(ur_t)) : Symbol[]
-    DataTypeStore(FakeTypeName(ur_t), FakeTypeName(ur_t.super), parameters, types, fieldnames, MethodStore[], _doc(parent_mod, symbol), exported)
+    DataTypeStore(FakeTypeName(ur_t), FakeTypeName(ur_t.super), parameters, types, fieldnames, MethodStore[], _doc(parent_mod, symbol))
 end
 
 function Base.show(io::IO, dts::DataTypeStore)
@@ -101,16 +117,22 @@ struct FunctionStore <: SymStore
     methods::Vector{MethodStore}
     doc::String
     extends::VarRef
-    exported::Bool
 end
 
-function FunctionStore(@nospecialize(f), symbol, parent_mod, exported)
+# Back-compat positional form: drop the trailing `exported::Bool`.
+FunctionStore(name::VarRef, methods, doc, extends::VarRef, ::Bool) =
+    FunctionStore(name, methods, doc, extends)
+
+function FunctionStore(@nospecialize(f), symbol, parent_mod)
     if f isa Core.IntrinsicFunction
-        FunctionStore(VarRef(VarRef(Core.Intrinsics), nameof(f)), MethodStore[], _doc(parent_mod, symbol), VarRef(VarRef(parentmodule(f)), nameof(f)), exported)
+        FunctionStore(VarRef(VarRef(Core.Intrinsics), nameof(f)), MethodStore[], _doc(parent_mod, symbol), VarRef(VarRef(parentmodule(f)), nameof(f)))
     else
-        FunctionStore(VarRef(VarRef(parent_mod), nameof(f)), MethodStore[], _doc(parent_mod, symbol), VarRef(VarRef(parentmodule(f)), nameof(f)), exported)
+        FunctionStore(VarRef(VarRef(parent_mod), nameof(f)), MethodStore[], _doc(parent_mod, symbol), VarRef(VarRef(parentmodule(f)), nameof(f)))
     end
 end
+
+# Back-compat type-object form: drop the trailing `exported`.
+FunctionStore(@nospecialize(f), symbol, parent_mod, ::Bool) = FunctionStore(f, symbol, parent_mod)
 
 function Base.show(io::IO, fs::FunctionStore)
     print(io, fs.name, " with $(length(fs.methods)) methods")
@@ -120,8 +142,11 @@ struct GenericStore <: SymStore
     name::VarRef
     typ::Any
     doc::String
-    exported::Bool
 end
+
+# Back-compat positional form: drop the trailing `exported::Bool`.
+GenericStore(name::VarRef, typ, doc, ::Bool) =
+    GenericStore(name, typ, doc)
 
 # adapted from https://github.com/timholy/CodeTracking.jl/blob/afc73a957f5034cc7f02e084a91283c47882f92b/src/utils.jl#L87-L122
 
@@ -343,6 +368,15 @@ else
     _isdefinedglobal(m::Module, s::Symbol) = invokelatest(isdefined, m, s)
 end
 
+# Whether `s` is exported by `m`. invokelatest for the same world-age reason as
+# name enumeration. Pre-1.11 has no `public` keyword, and `names(m)` there is the
+# exported set. (The public set needs no predicate — `unsorted_names(m)` IS it.)
+@static if isdefined(Base, :isexported)
+    _isexported(m::Module, s::Symbol) = invokelatest(Base.isexported, m, s)
+else
+    _isexported(m::Module, s::Symbol) = s in unsorted_names(m)
+end
+
 # Read global `m.s`, returning `(false, nothing)` rather than throwing on an
 # ambiguous `using` binding. Backstop for the 1.11 path (1.12+ skips these via
 # `_isdefinedglobal`); without it one such name aborts the whole package.
@@ -516,6 +550,13 @@ function all_names(m, pred, symbols = Set(Symbol[]), seen = Set(Module[]))
     ns = unsorted_names(m; all = true, imported = false, usings = false)
     for n in ns
         _isdefinedglobal(m, n) || continue
+        # TODO: deprecated bindings are dropped from the cache entirely, so a
+        # reference to one reads as "Failed to resolve" and can't be hovered or
+        # struck through. Ideally we'd index them with a `deprecatednames` list
+        # (mirroring exportednames/publicnames) and drive the LSP Deprecated tag.
+        # Blocked on Julia: `Base.isdeprecated` only detects explicit
+        # `Base.deprecate` calls, not the `@deprecate`/`@deprecated` macros, so
+        # the signal is too partial to rely on. Revisit when it's reliable.
         Base.isdeprecated(m, n) && continue
         ok, val = _try_getglobal(m, n)
         ok || continue
@@ -529,11 +570,6 @@ function all_names(m, pred, symbols = Set(Symbol[]), seen = Set(Module[]))
     symbols
 end
 
-# On 1.12, names() includes bindings from Core in Base even not requested,
-# so we filter those out below. This could also be a version check, but doing it
-# this way should be more robust
-const CORE_BASE_NAMES_CONFUSION = :Bool in names(Base)
-
 function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Base.IdSet{Symbol} = getallns(), visited = Base.IdSet{Module}();  get_return_type = false)
     if m isa Module
         cache = _lookup(VarRef(m), env, true)
@@ -545,20 +581,47 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
             ok, x = _try_getglobal(m, s)
             ok || continue
 
-            if CORE_BASE_NAMES_CONFUSION && m === Base && _isdefinedglobal(Core, s) && getglobal(Core, s) === x
-                continue
-            end
-
             if Base.unwrap_unionall(x) isa DataType # Unions aren't handled here.
                 if parentmodule(x) === m
-                    cache[s] = DataTypeStore(x, s, m, s in getnames(m))
+                    cache[s] = DataTypeStore(x, s, m)
                     cache_methods(x, s, env, get_return_type)
-                elseif nameof(x) !== s
+                elseif !(x isa UnionAll) && haskey(cache, s) && (cache[s] isa FunctionStore || cache[s] isa DataTypeStore) && !isempty(cache[s].methods)
+                    # `cache_methods` (run when the owning module was crawled — Core is
+                    # crawled before Base) already seeded a method-carrying store for this
+                    # name: a Core-owned *concrete* type re-exported or aliased by Base
+                    # collects its Base-defined extension methods here — `String`
+                    # (`String(::Vector{UInt8})` …), and concrete aliases like `Int`→`Int64`.
+                    # Leave that store untouched. Overwriting it with a fresh shadow
+                    # `DataTypeStore` (below) makes it a *different* instance from the
+                    # canonical `Core.String`/`Core.Int` store, so the linter's identity-based
+                    # type comparisons (`check_kw_default`, `check_call`, type inference) stop
+                    # matching; overwriting with a `VarRef` (further below) drops the extension
+                    # methods. Keeping the seeded `FunctionStore` lets `get_eventual_datatype`
+                    # follow its `.extends` back to the canonical type.
+                    #
+                    # The `!(x isa UnionAll)` guard is essential: a *parametric* alias like
+                    # `Vector` (= `Array{T,1} where T`, whose `nameof` is `:Array` ≠ `:Vector`,
+                    # so it too is a shadow-rename case) must stay a `DataTypeStore` — arg-type
+                    # inference needs its type structure to match e.g. `v::Vector{UInt8}`
+                    # against `String(::Vector{UInt8})`. A `FunctionStore` has no such structure.
+                    #
+                    # A genuine renamed shadow (e.g. `DataFrames.Not → InvertedIndices.InvertedIndex`)
+                    # is NOT seeded — `cache_methods` attributes those methods to the owning
+                    # module, not the shadowing one — so it correctly falls through below.
+                elseif nameof(x) !== s || x isa UnionAll
                     # This needs some finessing.
-                    cache[s] = DataTypeStore(x, s, m, s in getnames(m))
+                    cache[s] = DataTypeStore(x, s, m)
                     ms = cache_methods(x, s, env, get_return_type)
                     # A slightly difficult case. `s` is probably a shadow binding of `x` but we should store the methods nonetheless.
                     # Example: DataFrames.Not points to InvertedIndices.InvertedIndex
+                    #
+                    # `x isa UnionAll` extends this to a *parametric* Core-owned type
+                    # re-exported by Base under its own name (`Ref`, `nameof(Ref) === :Ref`,
+                    # so the `nameof !== s` shadow test misses it). It needs a
+                    # `DataTypeStore` — not the `VarRef` below — for two reasons: its
+                    # constructor methods are attributed to Base (so a VarRef to the
+                    # method-poor `Core.Ref` drops them, breaking call-checking of e.g.
+                    # `Ref(5.0)`), and `T{...}` curly application needs the type structure.
                     for m in ms
                         push!(cache[s].methods, m[2])
                     end
@@ -567,8 +630,13 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
                     cache[s] = VarRef(VarRef(parentmodule(x)), nameof(x))
                 end
             elseif x isa Function
-                if parentmodule(x) === m || (x isa Core.IntrinsicFunction && m === Core.Intrinsics)
-                    cache[s] = FunctionStore(x, s, m, s in getnames(m))
+                # Intrinsics report `parentmodule(x) === Core` even though they actually live in
+                # `Core.Intrinsics`, so a plain `parentmodule(x) === m` test would misclassify them as
+                # Core-owned and emit an empty (0-method) FunctionStore. Treat an intrinsic as "own" only
+                # at `Core.Intrinsics`; accessed from anywhere else it falls through to the `elseif` branch
+                # below which forwards to `VarRef(VarRef(Core.Intrinsics), nameof(x))`.
+                if (x isa Core.IntrinsicFunction ? m === Core.Intrinsics : parentmodule(x) === m)
+                    cache[s] = FunctionStore(x, s, m)
                     cache_methods(x, s, env, get_return_type)
                 elseif !haskey(cache, s)
                     # This will be replaced at a later point by a FunctionStore if methods for `x` are defined within `m`.
@@ -595,7 +663,7 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
                     cache[s] = VarRef(x)
                 end
             else
-                cache[s] = GenericStore(VarRef(VarRef(m), s), FakeTypeName(typeof(x)), _doc(m, s), s in getnames(m))
+                cache[s] = GenericStore(VarRef(VarRef(m), s), FakeTypeName(typeof(x)), _doc(m, s))
             end
         end
     else
@@ -606,6 +674,24 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
 end
 
 
+# stdlibs loaded in a bare Julia sysimage — their Base-function extensions are
+# usable without an explicit `using`; determined empirically for Julia 1.12,
+# review across Julia versions. (JLL build artifacts like OpenBLAS_jll /
+# libblastrampoline_jll are loaded too but don't extend Base functions.)
+const _ALWAYS_AVAILABLE_STDLIBS = Set{Symbol}([:LinearAlgebra, :Random, :SHA, :Sockets, :FileWatching, :Libdl, :Artifacts])
+
+# A method defined in `mod` counts as always-available iff `mod` (or one of its
+# ancestor modules, e.g. LinearAlgebra.BLAS → LinearAlgebra) is on the sysimage
+# stdlib allow-list.
+function _is_always_available(mod::Module)
+    while true
+        nameof(mod) in _ALWAYS_AVAILABLE_STDLIBS && return true
+        p = parentmodule(mod)
+        p === mod && return false
+        mod = p
+    end
+end
+
 function load_core(; get_return_type = false)
     c = Pkg.Types.Context()
     cache = getenvtree([:Core,:Base])
@@ -613,7 +699,8 @@ function load_core(; get_return_type = false)
     cache[:Main] = ModuleStore(VarRef(nothing, :Main), Dict(), "", true, [], [])
 
     # This is wrong. Every module contains it's own include function.
-    push!(cache[:Base].exportednames, :include)
+    :include in cache[:Base].exportednames || push!(cache[:Base].exportednames, :include)
+    :include in cache[:Base].publicnames || push!(cache[:Base].publicnames, :include)
     let f = cache[:Base][:include]
         if haskey(cache[:Base][:MainInclude], :include)
             cache[:Base][:include] = FunctionStore(f.name, cache[:Base][:MainInclude][:include].methods, f.doc, f.extends, true)
@@ -643,7 +730,6 @@ function load_core(; get_return_type = false)
             cache[:Core][f] = FunctionStore(getglobal(Core, Symbol(f)), Symbol(f), Core, Symbol(f) in cnames)
         end
     end
-    haskey(cache[:Core], :_typevar) && push!(cache[:Core][:_typevar].methods, MethodStore(:_typevar, :Core, "built-in", 0, [:n => FakeTypeName(Symbol), :lb => FakeTypeName(Any), :ub => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:_apply].methods, MethodStore(:_apply, :Core, "built-in", 0, [:f => FakeTypeName(Function), :args => FakeTypeName(Vararg{Any})], Symbol[], FakeTypeName(Any)))
     haskey(cache[:Core].vals, :_apply_iterate) && push!(cache[:Core][:_apply_iterate].methods, MethodStore(:_apply_iterate, :Core, "built-in", 0, [:f => FakeTypeName(Function), :args => FakeTypeName(Vararg{Any})], Symbol[], FakeTypeName(Any)))
     if isdefined(Core, :_call_latest)
@@ -665,11 +751,11 @@ function load_core(; get_return_type = false)
     push!(cache[:Core][:arraysize].methods, MethodStore(:arraysize, :Core, "built-in", 0, [:a => FakeTypeName(Array), :i => FakeTypeName(Int)], Symbol[], FakeTypeName(Int)))
     haskey(cache[:Core], :const_arrayref) && push!(cache[:Core][:const_arrayref].methods, MethodStore(:const_arrayref, :Core, "built-in", 0, [:args => FakeTypeName(Vararg{Any})], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:fieldtype].methods, MethodStore(:fieldtype, :Core, "built-in", 0, [:t => FakeTypeName(DataType), :field => FakeTypeName(Symbol)], Symbol[], FakeTypeName(Type{T} where T)))
-    push!(cache[:Core][:getfield].methods, MethodStore(:setfield, :Core, "built-in", 0, [:object => FakeTypeName(Any), :item => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
+    push!(cache[:Core][:getfield].methods, MethodStore(:getfield, :Core, "built-in", 0, [:object => FakeTypeName(Any), :item => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:ifelse].methods, MethodStore(:ifelse, :Core, "built-in", 0, [:condition => FakeTypeName(Bool), :x => FakeTypeName(Any), :y => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
-    push!(cache[:Core][:invoke].methods, MethodStore(:invoke, :Core, "built-in", 0, [:f => FakeTypeName(Function), :x => FakeTypeName(Any), :argtypes => FakeTypeName(Type{T} where T) , :args => FakeTypeName(Vararg{Any})], Symbol[], FakeTypeName(Any)))
+    # `invoke` is handled below (its methods are replaced with the documented forms).
     push!(cache[:Core][:isa].methods, MethodStore(:isa, :Core, "built-in", 0, [:a => FakeTypeName(Any), :T => FakeTypeName(Type{T} where T)], Symbol[], FakeTypeName(Bool)))
-    push!(cache[:Core][:isdefined].methods, MethodStore(:getproperty, :Core, "built-in", 0, [:value => FakeTypeName(Any), :field => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
+    push!(cache[:Core][:isdefined].methods, MethodStore(:isdefined, :Core, "built-in", 0, [:value => FakeTypeName(Any), :field => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:nfields].methods, MethodStore(:nfields, :Core, "built-in", 0, [:x => FakeTypeName(Any)], Symbol[], FakeTypeName(Int)))
     push!(cache[:Core][:setfield!].methods, MethodStore(:setfield!, :Core, "built-in", 0, [:value => FakeTypeName(Any), :name => FakeTypeName(Symbol), :x => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:sizeof].methods, MethodStore(:sizeof, :Core, "built-in", 0, [:obj => FakeTypeName(Any)], Symbol[], FakeTypeName(Int)))
@@ -681,20 +767,18 @@ function load_core(; get_return_type = false)
 
     push!(cache[:Core][:getproperty].methods, MethodStore(:getproperty, :Core, "built-in", 0, [:value => FakeTypeName(Any), :name => FakeTypeName(Symbol)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:setproperty!].methods, MethodStore(:setproperty!, :Core, "built-in", 0, [:value => FakeTypeName(Any), :name => FakeTypeName(Symbol), :x => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
-    push!(cache[:Core][:setproperty!].methods, MethodStore(:setproperty!, :Core, "built-in", 0, [:value => FakeTypeName(Any), :name => FakeTypeName(Symbol), :x => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     haskey(cache[:Core], :_abstracttype) && push!(cache[:Core][:_abstracttype].methods, MethodStore(:_abstracttype, :Core, "built-in", 0, [:m => FakeTypeName(Module), :x => FakeTypeName(Symbol), :p => FakeTypeName(Core.SimpleVector)], Symbol[], FakeTypeName(Any)))
     haskey(cache[:Core], :_primitivetype) && push!(cache[:Core][:_primitivetype].methods, MethodStore(:_primitivetype, :Core, "built-in", 0, [:m => FakeTypeName(Module), :x => FakeTypeName(Symbol), :p => FakeTypeName(Core.SimpleVector), :n => FakeTypeName(Core.Int)], Symbol[], FakeTypeName(Any)))
     haskey(cache[:Core], :_equiv_typedef) && push!(cache[:Core][:_equiv_typedef].methods, MethodStore(:_equiv_typedef, :Core, "built-in", 0, [:a => FakeTypeName(Any), :b => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     haskey(cache[:Core], :_setsuper!) && push!(cache[:Core][:_setsuper!].methods, MethodStore(:_setsuper!, :Core, "built-in", 0, [:a => FakeTypeName(Any), :b => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     haskey(cache[:Core], :_structtype) && push!(cache[:Core][:_structtype].methods, MethodStore(:_structtype, :Core, "built-in", 0, [:m => FakeTypeName(Module), :x => FakeTypeName(Symbol), :p => FakeTypeName(Core.SimpleVector), :fields => FakeTypeName(Core.SimpleVector), :mut => FakeTypeName(Bool), :z => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
-    haskey(cache[:Core], :_typebody) && push!(cache[:Core][:_typebody!].methods, MethodStore(:_typebody!, :Core, "built-in", 0, [:a => FakeTypeName(Any), :b => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
+    haskey(cache[:Core], :_typebody!) && push!(cache[:Core][:_typebody!].methods, MethodStore(:_typebody!, :Core, "built-in", 0, [:a => FakeTypeName(Any), :b => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:(===)].methods, MethodStore(:(===), :Core, "built-in", 0, [:a => FakeTypeName(Any), :b => FakeTypeName(Any)], Symbol[], FakeTypeName(Any)))
     push!(cache[:Core][:(<:)].methods, MethodStore(:(<:), :Core, "built-in", 0, [:a => FakeTypeName(Type{T} where T), :b => FakeTypeName(Type{T} where T)], Symbol[], FakeTypeName(Any)))
     # Add unspecified methods for Intrinsics, working out the actual methods will need to be done by hand?
     for n in names(Core.Intrinsics)
         if getglobal(Core.Intrinsics, n) isa Core.IntrinsicFunction
             push!(cache[:Core][:Intrinsics][n].methods, MethodStore(n, :Intrinsics, "built-in", 0, [:args => FakeTypeName(Vararg{Any})], Symbol[], FakeTypeName(Any)))
-            :args => FakeTypeName(Vararg{Any})
         end
     end
 
@@ -712,21 +796,70 @@ function load_core(; get_return_type = false)
         "`ccall((function_name, library), returntype, (argtype1, ...), argvalue1, ...)`\n`ccall(function_name, returntype, (argtype1, ...), argvalue1, ...)`\n`ccall(function_pointer, returntype, (argtype1, ...), argvalue1, ...)`\n\nCall a function in a C-exported shared library, specified by the tuple (`function_name`, `library`), where each component is either a string or symbol. Instead of specifying a library, one\ncan also use a `function_name` symbol or string, which is resolved in the current process. Alternatively, `ccall` may also be used to call a function pointer `function_pointer`, such as one\nreturned by `dlsym`.\n\nNote that the argument type tuple must be a literal tuple, and not a tuple-valued variable or expression.\n\nEach `argvalue` to the `ccall` will be converted to the corresponding `argtype`, by automatic insertion of calls to `unsafe_convert(argtype, cconvert(argtype, argvalue))`. (See also the documentation for `unsafe_convert` and `cconvert` for further details.) In most cases, this simply results in a call to `convert(argtype, argvalue)`.",
         VarRef(VarRef(Core), :ccall),
         true)
-    push!(cache[:Core].exportednames, :ccall)
+    :ccall in cache[:Core].exportednames || push!(cache[:Core].exportednames, :ccall)
+    :ccall in cache[:Core].publicnames || push!(cache[:Core].publicnames, :ccall)
     cache[:Core][Symbol("@__doc__")] = FunctionStore(VarRef(VarRef(Core), Symbol("@__doc__")), [], "", VarRef(VarRef(Core), Symbol("@__doc__")), true)
     cache_methods(getglobal(Core, Symbol("@__doc__")), Symbol("@__doc__"), cache, false)
-    # Accounts for the dd situation where Base.rand only has methods from Random which doesn't appear to be explicitly used.
-    # append!(cache[:Base][:rand].methods, cache_methods(Base.rand, cache))
-    for m in cache_methods(Base.rand, :rand, cache, get_return_type)
-        push!(cache[:Base][:rand].methods, m[2])
+    # `invokelatest` and `invoke_in_world` forward keyword arguments to their
+    # target (`f(args...; kwargs...)`), but each is a single crawled method whose
+    # `Base.kwarg_decl` reports no keywords and whose parameters are the generic
+    # `(x...)` — so `check_call` would flag `invokelatest(f, args...; kw=v)` as an
+    # unknown keyword, and hover/signature-help shows meaningless `x...`. Replace
+    # the methods with their documented forms (mirroring the internal
+    # `_call_latest`/`_call_in_world` signatures) plus a keyword splat so any
+    # keyword is accepted. (They are Core-owned; Base re-exports them as VarRefs
+    # to these stores.)
+    for (n, sig) in (
+        :invokelatest => Pair{Any,Any}[:f => FakeTypeName(Function), :args => FakeTypeName(Vararg{Any})],
+        :invoke_in_world => Pair{Any,Any}[:world => FakeTypeName(UInt), :f => FakeTypeName(Function), :args => FakeTypeName(Vararg{Any})],
+    )
+        haskey(cache[:Core], n) || continue
+        fs = cache[:Core][n]
+        fs isa FunctionStore || continue
+        empty!(fs.methods)
+        push!(fs.methods, MethodStore(n, :Core, "built-in", 0, sig, [Symbol("kwargs...")], FakeTypeName(Any)))
     end
-    for m in cache_methods(Base.randn, :randn, cache, get_return_type)
-        push!(cache[:Base][:randn].methods, m[2])
+    # `invoke`'s crawled signature is imprecise (it carries a spurious extra
+    # positional, so the `argtypes::Type` constraint lands on the wrong argument
+    # and valid calls are flagged). Replace it with the three documented forms,
+    # each forwarding `; kwargs...`.
+    if haskey(cache[:Core], :invoke) && cache[:Core][:invoke] isa FunctionStore
+        invoke_methods = cache[:Core][:invoke].methods
+        empty!(invoke_methods)
+        for at in (FakeTypeName(Type{T} where T), FakeTypeName(Method), FakeTypeName(Core.CodeInstance))
+            push!(invoke_methods, MethodStore(:invoke, :Core, "built-in", 0,
+                [:f => FakeTypeName(Function), :argtypes => at, :args => FakeTypeName(Vararg{Any})],
+                [Symbol("kwargs...")], FakeTypeName(Any)))
+        end
+    end
+    # Accounts for Base functions that are always-available but which loaded stdlibs
+    # (Random, LinearAlgebra, …) extend: the Core+Base crawl attributes each method to
+    # its defining module, so methods defined outside Core/Base are dropped and those
+    # Base functions end up method-incomplete (rand 0/76, randn 0/14, kron! 0/13 — fully
+    # external; kron 1/17 — partial; plus operators `*`, `\`, `+`, … and others). Re-attach
+    # the dropped methods generically rather than by hand, but ONLY those defined in an
+    # always-available sysimage stdlib: load_core runs during JuliaWorkspaces' precompile
+    # with its full dependency tree loaded, so an unscoped re-attach leaks methods from
+    # Dates/LibGit2/CSTParser/… into the shipped Base store. Safe against double-counting at
+    # request time via the `iterate_over_ss_methods` de-dup.
+    for n in unsorted_names(Base; all = true, imported = true)
+        _isdefinedglobal(Base, n) || continue
+        ok, f = _try_getglobal(Base, n)
+        ok || continue
+        (f isa Function && !(f isa Core.Builtin)) || continue   # builtins/intrinsics handled separately
+        haskey(cache[:Base], n) || continue
+        st = cache[:Base][n]
+        st isa FunctionStore || continue
+        # Cheap gate: `methodlist` is exactly what `cache_methods` iterates, so a store
+        # that already holds every method (crawl captured it fully) is skipped.
+        length(st.methods) >= length(methodlist(f)) && continue
+        for (mmod, mstore) in cache_methods(f, n, cache, get_return_type)
+            _is_always_available(mmod) || continue                       # only re-attach sysimage-stdlib methods
+            any(existing -> _samestore(existing, mstore), st.methods) && continue  # de-dup safety
+            push!(st.methods, mstore)
+        end
     end
 
-    # Intrinsics
-    cache[:Core][:add_int] = VarRef(VarRef(VarRef(nothing, :Core), :Intrinsics), :add_int)
-    cache[:Core][:sle_int] = VarRef(VarRef(VarRef(nothing, :Core), :Intrinsics), :sle_int)
     return cache
 end
 

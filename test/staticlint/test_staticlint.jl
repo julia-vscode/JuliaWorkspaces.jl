@@ -9,8 +9,10 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     const CSTParser = JuliaWorkspaces.CSTParser
     const StaticLint = JuliaWorkspaces.StaticLint
 
+    export JuliaWorkspaces
     export parse_and_pass, check_resolved, get_hints, get_env, collect_hints
     export module_name, find_module_by_name, find_first
+    export ws_files, find_identifiers, find_binding
 
     const TEST_URI = JuliaWorkspaces.URIs2.uri"file://test.jl"
 
@@ -47,7 +49,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
 
         cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, our_uri)
         meta_dict, workspace_packages = JuliaWorkspaces.derived_static_lint_meta_for_root(jw.runtime, our_uri)
-        
+
         return cst, meta_dict, jw
     end
 
@@ -115,6 +117,37 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
 
     # Adapter to support do-block call style: find_first(root) do x ... end
     find_first(f::Function, root::CSTParser.EXPR) = find_first(root, f)
+
+    # Build a workspace from `uri => source` pairs (for cross-file / per-file
+    # traversal tests that go through `derived_file_analysis`).
+    function ws_files(pairs::Pair{<:JuliaWorkspaces.URIs2.URI,<:AbstractString}...)
+        jw = JuliaWorkspaces.JuliaWorkspace()
+        for (u, s) in pairs
+            add_file!(jw, TextFile(u, SourceText(s, "julia")))
+        end
+        return jw
+    end
+
+    function find_identifiers(x, value::String, hits=CSTParser.EXPR[])
+        if StaticLint.headof(x) === :IDENTIFIER && CSTParser.valof(x) == value
+            push!(hits, x)
+        elseif x.args !== nothing
+            for a in x.args
+                find_identifiers(a, value, hits)
+            end
+        end
+        return hits
+    end
+
+    # Last binding attached to an identifier named `name` in `cst` (or nothing).
+    function find_binding(cst, meta_dict, name::String)
+        b = nothing
+        for x in find_identifiers(cst, name)
+            bb = StaticLint.bindingof(x, meta_dict)
+            bb isa StaticLint.Binding && (b = bb)
+        end
+        return b
+    end
 end
 
 
@@ -415,7 +448,7 @@ end
     f() where {T,S}
     f() where {T<:Any}
     """)
-    
+
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[1].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[2], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[3], meta_dict) == JuliaWorkspaces.StaticLint.UnusedTypeParameter
@@ -723,6 +756,40 @@ end
     end
     let (cst, meta_dict) = parse_and_pass("function f end\nf(x) = x\nf(1, 2, 3)")
         @test errorof(cst.args[3], meta_dict) === IncorrectCallArgs
+    end
+end
+
+@testitem "check_call parametric re-exported type constructor (Ref)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof
+    # `Ref` is a parametric Core-owned type re-exported by Base under its own name;
+    # its constructor methods are attributed to Base. The crawler must represent
+    # `Base.Ref` as a method-carrying DataTypeStore (not a VarRef to the
+    # method-poor `Core.Ref`), otherwise call-checking these constructors falsely
+    # flags them as having no matching method.
+    for src in ["f() = Ref(5.0)", "f() = Ref(false)", "f() = Ref{Float64}(5.0)", "f() = Ref(0.0)"]
+        cst, meta_dict = parse_and_pass(src)
+        call = cst.args[1].args[2].args[1]
+        @test errorof(call, meta_dict) === nothing
+    end
+end
+
+@testitem "check_call kwarg-forwarding builtins tolerate keywords" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof
+    # `invokelatest`/`invoke`/`invoke_in_world` forward `; kwargs...` to their
+    # target, so passing keywords must not be flagged. Their crawled `kwarg_decl`
+    # is empty, so `load_core` marks their methods with a keyword splat.
+    for src in [
+        "f(err) = invokelatest(showerror, stderr, err; blame_revise=false)",
+        "f(err) = Base.invokelatest(showerror, stderr, err; blame_revise=false)",
+        "g(world, f, a) = Base.invoke_in_world(world, f, a; kw=1)",
+        # `invoke` is given its three documented forms (argtypes::Type/Method/
+        # CodeInstance), each with a keyword splat; the crawled signature carried a
+        # spurious extra positional that mis-flagged valid calls.
+        "g(f) = invoke(f, Tuple{Int}, 1)",
+        "g(f) = invoke(f, Tuple{Int}, 1; kw=2)",
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        @test errorof(cst.args[1].args[2], meta_dict) === nothing
     end
 end
 
@@ -1087,7 +1154,7 @@ end
     cst, meta_dict = parse_and_pass("""
         stdcall
         """)
-    
+
     @test !hasref(cst[1], meta_dict)
 end
 
@@ -1186,7 +1253,7 @@ end
     using JuliaWorkspaces.StaticLint: errorof, UnusedFunctionArgument
 
     cst, meta_dict = parse_and_pass("function f(arg) arg = 1 end")
-    
+
     @test errorof(CSTParser.get_sig(cst[1])[3], meta_dict) === UnusedFunctionArgument
 end
 
@@ -1441,7 +1508,7 @@ end
         Base.fetch(x) = 1
         function f(a::fetch) a end
         """)
-            
+
     @test errorof(cst.args[1].args[1].args[2], meta_dict) === InvalidTypeDeclaration
     @test errorof(cst.args[2].args[1].args[2], meta_dict) === InvalidTypeDeclaration
     @test errorof(cst.args[3].args[1].args[2], meta_dict) === nothing
@@ -1974,7 +2041,7 @@ end
         end
         break
         """)
-    
+
     @test errorof(cst.args[1].args[2].args[1], meta_dict) === nothing
     @test errorof(cst.args[2], meta_dict) === JuliaWorkspaces.StaticLint.ShouldBeInALoop
 end
@@ -1982,7 +2049,7 @@ end
 @testitem "@." setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: hasref
 
-    cst, meta_dict = parse_and_pass("@. a + b")    
+    cst, meta_dict = parse_and_pass("@. a + b")
 
     @test hasref(cst.args[1].args[1], meta_dict)
 end
@@ -3720,6 +3787,94 @@ end
     end
 end
 
+@testitem "declaration-only global/local binds the name" setup=[shared_static_lint] begin
+    # A `global`/`local x` or `global`/`local x::T` declaration without an
+    # assignment still introduces the name; later uses must resolve (not be
+    # flagged as missing references). The assignment form already worked (via
+    # the `#globals` redirect for globals), but the declaration-only forms
+    # created no binding: `:global` was unhandled entirely, and `:local`
+    # handled only the bare-identifier form, not the typed `x::T` form.
+
+    # Typed global declaration at module top level (Revise's `global juliadir::String`).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        global juliadir::String
+        get_it() = juliadir
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Bare global declaration at module top level.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        global juliadir
+        get_it() = juliadir
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Comma-separated mix of bare and typed global declarations.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        global a, b::Int
+        use() = a + b
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # A typed `global x::T` inside a function still declares the module global,
+    # so uses outside the function resolve.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function setit()
+            global juliadir::String
+        end
+        get_it() = juliadir
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Typed `local x::T` declaration in a function body, later assigned & used.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            local z::Int
+            z = 1
+            return z
+        end
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Comma-separated mix of bare and typed local declarations.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            local a, b::Int
+            a = 1
+            b = 2
+            return a + b
+        end
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Guard: a *bare* `x::T` (no `global`/`local` keyword) is a type-assert that
+    # READS `x`, not a declaration — at module scope and in a local scope alike
+    # (both raise `UndefVarError` at runtime). It must stay flagged as a missing
+    # reference; only the keyword forms above introduce a binding.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        module M
+            x::Int
+        end
+        """)
+        @test !isempty(collect_hints(cst, meta_dict, jw))
+    end
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            z::Int
+            z = 1
+            return z
+        end
+        """)
+        @test !isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
+
 @testitem "closures referencing variables defined later (#313)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, refof, bindingof, UnusedBinding
 
@@ -3995,4 +4150,124 @@ end
 
     @test StaticLint.scopehasmodule(filescope, :Base)
     @test StaticLint.scopehasmodule(filescope, :Core)
+end
+
+@testitem "iterate_over_ss_methods de-duplicates cross-package extensions" begin
+    using JuliaWorkspaces
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    using JuliaWorkspaces.SymbolServer: VarRef, ModuleStore, FunctionStore, DataTypeStore,
+        MethodStore, FakeTypeName, EnvStore, collect_extended_methods, _samestore
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # A method present both in a function's OWN store (as `load_core` bakes stdlib
+    # methods onto Base.rand) AND in an in-scope extension package's store must be
+    # yielded exactly once. Own and extension MethodStores are built independently
+    # (no shared identity), matching the real core-append-vs-package-store split.
+    mk(n; mod, file) = [MethodStore(:rand, mod, file, Int32(i),
+                                    Pair{Any,Any}[:x => FakeTypeName(Int)],
+                                    Symbol[], FakeTypeName(Any)) for i in 1:n]
+    N = 5
+    own = mk(N; mod=:Base, file="random.jl")
+    copies = [MethodStore(m.name, m.mod, m.file, m.line, copy(m.sig), copy(m.kws), m.rt) for m in own]
+
+    base_vr = VarRef(VarRef(nothing, :Base), :rand)
+    rand_vr = VarRef(VarRef(nothing, :Random), :rand)
+    fs_base = FunctionStore(base_vr, copy(own), "", base_vr, true)     # extends == name
+    fs_rand = FunctionStore(rand_vr, copy(copies), "", base_vr, true)  # extends Base.rand
+
+    modBase = ModuleStore(VarRef(nothing, :Base), Dict{Symbol,Any}(:rand => fs_base), "", true, [:rand], Symbol[])
+    modRand = ModuleStore(VarRef(nothing, :Random), Dict{Symbol,Any}(:rand => fs_rand), "", true, [:rand], Symbol[])
+    env_store = EnvStore(:Base => modBase, :Random => modRand)
+    env = SL.ExternalEnv(env_store, collect_extended_methods(env_store), Symbol[:Base, :Random])
+
+    tls = SL.Scope(CSTParser.parse("begin end"))
+    tls.modules = Dict{Symbol,Any}(:Base => modBase, :Random => modRand)
+
+    collect_ms(b) = (out = MethodStore[]; SL.iterate_over_ss_methods(b, tls, env, m -> (push!(out, m); false)); out)
+    dup_pairs(c) = count(_samestore(c[i], c[j]) for i in eachindex(c) for j in 1:(i-1); init=0)
+
+    got = collect_ms(fs_base)
+    # Pre-fix: own (5) + Random extension (5) [+ Base self-entry (5)] were all
+    # yielded -> >= 10. Post-fix: each method once.
+    @test length(got) == N
+    @test dup_pairs(got) == 0
+    @test all(o -> any(g -> _samestore(o, g), got), own)  # union complete, nothing lost
+
+    # A genuinely distinct extension method is still kept.
+    push!(fs_rand.methods, MethodStore(:rand, :Random, "random.jl", Int32(999),
+                                       Pair{Any,Any}[:y => FakeTypeName(Int)], Symbol[], FakeTypeName(Any)))
+    got2 = collect_ms(fs_base)
+    @test length(got2) == N + 1
+    @test dup_pairs(got2) == 0
+
+    # DataTypeStore variant: a type whose constructor is extended by another package.
+    foo_vr = VarRef(VarRef(nothing, :A), :Foo)
+    ctors = mk(4; mod=:A, file="a.jl")
+    ctor_copies = [MethodStore(m.name, m.mod, m.file, m.line, copy(m.sig), copy(m.kws), m.rt) for m in ctors]
+    dts = DataTypeStore(FakeTypeName(foo_vr, []),
+                        FakeTypeName(VarRef(VarRef(nothing, :Core), :Any), []),
+                        [], [], [], copy(ctors), "")
+    fs_foo_ext = FunctionStore(VarRef(VarRef(nothing, :B), :Foo), copy(ctor_copies), "", foo_vr, false)
+    modA = ModuleStore(VarRef(nothing, :A), Dict{Symbol,Any}(:Foo => dts), "", true, [:Foo], Symbol[])
+    modB = ModuleStore(VarRef(nothing, :B), Dict{Symbol,Any}(:Foo => fs_foo_ext), "", true, [:Foo], Symbol[])
+    esD = EnvStore(:A => modA, :B => modB)
+    envD = SL.ExternalEnv(esD, collect_extended_methods(esD), Symbol[:A, :B])
+    tlsD = SL.Scope(CSTParser.parse("begin end"))
+    tlsD.modules = Dict{Symbol,Any}(:A => modA, :B => modB)
+    gotD = MethodStore[]
+    SL.iterate_over_ss_methods(dts, tlsD, envD, m -> (push!(gotD, m); false))
+    @test length(gotD) == 4
+    @test dup_pairs(gotD) == 0
+end
+
+@testitem "check_call: describe_call_mismatch names the mismatch" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    CST = JuliaWorkspaces.CSTParser
+
+    firstcall(cst, name) = find_first(cst) do x
+        SL.headof(x) === :call && x.args !== nothing && !isempty(x.args) &&
+            SL.isidentifier(x.args[1]) && CST.valof(x.args[1]) == name
+    end
+    function describe(src, name)
+        cst, meta_dict, jw = parse_and_pass(src)
+        SL.describe_call_mismatch(firstcall(cst, name), get_env(jw), meta_dict)
+    end
+
+    # arity
+    m = describe("f(x) = x\nf(1, 2)\n", "f")
+    @test occursin("No method matching `f(", m)
+    @test occursin("Expected 1 argument", m) && occursin("got 2", m)
+
+    # positional type
+    m = describe("f(x::Int) = x\nf(\"s\")\n", "f")
+    @test occursin("argument 1", m) && occursin("Int", m) && occursin("String", m)
+
+    # positional type with several methods picks the closest by arity
+    m = describe("f(x::Int) = x\nf(x::Int, y::Int) = x\nf(\"s\")\n", "f")
+    @test occursin("argument 1", m) && occursin("expected `Int", m) && occursin("got `String", m)
+
+    # keyword: a store function with no keywords called with one
+    m = describe("g() = sqrt(1; foo=2)\n", "sqrt")
+    @test occursin("keyword `foo`", m)
+end
+
+@testitem "correctly mark exported bindings" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof
+
+    if VERSION >= v"1.12"
+        cst, meta_dict = parse_and_pass("""
+            module M
+            f() = 1
+            g() = 2
+            h() = 3
+            export f
+            public g
+            end""")
+        sc = scopeof(cst.args[1], meta_dict)
+        # export ⇒ exported + public; public ⇒ public only; neither ⇒ internal.
+        @test sc.names["f"].is_exported && sc.names["f"].is_public
+        @test sc.names["g"].is_public && !sc.names["g"].is_exported
+        @test !sc.names["h"].is_public && !sc.names["h"].is_exported
+    end
 end

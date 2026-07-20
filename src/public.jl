@@ -737,9 +737,15 @@ needed by LS request handlers.
 # Returns
 - A named tuple `(meta_dict, env, workspace_packages, root)` or `nothing` if no root
   contains the URI.
-  - `meta_dict::Dict{UInt64, StaticLint.Meta}` — maps EXPR object_id → metadata
+  - `meta_dict::Dict{UInt64, StaticLint.Meta}` — maps EXPR object_id → metadata.
+    Since the inventories refactor this is the CURRENT-FILE per-file analysis
+    meta (`derived_file_analysis(rt, root, uri).meta`), carrying only `uri`'s
+    own EXPRs; a name declared in a sibling file resolves as a
+    `StaticLint.TreeRef` rather than a merged `Binding`.
   - `env::StaticLint.ExternalEnv` — resolved environment (symbols, methods, deps)
-  - `workspace_packages::Dict{String,Any}` — deved packages available for import
+  - `workspace_packages::Dict{String,Any}` — vestigial: always an empty `Dict`
+    since the per-file migration (deved-package method sets are now reached
+    request-time through the module tree). Deletion candidate for M5.
   - `root::URI` — the root file that was used
 """
 function get_static_lint_data(jw::JuliaWorkspace, uri::URI)
@@ -750,14 +756,14 @@ function get_static_lint_data(jw::JuliaWorkspace, uri::URI)
     root = derived_best_root_for_uri(jw.runtime, uri)
     root === nothing && return nothing
 
-    lint_result = derived_static_lint_meta_for_root(jw.runtime, root)
+    meta_dict = derived_file_analysis(jw.runtime, root, uri).meta
     project_uri = derived_project_uri_for_root(jw.runtime, root)
     env = derived_environment(jw.runtime, project_uri)
 
     return (
-        meta_dict=lint_result.meta_dict,
+        meta_dict=meta_dict,
         env=env,
-        workspace_packages=lint_result.workspace_packages,
+        workspace_packages=Dict{String,Any}(),
         root=root
     )
 end

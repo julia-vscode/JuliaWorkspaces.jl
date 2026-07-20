@@ -27,6 +27,11 @@ when the URI is a regular workspace file, otherwise falls back to the lazy
 Returns `nothing` if neither is available.
 """
 Salsa.@derived function derived_text_file_content(rt, uri)
+    # Lazy probes (e.g. `derived_project_toml_files`) can hand through
+    # `nothing` for a missing candidate file; treat that as "no content"
+    # rather than crashing further down (e.g. in `input_indirect_text_file`).
+    uri === nothing && return nothing
+
     if derived_has_file(rt, uri)
         return input_text_file(rt, uri)
     else

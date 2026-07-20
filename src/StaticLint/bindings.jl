@@ -8,17 +8,25 @@ Struct fields:
 """
 mutable struct Binding
     name::EXPR
-    val::Union{Binding,EXPR,SymbolServer.SymStore,Nothing}
+    # `TreeRef`: per-file traversal mode only — an import-statement binding
+    # whose target resolved through the module tree (plain data, never
+    # another file's EXPR/Binding)
+    val::Union{Binding,EXPR,SymbolServer.SymStore,TreeRef,Nothing}
     type::Union{Binding,SymbolServer.SymStore,Nothing}
     refs::Vector{Any}
+    # `export`/`public` declarations of this name in its module. exported ⇒
+    # public, mirroring the ModuleStore exportednames ⊆ publicnames model for
+    # cached packages so workspace and cached symbols share one API-status model.
     is_public::Bool
+    is_exported::Bool
 end
-Binding(x::EXPR) = Binding(CSTParser.get_name(x), x, nothing, [], false)
-Binding(name, val, type, refs) = Binding(name, val, type, refs, false)
+Binding(x::EXPR) = Binding(CSTParser.get_name(x), x, nothing, [], false, false)
+Binding(name, val, type, refs) = Binding(name, val, type, refs, false, false)
+Binding(name, val, type, refs, is_public::Bool) = Binding(name, val, type, refs, is_public, false)
 
 function Base.show(io::IO, b::Binding)
     printstyled(io, " Binding(", to_codeobject(b.name),
-        b.is_public ? "ᵖ" : "",
+        b.is_exported ? "ᵉ" : b.is_public ? "ᵖ" : "",
         b.type === nothing ? "" : "::($(b.type.name))",
         b.refs isa Vector ? " ($(length(b.refs)) refs))" : ")", color=:blue)
 end
@@ -113,11 +121,27 @@ function mark_bindings!(x::EXPR, state)
                 mark_binding!(arg, meta_dict)
             end
         end
-    elseif headof(x) === :local
+    elseif headof(x) === :local || headof(x) === :global
+        # A declaration-only `local`/`global x` or `local`/`global x::T` (no
+        # assignment) still introduces the name, and both forms need the same
+        # marking here — the local-vs-global scope difference is handled
+        # downstream in `add_binding` (a `:global` name is redirected to the
+        # global scope via the `#globals` marker set by `mark_globals`; a
+        # `:local` name stays in the current scope). Without a binding here,
+        # later uses of the name are flagged as missing references — the bare
+        # identifier form was handled for `:local` but never for `:global`, and
+        # the typed-declaration form (`x::T`) was handled for neither. The
+        # assignment form (`global x = v` / `local x = v`) is handled by the
+        # child assignment during traversal, so skip it here to avoid a double
+        # binding.
         for i = 1:length(x.args)
-            if isidentifier(x.args[i])
-                mark_binding!(x.args[i], meta_dict)
-                setref!(x.args[i], bindingof(x.args[i], meta_dict), meta_dict)
+            arg = x.args[i]
+            if isidentifier(arg)
+                mark_binding!(arg, meta_dict)
+                setref!(arg, bindingof(arg, meta_dict), meta_dict)
+            elseif CSTParser.isdeclaration(arg) && isidentifier(arg.args[1])
+                mark_binding!(arg, meta_dict)
+                setref!(arg.args[1], bindingof(arg, meta_dict), meta_dict)
             end
         end
     end
@@ -393,7 +417,11 @@ function add_binding(x, state, scope=state.scope)
                         overload_method(tls, b, VarRef(lhs_ref.name, Symbol(name))) # Add to overloaded list but not scope.
                     end
                 elseif lhs_ref isa Binding && CoreTypes.ismodule(lhs_ref.type)
-                    if hasscope(lhs_ref.val, meta_dict) && haskey(scopeof(lhs_ref.val, meta_dict).names, name)
+                    # `val isa EXPR` guard: a module-typed binding's val is only
+                    # an EXPR for in-closure module definitions — a per-file-mode
+                    # tree import binds the module name with a TreeRef val (and
+                    # `hasscope` is typed on EXPR)
+                    if lhs_ref.val isa EXPR && hasscope(lhs_ref.val, meta_dict) && haskey(scopeof(lhs_ref.val, meta_dict).names, name)
                         # Don't need to do anything, name will resolve
                     end
                 end
@@ -414,6 +442,27 @@ function add_binding(x, state, scope=state.scope)
                     else
                         seterror!(x, CannotDefineFuncAlreadyHasValue, meta_dict)
                     end
+                elseif is_toplevel_scope(tls) && (ctx = enclosing_tree_context(tls)) !== nothing && tree_context_declares_datatype(ctx, name)
+                    # Per-file traversal mode: `name` is a DATATYPE declared in
+                    # a SIBLING file of this module — visible only through the
+                    # module tree, so the `scopehasbinding(tls, name)` arm above
+                    # missed it. Guarded on `is_toplevel_scope(tls)` for the same
+                    # scope precision as that arm: only a MODULE/top-level
+                    # definition extends the datatype's methods. A nested
+                    # function scope (`tls` is a closure's enclosing func scope)
+                    # may instead legitimately SHADOW the datatype with a local
+                    # closure of the same name, which must stay a local binding
+                    # (`enclosing_tree_context` walks past the closure to the
+                    # module context, so without this guard the branch would
+                    # wrongly fire for such closures too).
+                    # This definition is therefore an outer
+                    # constructor / method extension over that datatype, so
+                    # apply the same rule as the `isfunction`/`isdatatype` arm:
+                    # do nothing, the name resolves (via
+                    # `resolve_ref_from_module`) to the tree's datatype. Adding
+                    # a local function binding here would shadow the struct and
+                    # make in-file `::name` annotations resolve to a
+                    # non-DataType (a false `InvalidTypeDeclaration`).
                 else
                     scope.names[name] = b
                     if !hasref(b.name, meta_dict)

@@ -106,7 +106,23 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
     return TextFile(uri, SourceText(content, language_id))
 end
 
-function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
+"""
+    read_path_into_textdocuments(uri; ignore_io_errors=false, file_limit=nothing)
+        -> Union{Vector{TextFile}, Nothing}
+
+Read every workspace-relevant file (Julia sources, Project/Manifest, lint/format
+configs, Markdown) under the folder `uri` into `TextFile`s.
+
+When `file_limit` is set and the tree contains more than that many Julia files,
+returns `nothing` (the tree is deemed too large to load) — the count is checked
+before any content is read. Otherwise returns the collected `Vector{TextFile}`
+(possibly empty). Callers that pass a `file_limit` must handle the `nothing`
+return.
+
+With `ignore_io_errors`, a non-`file` URI yields an empty vector and unreadable
+files are skipped; otherwise both throw.
+"""
+function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_limit::Union{Nothing,Int}=nothing)
     result = TextFile[]
 
     if uri.scheme !== "file"
@@ -119,23 +135,36 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false)
 
     path = uri2filepath(uri)
 
+    # Collect paths first so an over-limit tree aborts before any content is
+    # read; contents are read afterwards with per-file yields.
+    candidate_paths = String[]
+    julia_file_count = 0
     for (root, _, files) in walkdir(path, onerror=x -> x)
+        yield()
         for file in files
             filepath = joinpath(root, file)
-            if is_path_julia_file(filepath) ||
-                        is_path_project_file(filepath) ||
+            if is_path_julia_file(filepath)
+                julia_file_count += 1
+                if file_limit !== nothing && julia_file_count > file_limit
+                    return nothing
+                end
+                push!(candidate_paths, filepath)
+            elseif is_path_project_file(filepath) ||
                         is_path_manifest_file(filepath) ||
                         is_path_lintconfig_file(filepath) ||
                         is_path_formatconfig_file(filepath) ||
                         is_path_markdown_file(filepath) ||
                         is_path_juliamarkdown_file(filepath)
-
-                uri = filepath2uri(filepath)
-                text_file = read_text_file_from_uri(uri, return_nothing_on_io_error=ignore_io_errors)
-                text_file === nothing && continue
-                push!(result, text_file)
+                push!(candidate_paths, filepath)
             end
         end
+    end
+
+    for filepath in candidate_paths
+        text_file = read_text_file_from_uri(filepath2uri(filepath), return_nothing_on_io_error=ignore_io_errors)
+        text_file === nothing && continue
+        push!(result, text_file)
+        yield()
     end
 
     return result

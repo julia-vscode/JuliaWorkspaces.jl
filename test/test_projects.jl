@@ -114,3 +114,41 @@ end
     @test !isempty(lint_result.meta_dict)
     @test isempty(lint_result.workspace_packages)
 end
+
+@testitem "derived_project with Manifest.toml but no Project.toml does not crash" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_diagnostics
+    using JuliaWorkspaces.URIs2: URI
+
+    # A folder that has only a Manifest.toml (no Project.toml) mimics a
+    # DJP-created temp project directory (e.g. /tmp/jl_xxxxxx) whose
+    # Project.toml is missing or was deleted. The lazy
+    # `derived_project_toml_files` probe used for the active project can
+    # then return `(project_file=nothing, manifest_file=<uri>)`.
+    manifest_toml = """
+    # This file is machine-generated - editing it directly is not advised
+
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    folder_uri = URI("file:///manifestonlyprojecttest")
+    manifest_uri = URI("file:///manifestonlyprojecttest/Manifest.toml")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(manifest_uri, SourceText(manifest_toml, "toml")))
+
+    JuliaWorkspaces.set_active_project!(jw, folder_uri)
+
+    # A folder without a Project.toml is not a project, even if it has a
+    # Manifest.toml.
+    @test JuliaWorkspaces.derived_project(jw.runtime, folder_uri) === nothing
+
+    # This is the crash path: get_diagnostics used to throw a `FieldError`
+    # (accessing `.scheme` on `nothing`) because `derived_project` reached
+    # `derived_text_file_content(rt, project_file)` with `project_file ===
+    # nothing`.
+    get_diagnostics(jw)
+end

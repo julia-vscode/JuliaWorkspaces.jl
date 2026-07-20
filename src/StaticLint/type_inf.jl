@@ -7,6 +7,30 @@ function settype!(b::Binding, type)
     b.type = type
 end
 
+# `(a, b, …)::Tuple{T1, T2, …}` (a typed positional destructure, e.g. a function
+# arg `(file, line)::Tuple{AbstractString, Any}`): each element must take its
+# POSITIONAL parameter type, not the whole tuple type. Without this, every
+# element was assigned `Tuple{...}` itself. Returns true when it set a type;
+# falls back (returns false) for anything not a plain positional `Tuple{...}`
+# match — `Vararg`/`NTuple` params, an out-of-range index, or a non-identifier
+# element (e.g. a nested tuple) — leaving the caller's normal path to run.
+function _infer_tuple_decl_element!(binding, lhs, ann, state, scope)
+    (iscurly(ann) && isidentifier(ann.args[1]) && valofid(ann.args[1]) == "Tuple") || return false
+    name = binding.name
+    isidentifier(name) || return false
+    nm = valofid(name)
+    idx = findfirst(a -> isidentifier(a) && valofid(a) == nm, lhs.args)
+    idx === nothing && return false
+    # curly args are [Tuple, T1, T2, …], so the i-th element's param is ann.args[i+1]
+    pidx = idx + 1
+    pidx <= length(ann.args) || return false
+    t = ann.args[pidx]
+    # a `Vararg{…}` param spans a variable number of elements — can't map by position
+    (iscurly(t) && isidentifier(t.args[1]) && valofid(t.args[1]) == "Vararg") && return false
+    infer_type_decl(binding, t, state, scope)
+    return true
+end
+
 function infer_type(binding::Binding, scope, state)
     if binding isa Binding
         binding.type !== nothing && return
@@ -29,7 +53,12 @@ function infer_type(binding::Binding, scope, state)
                     end
                 end
             elseif binding.val.head isa EXPR && valof(binding.val.head) == "::"
-                infer_type_decl(binding, state, scope)
+                lhs = binding.val.args[1]
+                if CSTParser.istuple(lhs) && _infer_tuple_decl_element!(binding, lhs, binding.val.args[2], state, scope)
+                    # `(a, b, …)::Tuple{T1, T2, …}` positional destructure handled below
+                else
+                    infer_type_decl(binding, state, scope)
+                end
             elseif CSTParser.issplat(binding.val) && length(binding.val.args) >= 1 &&
                    binding.val.args[1].head isa EXPR && valof(binding.val.args[1].head) == "::"
                 infer_type_decl(binding, binding.val.args[1].args[2], state, scope)
@@ -40,6 +69,54 @@ function infer_type(binding::Binding, scope, state)
     end
 end
 
+# Resolve a datatype-denoting external `TreeRef` to its `SymStore` via the env.
+# In the per-file traversal mode a `using`'d name from a sibling file (e.g.
+# `using Base: PkgId`) resolves through the module tree to a `TreeRef`, not to a
+# local `Binding`/store. Walk `getsymbols(env)` by `origin_module` to the
+# `ModuleStore`, then look up `name` (following a `VarRef`). Mirrors hover's
+# external-symbol resolution (`_get_tree_ref_hover`) but stays inside StaticLint.
+# Returns the store (ideally a `DataTypeStore`) or `nothing`.
+function resolve_treeref_store(tr::TreeRef, state)
+    tr.kind === :external_symbol || return nothing
+    isempty(tr.origin_module) && return nothing
+    store = get(getsymbols(state), Symbol(tr.origin_module[1]), nothing)
+    store isa SymbolServer.ModuleStore || return nothing
+    for i in 2:length(tr.origin_module)
+        sub = maybe_lookup(get(store.vals, Symbol(tr.origin_module[i]), nothing), state)
+        sub isa SymbolServer.ModuleStore || return nothing
+        store = sub
+    end
+    val = get(store.vals, Symbol(tr.name), nothing)
+    val === nothing && return nothing
+    return maybe_lookup(val, state)
+end
+
+# The datatype constructed by a constructor-style call's callee (`x = T(...)`),
+# for type inference — a datatype `Binding`, a `DataTypeStore`, or `nothing`.
+# Handles a bare identifier callee, a qualified getfield callee (`Base.PkgId`),
+# and a cross-file `TreeRef` callee (resolved through the env).
+function _resolve_constructor_datatype(callname, scope, state)
+    meta_dict = state.meta_dict
+    if isidentifier(callname)
+        resolve_ref(callname, scope, state)
+        hasref(callname, meta_dict) || return nothing
+        ref = refof(callname, meta_dict)
+    elseif is_getfield_w_quotenode(callname)
+        resolve_getfield(callname, scope, state)
+        ref = refof_maybe_getfield(callname, meta_dict)
+    else
+        return nothing
+    end
+    if ref isa TreeRef
+        ref = resolve_treeref_store(ref, state)
+    end
+    rb = get_root_method(ref)
+    if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
+        return rb
+    end
+    return nothing
+end
+
 function infer_type_assignment_rhs(binding, state, scope)
     meta_dict = state.meta_dict
     lhs = binding.val.args[1]
@@ -47,7 +124,21 @@ function infer_type_assignment_rhs(binding, state, scope)
 
     is_destructuring = CSTParser.istuple(lhs) && !isempty(lhs.args) && CSTParser.isparameters(lhs.args[1])
     if is_loop_iter_assignment(binding.val)
-        settype!(binding, infer_eltype(rhs, state))
+        elt = infer_eltype(rhs, state)
+        if is_destructuring
+            # property destructure in a loop (`for (; a, b) in coll`): each
+            # variable takes its OWN field type from the element type, not the
+            # whole element type. Without this every variable was set to the
+            # collection's eltype.
+            infer_destructuring_type(binding, elt, meta_dict)
+        else
+            settype!(binding, elt)
+        end
+    elseif CSTParser.istuple(lhs) && !is_destructuring
+        # Positional destructuring `a, b = rhs`: each variable is an element of
+        # `iterate(rhs)`, not `rhs` itself, so it must not inherit the RHS type.
+        # (We don't infer per-element types here.)
+        return
     elseif headof(rhs) === :ref && length(rhs.args) > 1 && all(a -> _is_scalar_index(a, state, scope), @view rhs.args[2:end])
         # Only infer the element type when every index is provably scalar
         # (integer literal / `begin`/`end` / `Number`-typed ref). A slice or
@@ -63,21 +154,13 @@ function infer_type_assignment_rhs(binding, state, scope)
         infer_type_decl(binding, rhs.args[2], state, scope)
     else
         if CSTParser.is_func_call(rhs)
-            if CSTParser.istuple(lhs) && !is_destructuring
-                return
-            end
             callname = CSTParser.get_name(rhs)
-            if isidentifier(callname)
-                resolve_ref(callname, scope, state)
-                if hasref(callname, meta_dict)
-                    rb = get_root_method(refof(callname, meta_dict))
-                    if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
-                        if is_destructuring
-                            infer_destructuring_type(binding, rb, meta_dict)
-                        else
-                            settype!(binding, rb)
-                        end
-                    end
+            rb = _resolve_constructor_datatype(callname, scope, state)
+            if rb !== nothing
+                if is_destructuring
+                    infer_destructuring_type(binding, rb, meta_dict)
+                else
+                    settype!(binding, rb)
                 end
             end
         elseif CSTParser.iscurly(rhs) || CSTParser.iswhere(rhs)
@@ -88,14 +171,19 @@ function infer_type_assignment_rhs(binding, state, scope)
             unwrapped = CSTParser.rem_wheres_decls(rhs)
             if CSTParser.iscurly(unwrapped)
                 callname = CSTParser.get_name(unwrapped)
+                # A `curly` is always a type application (`X{...}`), so the alias
+                # is a type regardless of whether the base `X` resolves — a
+                # foreign/unresolved parametric base (e.g. Revise's
+                # `OrderedDict{Module,ExprsInfos}`) must still count as a datatype
+                # so that method definitions through the alias
+                # (`Alias(x) = ...`) don't false-flag CannotDefineFuncAlreadyHasValue.
+                # Still resolve the base so a genuine missing reference is reported.
                 if isidentifier(callname)
                     resolve_ref(callname, scope, state)
-                    if hasref(callname, meta_dict)
-                        rb = get_root_method(refof(callname, meta_dict))
-                        if (rb isa Binding && (CoreTypes.isdatatype(rb.type) || rb.val isa SymbolServer.DataTypeStore)) || rb isa SymbolServer.DataTypeStore
-                            settype!(binding, CoreTypes.DataType)
-                        end
-                    end
+                    settype!(binding, CoreTypes.DataType)
+                elseif is_getfield_w_quotenode(callname)
+                    resolve_getfield(callname, scope, state)
+                    settype!(binding, CoreTypes.DataType)
                 end
             end
         elseif (literal_type = infer_literal_type(rhs)) !== nothing
@@ -164,8 +252,34 @@ end
 # An alias may resolve to something carrying no field information (or `nothing`).
 infer_destructuring_type(binding, rb, meta_dict, depth=0) = nothing
 
-function infer_type_decl(binding, state, scope)
+# Shared tail of both `infer_type_decl` forms: `t` is the (unwrapped, resolved)
+# type expression of a `::T` declaration. A cross-file `TreeRef` annotation
+# (e.g. a sibling `using Base: PkgId`) is resolved through the env — since
+# `Binding.type` can't carry a TreeRef, the resolved `DataTypeStore` is set (and
+# if it doesn't resolve, the type is left unset for `declared_type_is_tree_backed`
+# to protect from by-use guessing).
+function _settype_from_decl!(binding, t, state)
     meta_dict = state.meta_dict
+    r = refof(t, meta_dict)
+    if r isa TreeRef
+        store = resolve_treeref_store(r, state)
+        store isa SymbolServer.DataTypeStore && settype!(binding, store)
+    elseif r isa Binding
+        rb = get_root_method(r)
+        if rb isa Binding && CoreTypes.isdatatype(rb.type)
+            settype!(binding, rb)
+        else
+            settype!(binding, r)
+        end
+    else
+        edt = get_eventual_datatype(r, state.env)
+        if edt !== nothing
+            settype!(binding, edt)
+        end
+    end
+end
+
+function infer_type_decl(binding, state, scope)
     t = binding.val.args[2]
     if isidentifier(t)
         resolve_ref(t, scope, state)
@@ -178,19 +292,7 @@ function infer_type_decl(binding, state, scope)
         resolve_getfield(t, scope, state)
         t = t.args[2].args[1]
     end
-    if refof(t, meta_dict) isa Binding
-        rb = get_root_method(refof(t, meta_dict))
-        if rb isa Binding && CoreTypes.isdatatype(rb.type)
-            settype!(binding, rb)
-        else
-            settype!(binding, refof(t, meta_dict))
-        end
-    else
-        edt = get_eventual_datatype(refof(t, meta_dict), state.env)
-        if edt !== nothing
-            settype!(binding, edt)
-        end
-    end
+    _settype_from_decl!(binding, t, state)
 end
 
 function infer_type_decl(binding, t, state, scope)
@@ -205,19 +307,7 @@ function infer_type_decl(binding, t, state, scope)
         resolve_getfield(t, scope, state)
         t = t.args[2].args[1]
     end
-    if refof(t, state.meta_dict) isa Binding
-        rb = get_root_method(refof(t, state.meta_dict))
-        if rb isa Binding && CoreTypes.isdatatype(rb.type)
-            settype!(binding, rb)
-        else
-            settype!(binding, refof(t, state.meta_dict))
-        end
-    else
-        edt = get_eventual_datatype(refof(t, state.meta_dict), state.env)
-        if edt !== nothing
-            settype!(binding, edt)
-        end
-    end
+    _settype_from_decl!(binding, t, state)
 end
 
 get_eventual_datatype(_, _::ExternalEnv) = nothing
@@ -226,9 +316,42 @@ function get_eventual_datatype(b::SymbolServer.FunctionStore, env::ExternalEnv)
     return SymbolServer._lookup(b.extends, getsymbols(env))
 end
 
+# Per-file traversal mode only: does `b`'s declaration carry an explicit `::`
+# type annotation that resolved through the module tree (a `TreeRef`)? The
+# legacy `Binding.type` slot can't carry a TreeRef, so `infer_type_decl`
+# leaves the type as `nothing` — but the type IS declared and known, so
+# by-use inference must not override it with a guess (it inferred e.g.
+# `Core.DebugInfo` for a `framecode::FrameCode` argument and then flagged the
+# struct's real fields as missing references). Mirrors the annotation
+# unwrapping in `infer_type_decl` (curly / getfield forms).
+function declared_type_is_tree_backed(b::Binding, meta_dict)
+    v = b.val
+    v isa EXPR || return false
+    t = if v.head isa EXPR && valof(v.head) == "::" && v.args !== nothing && length(v.args) == 2
+        v.args[2]
+    elseif isassignment(v) && v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
+           v.args[1].args !== nothing && length(v.args[1].args) == 2
+        v.args[1].args[2]
+    elseif CSTParser.issplat(v) && v.args !== nothing && length(v.args) >= 1 &&
+           v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
+           v.args[1].args !== nothing && length(v.args[1].args) == 2
+        v.args[1].args[2]
+    else
+        return false
+    end
+    if iscurly(t) && t.args !== nothing && length(t.args) >= 1
+        t = t.args[1]
+    end
+    if CSTParser.is_getfield_w_quotenode(t)
+        t = t.args[2].args[1]
+    end
+    return refof(t, meta_dict) isa TreeRef
+end
+
 # Work out what type a bound variable has by functions that are called on it.
 function infer_type_by_use(b::Binding, env::ExternalEnv, meta_dict)
     b.type !== nothing && return # b already has a type
+    declared_type_is_tree_backed(b, meta_dict) && return # declared type is known, just not carriable — never guess over it
     possibletypes = []
     visitedmethods = []
     ifbranch = nothing

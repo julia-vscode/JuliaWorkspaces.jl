@@ -62,13 +62,14 @@ function index_project(djp::DynamicJuliaProcess, store_path::String)
     )
 end
 
-function create_standalone_project(djp::DynamicJuliaProcess, store_path::String)
+function create_standalone_project(djp::DynamicJuliaProcess, store_path::String, project_dir::String)
     JSONRPC.send(
         djp.endpoint,
         JuliaDynamicAnalysisProtocol.create_standalone_project_request_type,
         JuliaDynamicAnalysisProtocol.CreateStandaloneProjectParams(
             djp.project_path,
-            store_path
+            store_path,
+            project_dir
         )
     )
 end
@@ -77,6 +78,27 @@ end
 struct DynamicProcessCrashException <: Exception
     key::DJPKey
     exitcode::Union{Int,Nothing}
+end
+
+# ─── Launch prioritization ───────────────────────────────────────────────────
+#
+# Environments higher up the directory tree resolve first, so a package's main
+# environment is ready before its test environment, testdata fixtures, nested
+# docs/benchmark projects, etc. At equal depth the main env beats a standalone
+# project beats a test env (a package's test-env key carries the same path as
+# its main-env key).
+
+_key_path(key::WatchEnvironmentKey) = key.project_path
+_key_path(key::WatchTestEnvironmentKey) = key.project_path
+_key_path(key::CreateStandaloneProjectKey) = key.package_path
+
+_kind_rank(::WatchEnvironmentKey) = 0
+_kind_rank(::CreateStandaloneProjectKey) = 1
+_kind_rank(::WatchTestEnvironmentKey) = 2
+
+function _launch_priority(key::DJPKey)
+    depth = count(c -> c == '/' || c == '\\', normpath(_key_path(key)))
+    return (depth, _kind_rank(key))
 end
 
 # Dispatch handler for JSONRPC messages received FROM the dynamic analysis
@@ -302,6 +324,9 @@ Downloading a cached index avoids having to index a package locally.
 """
 const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://julia-symbolcache.org"
 
+# Identity of one package's symbol cache on disc.
+const PkgCacheKey = @NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}
+
 struct DynamicFeature
     djp_mode::DynamicMode
     store_path::String
@@ -319,7 +344,10 @@ struct DynamicFeature
     # The `required` set from the most recent reconcile, used by `_reconcile!`
     # to skip sending a `ReconcileMsg` when nothing changed.
     last_required::Set{DJPKey}
-    missing_pkg_metadata::Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}
+    missing_pkg_metadata::Set{PkgCacheKey}
+    # Package caches whose metadata input is already populated; guards against
+    # re-reading (and re-`set_input`ing) multi-MB cache files.
+    loaded_pkg_metadata::Set{PkgCacheKey}
     pending_count::Threads.Atomic{Int}
     update_channel::Channel{Symbol}
     progress_callback::Union{Nothing,Function}
@@ -328,8 +356,29 @@ struct DynamicFeature
     # child reports and to re-use the last percentage for reports without one.
     child_progress::Dict{DJPKey,Int}
     controller_fsm::FSM{DynamicControllerPhase}
+    # ── Launch concurrency cap ──
+    # Maximum number of concurrently *working* child processes (<= 0: unlimited).
+    max_concurrent_djps::Int
+    # Keys ready to launch but over the cap; drained best-`_launch_priority`
+    # first, insertion order as the final tiebreak.
+    launch_queue::Vector{DJPKey}
+    # Keys whose child has been launched and whose work item has not reached a
+    # terminal message yet — the set the cap counts (NOT `procs`: persistent
+    # children that finished indexing stay in `procs` without holding a slot).
+    launching::Set{DJPKey}
+    # Launch implementation; injectable so reactor tests observe launches
+    # without spawning processes (same seam pattern as `progress_callback`).
+    launcher::Function
+    # ── Background refresh of served-stale standalone envs ──
+    # Strictly lower priority than `launch_queue`; never counts as a pending
+    # work item (readiness must not wait on refreshes).
+    refresh_queue::Vector{DJPKey}
+    refreshing::Set{DJPKey}
 
-    function DynamicFeature(djp_mode::DynamicMode, store_path::String; download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM, progress_callback::Union{Nothing,Function}=nothing)
+    function DynamicFeature(djp_mode::DynamicMode, store_path::String;
+            download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
+            progress_callback::Union{Nothing,Function}=nothing,
+            max_concurrent_djps::Int=4, launcher::Function=_launch_process!)
         return new(
             djp_mode,
             store_path,
@@ -342,14 +391,65 @@ struct DynamicFeature
             Set{DJPKey}(),
             Set{DJPKey}(),
             Set{DJPKey}(),
-            Set{@NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}}(),
+            Set{PkgCacheKey}(),
+            Set{PkgCacheKey}(),
             Threads.Atomic{Int}(0),
             Channel{Symbol}(100),
             progress_callback,
             Dict{DJPKey,Int}(),
-            dynamic_controller_fsm("dynamic_controller")
+            dynamic_controller_fsm("dynamic_controller"),
+            max_concurrent_djps,
+            Vector{DJPKey}(),
+            Set{DJPKey}(),
+            launcher,
+            Vector{DJPKey}(),
+            Set{DJPKey}(),
         )
     end
+end
+
+# Persistent, deterministic project dir for a standalone package: reused
+# across sessions while the package's Project.toml (content hash) is
+# unchanged. The dir name includes a path hash (not just
+# `basename(package_path)`) so same-named packages under different paths (e.g.
+# `packages/Foo` vs `packages-old/Foo`) get distinct dirs. The path-hash
+# segment is also why sibling cleanup can match on a plain prefix without
+# colliding with a differently-named package that merely starts with the same
+# characters (e.g. `Pkg` vs `Pkg-extra`).
+#
+# `(parent, prefix, dir)` — pure, no filesystem mutation.
+function _standalone_dir_components(df::DynamicFeature, key::CreateStandaloneProjectKey)
+    parent = joinpath(dirname(df.store_path), "standalone-projects")
+    name = basename(key.package_path)
+    path_hash = string(hash(key.package_path) % UInt32, base=16, pad=8)
+    prefix = string(name, "-", path_hash, "-")
+    dir = joinpath(parent, string(prefix, string(key.content_hash, base=16, pad=16)))
+    return (parent, prefix, dir)
+end
+
+# The deterministic dir path only — no filesystem mutation, so it is safe to
+# call OFF the reactor (e.g. from a `ProcessLaunchedMsg` async task, where the
+# destructive `_prepare_standalone_project_dir!` would race a concurrent
+# resolve into a sibling content-hash's live dir).
+_standalone_project_dir_path(df::DynamicFeature, key::CreateStandaloneProjectKey) =
+    _standalone_dir_components(df, key)[3]
+
+# Reactor-only: prepare the dir. Sibling dirs for the same package *path* under
+# an *old* content hash are removed (a changed package gets a fresh resolve,
+# and growth stays bounded), then the dir is `mkpath`ed. MUST run on the
+# reactor — the `rm(...; recursive=true)` would otherwise delete a sibling
+# dir that a newer content hash's child is actively resolving into.
+function _prepare_standalone_project_dir!(df::DynamicFeature, key::CreateStandaloneProjectKey)
+    parent, prefix, dir = _standalone_dir_components(df, key)
+    if isdir(parent)
+        for other in readdir(parent; join=true)
+            if startswith(basename(other), prefix) && other != dir
+                try rm(other; recursive=true) catch; end
+            end
+        end
+    end
+    mkpath(dir)
+    return dir
 end
 
 """
@@ -620,6 +720,81 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     return
 end
 
+_has_free_slot(df::DynamicFeature) =
+    df.max_concurrent_djps <= 0 || length(df.launching) < df.max_concurrent_djps
+
+# Construct the DJP for `key` and launch it, occupying a slot. The DJP is
+# derived from the key alone so queued keys carry no state that can go stale.
+function _launch_now!(df::DynamicFeature, key::DJPKey)
+    djp = if key isa WatchEnvironmentKey
+        DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
+    elseif key isa WatchTestEnvironmentKey
+        DynamicJuliaProcess(key, key.project_path, key.package_name, :watch_test_environment)
+    else
+        DynamicJuliaProcess(key, key.package_path, nothing, :create_standalone_project)
+    end
+    df.procs[key] = djp
+    push!(df.launching, key)
+    df.launcher(df, djp)
+    return
+end
+
+# Launch `key` if a slot is free, otherwise queue it.
+function _request_launch!(df::DynamicFeature, key::DJPKey)
+    if _has_free_slot(df)
+        _launch_now!(df, key)
+    else
+        _report_progress(df, _progress_key("index", key), "Queued for indexing...", 0)
+        push!(df.launch_queue, key)
+    end
+    return
+end
+
+# Launch queued keys, best `_launch_priority` first (stable: strict `<` keeps
+# insertion order among equals), while slots are free. Skips keys whose work
+# was cancelled while queued.
+function _drain_launch_queue!(df::DynamicFeature)
+    while _has_free_slot(df) && !isempty(df.launch_queue)
+        best = 1
+        for i in 2:length(df.launch_queue)
+            if _launch_priority(df.launch_queue[i]) < _launch_priority(df.launch_queue[best])
+                best = i
+            end
+        end
+        key = df.launch_queue[best]
+        deleteat!(df.launch_queue, best)
+        key in df.inflight || continue
+        _launch_now!(df, key)
+    end
+
+    # Refreshes fill remaining slots only when no first-time work wants them.
+    # `pending_count` (not just `launch_queue`) gates this: it covers queued,
+    # launched, and prep-in-flight work items, so the completion of the last
+    # first-time item -- including a fast-lane serve itself -- is what
+    # releases refreshes to run.
+    while _has_free_slot(df) && df.pending_count[] <= 0 && isempty(df.launch_queue) && !isempty(df.refresh_queue)
+        best = 1
+        for i in 2:length(df.refresh_queue)
+            if _launch_priority(df.refresh_queue[i]) < _launch_priority(df.refresh_queue[best])
+                best = i
+            end
+        end
+        key = df.refresh_queue[best]
+        deleteat!(df.refresh_queue, best)
+        push!(df.refreshing, key)
+        _report_progress(df, _progress_key("refresh", key), "Refreshing environment...", 0)
+        _launch_now!(df, key)
+    end
+    return
+end
+
+# A launched child reached a terminal state: release its slot and refill.
+function _free_slot!(df::DynamicFeature, key::DJPKey)
+    delete!(df.launching, key)
+    _drain_launch_queue!(df)
+    return
+end
+
 """
     Base.run(df::DynamicFeature)
 
@@ -708,17 +883,23 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
+        # This fast lane never occupies a launch slot, so it cannot rely on
+        # `_free_slot!` to drain queued refreshes. Without this, the last
+        # outstanding first-time item completing this way (the common
+        # warm-restart ordering where standalone preps finish fast and
+        # watch-env preps finish last) would leave queued refreshes stalled
+        # forever.
+        _drain_launch_queue!(df)
     elseif df.djp_mode != DynamicOff
         @info "Launching DJP for remaining missing packages" project_path=key.project_path
         _report_progress(df, _progress_key("index", key), "Starting indexer for $(basename(key.project_path))...", 0)
-        djp = DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
-        df.procs[key] = djp
-        _launch_process!(df, djp)
+        _request_launch!(df, key)
     else
         @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=key.project_path
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
+        _drain_launch_queue!(df)
     end
 
     return false
@@ -735,10 +916,20 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
         return false
     end
 
+    # A test environment can only be produced by a child process; without
+    # dynamic indexing this work is terminal (best-effort readiness, like the
+    # watch-env DynamicOff branch).
+    if df.djp_mode == DynamicOff
+        @info "Test environment needs a dynamic child process but dynamic indexing is disabled; skipping" key
+        put!(df.out_channel, FailedResult(key))
+        push!(df.done, key)
+        _complete_work_item!(df, key)
+        _drain_launch_queue!(df)
+        return false
+    end
+
     _report_progress(df, _progress_key("index", key), "Starting indexer for the test environment of $(key.package_name)...", 0)
-    djp = DynamicJuliaProcess(key, key.project_path, key.package_name, :watch_test_environment)
-    df.procs[key] = djp
-    _launch_process!(df, djp)
+    _request_launch!(df, key)
 
     return false
 end
@@ -754,10 +945,50 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
         return false
     end
 
-    _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
-    djp = DynamicJuliaProcess(key, key.package_path, nothing, :create_standalone_project)
-    df.procs[key] = djp
-    _launch_process!(df, djp)
+    _report_progress(df, _progress_key("index", key), "Checking standalone project for $(basename(key.package_path))...", 0)
+
+    # Offload the (IO-bound) dir + missing-package check to a task so the
+    # reactor stays responsive; the decision comes back as a
+    # `StandaloneProjectPrepDoneMsg` so all state mutation stays on the reactor.
+    dir = _prepare_standalone_project_dir!(df, key)
+    store_path = df.store_path
+    Threads.@async try
+        usable = isfile(joinpath(dir, "Project.toml")) && isfile(joinpath(dir, "Manifest.toml"))
+        fast_lane = usable && isempty(_get_missing_packages(dir, store_path))
+        put!(df.in_channel, StandaloneProjectPrepDoneMsg(key, fast_lane))
+    catch err
+        @error "Standalone project prep failed" key exception=(err, catch_backtrace())
+        put!(df.in_channel, ProcessIndexFailedMsg(key, err))
+    end
+
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
+    key = msg.key
+
+    if msg.fast_lane
+        @info "Serving existing standalone project; refreshing in background" package_path=key.package_path
+        dir = _standalone_project_dir_path(df, key)
+        put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash))
+        push!(df.done, key)
+        _complete_work_item!(df, key)
+        # A refresh needs a child process, which dynamic-off mode never runs;
+        # the served (possibly stale) environment is all it gets.
+        df.djp_mode != DynamicOff && push!(df.refresh_queue, key)
+        _drain_launch_queue!(df)
+    elseif df.djp_mode == DynamicOff
+        # Creating the standalone project needs a child process; terminal
+        # without one (files fall back to the active project's environment).
+        @info "Standalone project needs a dynamic child process but dynamic indexing is disabled; skipping" key
+        put!(df.out_channel, FailedResult(key))
+        push!(df.done, key)
+        _complete_work_item!(df, key)
+        _drain_launch_queue!(df)
+    else
+        _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
+        _request_launch!(df, key)
+    end
 
     return false
 end
@@ -782,7 +1013,11 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
     # as a `ProcessIndexedMsg`/`ProcessIndexFailedMsg`.
     Threads.@async try
         result_dir = if key isa CreateStandaloneProjectKey
-            create_standalone_project(djp, df.store_path)
+            # Pure path only: the reactor already prepared (cleaned + created)
+            # this dir in `CreateStandaloneProjectMsg`. Recomputing the
+            # destructive prepare here — off the reactor — could `rm` a sibling
+            # content-hash's dir that another child is resolving into.
+            create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key))
         else
             index_project(djp, df.store_path)
         end
@@ -816,6 +1051,26 @@ end
 
 function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     key = msg.key
+
+    if key in df.refreshing
+        # Background refresh finished: re-emit the (idempotent) ready result —
+        # freshness lands via the rewritten Manifest and the result path's
+        # package-cache loading. Never touches pending_count.
+        delete!(df.refreshing, key)
+        djp = get(df.procs, key, nothing)
+        if djp !== nothing && state(djp.fsm) == DynamicProcessIndexing
+            transition!(djp.fsm, DynamicProcessDone; reason="refreshed")
+        end
+        put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(msg.result_dir), key.content_hash))
+        if df.djp_mode == DynamicIndexingOnly && djp !== nothing
+            kill(djp)
+            delete!(df.procs, key)
+        end
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
+        _free_slot!(df, key)
+        return false
+    end
+
     if key ∉ df.inflight
         @debug "Stale/duplicate ProcessIndexedMsg; ignoring" key
         return false
@@ -846,12 +1101,32 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         delete!(df.procs, key)
     end
 
+    # Decrement pending_count before freeing the slot: the free-slot drain
+    # reads pending_count to decide whether a queued refresh may launch, so it
+    # must see this item's own completion, not a stale pre-decrement value.
     _complete_work_item!(df, key)
+    _free_slot!(df, key)
     return false
 end
 
 function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
     key = msg.key
+
+    if key in df.refreshing
+        # The served stale environment keeps working; do not poison
+        # failed_projects over a refresh.
+        @warn "Background environment refresh failed" key exception=(msg.err,)
+        delete!(df.refreshing, key)
+        djp = get(df.procs, key, nothing)
+        if djp !== nothing
+            try kill(djp) catch; end
+            delete!(df.procs, key)
+        end
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
+        _free_slot!(df, key)
+        return false
+    end
+
     if key ∉ df.inflight
         @debug "Stale/duplicate ProcessIndexFailedMsg; ignoring" key
         return false
@@ -868,7 +1143,9 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         delete!(df.procs, key)
     end
 
+    # Same ordering rationale as ProcessIndexedMsg: decrement before draining.
     _complete_work_item!(df, key)
+    _free_slot!(df, key)
     return false
 end
 
@@ -876,6 +1153,16 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     key = msg.key
     djp = get(df.procs, key, nothing)
     djp === nothing && return false
+
+    if key in df.refreshing && state(djp.fsm) in (DynamicProcessStarting, DynamicProcessConnected, DynamicProcessIndexing)
+        @warn "Background refresh process terminated unexpectedly" key
+        delete!(df.refreshing, key)
+        try kill(djp) catch; end
+        delete!(df.procs, key)
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
+        _free_slot!(df, key)
+        return false
+    end
 
     # A termination while the work item is still in flight means the process
     # died before its index request completed — treat as a failure.
@@ -888,6 +1175,7 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
         _complete_work_item!(df, key)
     end
 
+    _free_slot!(df, key)
     return false
 end
 
@@ -939,6 +1227,7 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
             # has been removed from `df.procs`.
             if key in df.inflight
                 _complete_work_item!(df, key)
+                delete!(df.launching, key)
             end
         end
     end
@@ -948,9 +1237,32 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
     filter!(k -> k in required, df.done)
     filter!(k -> k in required, df.failed_projects)
 
+    # Queued-but-not-launched keys that are no longer required never launch;
+    # balance their pending work items like the kill path above.
+    filter!(df.launch_queue) do k
+        k in required && return true
+        _complete_work_item!(df, k)
+        return false
+    end
+
+    # Refresh bookkeeping for keys that are no longer required: queued entries
+    # just vanish (they are not work items); launched ones are killed.
+    filter!(k -> k in required, df.refresh_queue)
+    for key in collect(df.refreshing)
+        key in required && continue
+        delete!(df.refreshing, key)
+        djp = get(df.procs, key, nothing)
+        if djp !== nothing
+            try kill(djp) catch; end
+            delete!(df.procs, key)
+        end
+        delete!(df.launching, key)
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
+    end
+
     # ── Spawn work for newly-required keys ─────────────────────────────────
     known = union(Set(keys(df.procs)), df.inflight, df.done, df.failed_projects)
-    for key in required
+    for key in sort!(collect(required); by=_launch_priority)
         key in known && continue
 
         # Accounting that previously lived in the lazy inputs: register one
@@ -966,6 +1278,8 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
             handle!(df, CreateStandaloneProjectMsg(key))
         end
     end
+
+    _drain_launch_queue!(df)
 
     return false
 end
