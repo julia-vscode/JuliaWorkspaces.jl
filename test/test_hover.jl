@@ -1182,3 +1182,56 @@ end
         @test occursin("Public API of `Meta` (not exported)", hov("parse"))
     end
 end
+
+@testitem "Hover: API-status footer for workspace-defined names (parity with imports)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    # Same-file workspace bindings carry the same exported/public status as
+    # imported members; an internal name or a local gets no footer.
+    src = """
+    module MyPkg
+    export foo
+    public bar
+    foo() = 1
+    bar() = 2
+    baz() = 3
+    function g()
+        local_x = foo() + bar() + baz()
+        return local_x
+    end
+    end
+    """
+    uri = URI("file:///hovws/src/MyPkg.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    hov(n) = get_hover_text(jw, uri, first(findlast(n, src)))
+    no_status(h) = h === nothing || !(occursin("Exported by", h) || occursin("Public API", h) || occursin("Internal to", h))
+
+    @test occursin("Exported by `MyPkg`", hov("foo()"))
+    @test no_status(hov("baz()"))       # internal — no footer for own code
+    @test no_status(hov("local_x"))     # local — no footer
+    if isdefined(Base, :ispublic)
+        @test occursin("Public API of `MyPkg` (not exported)", hov("bar()"))
+    end
+end
+
+@testitem "Hover: API-status footer for cross-file workspace names" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    # A name defined in a sibling file resolves through the module tree; its
+    # status comes from the module's export list, same footer as same-file.
+    mainsrc = "module Foo\nexport bar\ninclude(\"impl.jl\")\nusebar() = bar()\nusebaz() = baz()\nend\n"
+    implsrc = "bar() = 1\nbaz() = 2\n"
+    jw = JuliaWorkspace()
+    mainuri = URI("file:///foo/src/Foo.jl")
+    add_file!(jw, TextFile(mainuri, SourceText(mainsrc, "julia")))
+    add_file!(jw, TextFile(URI("file:///foo/src/impl.jl"), SourceText(implsrc, "julia")))
+    # land on the trailing call name (`bar`/`baz`), not the def name
+    hov(n) = get_hover_text(jw, mainuri, first(findfirst(n, mainsrc)) + length(n) - 3)
+
+    @test occursin("Exported by `Foo`", hov("usebar() = bar"))    # cross-file, exported
+    h = hov("usebaz() = baz")                                     # cross-file, internal
+    @test h === nothing || !occursin("----", h)
+end

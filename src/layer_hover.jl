@@ -362,13 +362,27 @@ end
 
 _get_hover(x, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing) = documentation
 
-# Footer stating whether `name` is exported / public / internal in `mod`.
-function _api_status_footer(mod::SymbolServer.ModuleStore, name::Symbol)
-    modname = mod.name isa SymbolServer.VarRef ? mod.name.name : Symbol(mod.name)
-    status = StaticLint.isexportedby(name, mod) ? "Exported by `$(modname)`" :
-             StaticLint.ispublicby(name, mod)   ? "Public API of `$(modname)` (not exported)" :
-                                                   "Internal to `$(modname)`"
-    return string("\n\n----\n", status, ".\n")
+# Pure footer formatter for an API-status classification.
+function _status_footer(status::Symbol, modname)
+    modname === nothing && return ""
+    text = status === :exported ? "Exported by `$(modname)`" :
+           status === :public   ? "Public API of `$(modname)` (not exported)" :
+                                   "Internal to `$(modname)`"
+    return string("\n\n----\n", text, ".\n")
+end
+
+# Footer for an external module member, attributed to `mod`.
+_api_status_footer(mod::SymbolServer.ModuleStore, name::Symbol) = _status_footer(
+    StaticLint.isexportedby(name, mod) ? :exported : StaticLint.ispublicby(name, mod) ? :public : :internal,
+    mod.name isa SymbolServer.VarRef ? mod.name.name : Symbol(mod.name))
+
+# Innermost `module` enclosing the EXPR `x`, by name.
+function _enclosing_module_name(x::CSTParser.EXPR)
+    mexpr = StaticLint.maybe_get_parent_fexpr(x, CSTParser.defines_module)
+    mexpr === nothing && return nothing
+    nm = CSTParser.get_name(mexpr)
+    (nm isa CSTParser.EXPR && CSTParser.isidentifier(nm)) || return nothing
+    return Symbol(StaticLint.valofid(nm))
 end
 
 # Dotted module path (e.g. ["Base", "Meta"]) that the LHS module expression `m`
@@ -402,12 +416,35 @@ function _resolve_access_module(m::CSTParser.EXPR, rt, root, env, meta_dict)
     return top isa SymbolServer.ModuleStore ? top : nothing
 end
 
-# API-status footer for a hovered identifier, attributed to the ACCESS module:
-# a qualified `M.name` reports M (so a re-export reports the module it's accessed
-# through, not where it's defined); a bare name reports the `using`'d module that
-# brought it into scope. "" when no external module owns the access.
+# API-status footer for a hovered identifier — the same exported/public/internal
+# note whether it resolves to an imported symbol or a workspace-defined one:
+#  - workspace binding (same-file / whole-closure): its own `is_exported`/
+#    `is_public`, attributed to its enclosing module;
+#  - workspace name resolved through the module tree (cross-file): the module's
+#    export/public lists (`derived_module_exports`);
+#  - external member: the ACCESS module, so a qualified `M.name` reports M (a
+#    re-export reports the module it's reached through) and a bare name the
+#    `using`'d module that brought it into scope.
+# A workspace symbol that is neither exported nor public gets no footer (it's the
+# user's own internal/local name); an external internal member is still flagged.
 function _api_status_line(x::CSTParser.EXPR, rt, root, env, meta_dict)
     CSTParser.isidentifier(x) || return ""
+    r = StaticLint.hasref(x, meta_dict) ? StaticLint.refof(x, meta_dict) : nothing
+
+    if r isa StaticLint.Binding && r.val isa CSTParser.EXPR
+        (StaticLint.isexportedby(r) || StaticLint.ispublicby(r)) || return ""
+        return _status_footer(StaticLint.isexportedby(r) ? :exported : :public,
+                              _enclosing_module_name(r.name))
+    end
+    if r isa StaticLint.TreeRef && !(r.kind in (:external_module, :external_symbol)) &&
+       rt !== nothing && root !== nothing
+        ex = derived_module_exports(rt, root, r.origin_module)
+        nm = String(r.name)
+        status = nm in ex.exports ? :exported : nm in ex.publics ? :public : return ""
+        modname = isempty(r.origin_module) ? nothing : Symbol(last(r.origin_module))
+        return _status_footer(status, modname)
+    end
+
     name = Symbol(StaticLint.valofid(x))
     p = CSTParser.parentof(x)
     if p isa CSTParser.EXPR && CSTParser.headof(p) === :quotenode &&
@@ -449,11 +486,10 @@ function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_di
         else
             documentation
         end
-        # Attribute exported/public/internal to the access module (handles
-        # re-exports); only fires when an external module owns the access.
-        if r isa SymbolServer.SymStore || (r isa StaticLint.Binding && r.val isa SymbolServer.SymStore)
-            documentation = string(documentation, _api_status_line(x, rt, root, env, meta_dict))
-        end
+        # Append the exported/public/internal footer. `_api_status_line`
+        # self-gates: it annotates imported members and workspace API names
+        # alike, and returns "" for locals / non-API refs.
+        documentation = string(documentation, _api_status_line(x, rt, root, env, meta_dict))
     end
     return documentation
 end
