@@ -1240,6 +1240,14 @@ end
 # Symbol collection (three overloads)
 # ============================================================================
 
+# An unexported name is offered with an explicit `using M: name` import; the
+# note distinguishes sanctioned public API (`public`) from reaching into the
+# module's internals.
+_unexported_import_note(m::SymbolServer.ModuleStore, name) =
+    StaticLint.ispublicby(name, m) ?
+        "This is a public (but unexported) symbol and will be explicitly imported." :
+        "This is an internal symbol and will be explicitly imported."
+
 function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_CompletionState, inclexported=false, dotcomps=false; priority::Int=_PRIO_STORE)
     possible_names = String[]
     symbols = _getsymbols(state)
@@ -1277,10 +1285,11 @@ function _collect_completions(m::SymbolServer.ModuleStore, spartial, state::_Com
             end
         elseif length(spartial) > 3 && !_variable_already_imported(m, canonical_name, state)
             if state.completion_mode === :import
+                import_note = _unexported_import_note(m, canonical_name)
                 foreach(possible_names) do n
                     _add_completion_item(state, CompletionResultItem(
                         n, _completion_kind(v), nothing,
-                        "This is an unexported symbol and will be explicitly imported.",
+                        import_note,
                         _texteditfor(state, spartial, n);
                         detail_description = v isa SymbolServer.SymStore ? _sanitize_docstring(v.doc) : nothing,
                         insert_text_format=InsertFormats.PlainText,

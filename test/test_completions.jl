@@ -1517,3 +1517,19 @@ end
     labels = [i.label for i in get_completions(jw, uri, idx).items]
     @test "floor" in labels
 end
+
+@testitem "Completions: public vs internal unexported symbols get distinct import notes" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+    const SS = JuliaWorkspaces.SymbolServer
+
+    # tst_exp exported, tst_pub public-but-unexported, tst_int internal.
+    # (values are irrelevant to the note; ispublicby only needs the name present)
+    vals = Dict{Symbol,Any}(:tst_exp => nothing, :tst_pub => nothing, :tst_int => nothing)
+    mod = SS.ModuleStore(SS.VarRef(nothing, :M), vals, "",
+                         [:tst_exp], [:tst_exp, :tst_pub], Symbol[])
+
+    @test occursin("public (but unexported)", JuliaWorkspaces._unexported_import_note(mod, "tst_pub"))
+    @test occursin("internal", JuliaWorkspaces._unexported_import_note(mod, "tst_int"))
+    # sanity: an exported name is public too
+    @test occursin("public", JuliaWorkspaces._unexported_import_note(mod, "tst_exp"))
+end
