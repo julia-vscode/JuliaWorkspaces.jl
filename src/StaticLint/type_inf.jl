@@ -134,6 +134,11 @@ function infer_type_assignment_rhs(binding, state, scope)
         else
             settype!(binding, elt)
         end
+    elseif CSTParser.istuple(lhs) && !is_destructuring
+        # Positional destructuring `a, b = rhs`: each variable is an element of
+        # `iterate(rhs)`, not `rhs` itself, so it must not inherit the RHS type.
+        # (We don't infer per-element types here.)
+        return
     elseif headof(rhs) === :ref && length(rhs.args) > 1 && all(a -> _is_scalar_index(a, state, scope), @view rhs.args[2:end])
         # Only infer the element type when every index is provably scalar
         # (integer literal / `begin`/`end` / `Number`-typed ref). A slice or
@@ -149,9 +154,6 @@ function infer_type_assignment_rhs(binding, state, scope)
         infer_type_decl(binding, rhs.args[2], state, scope)
     else
         if CSTParser.is_func_call(rhs)
-            if CSTParser.istuple(lhs) && !is_destructuring
-                return
-            end
             callname = CSTParser.get_name(rhs)
             rb = _resolve_constructor_datatype(callname, scope, state)
             if rb !== nothing

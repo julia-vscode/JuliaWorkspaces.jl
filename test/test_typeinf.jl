@@ -358,3 +358,24 @@ end
     # Works even when the source variable is untyped.
     @test scopeof(scopeof(cst, meta_dict).names["untyped"].val, meta_dict).names["y"].type === Child1
 end
+
+@testitem "type inference: positional tuple destructuring doesn't copy the RHS type" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof
+
+    cst, meta_dict = parse_and_pass("""
+    struct Foo
+        x
+        y
+    end
+    let z = Foo(1, 2)
+        a, b = z
+        a
+    end
+    """)
+    Foo = scopeof(cst, meta_dict).names["Foo"]
+    letscope = scopeof(cst.args[2], meta_dict)
+    # `a`/`b` are elements of iterate(z), not `z` itself — must not inherit Foo.
+    @test letscope.names["a"].type === nothing
+    @test letscope.names["b"].type === nothing
+    @test letscope.names["z"].type === Foo   # sanity: RHS really is Foo
+end
