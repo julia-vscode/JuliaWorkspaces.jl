@@ -1162,6 +1162,7 @@ end
     a = Base.sort
     b = Base.var"@assume_effects"
     c = Base.LibuvStream
+    d = Base.Meta.parse
     end
     """
     uri = URI("file:///apistatus/src/H.jl")
@@ -1175,5 +1176,9 @@ end
         # premise: @assume_effects is public-but-not-exported in Base on 1.11+
         @test Base.ispublic(Base, Symbol("@assume_effects")) && !Base.isexported(Base, Symbol("@assume_effects"))
         @test occursin("Public API of `Base` (not exported)", hov("@assume_effects"))
+        # submodule-qualified access: `Base.Meta.parse` is public in Base.Meta
+        # (hover the `parse` identifier — the only occurrence in `src`).
+        @test Base.ispublic(Base.Meta, :parse) && !Base.isexported(Base.Meta, :parse)
+        @test occursin("Public API of `Meta` (not exported)", hov("parse"))
     end
 end

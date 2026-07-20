@@ -371,20 +371,50 @@ function _api_status_footer(mod::SymbolServer.ModuleStore, name::Symbol)
     return string("\n\n----\n", status, ".\n")
 end
 
+# Walk a dotted module path (["Base", "Meta"]) to its `ModuleStore`, descending
+# through submodule entries in each store's `vals`. `nothing` if any hop misses.
+function _module_store_from_path(path, syms)
+    isempty(path) && return nothing
+    m = get(syms, Symbol(path[1]), nothing)
+    for i in 2:length(path)
+        m isa SymbolServer.ModuleStore || return nothing
+        v = get(m.vals, Symbol(path[i]), nothing)
+        v isa SymbolServer.VarRef && (v = SymbolServer._lookup(v, syms, true))
+        m = v
+    end
+    return m isa SymbolServer.ModuleStore ? m : nothing
+end
+
+# Coerce a resolved reference to the `ModuleStore` it denotes: unwrap a binding,
+# follow a `VarRef`, or walk an `:external_module` `TreeRef`'s path (submodules
+# like `Base.Meta` resolve to a `TreeRef`, not a top-level env symbol).
+function _as_module_store(r, syms)
+    r isa StaticLint.Binding && (r = r.val)
+    if r isa StaticLint.TreeRef && r.kind === :external_module
+        return _module_store_from_path(vcat(r.origin_module, [String(r.name)]), syms)
+    end
+    r isa SymbolServer.VarRef && (r = SymbolServer._lookup(r, syms, true))
+    return r isa SymbolServer.ModuleStore ? r : nothing
+end
+
 # Resolve the module expression `m` (the LHS of a qualified `M.name`) to its
-# `ModuleStore`, or `nothing`.
+# `ModuleStore`, or `nothing`. Handles nested `A.B.name` and submodules.
 function _resolve_access_module(m::CSTParser.EXPR, env, meta_dict)
     syms = env isa StaticLint.ExternalEnv ? env.symbols : env
-    if StaticLint.hasref(m, meta_dict)
-        r = StaticLint.refof(m, meta_dict)
-        r isa StaticLint.Binding && (r = r.val)
-        r isa SymbolServer.VarRef && (r = SymbolServer._lookup(r, syms, true))
-        r isa SymbolServer.ModuleStore && return r
+    if CSTParser.is_getfield_w_quotenode(m)
+        parent = _resolve_access_module(m.args[1], env, meta_dict)
+        parent isa SymbolServer.ModuleStore || return nothing
+        sub = get(parent.vals, Symbol(StaticLint.valofid(StaticLint.rhs_of_getfield(m))), nothing)
+        sub isa SymbolServer.VarRef && (sub = SymbolServer._lookup(sub, syms, true))
+        return sub isa SymbolServer.ModuleStore ? sub : nothing
     end
-    # Per-file analysis resolves a module ref to a plain-data `TreeRef`, not a
-    # store — fall back to the written top-level module name in the env.
     CSTParser.isidentifier(m) || return nothing
-    return get(syms, Symbol(StaticLint.valofid(m)), nothing)
+    if StaticLint.hasref(m, meta_dict)
+        ms = _as_module_store(StaticLint.refof(m, meta_dict), syms)
+        ms isa SymbolServer.ModuleStore && return ms
+    end
+    top = get(syms, Symbol(StaticLint.valofid(m)), nothing)
+    return top isa SymbolServer.ModuleStore ? top : nothing
 end
 
 # API-status footer for a hovered identifier, attributed to the ACCESS module:
