@@ -812,3 +812,19 @@ end
     CacheStore.write(io, ft)
     @test CacheStore.read(IOBuffer(take!(io))) == ft
 end
+
+@testitem "SymbolServer: unsorted_names enumerates bindings committed in the calling frame" begin
+    using JuliaWorkspaces.SymbolServer: unsorted_names
+
+    # get_store `import`s a package and then enumerates its names in the same
+    # frame. On Julia 1.12 bindings are world-age partitioned, so a bare
+    # `ccall(:jl_module_names, …)` runs at the frame's entry world and misses
+    # bindings the frame just committed — dropping every non-exported name of a
+    # freshly-loaded package. unsorted_names must query at the latest world.
+    m = Module(:UnsortedNamesWorldAge)
+    function commit_then_enumerate()
+        Core.eval(m, :(nonexported_helper() = 1))
+        return unsorted_names(m; all=true)
+    end
+    @test :nonexported_helper in commit_then_enumerate()
+end

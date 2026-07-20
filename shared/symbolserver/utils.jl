@@ -360,12 +360,17 @@ get_top_module(vr::VarRef) = vr.parent === nothing ? vr.name : get_top_module(vr
 
 # Sorting is the main performance of calling `names`
 @static if VERSION < v"1.12-"
-    unsorted_names(m::Module; all::Bool=false, imported::Bool=false, usings=false) =
+    _jl_module_names(m, all, imported, _) =
         ccall(:jl_module_names, Array{Symbol,1}, (Any, Cint, Cint), m, all, imported)
 else
-    unsorted_names(m::Module; all::Bool=false, imported::Bool=false, usings=false) =
-         ccall(:jl_module_names, Array{Symbol,1}, (Any, Cint, Cint, Cint), m, all, imported, usings)
+    _jl_module_names(m, all, imported, usings) =
+        ccall(:jl_module_names, Array{Symbol,1}, (Any, Cint, Cint, Cint), m, all, imported, usings)
 end
+
+# bindings are world-age partitioned from 1.12 onwards, so an
+# in-frame call misses bindings committed later in the same frame.
+unsorted_names(m::Module; all::Bool=false, imported::Bool=false, usings=false) =
+    Base.invokelatest(_jl_module_names, m, all, imported, usings)
 
 ## recursive_copy
 #
