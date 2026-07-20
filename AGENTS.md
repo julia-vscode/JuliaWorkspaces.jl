@@ -14,6 +14,7 @@ This is a static analysis engine for Julia projects and mainly backs LanguageSer
 - Build a fresh `JuliaWorkspace` per check; Revise picks up non-`@derived` edits but memoized results are stale.
 - Test cross-file behaviour via `derived_file_analysis(rt, root, uri).meta` — `derived_static_lint_meta_for_root(rt, uri)` analyses a non-root file standalone (no module context), so cross-file names don't resolve.
 - In a bare module (no project), `get_diagnostic` won't surface check_call/missing-ref hints; read `StaticLint.errorof(node, meta_dict)` directly.
+- Wherever possible, make sure that behaviour is consistent between imported bindings and bindings defined in the workspace.
 
 ## Internals
 - Base/Core/stdlibs are baked into the precompile file via `const stdlibs = load_core()`. Verify changes by running `load_core()`, not by checking `stdlibs`. `load_core`/crawler edits only reach the `derived_*` pipeline after a session restart (the baked const is stale until recompile); a fresh `load_core()` verifies crawler output only.
