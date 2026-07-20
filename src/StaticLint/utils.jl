@@ -202,7 +202,6 @@ isexportedby(k, m::SymbolServer.ModuleStore) = false
 # use `isexportedby` for `using`-scope, which imports exported names only.
 ispublicby(k::Symbol, m::SymbolServer.ModuleStore) = haskey(m, k) && k in m.publicnames
 ispublicby(k::String, m::SymbolServer.ModuleStore) = ispublicby(Symbol(k), m)
-ispublicby(x::EXPR, m::SymbolServer.ModuleStore) = ispublicby(isidentifier(x) ? valofid(x) : valof(x), m)
 ispublicby(k, m::SymbolServer.ModuleStore) = false
 
 function retrieve_toplevel_scope(x::EXPR, meta_dict)

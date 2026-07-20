@@ -462,7 +462,7 @@ end
 
     for T in (MethodStore, DataTypeStore, Pair{Int,String}, Dict{Symbol,Any})
         ur = Base.unwrap_unionall(T)
-        d = DataTypeStore(T, nameof(ur), @__MODULE__, false)
+        d = DataTypeStore(T, nameof(ur), @__MODULE__)
         @test length(d.types) == length(d.fieldnames) == fieldcount(ur)
         @test !any(t -> t isa Type, d.types)        # no raw types leaked in
         io = IOBuffer(); write(io, d); seekstart(io); read(io)   # must round-trip
@@ -474,7 +474,7 @@ end
         Any[],                  # parameters
         Any[],                  # fieldtypes
         Any[:a, :b],            # fieldnames
-        MethodStore[], "", false,
+        MethodStore[], "",
     )
     @test length(dts.types) == 2
     @test all(t -> t isa FakeTypeName, dts.types)

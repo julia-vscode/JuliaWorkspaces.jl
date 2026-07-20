@@ -4207,7 +4207,7 @@ end
     ctor_copies = [MethodStore(m.name, m.mod, m.file, m.line, copy(m.sig), copy(m.kws), m.rt) for m in ctors]
     dts = DataTypeStore(FakeTypeName(foo_vr, []),
                         FakeTypeName(VarRef(VarRef(nothing, :Core), :Any), []),
-                        [], [], [], copy(ctors), "", true)
+                        [], [], [], copy(ctors), "")
     fs_foo_ext = FunctionStore(VarRef(VarRef(nothing, :B), :Foo), copy(ctor_copies), "", foo_vr, false)
     modA = ModuleStore(VarRef(nothing, :A), Dict{Symbol,Any}(:Foo => dts), "", true, [:Foo], Symbol[])
     modB = ModuleStore(VarRef(nothing, :B), Dict{Symbol,Any}(:Foo => fs_foo_ext), "", true, [:Foo], Symbol[])

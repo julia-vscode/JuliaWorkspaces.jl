@@ -25,10 +25,12 @@ ModuleStore(name::VarRef, vals, doc, ::Bool, exportednames, used_modules) =
     ModuleStore(name, vals, doc, exportednames, exportednames, used_modules)
 
 function ModuleStore(m)
-    # `names(m)` is the public set on 1.11+; exported ⊆ public.
+    # `names(m)` (all=false) is exactly the public set (exported ∪ public) on
+    # 1.11+, and the exported set pre-1.11 — so it already IS `publicnames`;
+    # exported is the strict subset.
     ns = unsorted_names(m)
     ModuleStore(VarRef(m), Dict{Symbol,Any}(), _doc(m, nameof(m)),
-        filter(s -> _isexported(m, s), ns), filter(s -> _ispublic(m, s), ns), Symbol[])
+        filter(s -> _isexported(m, s), ns), ns, Symbol[])
 end
 Base.getindex(m::ModuleStore, k) = m.vals[k]
 Base.setindex!(m::ModuleStore, v, k) = (m.vals[k] = v)
@@ -83,11 +85,6 @@ struct DataTypeStore <: SymStore
     end
 end
 
-# Back-compat positional form: drop the trailing `exported::Bool` (status now
-# lives on the owning ModuleStore's name lists).
-DataTypeStore(names, super, parameters, fieldtypes, fieldnames, methods, doc, ::Bool) =
-    DataTypeStore(names, super, parameters, fieldtypes, fieldnames, methods, doc)
-
 function DataTypeStore(@nospecialize(t), symbol, parent_mod)
     ur_t = Base.unwrap_unionall(t)
     parameters = if isdefined(ur_t, :parameters)
@@ -108,9 +105,6 @@ function DataTypeStore(@nospecialize(t), symbol, parent_mod)
     fieldnames = has_fields ? collect(Base.fieldnames(ur_t)) : Symbol[]
     DataTypeStore(FakeTypeName(ur_t), FakeTypeName(ur_t.super), parameters, types, fieldnames, MethodStore[], _doc(parent_mod, symbol))
 end
-
-# Back-compat type-object form: drop the trailing `exported`.
-DataTypeStore(@nospecialize(t), symbol, parent_mod, ::Bool) = DataTypeStore(t, symbol, parent_mod)
 
 function Base.show(io::IO, dts::DataTypeStore)
     print(io, dts.name, " <: ", dts.super, " with $(length(dts.methods)) methods")
@@ -372,16 +366,13 @@ else
     _isdefinedglobal(m::Module, s::Symbol) = invokelatest(isdefined, m, s)
 end
 
-# Export/public status of a binding. `public` is the wider set (`export` implies
-# `public`), so an exported name has both true. invokelatest for the same
-# world-age reason as name enumeration. Pre-1.11 has no `public`, and `names(m)`
-# there is the exported set, so both collapse to that.
-@static if isdefined(Base, :ispublic)
+# Whether `s` is exported by `m`. invokelatest for the same world-age reason as
+# name enumeration. Pre-1.11 has no `public` keyword, and `names(m)` there is the
+# exported set. (The public set needs no predicate — `unsorted_names(m)` IS it.)
+@static if isdefined(Base, :isexported)
     _isexported(m::Module, s::Symbol) = invokelatest(Base.isexported, m, s)
-    _ispublic(m::Module, s::Symbol) = invokelatest(Base.ispublic, m, s)
 else
     _isexported(m::Module, s::Symbol) = s in unsorted_names(m)
-    _ispublic(m::Module, s::Symbol) = _isexported(m, s)
 end
 
 # Read global `m.s`, returning `(false, nothing)` rather than throwing on an

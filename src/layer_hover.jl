@@ -371,48 +371,33 @@ function _api_status_footer(mod::SymbolServer.ModuleStore, name::Symbol)
     return string("\n\n----\n", status, ".\n")
 end
 
-# Walk a dotted module path (["Base", "Meta"]) to its `ModuleStore`, descending
-# through submodule entries in each store's `vals`. `nothing` if any hop misses.
-function _module_store_from_path(path, syms)
-    isempty(path) && return nothing
-    m = get(syms, Symbol(path[1]), nothing)
-    for i in 2:length(path)
-        m isa SymbolServer.ModuleStore || return nothing
-        v = get(m.vals, Symbol(path[i]), nothing)
-        v isa SymbolServer.VarRef && (v = SymbolServer._lookup(v, syms, true))
-        m = v
-    end
-    return m isa SymbolServer.ModuleStore ? m : nothing
-end
-
-# Coerce a resolved reference to the `ModuleStore` it denotes: unwrap a binding,
-# follow a `VarRef`, or walk an `:external_module` `TreeRef`'s path (submodules
-# like `Base.Meta` resolve to a `TreeRef`, not a top-level env symbol).
-function _as_module_store(r, syms)
+# Dotted module path (e.g. ["Base", "Meta"]) that the LHS module expression `m`
+# denotes, read off the resolved `:external_module` `TreeRef` of its innermost
+# identifier — which already carries the full parent path, so `Base.Meta` and a
+# bare `Meta` (imported via `using Base.Meta`) both yield ["Base", "Meta"].
+# `nothing` if `m` doesn't resolve through the tree.
+function _module_path(m::CSTParser.EXPR, meta_dict)
+    id = CSTParser.is_getfield_w_quotenode(m) ? StaticLint.rhs_of_getfield(m) : m
+    (id isa CSTParser.EXPR && CSTParser.isidentifier(id) && StaticLint.hasref(id, meta_dict)) || return nothing
+    r = StaticLint.refof(id, meta_dict)
     r isa StaticLint.Binding && (r = r.val)
-    if r isa StaticLint.TreeRef && r.kind === :external_module
-        return _module_store_from_path(vcat(r.origin_module, [String(r.name)]), syms)
-    end
-    r isa SymbolServer.VarRef && (r = SymbolServer._lookup(r, syms, true))
-    return r isa SymbolServer.ModuleStore ? r : nothing
+    (r isa StaticLint.TreeRef && r.kind === :external_module) || return nothing
+    return String[r.origin_module..., String(r.name)]
 end
 
-# Resolve the module expression `m` (the LHS of a qualified `M.name`) to its
-# `ModuleStore`, or `nothing`. Handles nested `A.B.name` and submodules.
-function _resolve_access_module(m::CSTParser.EXPR, env, meta_dict)
-    syms = env isa StaticLint.ExternalEnv ? env.symbols : env
-    if CSTParser.is_getfield_w_quotenode(m)
-        parent = _resolve_access_module(m.args[1], env, meta_dict)
-        parent isa SymbolServer.ModuleStore || return nothing
-        sub = get(parent.vals, Symbol(StaticLint.valofid(StaticLint.rhs_of_getfield(m))), nothing)
-        sub isa SymbolServer.VarRef && (sub = SymbolServer._lookup(sub, syms, true))
-        return sub isa SymbolServer.ModuleStore ? sub : nothing
+# Resolve the LHS module expression of a qualified `M.name` to its `ModuleStore`.
+# Reuses the shared tree resolver; falls back to a module written by its bare
+# top-level name that didn't resolve through the tree.
+function _resolve_access_module(m::CSTParser.EXPR, rt, root, env, meta_dict)
+    if rt !== nothing && root !== nothing
+        path = _module_path(m, meta_dict)
+        if path !== nothing
+            ms = _resolve_external_module(rt, root, path)
+            ms isa SymbolServer.ModuleStore && return ms
+        end
     end
     CSTParser.isidentifier(m) || return nothing
-    if StaticLint.hasref(m, meta_dict)
-        ms = _as_module_store(StaticLint.refof(m, meta_dict), syms)
-        ms isa SymbolServer.ModuleStore && return ms
-    end
+    syms = env isa StaticLint.ExternalEnv ? env.symbols : env
     top = get(syms, Symbol(StaticLint.valofid(m)), nothing)
     return top isa SymbolServer.ModuleStore ? top : nothing
 end
@@ -421,13 +406,13 @@ end
 # a qualified `M.name` reports M (so a re-export reports the module it's accessed
 # through, not where it's defined); a bare name reports the `using`'d module that
 # brought it into scope. "" when no external module owns the access.
-function _api_status_line(x::CSTParser.EXPR, env, meta_dict)
+function _api_status_line(x::CSTParser.EXPR, rt, root, env, meta_dict)
     CSTParser.isidentifier(x) || return ""
     name = Symbol(StaticLint.valofid(x))
     p = CSTParser.parentof(x)
     if p isa CSTParser.EXPR && CSTParser.headof(p) === :quotenode &&
        CSTParser.parentof(p) isa CSTParser.EXPR && CSTParser.is_getfield_w_quotenode(CSTParser.parentof(p))
-        mod = _resolve_access_module(CSTParser.parentof(p).args[1], env, meta_dict)
+        mod = _resolve_access_module(CSTParser.parentof(p).args[1], rt, root, env, meta_dict)
         return mod === nothing ? "" : _api_status_footer(mod, name)
     end
     scope = _retrieve_scope(x, meta_dict)
@@ -442,7 +427,7 @@ function _api_status_line(x::CSTParser.EXPR, env, meta_dict)
     end
     return ""
 end
-_api_status_line(_, _, _) = ""
+_api_status_line(_, _, _, _, _) = ""
 
 function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
     if (CSTParser.isidentifier(x) || CSTParser.isoperator(x)) && StaticLint.hasref(x, meta_dict)
@@ -467,7 +452,7 @@ function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_di
         # Attribute exported/public/internal to the access module (handles
         # re-exports); only fires when an external module owns the access.
         if r isa SymbolServer.SymStore || (r isa StaticLint.Binding && r.val isa SymbolServer.SymStore)
-            documentation = string(documentation, _api_status_line(x, env, meta_dict))
+            documentation = string(documentation, _api_status_line(x, rt, root, env, meta_dict))
         end
     end
     return documentation
