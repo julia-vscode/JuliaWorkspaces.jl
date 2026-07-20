@@ -362,6 +362,58 @@ end
 
 _get_hover(x, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing) = documentation
 
+# Footer stating whether `name` is exported / public / internal in `mod`.
+function _api_status_footer(mod::SymbolServer.ModuleStore, name::Symbol)
+    modname = mod.name isa SymbolServer.VarRef ? mod.name.name : Symbol(mod.name)
+    status = StaticLint.isexportedby(name, mod) ? "Exported by `$(modname)`" :
+             StaticLint.ispublicby(name, mod)   ? "Public API of `$(modname)` (not exported)" :
+                                                   "Internal to `$(modname)`"
+    return string("\n\n----\n", status, ".\n")
+end
+
+# Resolve the module expression `m` (the LHS of a qualified `M.name`) to its
+# `ModuleStore`, or `nothing`.
+function _resolve_access_module(m::CSTParser.EXPR, env, meta_dict)
+    syms = env isa StaticLint.ExternalEnv ? env.symbols : env
+    if StaticLint.hasref(m, meta_dict)
+        r = StaticLint.refof(m, meta_dict)
+        r isa StaticLint.Binding && (r = r.val)
+        r isa SymbolServer.VarRef && (r = SymbolServer._lookup(r, syms, true))
+        r isa SymbolServer.ModuleStore && return r
+    end
+    # Per-file analysis resolves a module ref to a plain-data `TreeRef`, not a
+    # store — fall back to the written top-level module name in the env.
+    CSTParser.isidentifier(m) || return nothing
+    return get(syms, Symbol(StaticLint.valofid(m)), nothing)
+end
+
+# API-status footer for a hovered identifier, attributed to the ACCESS module:
+# a qualified `M.name` reports M (so a re-export reports the module it's accessed
+# through, not where it's defined); a bare name reports the `using`'d module that
+# brought it into scope. "" when no external module owns the access.
+function _api_status_line(x::CSTParser.EXPR, env, meta_dict)
+    CSTParser.isidentifier(x) || return ""
+    name = Symbol(StaticLint.valofid(x))
+    p = CSTParser.parentof(x)
+    if p isa CSTParser.EXPR && CSTParser.headof(p) === :quotenode &&
+       CSTParser.parentof(p) isa CSTParser.EXPR && CSTParser.is_getfield_w_quotenode(CSTParser.parentof(p))
+        mod = _resolve_access_module(CSTParser.parentof(p).args[1], env, meta_dict)
+        return mod === nothing ? "" : _api_status_footer(mod, name)
+    end
+    scope = _retrieve_scope(x, meta_dict)
+    while scope isa StaticLint.Scope
+        if scope.modules !== nothing
+            for mod in values(scope.modules)
+                mod isa SymbolServer.ModuleStore && StaticLint.isexportedby(name, mod) &&
+                    return _api_status_footer(mod, name)
+            end
+        end
+        scope = scope.parent
+    end
+    return ""
+end
+_api_status_line(_, _, _) = ""
+
 function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_dict, rt=nothing, root=nothing)
     if (CSTParser.isidentifier(x) || CSTParser.isoperator(x)) && StaticLint.hasref(x, meta_dict)
         r = StaticLint.refof(x, meta_dict)
@@ -381,6 +433,11 @@ function _get_hover(x::CSTParser.EXPR, documentation::String, expr, env, meta_di
             _get_tree_ref_hover(r, documentation, expr, env, meta_dict, rt, root)
         else
             documentation
+        end
+        # Attribute exported/public/internal to the access module (handles
+        # re-exports); only fires when an external module owns the access.
+        if r isa SymbolServer.SymStore || (r isa StaticLint.Binding && r.val isa SymbolServer.SymStore)
+            documentation = string(documentation, _api_status_line(x, env, meta_dict))
         end
     end
     return documentation

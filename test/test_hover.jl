@@ -1150,3 +1150,30 @@ end
     @test occursin("greet docs EDITED", result)
     @test get(recv.counts, "derived_file_analysis", 0) == 0
 end
+
+@testitem "Hover: API-status footer attributes exported/public/internal to the access module" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    # Qualified access is attributed to the module it is accessed THROUGH (so a
+    # re-export reports that module, not where the name is defined).
+    src = """
+    module H
+    a = Base.sort
+    b = Base.var"@assume_effects"
+    c = Base.LibuvStream
+    end
+    """
+    uri = URI("file:///apistatus/src/H.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    hov(n) = get_hover_text(jw, uri, first(findfirst(n, src)))
+
+    @test occursin("Exported by `Base`", hov("sort"))
+    @test occursin("Internal to `Base`", hov("LibuvStream"))
+    if isdefined(Base, :ispublic)
+        # premise: @assume_effects is public-but-not-exported in Base on 1.11+
+        @test Base.ispublic(Base, Symbol("@assume_effects")) && !Base.isexported(Base, Symbol("@assume_effects"))
+        @test occursin("Public API of `Base` (not exported)", hov("@assume_effects"))
+    end
+end
