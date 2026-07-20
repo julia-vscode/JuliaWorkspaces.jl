@@ -1018,6 +1018,21 @@ end
     end
 end
 
+@testitem "SymbolServer: back-compat ModuleStore shim does not alias the two name lists" begin
+    using JuliaWorkspaces.SymbolServer: ModuleStore, VarRef
+    # The old positional form (with the dropped `exported::Bool`) seeds both
+    # name lists from one argument. They must be SEPARATE arrays, or a later
+    # `push!` to one (e.g. load_core's `:include`/`:ccall` fixups) mutates both.
+    names = [:a, :b]   # a Vector{Symbol}: `convert` would NOT de-alias this
+    ms = ModuleStore(VarRef(nothing, :M), Dict{Symbol,Any}(), "", true, names, Symbol[])
+    @test ms.exportednames == [:a, :b]
+    @test ms.publicnames == [:a, :b]
+    @test ms.exportednames !== ms.publicnames
+    push!(ms.publicnames, :c)
+    @test :c in ms.publicnames
+    @test !(:c in ms.exportednames)   # push to one must not affect the other
+end
+
 @testitem "SymbolServer: exportednames/publicnames survive a cache round-trip" begin
     using JuliaWorkspaces.SymbolServer: CacheStore, ModuleStore, FunctionStore, VarRef, MethodStore, Package
 

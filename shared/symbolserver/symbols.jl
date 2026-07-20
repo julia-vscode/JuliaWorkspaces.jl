@@ -20,9 +20,11 @@ struct ModuleStore <: SymStore
 end
 
 # Back-compat positional form: the old `exported::Bool` (slot 4) is dropped, and
-# the old single `exportednames` list seeds both name lists.
+# the old single `exportednames` list seeds both name lists. `copy` keeps the
+# two lists from aliasing the same array — a later `push!` to one (e.g. the
+# `:include`/`:ccall` fixups in `load_core`) must not silently mutate the other.
 ModuleStore(name::VarRef, vals, doc, ::Bool, exportednames, used_modules) =
-    ModuleStore(name, vals, doc, exportednames, exportednames, used_modules)
+    ModuleStore(name, vals, doc, exportednames, copy(exportednames), used_modules)
 
 function ModuleStore(m)
     # `names(m)` (all=false) is exactly the public set (exported ∪ public) on
