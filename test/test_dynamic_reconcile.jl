@@ -181,66 +181,72 @@ end
     @test !isempty(req_off)                                   # real projects still watched
 end
 
-@testitem "Dynamic reconcile: standalone project dirs are hash-keyed and cleaned up" begin
+@testitem "Dynamic reconcile: standalone project dirs are hash-keyed; prepare cleans, path is pure" begin
     using JuliaWorkspaces: DynamicFeature, DynamicPersistent, CreateStandaloneProjectKey,
-        _standalone_project_dir
+        _prepare_standalone_project_dir!, _standalone_project_dir_path
 
-    store = mktempdir()
+    store = joinpath(mktempdir(), "cache")     # isolate standalone-projects under a fresh dir
     df = DynamicFeature(DynamicPersistent, store; launcher=(df, djp) -> nothing)
 
     key1 = CreateStandaloneProjectKey("/ws/Pkg", UInt64(0x1234))
     key2 = CreateStandaloneProjectKey("/ws/Pkg", UInt64(0x5678))
 
-    dir1 = _standalone_project_dir(df, key1)
+    dir1 = _prepare_standalone_project_dir!(df, key1)
     @test startswith(dir1, joinpath(dirname(store), "standalone-projects"))
     @test occursin("Pkg-", basename(dir1))
-    @test _standalone_project_dir(df, key1) == dir1      # deterministic
-    @test isdir(dir1)                                    # parent-created
+    @test _prepare_standalone_project_dir!(df, key1) == dir1   # deterministic
+    @test _standalone_project_dir_path(df, key1) == dir1       # same path, pure
+    @test isdir(dir1)                                          # prepare creates it
 
-    dir2 = _standalone_project_dir(df, key2)
+    # The pure path function must NOT create or delete anything — this is what
+    # makes it safe to call from the off-reactor `ProcessLaunchedMsg` task:
+    # computing key2's path must leave key1's live dir intact.
+    dir2 = _standalone_project_dir_path(df, key2)
     @test dir2 != dir1
+    @test !isdir(dir2)      # pure: not created
+    @test isdir(dir1)       # pure: sibling NOT deleted
+
+    # prepare, by contrast, cleans up the old-hash sibling and creates the dir.
+    @test _prepare_standalone_project_dir!(df, key2) == dir2
+    @test isdir(dir2)
     @test !isdir(dir1)      # old hash dir for the same package cleaned up
 
     # A same-basename package under a *different* path must not be touched by
-    # the other package's cleanup — otherwise one package's launch could
-    # `rm -rf` a sibling's dir mid-resolve.
+    # the other package's cleanup.
     other_path_key = CreateStandaloneProjectKey("/ws-old/Pkg", UInt64(0x5678))
-    other_path_dir = _standalone_project_dir(df, other_path_key)
+    other_path_dir = _prepare_standalone_project_dir!(df, other_path_key)
     @test other_path_dir != dir2
     @test isdir(dir2)             # untouched by the other path's cleanup
     @test isdir(other_path_dir)
 
-    # Re-running the original key's cleanup must not remove the other path's
-    # dir either.
-    dir2_again = _standalone_project_dir(df, key2)
-    @test dir2_again == dir2
+    @test _prepare_standalone_project_dir!(df, key2) == dir2
     @test isdir(other_path_dir)
 
     # Prefix collision: "Pkg" cleanup must never remove "Pkg-extra" dirs.
     pkg_key = CreateStandaloneProjectKey("/ws2/Pkg", UInt64(1))
     pkg_extra_key = CreateStandaloneProjectKey("/ws2/Pkg-extra", UInt64(2))
-    pkg_dir = _standalone_project_dir(df, pkg_key)
-    pkg_extra_dir = _standalone_project_dir(df, pkg_extra_key)
+    _prepare_standalone_project_dir!(df, pkg_key)
+    pkg_extra_dir = _prepare_standalone_project_dir!(df, pkg_extra_key)
     @test isdir(pkg_extra_dir)
 
-    # Re-resolving `pkg_key` with a new content hash must clean up only its
-    # own old dir, never `pkg_extra_dir`.
+    # Re-resolving `pkg_key` with a new content hash cleans up only its own old
+    # dir, never `pkg_extra_dir`.
     pkg_key_v2 = CreateStandaloneProjectKey("/ws2/Pkg", UInt64(3))
-    _standalone_project_dir(df, pkg_key_v2)
+    _prepare_standalone_project_dir!(df, pkg_key_v2)
     @test isdir(pkg_extra_dir)
 end
 
 @testitem "Dynamic reconcile: standalone fast lane serves existing project and refreshes when idle" begin
     using JuliaWorkspaces: DynamicFeature, DynamicPersistent,
         StandaloneProjectPrepDoneMsg, CreateStandaloneProjectKey, StandaloneProjectReadyResult,
-        DJPKey, handle!, _standalone_project_dir
+        DJPKey, handle!, _prepare_standalone_project_dir!
 
     launches = DJPKey[]
     store = mktempdir()
     df = DynamicFeature(DynamicPersistent, store; launcher=(df, djp) -> push!(launches, djp.key))
 
     key = CreateStandaloneProjectKey("/ws/Pkg", UInt64(0xabc))
-    dir = _standalone_project_dir(df, key)
+    dir = _prepare_standalone_project_dir!(df, key)
     write(joinpath(dir, "Project.toml"), "name = \"scratch\"\n")
     write(joinpath(dir, "Manifest.toml"), "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n\n[deps]\n")
 
@@ -283,7 +289,7 @@ end
     using JuliaWorkspaces: DynamicFeature, DynamicPersistent, StandaloneProjectPrepDoneMsg,
         ProcessIndexedMsg, ProcessIndexFailedMsg, CreateStandaloneProjectKey,
         WatchTestEnvironmentKey, WatchTestEnvironmentMsg, StandaloneProjectReadyResult, DJPKey,
-        handle!, _standalone_project_dir
+        handle!, _standalone_project_dir_path
     using Base.Threads: atomic_add!
 
     launches = DJPKey[]
@@ -322,7 +328,7 @@ end
     # Refresh completion re-emits the ready result, frees the slot, and never
     # touches pending_count.
     pending_before_done = df.pending_count[]
-    handle!(df, ProcessIndexedMsg(fast, _standalone_project_dir(df, fast)))
+    handle!(df, ProcessIndexedMsg(fast, _standalone_project_dir_path(df, fast)))
     @test take!(df.out_channel) isa StandaloneProjectReadyResult
     @test !(fast in df.refreshing)
     @test df.pending_count[] == pending_before_done

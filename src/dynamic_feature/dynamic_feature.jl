@@ -410,21 +410,37 @@ end
 
 # Persistent, deterministic project dir for a standalone package: reused
 # across sessions while the package's Project.toml (content hash) is
-# unchanged. Sibling dirs for the same package *path* under an *old* hash are
-# removed — a changed package gets a fresh resolve, and growth stays bounded.
-# The dir name includes a path hash (not just `basename(package_path)`) so
-# same-named packages under different paths (e.g. `packages/Foo` vs
-# `packages-old/Foo`) get distinct dirs; without it, this function re-running
-# on another package's `ProcessLaunchedMsg` task could `rm -rf` a sibling's dir
-# mid-resolve. The path-hash segment is also why cleanup can match on a plain
-# prefix without colliding with a differently-named package that merely starts
-# with the same characters (e.g. `Pkg` vs `Pkg-extra`).
-function _standalone_project_dir(df::DynamicFeature, key::CreateStandaloneProjectKey)
+# unchanged. The dir name includes a path hash (not just
+# `basename(package_path)`) so same-named packages under different paths (e.g.
+# `packages/Foo` vs `packages-old/Foo`) get distinct dirs. The path-hash
+# segment is also why sibling cleanup can match on a plain prefix without
+# colliding with a differently-named package that merely starts with the same
+# characters (e.g. `Pkg` vs `Pkg-extra`).
+#
+# `(parent, prefix, dir)` — pure, no filesystem mutation.
+function _standalone_dir_components(df::DynamicFeature, key::CreateStandaloneProjectKey)
     parent = joinpath(dirname(df.store_path), "standalone-projects")
     name = basename(key.package_path)
     path_hash = string(hash(key.package_path) % UInt32, base=16, pad=8)
     prefix = string(name, "-", path_hash, "-")
     dir = joinpath(parent, string(prefix, string(key.content_hash, base=16, pad=16)))
+    return (parent, prefix, dir)
+end
+
+# The deterministic dir path only — no filesystem mutation, so it is safe to
+# call OFF the reactor (e.g. from a `ProcessLaunchedMsg` async task, where the
+# destructive `_prepare_standalone_project_dir!` would race a concurrent
+# resolve into a sibling content-hash's live dir).
+_standalone_project_dir_path(df::DynamicFeature, key::CreateStandaloneProjectKey) =
+    _standalone_dir_components(df, key)[3]
+
+# Reactor-only: prepare the dir. Sibling dirs for the same package *path* under
+# an *old* content hash are removed (a changed package gets a fresh resolve,
+# and growth stays bounded), then the dir is `mkpath`ed. MUST run on the
+# reactor — the `rm(...; recursive=true)` would otherwise delete a sibling
+# dir that a newer content hash's child is actively resolving into.
+function _prepare_standalone_project_dir!(df::DynamicFeature, key::CreateStandaloneProjectKey)
+    parent, prefix, dir = _standalone_dir_components(df, key)
     if isdir(parent)
         for other in readdir(parent; join=true)
             if startswith(basename(other), prefix) && other != dir
@@ -934,7 +950,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
     # Offload the (IO-bound) dir + missing-package check to a task so the
     # reactor stays responsive; the decision comes back as a
     # `StandaloneProjectPrepDoneMsg` so all state mutation stays on the reactor.
-    dir = _standalone_project_dir(df, key)
+    dir = _prepare_standalone_project_dir!(df, key)
     store_path = df.store_path
     Threads.@async try
         usable = isfile(joinpath(dir, "Project.toml")) && isfile(joinpath(dir, "Manifest.toml"))
@@ -953,7 +969,7 @@ function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
 
     if msg.fast_lane
         @info "Serving existing standalone project; refreshing in background" package_path=key.package_path
-        dir = _standalone_project_dir(df, key)
+        dir = _standalone_project_dir_path(df, key)
         put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
@@ -997,7 +1013,11 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
     # as a `ProcessIndexedMsg`/`ProcessIndexFailedMsg`.
     Threads.@async try
         result_dir = if key isa CreateStandaloneProjectKey
-            create_standalone_project(djp, df.store_path, _standalone_project_dir(df, key))
+            # Pure path only: the reactor already prepared (cleaned + created)
+            # this dir in `CreateStandaloneProjectMsg`. Recomputing the
+            # destructive prepare here — off the reactor — could `rm` a sibling
+            # content-hash's dir that another child is resolving into.
+            create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key))
         else
             index_project(djp, df.store_path)
         end
