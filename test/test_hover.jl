@@ -880,7 +880,7 @@ end
     # Byte parity with the old rendering (probe-captured): the typed
     # definition block first, then the docstring.
     @test hover_at(jw, b_src, "cuse() = CONSTX") ==
-        "\n```julia\nCONSTX::Int64 = 42\n```\n\nCONSTX docs"
+        "\n```julia\nCONSTX::$(Int) = 42\n```\n\nCONSTX docs"
     @test hover_at(jw, b_src, "guse() = myglobal") ==
         "\n```julia\nmyglobal = [1, 2]\n```\n\nv docs"
 end

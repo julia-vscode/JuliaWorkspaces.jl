@@ -60,12 +60,17 @@
 
     # A parametric Core-owned type re-exported by Base under its OWN name (`Ref`,
     # `nameof(Ref) === :Ref`, so the shadow-rename branch's `nameof !== s` misses
-    # it) must still be a `DataTypeStore` carrying its constructor methods — NOT a
-    # `VarRef` to the method-poor `Core.Ref` (its constructors are attributed to
-    # Base). Otherwise call-checking a constructor call like `Ref(5.0)` finds no
-    # methods.
+    # it) must still carry its constructor methods — NOT resolve to a `VarRef` to
+    # the method-poor `Core.Ref` (its constructors are attributed to Base).
+    # Otherwise call-checking a constructor call like `Ref(5.0)` finds no methods.
+    #
+    # On 1.12 `Ref` is (intentionally) in `names(Base)`, so it reaches the
+    # `x isa UnionAll` branch in `symbols` and is stored as a `DataTypeStore`. On
+    # 1.11 `Ref` is absent from `names(Base)`, never hits that branch, and instead
+    # resolves to a method-carrying `FunctionStore`. Either way the invariant is
+    # that the store is present with its constructor methods.
     let rref = base.vals[:Ref]
-        @test rref isa DataTypeStore
+        @test rref isa (VERSION >= v"1.12" ? DataTypeStore : FunctionStore)
         @test !isempty(rref.methods)
     end
 end
@@ -951,11 +956,11 @@ end
     # `kron` is the partial case the old hand-maintained rand/randn/kron! appends
     # missed entirely: the crawl kept its single Base method but dropped ~16
     # LinearAlgebra methods, so pre-fix `kron` had exactly 1 method here.
-    @test length(base[:kron].methods) >= 16
+    @test length(base[:kron].methods) >= (VERSION >= v"1.12" ? 16 : 13)
     # Regression on the previously hand-appended, fully-external functions.
     @test length(base[:rand].methods) >= 20    # all from Random
     @test length(base[:randn].methods) >= 10   # all from Random
-    @test length(base[:kron!].methods) >= 10   # all from LinearAlgebra
+    @test length(base[:kron!].methods) >= (VERSION >= v"1.12" ? 10 : 9)   # all from LinearAlgebra
 
     # The re-attach must be scoped to the always-available sysimage stdlibs. load_core
     # runs during JuliaWorkspaces' precompile with its whole dependency tree loaded, so
