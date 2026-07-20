@@ -1232,6 +1232,32 @@ end
     @test !any(d -> occursin("Missing reference: a", d.message), fa.diagnostics)
 end
 
+@testitem "derived_file_analysis: a re-exported name used through `using` is not a missing ref" setup=[FileAnalysisWS] begin
+    # `Child` re-exports `bar`, which it imported from `Prov` (not declared in
+    # `Child`). `using .Child` in the enclosing module must make `bar` visible,
+    # so the `bar()` use is not reported "Missing reference: bar".
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        module Prov
+        export bar
+        bar() = 1
+        end
+        module Child
+        using ..Prov
+        export bar
+        end
+        using .Child
+        useit() = bar()
+        end
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, ROOT)
+    # No missing-ref, and — since `bar` binds as `:unknown` — no false
+    # arg-count flag on the `bar()` call either: no diagnostic mentions `bar`.
+    @test !any(d -> occursin("bar", d.message), fa.diagnostics)
+end
+
 @testitem "derived_file_analysis: a sibling file's failed wildcard using suppresses missing-ref hints module-wide" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => """

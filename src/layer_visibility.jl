@@ -146,9 +146,20 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
             exports = derived_module_exports(rt, root, tp).exports
             declared = derived_module_declared(rt, root, tp)
             for name in exports
-                haskey(names, name) || continue
-                mt = names[name] === :module ? ImportTarget(:tree, vcat(tp, [name])) : nothing
-                push!(entries, (name, VisibleName(names[name], :using_tree, declared[name], tp), mt))
+                if haskey(names, name)
+                    mt = names[name] === :module ? ImportTarget(:tree, vcat(tp, [name])) : nothing
+                    push!(entries, (name, VisibleName(names[name], :using_tree, declared[name], tp), mt))
+                else
+                    # A re-export of a name the submodule brought in through its
+                    # OWN imports (`using ..Prov; export bar`): exported but not
+                    # in its DECLARED names. Bind it so a use isn't a spurious
+                    # missing-ref (matching the colon-list `_member_lookup`
+                    # path, which binds an unresolved member as `:unknown`); its
+                    # kind and defining item aren't known without resolving the
+                    # submodule's own imports, which a same-root `using` cycle
+                    # could not do without re-entering an in-progress query.
+                    push!(entries, (name, VisibleName(:unknown, :using_tree, nothing, tp), nothing))
+                end
             end
         end
         bound = alias !== nothing ? alias : tp[end]

@@ -830,6 +830,61 @@ end
     @test parent_visible["Child"].origin_module == ["Parent"]
 end
 
+@testitem "module visibility: using a tree submodule brings in its RE-exported names" setup=[ModuleTreeWS] begin
+    # Child imports `bar` from Prov and re-exports it. A `using ..Child` in the
+    # Sibling observer must see `bar`: the old code gated the whole-module
+    # bring-in on Child's DECLARED names, dropping re-exports of imported names
+    # and producing a spurious missing-ref at any use of `bar`.
+    tree, root_uri, jw = tree_of("""
+    module Parent
+    module Prov
+    export bar
+    bar() = 1
+    end
+    module Child
+    using ..Prov
+    export bar
+    end
+    module Sibling
+    using ..Child
+    end
+    end
+    """)
+
+    # `bar` must be VISIBLE (else a use is a spurious missing-ref). It's a
+    # re-export of an imported name, so it binds as `:unknown` — resolving its
+    # precise kind/item would need the submodule's own imports (deferred; a
+    # same-root `using` cycle can't recurse into the memoized query safely).
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent", "Sibling"])
+    @test haskey(visible, "bar")
+    @test visible["bar"].origin === :using_tree
+    @test visible["bar"].origin_module == ["Parent", "Child"]
+    @test visible["bar"].kind === :unknown
+end
+
+@testitem "module visibility: a same-root using cycle terminates" setup=[ModuleTreeWS] begin
+    # Regression guard against the REJECTED recursive fix: Parent `using .Child`
+    # and Child `using ..Parent` form a same-root cycle. Resolving exports
+    # through the memoized `derived_module_visible_names` would re-enter an
+    # in-progress Salsa key (no in-progress guard) → DependencyCycleException.
+    # The non-recursive fix must terminate and still surface DECLARED exports.
+    tree, root_uri, jw = tree_of("""
+    module Parent
+    module Child
+    using ..Parent
+    export cc
+    cc() = 1
+    end
+    using .Child
+    export pp
+    pp() = 2
+    end
+    """)
+    visible = JuliaWorkspaces.derived_module_visible_names(jw.runtime, root_uri, ["Parent"])
+    @test haskey(visible, "cc")           # Child's DECLARED export still surfaces
+    @test visible["cc"].kind === :function
+end
+
 @testitem "module visibility: import with a statement alias binds only the alias" setup=[ModuleTreeWS] begin
     tree, root_uri, jw = tree_of("""
     module Foo
