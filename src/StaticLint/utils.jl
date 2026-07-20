@@ -197,6 +197,14 @@ isexportedby(k::String, m::SymbolServer.ModuleStore) = isexportedby(Symbol(k), m
 isexportedby(x::EXPR, m::SymbolServer.ModuleStore) = isexportedby(isidentifier(x) ? valofid(x) : valof(x), m)
 isexportedby(k, m::SymbolServer.ModuleStore) = false
 
+# Public API surface (`export` ∪ `public`), a superset of `isexportedby`. Use
+# this for API-surface decisions (hover status, qualified-access completion);
+# use `isexportedby` for `using`-scope, which imports exported names only.
+ispublicby(k::Symbol, m::SymbolServer.ModuleStore) = haskey(m, k) && k in m.publicnames
+ispublicby(k::String, m::SymbolServer.ModuleStore) = ispublicby(Symbol(k), m)
+ispublicby(x::EXPR, m::SymbolServer.ModuleStore) = ispublicby(isidentifier(x) ? valofid(x) : valof(x), m)
+ispublicby(k, m::SymbolServer.ModuleStore) = false
+
 function retrieve_toplevel_scope(x::EXPR, meta_dict)
     if scopeof(x, meta_dict) !== nothing && is_toplevel_scope(x)
         return scopeof(x, meta_dict)

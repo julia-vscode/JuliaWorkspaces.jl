@@ -557,6 +557,13 @@ function all_names(m, pred, symbols = Set(Symbol[]), seen = Set(Module[]))
     ns = unsorted_names(m; all = true, imported = false, usings = false)
     for n in ns
         _isdefinedglobal(m, n) || continue
+        # TODO: deprecated bindings are dropped from the cache entirely, so a
+        # reference to one reads as "Failed to resolve" and can't be hovered or
+        # struck through. Ideally we'd index them with a `deprecatednames` list
+        # (mirroring exportednames/publicnames) and drive the LSP Deprecated tag.
+        # Blocked on Julia: `Base.isdeprecated` only detects explicit
+        # `Base.deprecate` calls, not the `@deprecate`/`@deprecated` macros, so
+        # the signal is too partial to rely on. Revisit when it's reliable.
         Base.isdeprecated(m, n) && continue
         ok, val = _try_getglobal(m, n)
         ok || continue
