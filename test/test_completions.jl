@@ -1,3 +1,35 @@
+@testitem "Completions: workspace tree names carry an exported/public tag" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    # `foo`/`baz` are declared in a SIBLING file, so they reach the completion
+    # only through the module tree (`_add_visible_name_completion`) — not a
+    # local scope binding. The exported one must be tagged, matching hover; the
+    # internal one gets no tag.
+    project_toml = "name = \"CompTag\"\nuuid = \"a2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc\"\n\n[deps]\n"
+    entry = "module CompTag\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n"
+    a = "export item_exp\nitem_exp() = 1\nitem_int() = 3\n"
+    b = "g() = item\n"   # complete the shared `item` prefix
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///comptag/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///comptag/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///comptag/src/CompTag.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///comptag/src/a.jl"), SourceText(a, "julia")))
+    b_uri = URI("file:///comptag/src/b.jl")
+    add_file!(jw, TextFile(b_uri, SourceText(b, "julia")))
+
+    # Cursor right after the `item` partial in `g() = item`.
+    result = get_completions(jw, b_uri, first(findfirst("item", b)) + 4)
+    exp_item = filter(i -> i.label == "item_exp", result.items)
+    int_item = filter(i -> i.label == "item_int", result.items)
+    @test length(exp_item) == 1
+    @test exp_item[1].detail_description == "exported"   # exported ⇒ tagged
+    @test length(int_item) == 1
+    @test int_item[1].detail_description === nothing      # internal ⇒ no tag
+end
+
 @testitem "Completions: latex completions" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI

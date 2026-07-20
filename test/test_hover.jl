@@ -1115,6 +1115,32 @@ end
     @test occursin("myfunc(alpha)", result_q)
 end
 
+@testitem "Hover: API-status footer for a name whose origin module is another root" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    # `myfunc` is exported by the DEVED package B (a separate workspace root).
+    # The footer must query B's OWN root's export list, not MainP's — otherwise
+    # a cross-root name gets no exported/public footer at all.
+    main_project = "name = \"MainP\"\nuuid = \"b2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    b_project = "name = \"B\"\nuuid = \"c2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    entry = "module MainP\nusing B\nf() = myfunc(1)\nend\n"
+    b_entry = "module B\nexport myfunc\nmyfunc(alpha) = 1\nend\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsfoot/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsfoot/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsfoot/Main/src/MainP.jl"), SourceText(entry, "julia")))
+    add_file!(jw, TextFile(URI("file:///wsfoot/B/Project.toml"), SourceText(b_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsfoot/B/src/B.jl"), SourceText(b_entry, "julia")))
+
+    uri = URI("file:///wsfoot/Main/src/MainP.jl")
+    result = get_hover_text(jw, uri, findfirst("f() = myfunc", entry).stop)
+    @test result !== nothing
+    @test occursin("Exported by `B`", result)
+end
+
 @testitem "Hover: docstring edit in the defining file re-executes no analysis" setup=[HoverCrossWS] begin
     import JuliaWorkspaces.Salsa.TraceLogging as TL
 

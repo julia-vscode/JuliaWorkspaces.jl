@@ -438,7 +438,10 @@ function _api_status_line(x::CSTParser.EXPR, rt, root, env, meta_dict)
     end
     if r isa StaticLint.TreeRef && !(r.kind in (:external_module, :external_symbol)) &&
        rt !== nothing && root !== nothing
-        ex = derived_module_exports(rt, root, r.origin_module)
+        # A cross-file name's origin module may live in ANOTHER workspace root (a
+        # deved package); query its owning root, as signatures/definitions do.
+        qroot = _method_items_root(rt, root, r.origin_module)
+        ex = derived_module_exports(rt, qroot, r.origin_module)
         nm = String(r.name)
         status = nm in ex.exports ? :exported : nm in ex.publics ? :public : return ""
         modname = isempty(r.origin_module) ? nothing : Symbol(last(r.origin_module))

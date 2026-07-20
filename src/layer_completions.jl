@@ -381,6 +381,18 @@ function _completion_details_label(b)
     return nothing
 end
 
+# API-status tag for a tree-declared name: `exported`/`public` from its origin
+# module's export/public lists (queried in the module's OWN workspace root,
+# which may differ from the current one for a deved package), or `nothing` for
+# an internal workspace name — matching the hover footer.
+function _tree_api_status_label(rt, root, origin_module::Vector{String}, name::String)
+    isempty(origin_module) && return nothing
+    qroot = _method_items_root(rt, root, origin_module)
+    ex = derived_module_exports(rt, qroot, origin_module)
+    return name in ex.exports ? _api_status_label(:exported) :
+           name in ex.publics ? _api_status_label(:public) : nothing
+end
+
 function _completion_details_description(b)
     td = get_typed_definition(b)
     td === missing ? nothing : string(td)
@@ -1025,6 +1037,7 @@ function _add_visible_name_completion(state::_CompletionState, rt, root, name::S
     kind = _completion_kind_for_visible(vn.kind)
     detail = nothing
     documentation = nothing
+    detail_description = nothing
     if vn.kind === :external_symbol
         store = get!(store_cache, vn.origin_module) do
             _resolve_external_module(rt, root, vn.origin_module)
@@ -1048,11 +1061,13 @@ function _add_visible_name_completion(state::_CompletionState, rt, root, name::S
         # cached).
         doc = item_documentation(rt, vn.item)
         doc === nothing || (documentation = _sanitize_docstring(doc))
+        # exported/public tag, consistent with the hover footer for the same name.
+        detail_description = _tree_api_status_label(rt, root, vn.origin_module, name)
     end
     foreach(possible_names) do nn
         _add_completion_item(state, CompletionResultItem(
             nn, kind, detail, documentation,
-            _texteditfor(state, spartial, nn)), spartial, priority)
+            _texteditfor(state, spartial, nn); detail_description=detail_description), spartial, priority)
     end
 end
 
