@@ -1,14 +1,22 @@
-# Per-module extended-method contributions, cached by store identity. Module
-# stores are immutable once loaded (the baked stdlibs const and the memoized
-# package-metadata inputs), so contributions never change. The keys are pinned
-# for the process lifetime by those owners anyway, so the IdDict doesn't leak.
-const _EXTENDS_CACHE = IdDict{SymbolServer.ModuleStore,Vector{Pair{SymbolServer.VarRef,SymbolServer.VarRef}}}()
+# Per-module extended-method contributions, cached by store `objectid`. A
+# store's contents are immutable once loaded, so its contributions never
+# change. Stdlib stores are const, but PACKAGE stores are re-created on
+# re-index — so the cache holds only a `WeakRef` to each store (keyed by
+# `objectid`, a value that does not pin the store): once a re-created/dropped
+# store is otherwise unreferenced, its entry — and the whole symbol table it
+# would have pinned — can be collected. The `=== m` guard rejects a stale
+# entry should an `objectid` be reused after collection. Dead entries are
+# swept opportunistically so the map can't grow without bound across
+# re-indexes.
+const _EXTENDS_CACHE = Dict{UInt,Tuple{WeakRef,Vector{Pair{SymbolServer.VarRef,SymbolServer.VarRef}}}}()
 const _EXTENDS_CACHE_LOCK = ReentrantLock()
+const _EXTENDS_CACHE_SWEEP_AT = 512
 
 function _module_extends_contributions(m::SymbolServer.ModuleStore)
+    oid = objectid(m)
     @lock _EXTENDS_CACHE_LOCK begin
-        cached = get(_EXTENDS_CACHE, m, nothing)
-        cached !== nothing && return cached
+        hit = get(_EXTENDS_CACHE, oid, nothing)
+        hit !== nothing && hit[1].value === m && return hit[2]
     end
     tmp = Dict{SymbolServer.VarRef,Vector{SymbolServer.VarRef}}()
     SymbolServer.collect_extended_methods(m, tmp, m.name)
@@ -21,8 +29,12 @@ function _module_extends_contributions(m::SymbolServer.ModuleStore)
         end
     end
     @lock _EXTENDS_CACHE_LOCK begin
-        return get!(_EXTENDS_CACHE, m, contribs)
+        if length(_EXTENDS_CACHE) >= _EXTENDS_CACHE_SWEEP_AT
+            filter!(kv -> kv.second[1].value !== nothing, _EXTENDS_CACHE)
+        end
+        _EXTENDS_CACHE[oid] = (WeakRef(m), contribs)
     end
+    return contribs
 end
 
 # Equivalent to `SymbolServer.collect_extended_methods(store)`, but assembled

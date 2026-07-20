@@ -93,3 +93,21 @@ end
     @test collect(df.missing_pkg_metadata) == [uncached_key]
     @test input_package_metadata(jw.runtime, :CachedPkg, cached_uuid, v"1.0.0", tree) !== nothing
 end
+
+@testitem "Package cache loading: extends cache does not pin dropped module stores" begin
+    using JuliaWorkspaces: _module_extends_contributions
+    using JuliaWorkspaces.SymbolServer: ModuleStore, VarRef
+
+    # A re-created/dropped package store must be collectable — the extends cache
+    # holds only a WeakRef, so it never pins the store (and its whole symbol
+    # table) for the process lifetime.
+    function cache_an_ephemeral_store()
+        ms = ModuleStore(VarRef(nothing, :Ephemeral), Dict{Symbol,Any}(), "", Symbol[], Symbol[], Symbol[])
+        _module_extends_contributions(ms)   # populate the cache
+        return WeakRef(ms)
+    end
+
+    wr = cache_an_ephemeral_store()
+    GC.gc(true); GC.gc(true)
+    @test wr.value === nothing              # collected ⇒ the cache did not pin it
+end
