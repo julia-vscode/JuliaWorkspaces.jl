@@ -1,6 +1,7 @@
 module CacheStore
 using ..SymbolServer: VarRef, FakeTypeName, FakeTypeofBottom, FakeTypeVar, FakeUnion, FakeUnionAll, Unserializable
 using ..SymbolServer: ModuleStore, Package, FunctionStore, MethodStore, DataTypeStore, GenericStore
+using ..SymbolServer: CACHE_FORMAT_VERSION
 @static if !(Vararg isa Type)
     using ..SymbolServer: FakeTypeofVararg
 end
@@ -32,7 +33,8 @@ const UnserializableHeader = 0x17
 # reserve 0x00-0xfe for type headers and indicate that this file is binary by not starting
 # with ASCII
 const MagicHeader = b"\xffjstore"
-const StoreVersion = b"\x00\x02"
+# Derived from CACHE_FORMAT_VERSION (utils.jl, included first) as a 2-byte tag.
+const StoreVersion = UInt8[CACHE_FORMAT_VERSION >> 8, CACHE_FORMAT_VERSION & 0xff]
 
 struct CacheCorruptedError <: Exception
     msg::String
@@ -190,7 +192,6 @@ function _write(io, x::FunctionStore, depth::Int)
     _write_vector(io, x.methods, depth)
     _write(io, x.doc, depth)
     _write(io, x.extends, depth)
-    _write(io, x.exported, depth)
 end
 
 function _write(io, x::DataTypeStore, depth::Int)
@@ -204,7 +205,6 @@ function _write(io, x::DataTypeStore, depth::Int)
     _write_vector(io, x.fieldnames, depth)
     _write_vector(io, x.methods, depth)
     _write(io, x.doc, depth)
-    _write(io, x.exported, depth)
 end
 
 function _write(io, x::GenericStore, depth::Int)
@@ -214,7 +214,6 @@ function _write(io, x::GenericStore, depth::Int)
     _write(io, x.name, depth)
     _write_any(io, x.typ, depth)
     _write(io, x.doc, depth)
-    _write(io, x.exported, depth)
 end
 
 function _write(io, x::ModuleStore, depth::Int)
@@ -240,8 +239,8 @@ function _write(io, x::ModuleStore, depth::Int)
         end
     end
     _write(io, x.doc, depth)
-    _write(io, x.exported, depth)
     _write_vector(io, x.exportednames, depth)
+    _write_vector(io, x.publicnames, depth)
     _write_vector(io, x.used_modules, depth)
 end
 
@@ -372,7 +371,6 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
             _read_vector(io, MethodStore, depth),
             _read(io, Base.read(io, UInt8), depth),
             _read(io, Base.read(io, UInt8), depth),
-            _read(io, Base.read(io, UInt8), depth),
         )
     elseif t === DataTypeStoreHeader
         yield()
@@ -384,12 +382,10 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
             _read_vector(io, Any, depth),
             _read_vector(io, MethodStore, depth),
             _read(io, Base.read(io, UInt8), depth),
-            _read(io, Base.read(io, UInt8), depth),
         )
     elseif t === GenericStoreHeader
         yield()
         GenericStore(
-            _read(io, Base.read(io, UInt8), depth),
             _read(io, Base.read(io, UInt8), depth),
             _read(io, Base.read(io, UInt8), depth),
             _read(io, Base.read(io, UInt8), depth),
@@ -409,10 +405,10 @@ function _read(io, t = Base.read(io, UInt8), depth::Int = 0)
             vals[k] = _read(io, vt, depth)
         end
         doc = _read(io, Base.read(io, UInt8), depth)
-        exported = _read(io, Base.read(io, UInt8), depth)
         exportednames = _read_vector(io, Symbol, depth)
+        publicnames = _read_vector(io, Symbol, depth)
         used_modules = _read_vector(io, Symbol, depth)
-        ModuleStore(name, vals, doc, exported, exportednames, used_modules)
+        ModuleStore(name, vals, doc, exportednames, publicnames, used_modules)
     elseif t === TrueHeader
         true
     elseif t === FalseHeader

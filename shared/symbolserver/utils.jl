@@ -1,9 +1,14 @@
 using Pkg
 
-# Symbol-cache hosting layout version (the "vN" path element under store/).
-# Bump here when the on-disk/hosted layout changes. Keep in sync with
-# scripts/symbolcache_common.sh (STORE_VERSION) — the shell scripts' copy.
-const CACHE_STORE_VERSION = "v2"
+# Single source of truth for the symbol-cache format version. Bump when the
+# `.jstore` serialization or the hosted store layout changes: the serialized
+# `StoreVersion` (serialize.jl), the hosted path element `CACHE_STORE_VERSION`,
+# and the local scratch dir (types.jl) all derive from it. The shell copy in
+# scripts/symbolcache_common.sh (STORE_VERSION) is the one place that must be
+# kept in sync by hand.
+const CACHE_FORMAT_VERSION = 3
+# The "vN" path element under store/.
+const CACHE_STORE_VERSION = "v$(CACHE_FORMAT_VERSION)"
 
 @static if VERSION < v"1.1"
     const PackageEntry = Vector{Dict{String,Any}}
@@ -424,7 +429,7 @@ recursive_copy(ua::FakeUnionAll) = FakeUnionAll(recursive_copy(ua.var), recursiv
 end
 
 recursive_copy(m::ModuleStore) = ModuleStore(recursive_copy(m.name), recursive_copy(m.vals), m.doc,
-                                             m.exported, copy(m.exportednames), copy(m.used_modules))
+                                             copy(m.exportednames), copy(m.publicnames), copy(m.used_modules))
 
 recursive_copy(p::Package) = Package(p.name,
                                      recursive_copy(p.val),
@@ -445,19 +450,16 @@ recursive_copy(dts::DataTypeStore) = DataTypeStore(recursive_copy(dts.name),
                                                    recursive_copy(dts.types),
                                                    recursive_copy(dts.fieldnames),
                                                    recursive_copy(dts.methods),
-                                                   dts.doc,
-                                                   dts.exported)
+                                                   dts.doc)
 
 recursive_copy(fs::FunctionStore) = FunctionStore(recursive_copy(fs.name),
                                                   recursive_copy(fs.methods),
                                                   fs.doc,
-                                                  recursive_copy(fs.extends),
-                                                  fs.exported)
+                                                  recursive_copy(fs.extends))
 
 recursive_copy(gs::GenericStore) = GenericStore(recursive_copy(gs.name),
                                                 recursive_copy(gs.typ),
-                                                gs.doc,
-                                                gs.exported)
+                                                gs.doc)
 
 
 # Tools for modifying source location
@@ -471,9 +473,9 @@ recursive_copy(gs::GenericStore) = GenericStore(recursive_copy(gs.name),
 function modify_dirs(m::ModuleStore, f)
     for (k, v) in m.vals
         if v isa FunctionStore
-            m.vals[k] = FunctionStore(v.name, MethodStore[MethodStore(m.name, m.mod, f(m.file), m.line, m.sig, m.kws, m.rt) for m in v.methods], v.doc, v.extends, v.exported)
+            m.vals[k] = FunctionStore(v.name, MethodStore[MethodStore(m.name, m.mod, f(m.file), m.line, m.sig, m.kws, m.rt) for m in v.methods], v.doc, v.extends)
         elseif v isa DataTypeStore
-            m.vals[k] = DataTypeStore(v.name, v.super, v.parameters, v.types, v.fieldnames, MethodStore[MethodStore(m.name, m.mod, f(m.file), m.line, m.sig, m.kws, m.rt) for m in v.methods], v.doc, v.exported)
+            m.vals[k] = DataTypeStore(v.name, v.super, v.parameters, v.types, v.fieldnames, MethodStore[MethodStore(m.name, m.mod, f(m.file), m.line, m.sig, m.kws, m.rt) for m in v.methods], v.doc)
         elseif v isa ModuleStore
             modify_dirs(v, f)
         end

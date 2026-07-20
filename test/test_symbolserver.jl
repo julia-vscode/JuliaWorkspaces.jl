@@ -992,3 +992,42 @@ end
     end
     @test :nonexported_helper in commit_then_enumerate()
 end
+
+@testitem "SymbolServer: ModuleStore splits exported vs public names" begin
+    using JuliaWorkspaces.SymbolServer: ModuleStore
+    # `public` is a 1.11+ keyword; the exported/public split only exists there.
+    if isdefined(Base, :ispublic)
+        m = Module(:ExportPublicSplit)
+        Core.eval(m, Meta.parseall("export ex_fn\npublic pub_fn\nex_fn() = 1\npub_fn() = 2\ninternal_fn() = 3\n"))
+        ms = ModuleStore(m)
+
+        # exportednames = true exports only; publicnames = exported ∪ public.
+        @test :ex_fn in ms.exportednames
+        @test :ex_fn in ms.publicnames
+        @test !(:pub_fn in ms.exportednames)   # public-but-not-exported: NOT an export
+        @test :pub_fn in ms.publicnames        # ...but is public
+        @test !(:internal_fn in ms.exportednames)
+        @test !(:internal_fn in ms.publicnames)
+    else
+        @test true
+    end
+end
+
+@testitem "SymbolServer: exportednames/publicnames survive a cache round-trip" begin
+    using JuliaWorkspaces.SymbolServer: CacheStore, ModuleStore, FunctionStore, VarRef, MethodStore, Package
+
+    mvr = VarRef(nothing, :M)
+    fs_pub = FunctionStore(VarRef(mvr, :pubf), MethodStore[], "", VarRef(mvr, :pubf))  # public, not exported
+    fs_exp = FunctionStore(VarRef(mvr, :expf), MethodStore[], "", VarRef(mvr, :expf))  # exported
+    ms = ModuleStore(mvr, Dict{Symbol,Any}(:pubf => fs_pub, :expf => fs_exp),
+                     "", [:expf], [:expf, :pubf], Symbol[])
+    pkg = Package("M", ms, Base.UUID(UInt128(1)), nothing)
+
+    io = IOBuffer(); CacheStore.write(io, pkg); seekstart(io)
+    r = CacheStore.read(io).val
+
+    # exported ⊆ public; the split must survive serialization.
+    @test r.exportednames == [:expf]
+    @test sort(r.publicnames) == [:expf, :pubf]
+    @test haskey(r.vals, :pubf) && haskey(r.vals, :expf)
+end

@@ -402,7 +402,10 @@ struct JuliaWorkspace
 
     function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, resolve_workspace_environments::Bool=true)
         if store_path === nothing
-            store_path = Scratch.@get_scratch!("store_path_v1")
+            # Tie the local scratch store to the cache format version so a format
+            # bump starts fresh instead of reading stale-format caches.
+            scratch_key = "store_path_$(SymbolServer.CACHE_STORE_VERSION)"
+            store_path = Scratch.@get_scratch!(scratch_key)
         end
         need_dynamic_feature = dynamic != DynamicOff || symbolcache_download
         dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, max_concurrent_djps=max_concurrent_djps) : nothing
@@ -427,8 +430,15 @@ function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1)
     cache_path = joinpath(store_path, uppercase(string(name)[1:1]), string(name), string(uuid), string(filename, ".jstore"))
 
     if isfile(cache_path)
-        package_data = open(cache_path) do io
-            SymbolServer.CacheStore.read(io)
+        # A stale/corrupt cache (e.g. an older serialization format left in the
+        # scratch store) is a miss, not a fatal error — the environment reindexes.
+        package_data = try
+            open(cache_path) do io
+                SymbolServer.CacheStore.read(io)
+            end
+        catch err
+            err isa SymbolServer.CacheStore.CacheCorruptedError || rethrow()
+            return nothing
         end
 
         pkg_path = Base.locate_package(Base.PkgId(uuid, string(name)))

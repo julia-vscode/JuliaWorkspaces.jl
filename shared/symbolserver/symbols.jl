@@ -11,12 +11,25 @@ struct ModuleStore <: SymStore
     name::VarRef
     vals::Dict{Symbol,Any}
     doc::String
-    exported::Bool
+    # A binding's export/public status is a (module, name) property recorded here
+    # for every name — including re-exports whose value is a bare `VarRef` and so
+    # can't carry its own flag. exported ⊆ public.
     exportednames::Vector{Symbol}
+    publicnames::Vector{Symbol}
     used_modules::Vector{Symbol}
 end
 
-ModuleStore(m) = ModuleStore(VarRef(m), Dict{Symbol,Any}(), _doc(m, nameof(m)), true, unsorted_names(m), Symbol[])
+# Back-compat positional form: the old `exported::Bool` (slot 4) is dropped, and
+# the old single `exportednames` list seeds both name lists.
+ModuleStore(name::VarRef, vals, doc, ::Bool, exportednames, used_modules) =
+    ModuleStore(name, vals, doc, exportednames, exportednames, used_modules)
+
+function ModuleStore(m)
+    # `names(m)` is the public set on 1.11+; exported ⊆ public.
+    ns = unsorted_names(m)
+    ModuleStore(VarRef(m), Dict{Symbol,Any}(), _doc(m, nameof(m)),
+        filter(s -> _isexported(m, s), ns), filter(s -> _ispublic(m, s), ns), Symbol[])
+end
 Base.getindex(m::ModuleStore, k) = m.vals[k]
 Base.setindex!(m::ModuleStore, v, k) = (m.vals[k] = v)
 Base.haskey(m::ModuleStore, k) = haskey(m.vals, k)
@@ -62,16 +75,20 @@ struct DataTypeStore <: SymStore
     fieldnames::Vector{Any}
     methods::Vector{MethodStore}
     doc::String
-    exported::Bool
-    function DataTypeStore(names, super, parameters, fieldtypes, fieldnames, methods, doc, exported)
+    function DataTypeStore(names, super, parameters, fieldtypes, fieldnames, methods, doc)
         if length(fieldtypes) < length(fieldnames)
             append!(fieldtypes, [FakeTypeName(Any) for _ in 1:(length(fieldnames)-length(fieldtypes))])
         end
-        new(names, super, parameters, fieldtypes, fieldnames, methods, doc, exported)
+        new(names, super, parameters, fieldtypes, fieldnames, methods, doc)
     end
 end
 
-function DataTypeStore(@nospecialize(t), symbol, parent_mod, exported)
+# Back-compat positional form: drop the trailing `exported::Bool` (status now
+# lives on the owning ModuleStore's name lists).
+DataTypeStore(names, super, parameters, fieldtypes, fieldnames, methods, doc, ::Bool) =
+    DataTypeStore(names, super, parameters, fieldtypes, fieldnames, methods, doc)
+
+function DataTypeStore(@nospecialize(t), symbol, parent_mod)
     ur_t = Base.unwrap_unionall(t)
     parameters = if isdefined(ur_t, :parameters)
         map(ur_t.parameters) do p
@@ -89,8 +106,11 @@ function DataTypeStore(@nospecialize(t), symbol, parent_mod, exported)
         []
     end
     fieldnames = has_fields ? collect(Base.fieldnames(ur_t)) : Symbol[]
-    DataTypeStore(FakeTypeName(ur_t), FakeTypeName(ur_t.super), parameters, types, fieldnames, MethodStore[], _doc(parent_mod, symbol), exported)
+    DataTypeStore(FakeTypeName(ur_t), FakeTypeName(ur_t.super), parameters, types, fieldnames, MethodStore[], _doc(parent_mod, symbol))
 end
+
+# Back-compat type-object form: drop the trailing `exported`.
+DataTypeStore(@nospecialize(t), symbol, parent_mod, ::Bool) = DataTypeStore(t, symbol, parent_mod)
 
 function Base.show(io::IO, dts::DataTypeStore)
     print(io, dts.name, " <: ", dts.super, " with $(length(dts.methods)) methods")
@@ -101,16 +121,22 @@ struct FunctionStore <: SymStore
     methods::Vector{MethodStore}
     doc::String
     extends::VarRef
-    exported::Bool
 end
 
-function FunctionStore(@nospecialize(f), symbol, parent_mod, exported)
+# Back-compat positional form: drop the trailing `exported::Bool`.
+FunctionStore(name::VarRef, methods, doc, extends::VarRef, ::Bool) =
+    FunctionStore(name, methods, doc, extends)
+
+function FunctionStore(@nospecialize(f), symbol, parent_mod)
     if f isa Core.IntrinsicFunction
-        FunctionStore(VarRef(VarRef(Core.Intrinsics), nameof(f)), MethodStore[], _doc(parent_mod, symbol), VarRef(VarRef(parentmodule(f)), nameof(f)), exported)
+        FunctionStore(VarRef(VarRef(Core.Intrinsics), nameof(f)), MethodStore[], _doc(parent_mod, symbol), VarRef(VarRef(parentmodule(f)), nameof(f)))
     else
-        FunctionStore(VarRef(VarRef(parent_mod), nameof(f)), MethodStore[], _doc(parent_mod, symbol), VarRef(VarRef(parentmodule(f)), nameof(f)), exported)
+        FunctionStore(VarRef(VarRef(parent_mod), nameof(f)), MethodStore[], _doc(parent_mod, symbol), VarRef(VarRef(parentmodule(f)), nameof(f)))
     end
 end
+
+# Back-compat type-object form: drop the trailing `exported`.
+FunctionStore(@nospecialize(f), symbol, parent_mod, ::Bool) = FunctionStore(f, symbol, parent_mod)
 
 function Base.show(io::IO, fs::FunctionStore)
     print(io, fs.name, " with $(length(fs.methods)) methods")
@@ -120,8 +146,11 @@ struct GenericStore <: SymStore
     name::VarRef
     typ::Any
     doc::String
-    exported::Bool
 end
+
+# Back-compat positional form: drop the trailing `exported::Bool`.
+GenericStore(name::VarRef, typ, doc, ::Bool) =
+    GenericStore(name, typ, doc)
 
 # adapted from https://github.com/timholy/CodeTracking.jl/blob/afc73a957f5034cc7f02e084a91283c47882f92b/src/utils.jl#L87-L122
 
@@ -343,6 +372,18 @@ else
     _isdefinedglobal(m::Module, s::Symbol) = invokelatest(isdefined, m, s)
 end
 
+# Export/public status of a binding. `public` is the wider set (`export` implies
+# `public`), so an exported name has both true. invokelatest for the same
+# world-age reason as name enumeration. Pre-1.11 has no `public`, and `names(m)`
+# there is the exported set, so both collapse to that.
+@static if isdefined(Base, :ispublic)
+    _isexported(m::Module, s::Symbol) = invokelatest(Base.isexported, m, s)
+    _ispublic(m::Module, s::Symbol) = invokelatest(Base.ispublic, m, s)
+else
+    _isexported(m::Module, s::Symbol) = s in unsorted_names(m)
+    _ispublic(m::Module, s::Symbol) = _isexported(m, s)
+end
+
 # Read global `m.s`, returning `(false, nothing)` rather than throwing on an
 # ambiguous `using` binding. Backstop for the 1.11 path (1.12+ skips these via
 # `_isdefinedglobal`); without it one such name aborts the whole package.
@@ -542,7 +583,7 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
 
             if Base.unwrap_unionall(x) isa DataType # Unions aren't handled here.
                 if parentmodule(x) === m
-                    cache[s] = DataTypeStore(x, s, m, s in getnames(m))
+                    cache[s] = DataTypeStore(x, s, m)
                     cache_methods(x, s, env, get_return_type)
                 elseif !(x isa UnionAll) && haskey(cache, s) && (cache[s] isa FunctionStore || cache[s] isa DataTypeStore) && !isempty(cache[s].methods)
                     # `cache_methods` (run when the owning module was crawled — Core is
@@ -569,7 +610,7 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
                     # module, not the shadowing one — so it correctly falls through below.
                 elseif nameof(x) !== s || x isa UnionAll
                     # This needs some finessing.
-                    cache[s] = DataTypeStore(x, s, m, s in getnames(m))
+                    cache[s] = DataTypeStore(x, s, m)
                     ms = cache_methods(x, s, env, get_return_type)
                     # A slightly difficult case. `s` is probably a shadow binding of `x` but we should store the methods nonetheless.
                     # Example: DataFrames.Not points to InvertedIndices.InvertedIndex
@@ -595,7 +636,7 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
                 # at `Core.Intrinsics`; accessed from anywhere else it falls through to the `elseif` branch
                 # below which forwards to `VarRef(VarRef(Core.Intrinsics), nameof(x))`.
                 if (x isa Core.IntrinsicFunction ? m === Core.Intrinsics : parentmodule(x) === m)
-                    cache[s] = FunctionStore(x, s, m, s in getnames(m))
+                    cache[s] = FunctionStore(x, s, m)
                     cache_methods(x, s, env, get_return_type)
                 elseif !haskey(cache, s)
                     # This will be replaced at a later point by a FunctionStore if methods for `x` are defined within `m`.
@@ -622,7 +663,7 @@ function symbols(env::EnvStore, m::Union{Module,Nothing} = nothing, allnames::Ba
                     cache[s] = VarRef(x)
                 end
             else
-                cache[s] = GenericStore(VarRef(VarRef(m), s), FakeTypeName(typeof(x)), _doc(m, s), s in getnames(m))
+                cache[s] = GenericStore(VarRef(VarRef(m), s), FakeTypeName(typeof(x)), _doc(m, s))
             end
         end
     else
@@ -659,6 +700,7 @@ function load_core(; get_return_type = false)
 
     # This is wrong. Every module contains it's own include function.
     push!(cache[:Base].exportednames, :include)
+    push!(cache[:Base].publicnames, :include)
     let f = cache[:Base][:include]
         if haskey(cache[:Base][:MainInclude], :include)
             cache[:Base][:include] = FunctionStore(f.name, cache[:Base][:MainInclude][:include].methods, f.doc, f.extends, true)
@@ -755,6 +797,7 @@ function load_core(; get_return_type = false)
         VarRef(VarRef(Core), :ccall),
         true)
     push!(cache[:Core].exportednames, :ccall)
+    push!(cache[:Core].publicnames, :ccall)
     cache[:Core][Symbol("@__doc__")] = FunctionStore(VarRef(VarRef(Core), Symbol("@__doc__")), [], "", VarRef(VarRef(Core), Symbol("@__doc__")), true)
     cache_methods(getglobal(Core, Symbol("@__doc__")), Symbol("@__doc__"), cache, false)
     # `invokelatest` and `invoke_in_world` forward keyword arguments to their
