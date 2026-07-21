@@ -18,10 +18,10 @@ end
     using JuliaWorkspaces
     using JuliaWorkspaces.SymbolServer: fetch_availability_index
 
-    has_tar = Sys.which("tar") !== nothing
-    has_tar || @info "skipping symbol cache integration test: tar not on PATH"
+    run_test = !Sys.iswindows()
+    run_test || @info "skipping symbol cache integration test on Windows"
 
-    if has_tar
+    if run_test
         V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
         mktempdir() do up
             # lay out <up>/store/<version>/index.tar.gz containing index.txt
@@ -77,10 +77,10 @@ end
     using JuliaWorkspaces.SymbolServer: write_cache, Package, ModuleStore, VarRef, CACHE_STORE_VERSION
     using Base: UUID
 
-    has_tar = Sys.which("tar") !== nothing
-    has_tar || @info "skipping symbol cache integration test: tar not on PATH"
+    run_test = !Sys.iswindows()
+    run_test || @info "skipping symbol cache integration test on Windows"
 
-    if has_tar
+    if run_test
         V = CACHE_STORE_VERSION
         mktempdir() do tmp
             bucket = joinpath(tmp, "bucket")
