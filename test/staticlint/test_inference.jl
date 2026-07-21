@@ -150,6 +150,142 @@ end
     @test !any(d -> occursin("Cannot define function", d.message), fa.diagnostics)
 end
 
+@testitem "method matching through a const type alias" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # A `::Alias` arg annotation, where `Alias` is a `const` type alias (parametric
+    # `const IntDict = Dict{Int,Int}` or not `const MyDict = Dict`), must narrow to
+    # the aliased datatype so calls on the arg (`length(x)`) match. Previously the
+    # arg took the opaque alias binding (type `DataType`, no supertype chain) and
+    # every method call false-flagged "No method matching".
+    root = URI("file:///t/src/M.jl")
+    f = URI("file:///t/src/t.jl")
+    jw = ws_files(
+        root => "module M\ninclude(\"t.jl\")\nend\n",
+        f => """
+        const MyDict = Dict
+        const IntDict = Dict{Int,Int}
+        f(x::IntDict) = length(x)
+        f(x::MyDict) = length(x)
+        f(x::Dict) = length(x)
+        """,
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, f)
+    @test !any(d -> occursin("No method matching", d.message), fa.diagnostics)
+end
+
+@testitem "narrow through a const alias whose base is cross-file/external" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: URI
+    using JuliaWorkspaces.StaticLint: bindingof, Binding, CoreTypes
+    using JuliaWorkspaces.CSTParser: CSTParser
+    const DataTypeStore = JuliaWorkspaces.SymbolServer.DataTypeStore
+
+    # A `const Alias = T` whose base `T` is only visible cross-file / from another
+    # module resolves per-file to an `:external_symbol` TreeRef (not a local
+    # Binding/store). The alias must still follow that TreeRef to the real
+    # datatype — both the bare form (`const PA = PkgId`) and the parametric form
+    # (`const PAV = Vector{PkgId}`) — so `::Alias` args narrow and calls on them
+    # don't false-flag. Uses `Base: PkgId` (always available in the test env).
+    root = URI("file:///t/src/M.jl")
+    f = URI("file:///t/src/t.jl")
+    jw = ws_files(
+        root => "module M\nusing Base: PkgId\ninclude(\"t.jl\")\nend\n",
+        f => "const PA = PkgId\nconst PAV = Vector{PkgId}\nf(x::PA) = x.name\ng(x::PAV) = length(x)\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, f)
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, f)
+
+    argtype(name) = begin
+        t = nothing
+        find_first(cst) do x
+            if CSTParser.isdeclaration(x) && length(x.args) >= 2 &&
+                    JuliaWorkspaces.StaticLint.isidentifier(x.args[2]) &&
+                    CSTParser.valof(x.args[2]) == name && bindingof(x, fa.meta) isa Binding
+                t = bindingof(x, fa.meta).type
+                return true
+            end
+            false
+        end
+        t
+    end
+
+    # bare alias → the real PkgId datatype
+    tpa = argtype("PA")
+    @test tpa isa DataTypeStore && occursin("PkgId", string(tpa.name))
+    # parametric alias → the container datatype (Array)
+    @test argtype("PAV") isa DataTypeStore
+    # `x.name` (a real PkgId field) and `length(::Vector)` must not false-flag
+    @test !any(d -> occursin("No method matching", d.message) ||
+                    occursin("has no field", d.message), fa.diagnostics)
+end
+
+@testitem "const alias with an unresolvable base does not false-flag calls" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # When an alias's base can't be resolved at all (undefined name), the arg must
+    # read as `Any` (type left unset) rather than the opaque alias binding — a
+    # broken supertype chain would spuriously fail method matching. The bad base
+    # is still reported as a missing reference; the method call must not be. Covers
+    # both the bare (`const B2 = Undef`) and parametric (`const B1 = Undef{Int}`)
+    # forms.
+    root = URI("file:///t/src/M.jl")
+    f = URI("file:///t/src/t.jl")
+    jw = ws_files(
+        root => "module M\ninclude(\"t.jl\")\nend\n",
+        f => "const B1 = NoSuchType{Int}\nf(x::B1) = length(x)\nconst B2 = AlsoMissing\ng(x::B2) = length(x)\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, f)
+    @test !any(d -> occursin("No method matching", d.message), fa.diagnostics)
+    # the genuinely-broken bases are still surfaced
+    @test any(d -> occursin("Missing reference", d.message), fa.diagnostics)
+end
+
+@testitem "local shadow of a global function is not checked against the global" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # A local closure or parameter that shadows a module-level function fully
+    # replaces it — its method set is exactly its own, so calls must be checked
+    # against the local, not the global's (cross-file) arity. Previously the
+    # tree-arity gate keyed on the NAME and false-flagged the shadowed call.
+    root = URI("file:///t/src/M.jl")
+    f = URI("file:///t/src/t.jl")
+    jw = ws_files(
+        root => "module M\ninclude(\"t.jl\")\nend\n",
+        f => """
+        foo(a, b) = a + b
+        function bar()
+            foo(a) = a
+            foo(1)
+        end
+        function bar(foo)
+            foo(1)
+        end
+        """,
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, f)
+    @test !any(d -> occursin("No method matching", d.message), fa.diagnostics)
+
+    # ...but a genuinely-wrong call to the (unshadowed) global still flags.
+    g = URI("file:///t/src/g.jl")
+    jw2 = ws_files(
+        root => "module M\ninclude(\"g.jl\")\nend\n",
+        g => "foo(a, b) = a + b\nbaz() = foo(1)\n",
+    )
+    fa2 = JuliaWorkspaces.derived_file_analysis(jw2.runtime, root, g)
+    @test any(d -> occursin("No method matching", d.message), fa2.diagnostics)
+
+    # A genuinely-wrong call to the LOCAL reports the local's arity, not the
+    # shadowed global's (the message must not quote the global's 2 args).
+    h = URI("file:///t/src/h.jl")
+    jw3 = ws_files(
+        root => "module M\ninclude(\"h.jl\")\nend\n",
+        h => "foo(a, b) = a + b\nfunction bar()\n    foo(a) = a\n    foo(1, 2, 3)\nend\n",
+    )
+    fa3 = JuliaWorkspaces.derived_file_analysis(jw3.runtime, root, h)
+    d = only(filter(x -> occursin("No method matching", x.message), fa3.diagnostics))
+    @test occursin("Expected 1 argument", d.message) && occursin("got 3", d.message)
+end
+
 @testitem "infer property-destructure loop variable field types" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: CoreTypes
     # `for (; a, b) in coll` must infer each variable's OWN field type from the

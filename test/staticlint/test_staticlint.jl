@@ -4201,6 +4201,12 @@ end
     m = describe("f(x::Int) = x\nf(x::Int, y::Int) = x\nf(\"s\")\n", "f")
     @test occursin("argument 1", m) && occursin("expected `Int", m) && occursin("got `String", m)
 
+    # several methods of the SAME (matching) arity: no single expected type is
+    # meaningful, so only the header is emitted — never an arbitrary "expected".
+    m = describe("f(x::Int) = x\nf(x::String) = x\nf(2.0)\n", "f")
+    @test occursin("No method matching `f(::Float64)`", m)
+    @test !occursin("expected", m) && !occursin("At argument", m)
+
     # keyword: a store function with no keywords called with one
     m = describe("g() = sqrt(1; foo=2)\n", "sqrt")
     @test occursin("keyword `foo`", m)
