@@ -165,7 +165,7 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
 
         # Late import-failure marking. Runs here (not in-pass) because
         # resolve_import failures may be retried via state.resolveonly.
-        StaticLint.mark_unresolved_imports!(cst2, meta_dict)
+        StaticLint.mark_unresolved_imports!(cst2, env, meta_dict)
     end
 
     return (meta_dict=meta_dict, workspace_packages=workspace_packages)

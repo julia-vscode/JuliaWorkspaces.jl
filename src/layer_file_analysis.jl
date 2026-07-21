@@ -761,7 +761,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
 
     # Late import-failure marking (in-pass failures may be retried via
     # `state.resolveonly`, so this can only run after the pass).
-    StaticLint.mark_unresolved_imports!(cst, meta_dict)
+    StaticLint.mark_unresolved_imports!(cst, env, meta_dict)
 
     diagnostics = _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root, path)
 

@@ -344,7 +344,7 @@ function fill_synthetic_import_binding!(b::Binding, val, state)
 end
 
 """
-    mark_unresolved_imports!(x::EXPR, meta_dict, isquoted=false)
+    mark_unresolved_imports!(x::EXPR, env, meta_dict, isquoted=false)
 
 Post-`semantic_pass` marking of import statements that still failed to
 resolve: the first unresolved component of each import path gets an
@@ -352,40 +352,40 @@ resolve: the first unresolved component of each import path gets an
 alongside `resolve_remaining_getfields!`), because in-pass failures may
 still be retried via `state.resolveonly`.
 """
-function mark_unresolved_imports!(x::EXPR, meta_dict, isquoted=false)
+function mark_unresolved_imports!(x::EXPR, env, meta_dict, isquoted=false)
     # relies on quoted(x) and unquoted(x) being mutually exclusive
     isquoted = isquoted ? !unquoted(x) : quoted(x)
     if !isquoted && (headof(x) === :using || headof(x) === :import)
-        mark_unresolved_import_stmt!(x, meta_dict)
+        mark_unresolved_import_stmt!(x, env, meta_dict)
         return x
     end
     if x.args !== nothing
         for a in x.args
-            mark_unresolved_imports!(a, meta_dict, isquoted)
+            mark_unresolved_imports!(a, env, meta_dict, isquoted)
         end
     end
     return x
 end
 
-function mark_unresolved_import_stmt!(x::EXPR, meta_dict)
+function mark_unresolved_import_stmt!(x::EXPR, env, meta_dict)
     x.args === nothing && return
     if length(x.args) > 0 && isoperator(headof(x.args[1])) && valof(headof(x.args[1])) == ":"
         colon_expr = x.args[1]
-        failed = first_unresolved_import_component(colon_expr.args[1], meta_dict)
+        failed = first_unresolved_import_component(colon_expr.args[1], env, meta_dict)
         if failed !== nothing
             # the whole module path is unknown; one error there covers the
             # statement (the listed names carry synthetic bindings)
             seterror!(failed, UnresolvedImport, meta_dict)
         else
             for i = 2:length(colon_expr.args)
-                nfailed = first_unresolved_import_component(colon_expr.args[i], meta_dict)
+                nfailed = first_unresolved_import_component(colon_expr.args[i], env, meta_dict)
                 nfailed === nothing && continue
                 seterror!(nfailed, UnresolvedImport, meta_dict)
             end
         end
     else
         for path in x.args
-            failed = first_unresolved_import_component(path, meta_dict)
+            failed = first_unresolved_import_component(path, env, meta_dict)
             failed === nothing && continue
             seterror!(failed, UnresolvedImport, meta_dict)
             if headof(x) === :using
@@ -402,8 +402,8 @@ end
 # First component of an import path that is still unresolved after all
 # passes: module-path components show up as ref-less (they never get
 # synthetic bindings), bound-name components as still-synthetic bindings.
-function first_unresolved_import_component(path::EXPR, meta_dict)
-    headof(path) === :as && return first_unresolved_import_component(path.args[1], meta_dict)
+function first_unresolved_import_component(path::EXPR, env, meta_dict)
+    headof(path) === :as && return first_unresolved_import_component(path.args[1], env, meta_dict)
     path.args === nothing && return nothing
     for arg in path.args
         # already diagnosed some other way (e.g. RelativeImportTooManyDots,
@@ -413,15 +413,22 @@ function first_unresolved_import_component(path::EXPR, meta_dict)
         hasref(arg, meta_dict) || return arg
         r = refof(arg, meta_dict)
         # Per-file traversal mode only: a module-path component that resolved
-        # to the `:external_symbol` tree stand-in (an UNINDEXED external module
-        # brought in only as a bare name — no ItemRef, item === nothing) is
-        # still unresolved for statement-level reporting. Without this, the
-        # colon-import of such a module (`using NotIndexed: (*)`) would look
-        # resolved on its module path and move the UnresolvedImport error onto
-        # a listed member, matching the whole-closure pass's "Failed to resolve
-        # `<module>`" outcome. Only the tree context ever produces `TreeRef`s,
-        # so this clause is inert on the whole-closure pass.
-        r isa TreeRef && r.kind === :external_symbol && return arg
+        # to the `:external_symbol` tree stand-in (an external module brought in
+        # only as a bare name — no ItemRef, item === nothing). It is unresolved
+        # ONLY when the named module isn't actually in the env: an UNINDEXED
+        # external (`using NotIndexed: (*)`) must still be flagged, matching the
+        # whole-closure pass's "Failed to resolve `<module>`" outcome. But an
+        # INDEXED external reached through a workspace package's tree context
+        # (`using Revise.CodeTracking: x`, where Revise re-exports the indexed
+        # CodeTracking via `using CodeTracking`) is resolvable — the whole-module
+        # form binds it and stays silent, so the colon form must not flag it.
+        # Only the tree context ever produces `TreeRef`s, so this is inert on the
+        # whole-closure pass.
+        if r isa TreeRef && r.kind === :external_symbol
+            topmod = isempty(r.origin_module) ? r.name : first(r.origin_module)
+            haskey(getsymbols(env), Symbol(topmod)) || return arg
+            continue
+        end
         is_synthetic_import_binding(r) && return arg
     end
     return nothing
