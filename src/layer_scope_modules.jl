@@ -3,15 +3,23 @@
 # to widen their method search past Base/Core to whatever the file's `using`s
 # actually bring into scope.
 
+# External-package `using`/`import` origin paths (env modules, e.g. ["LibGit2"])
+# visible in `visible`. Shared by completions and the in-scope-module set so both
+# read one definition. Excludes workspace-package and in-tree origins.
+_using_external_origins(visible) =
+    Set{Vector{String}}(vn.origin_module for (_, vn) in visible
+                         if vn.origin === :using_external && !isempty(vn.origin_module))
+
 # Top-level symbol of every external/workspace-package module brought into scope
 # at `path` (their exported names can carry overloads of Base/other store
 # functions). Base/Core are implicit — handled by the always-available rule in
 # `iterate_over_ss_methods` — so they are intentionally NOT collected here.
 function _in_scope_module_syms(rt, root, path::Vector{String})
-    syms = Set{Symbol}()
-    for (_, vn) in derived_module_visible_names(rt, root, path)
-        (vn.origin === :using_external || vn.origin === :using_workspace_package) || continue
-        isempty(vn.origin_module) || push!(syms, Symbol(vn.origin_module[1]))
+    visible = derived_module_visible_names(rt, root, path)
+    syms = Set{Symbol}(Symbol(p[1]) for p in _using_external_origins(visible))
+    for (_, vn) in visible
+        vn.origin === :using_workspace_package && !isempty(vn.origin_module) &&
+            push!(syms, Symbol(vn.origin_module[1]))
     end
     return syms
 end

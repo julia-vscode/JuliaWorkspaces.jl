@@ -1110,10 +1110,9 @@ function _append_module_level_completions(x::CSTParser.EXPR, spartial, state::_C
     path = vcat(state.module_path, _in_file_module_names(x, state.meta_dict))
 
     visible = derived_module_visible_names(rt, root, path)
+    ext_origins = _using_external_origins(visible)
     store_cache = Dict{Vector{String},Any}()
-    ext_origins = Set{Vector{String}}()
     for (name, vn) in visible
-        vn.origin === :using_external && push!(ext_origins, vn.origin_module)
         # declared/import-bound names rank like the old module-scope bindings;
         # `using` bring-ins rank like the old scope.modules stores
         priority = (vn.origin === :declared || vn.origin === :import_binding) ?

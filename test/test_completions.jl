@@ -1592,3 +1592,16 @@ end
     @test JuliaWorkspaces._completion_details_label(SL.Binding(cst, cst, nothing, [], true, false)) == "public"
     @test JuliaWorkspaces._completion_details_label(SL.Binding(cst, cst, nothing, [], false, false)) === nothing
 end
+
+@testitem "Completions: using-brought external names still offered" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+    uri = URI("file:///cmp/Foo.jl")
+    jw = JuliaWorkspace()
+    # `partition` is exported by Base.Iterators; `using Base.Iterators` keeps it
+    # offered as an unqualified completion (exercises the shared ext-origins path).
+    src = "module Foo\nusing Base.Iterators\nparti\nend\n"
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    result = get_completions(jw, uri, first(findfirst("parti", src)) + 5)
+    @test any(item -> startswith(item.label, "partition"), result.items)
+end
