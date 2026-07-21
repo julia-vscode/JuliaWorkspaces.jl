@@ -707,7 +707,7 @@ end
 function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     transition!(djp.fsm, DynamicProcessStarting; reason="launching")
     token = CancellationTokens.get_token(djp.cancellation_source)
-    djp.task = Threads.@async try
+    djp.task = @async try
         start(djp, df.in_channel, token)
     catch err
         # `start` reports errors from its supervised region itself; this catches
@@ -814,7 +814,7 @@ function Base.run(df::DynamicFeature)
 end
 
 function start(df::DynamicFeature)
-    Threads.@async try
+    @async try
         Base.run(df)
     catch err
         flush(stderr)
@@ -841,7 +841,7 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
     # task so the reactor stays responsive. The result is fed back as an
     # `EnvironmentPrepDoneMsg`, so all state mutation stays on the reactor.
     project_path = key.project_path
-    Threads.@async try
+    @async try
         missing_pkgs = _get_missing_packages(project_path, df.store_path)
 
         if !isempty(missing_pkgs) && df.download_enabled
@@ -952,7 +952,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
     # `StandaloneProjectPrepDoneMsg` so all state mutation stays on the reactor.
     dir = _prepare_standalone_project_dir!(df, key)
     store_path = df.store_path
-    Threads.@async try
+    @async try
         usable = isfile(joinpath(dir, "Project.toml")) && isfile(joinpath(dir, "Manifest.toml"))
         fast_lane = usable && isempty(_get_missing_packages(dir, store_path))
         put!(df.in_channel, StandaloneProjectPrepDoneMsg(key, fast_lane))
@@ -1011,7 +1011,7 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
     # Send the (blocking) index/standalone request from its own task so the
     # reactor stays responsive while the child computes. The result is fed back
     # as a `ProcessIndexedMsg`/`ProcessIndexFailedMsg`.
-    Threads.@async try
+    @async try
         result_dir = if key isa CreateStandaloneProjectKey
             # Pure path only: the reactor already prepared (cleaned + created)
             # this dir in `CreateStandaloneProjectMsg`. Recomputing the
