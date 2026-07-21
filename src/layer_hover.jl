@@ -745,7 +745,8 @@ function _get_hover(f::SymbolServer.FunctionStore, documentation::String, expr, 
 
     if expr !== nothing && env !== nothing
         tls = _retrieve_toplevel_scope(expr, meta_dict)
-        itr = func -> StaticLint.iterate_over_ss_methods(f, tls, env, func)
+        in_scope = _in_scope_syms_at(rt, root, expr, meta_dict)
+        itr = func -> StaticLint.iterate_over_ss_methods(f, tls, env, func; in_scope=in_scope)
     else
         itr = func -> begin
             for m in f.methods

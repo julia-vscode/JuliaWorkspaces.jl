@@ -1339,3 +1339,18 @@ end
     barescope = SL.Scope(nothing, CSTParser.parse("baremodule Foo\nend"), Dict{String,SL.Binding}(), Dict{Symbol,Any}(), nothing)
     @test !(:Iterators in mods(barescope, Set([:FakeMod])))
 end
+
+@testitem "Hover: method list uses the visibility layer for in-scope modules" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, URIs2
+    uri = URIs2.uri"file:///vis/Foo.jl"
+    jw = JuliaWorkspace()
+    # `using Base.Iterators` is redundant for Base subs (implicit), but this
+    # asserts the hover path is driven by _in_scope_syms_at without regressing:
+    # the Iterators overloads must still be listed.
+    src = "module Foo\nusing Base.Iterators\nlength([])\nend\n"
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    h = get_hover_text(jw, uri, first(findfirst("length([])", src)))
+    @test h !== nothing
+    @test occursin("is a function with", h)
+    @test occursin("in `Iterators`", h)
+end
