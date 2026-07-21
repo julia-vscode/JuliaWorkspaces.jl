@@ -182,13 +182,9 @@ root and looking up the owning URI from the Salsa-memoized expr→URI mapping.
 Returns `nothing` if the EXPR cannot be mapped to a file.
 """
 function _get_file_loc(x::CSTParser.EXPR, runtime)
-    root = x
-    while CSTParser.parentof(root) !== nothing
-        root = CSTParser.parentof(root)
-    end
-    CSTParser.headof(root) === :file || return nothing
-    expr_uri_map = derived_expr_uri_map(runtime)
-    uri = get(expr_uri_map, objectid(root), nothing)
+    root = _file_root(x)
+    root === nothing && return nothing
+    uri = get(derived_expr_uri_map(runtime), objectid(root), nothing)
     uri === nothing && return nothing
     _, offset = _descend(root, x)
     return (uri, offset)

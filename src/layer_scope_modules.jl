@@ -24,14 +24,21 @@ function _in_scope_module_syms(rt, root, path::Vector{String})
     return syms
 end
 
-# The URI of the file `x` lives in: walk to the `:file` root and look it up in
-# the expr→uri map. `nothing` if `x` is detached or the map has no entry.
-function _uri_for_expr(rt, x)
+# The enclosing `:file` root EXPR of `x` (walk parents); `nothing` if `x` is
+# detached or not under a file.
+function _file_root(x)
     root = x
     while CSTParser.parentof(root) !== nothing
         root = CSTParser.parentof(root)
     end
-    CSTParser.headof(root) === :file || return nothing
+    return CSTParser.headof(root) === :file ? root : nothing
+end
+
+# The URI of the file `x` lives in: look the `:file` root up in the expr→uri
+# map. `nothing` if `x` is detached or the map has no entry.
+function _uri_for_expr(rt, x)
+    root = _file_root(x)
+    root === nothing && return nothing
     return get(derived_expr_uri_map(rt), objectid(root), nothing)
 end
 
