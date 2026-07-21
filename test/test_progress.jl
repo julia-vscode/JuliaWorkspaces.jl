@@ -80,6 +80,32 @@ end
     @test key ∉ keys(df.child_progress)
 end
 
+@testitem "Refresh progress lands on the refresh bar" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, ProcessProgressMsg,
+        CreateStandaloneProjectKey, handle!
+
+    store_path = mktempdir()
+
+    calls = Tuple{String,String,Int}[]
+    cb = (key, msg, pct) -> push!(calls, (key, msg, pct))
+
+    df = DynamicFeature(DynamicIndexingOnly, store_path; progress_callback=cb)
+
+    # A refreshing key has already completed its work item, so it is in
+    # `refreshing`, not `inflight`.
+    key = CreateStandaloneProjectKey("/some/pkg", UInt64(1))
+    push!(df.refreshing, key)
+
+    handle!(df, ProcessProgressMsg(key, "Indexing Foo (1/2)...", 50))
+    @test calls[end] == ("refresh:/some/pkg", "Indexing Foo (1/2)...", 50)
+
+    # child_progress is cleared when the refresh ends so a later refresh of the
+    # same key starts fresh.
+    delete!(df.refreshing, key)
+    delete!(df.child_progress, key)
+    @test key ∉ keys(df.child_progress)
+end
+
 @testitem "Concurrent work items get independent bars" begin
     using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, ProcessProgressMsg,
         WatchEnvironmentKey, WatchTestEnvironmentKey, handle!, _complete_work_item!
