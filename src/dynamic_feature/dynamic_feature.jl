@@ -1032,19 +1032,20 @@ end
 
 function handle!(df::DynamicFeature, msg::ProcessProgressMsg)
     key = msg.key
-    if key ∉ df.inflight
+    # Refreshes run a child too, but sit in `refreshing`, not `inflight`; their
+    # progress belongs on the refresh bar.
+    refreshing = key in df.refreshing
+    if !refreshing && key ∉ df.inflight
         @debug "Stale ProcessProgressMsg; ignoring" key
         return false
     end
 
-    # The child's percentage feeds the item's own indexing bar directly. Keep
-    # it monotone across late/duplicate reports, cap below 100 (completion ends
-    # the bar via `_complete_work_item!`), and re-use the last percentage for
-    # reports that don't carry one.
+    # Keep monotone across late/duplicate reports, cap below 100 (completion ends
+    # the bar), and re-use the last percentage for reports that don't carry one.
     last = get(df.child_progress, key, 0)
     pct = msg.percentage === missing ? last : max(last, clamp(msg.percentage, 0, 99))
     df.child_progress[key] = pct
-    _report_progress(df, _progress_key("index", key), msg.message, pct)
+    _report_progress(df, _progress_key(refreshing ? "refresh" : "index", key), msg.message, pct)
 
     return false
 end
@@ -1057,6 +1058,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         # freshness lands via the rewritten Manifest and the result path's
         # package-cache loading. Never touches pending_count.
         delete!(df.refreshing, key)
+        delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
         if djp !== nothing && state(djp.fsm) == DynamicProcessIndexing
             transition!(djp.fsm, DynamicProcessDone; reason="refreshed")
@@ -1117,6 +1119,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         # failed_projects over a refresh.
         @warn "Background environment refresh failed" key exception=(msg.err,)
         delete!(df.refreshing, key)
+        delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
         if djp !== nothing
             try kill(djp) catch; end
@@ -1157,6 +1160,7 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     if key in df.refreshing && state(djp.fsm) in (DynamicProcessStarting, DynamicProcessConnected, DynamicProcessIndexing)
         @warn "Background refresh process terminated unexpectedly" key
         delete!(df.refreshing, key)
+        delete!(df.child_progress, key)
         try kill(djp) catch; end
         delete!(df.procs, key)
         _report_progress(df, _progress_key("refresh", key), "Done", 100)
@@ -1251,6 +1255,7 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
     for key in collect(df.refreshing)
         key in required && continue
         delete!(df.refreshing, key)
+        delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
         if djp !== nothing
             try kill(djp) catch; end
