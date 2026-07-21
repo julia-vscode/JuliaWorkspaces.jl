@@ -347,6 +347,20 @@ end
 is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} = true
 is_something_with_methods(x) = false
 
+# A function-LOCAL callee binding — a closure or parameter defined inside a
+# function/macro body — as opposed to a module/file top-level definition. A local
+# fully shadows any same-named global, so its method set is exactly its own; the
+# cross-file `tree_arities` gate (which reasons about module-level names whose
+# methods may span sibling files) must not apply, or a call to the local
+# false-flags against the global's arity.
+_is_local_callee_binding(b, meta_dict) = false
+function _is_local_callee_binding(b::Binding, meta_dict)
+    b.val isa EXPR || return false
+    p = parentof(b.val)
+    p isa EXPR || return false
+    return maybe_get_parent_fexpr(p, x -> CSTParser.defines_function(x) || CSTParser.defines_macro(x)) !== nothing
+end
+
 function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
@@ -367,7 +381,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
         # tree-visible (methods may span sibling files), OR a `TreeRef` to a
         # function/macro/struct defined only in sibling files.
         if tree_visible !== nothing &&
-           (func_ref isa Binding ||
+           ((func_ref isa Binding && !_is_local_callee_binding(func_ref, meta_dict)) ||
             (func_ref isa TreeRef && func_ref.kind in (:function, :macro, :struct, :mutable_struct)))
             name = CSTParser.get_name(x)
             if name isa EXPR && isidentifier(name)
@@ -721,32 +735,36 @@ function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_ar
     # (the cross-file arity path has no per-method types — that is Part B).
     cands === nothing && return header
 
-    # closest arity/keyword-ok candidate with a known mismatch
+    # candidates of matching arity (and, if the call has keywords, keyword-ok)
     kw_ok = [i for i in arity_ok if counts[i].kwsplat || all(kw in counts[i].kws for kw in act_kws)]
     consider = isempty(kw_ok) ? arity_ok : kw_ok
-    best_i, best_slot, best_got, best_exp, best_count = 0, 0, nothing, nothing, typemax(Int)
+    # Collapse duplicate views of the SAME method — a workspace binding yields its
+    # definition EXPR through both `.val` and a `.refs` entry. With more than one
+    # DISTINCT candidate of matching arity, no single "expected `T`" is meaningful
+    # (the argument may suit another overload's slot), so emit header only rather
+    # than naming an arbitrary one; the header already lists the actual arg types.
+    distinct = Any[]
     for i in consider
-        mism = 0
-        first_slot = 0
-        for s in 1:nargs
-            exp = _expected_arg_type(cands[i], s, nargs, store, meta_dict)
-            exp === nothing && continue
-            got = s <= length(inferred) ? inferred[s] : nothing
-            if !_has_type_intersection(got, exp, store, meta_dict)
-                mism += 1
-                first_slot == 0 && (first_slot = s)
-            end
-        end
-        if mism > 0 && mism < best_count
-            best_count = mism
-            best_i, best_slot = i, first_slot
-            best_exp = _expected_arg_type(cands[i], first_slot, nargs, store, meta_dict)
-            best_got = first_slot <= length(inferred) ? inferred[first_slot] : nothing
+        any(c -> c === cands[i], distinct) || push!(distinct, cands[i])
+    end
+    length(distinct) == 1 || return header
+
+    cand = distinct[1]
+    slot = 0
+    for s in 1:nargs
+        exp = _expected_arg_type(cand, s, nargs, store, meta_dict)
+        exp === nothing && continue
+        got = s <= length(inferred) ? inferred[s] : nothing
+        if !_has_type_intersection(got, exp, store, meta_dict)
+            slot = s
+            break
         end
     end
-    if best_slot > 0
-        return string(header, " At argument ", best_slot, ": expected `",
-            _format_type(best_exp), "`, got `", _format_type(best_got), "`.")
+    if slot > 0
+        exp = _expected_arg_type(cand, slot, nargs, store, meta_dict)
+        got = slot <= length(inferred) ? inferred[slot] : nothing
+        return string(header, " At argument ", slot, ": expected `",
+            _format_type(exp), "`, got `", _format_type(got), "`.")
     end
     return header
 end

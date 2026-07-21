@@ -99,6 +99,44 @@ end
     @test all(d -> d.uri == uri, defs)
 end
 
+@testitem "References: go-to-definition on a const type alias" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_definitions
+    using JuliaWorkspaces.URIs2: URI
+
+    # A `const` type alias (`const MyDict = Dict`, `const IntDict = Dict{Int,Int}`)
+    # carries a `DataType` binding type, but its `val` is a plain assignment, not a
+    # struct/function definition — go-to-def must land on the `const` declaration
+    # rather than hunting the binding's refs for methods (an alias defines none, so
+    # the walk returned nothing).
+    source = """
+    module Foo
+    const MyDict = Dict
+    const IntDict = Dict{Int,Int}
+
+    IntDict(x) = Dict{Int,Int}(x => x)
+
+    f(x::IntDict) = length(x)
+    f(x::MyDict) = length(x)
+    end
+    """
+    jw = JuliaWorkspace()
+    uri = URI("file:///aliasdef/src/Foo.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    # `MyDict` in `f(x::MyDict)` → jumps to `const MyDict = Dict` (line 2).
+    p_my = first(findfirst("::MyDict", source)) + length("::")
+    defs_my = get_definitions(jw, uri, p_my)
+    @test !isempty(defs_my)
+    @test any(d -> d.uri == uri && d.start.line == 2, defs_my)
+
+    # `IntDict` in `f(x::IntDict)` → jumps to BOTH the `const` declaration (line 3)
+    # and the constructor defined on the alias (line 5).
+    p_int = first(findfirst("::IntDict", source)) + length("::")
+    defs_int = get_definitions(jw, uri, p_int)
+    @test any(d -> d.uri == uri && d.start.line == 3, defs_int)
+    @test any(d -> d.uri == uri && d.start.line == 5, defs_int)
+end
+
 @testitem "References: go-to-definition on a using'd module name" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_definitions
     using JuliaWorkspaces.URIs2: URI

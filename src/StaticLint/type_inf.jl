@@ -189,7 +189,19 @@ function infer_type_assignment_rhs(binding, state, scope)
         elseif (literal_type = infer_literal_type(rhs)) !== nothing
             settype!(binding, literal_type)
         elseif isidentifier(rhs) || is_getfield_w_quotenode(rhs)
-            refof_rhs = isidentifier(rhs) ? refof(rhs, meta_dict) : refof_maybe_getfield(rhs, meta_dict)
+            # Resolve the RHS on demand (idempotent): a cross-file / external base
+            # (`const PA = PkgId` under `using Base: PkgId`) may not have a ref yet
+            # when inference reaches the assignment, and in per-file mode only
+            # resolves through the `:__tree__` context on the scope chain. Without
+            # this the alias's type stayed unset and it wasn't recognized as a type
+            # alias (so `::Alias` args didn't narrow — see `_resolve_type_alias`).
+            if isidentifier(rhs)
+                !hasref(rhs, meta_dict) && resolve_ref(rhs, scope, state)
+                refof_rhs = refof(rhs, meta_dict)
+            else
+                refof_maybe_getfield(rhs, meta_dict) === nothing && resolve_getfield(rhs, scope, state)
+                refof_rhs = refof_maybe_getfield(rhs, meta_dict)
+            end
             if is_destructuring
                 # property destructuring `(; field) = obj`: infer the field's
                 # declared type from `obj`'s type rather than `obj`'s type itself.
@@ -207,6 +219,17 @@ function infer_type_assignment_rhs(binding, state, scope)
                     settype!(binding, CoreTypes.DataType)
                 else
                     settype!(binding, refof_rhs.type)
+                end
+            elseif refof_rhs isa TreeRef
+                # A cross-file / external base (`const PA = PkgId`): mark the alias
+                # as a datatype/function so `::Alias` narrows through
+                # `_resolve_type_alias`, exactly as the parametric `curly` branch
+                # above does.
+                store = resolve_treeref_store(refof_rhs, state)
+                if store isa SymbolServer.DataTypeStore
+                    settype!(binding, CoreTypes.DataType)
+                elseif store isa SymbolServer.FunctionStore
+                    settype!(binding, CoreTypes.Function)
                 end
             elseif refof_rhs isa SymbolServer.GenericStore && refof_rhs.typ isa SymbolServer.FakeTypeName
                 settype!(binding, maybe_lookup(refof_rhs.typ.name, state))
@@ -252,6 +275,67 @@ end
 # An alias may resolve to something carrying no field information (or `nothing`).
 infer_destructuring_type(binding, rb, meta_dict, depth=0) = nothing
 
+# A `const Alias = <type>` binding: a datatype-typed binding whose `val` is a
+# plain assignment rather than a `struct`/`abstract`/`primitive` definition. Its
+# own supertype chain dead-ends at `Any` (`_super` can't walk an assignment), so
+# it must never stand in as a resolved type — resolve it through `_resolve_type_alias`
+# or drop it.
+_is_type_alias(b::Binding) =
+    b.val isa EXPR && isassignment(b.val) && length(b.val.args) == 2 && CoreTypes.isdatatype(b.type)
+
+# A `const Alias = T` / `const Alias = T{...}` type alias: follow the RHS to the
+# datatype it names, so a `::Alias` annotation narrows to the real type (method
+# matching, field completion) instead of the opaque alias binding (whose type is
+# the `DataType` meta-type and whose supertype chain dead-ends at `Any`). Returns
+# the aliased `DataTypeStore` / datatype `Binding`, or `nothing` when `b` isn't
+# such an alias, or when its base type can't be resolved (external package not in
+# the env, unresolved cross-file name). `depth` guards against `const A = B;
+# const B = A` cycles.
+function _resolve_type_alias(b::Binding, state, depth=0)
+    depth > 20 && return nothing
+    _is_type_alias(b) || return nothing
+    rhs = CSTParser.rem_wheres_decls(b.val.args[2])
+    if iscurly(rhs) && rhs.args !== nothing && length(rhs.args) >= 1
+        rhs = rhs.args[1]
+    end
+    meta_dict = state.meta_dict
+    # The base is resolved on demand in the alias's own scope (idempotent) — its
+    # ref may not be set yet when type inference reaches a `::Alias` annotation,
+    # and in per-file mode a cross-file/external base only resolves through the
+    # `:__tree__` context seeded on that scope chain. Mirrors `infer_type_decl`.
+    scope = retrieve_scope(b.val, meta_dict)
+    if isidentifier(rhs)
+        scope isa Scope && !hasref(rhs, meta_dict) && resolve_ref(rhs, scope, state)
+        r = refof(rhs, meta_dict)
+    elseif is_getfield_w_quotenode(rhs)
+        scope isa Scope && !hasref(rhs, meta_dict) && resolve_getfield(rhs, scope, state)
+        r = refof_maybe_getfield(rhs, meta_dict)
+    else
+        return nothing
+    end
+    if r isa TreeRef
+        # per-file mode: a cross-file / external base (`using OrderedCollections`
+        # ⇒ `OrderedDict`) resolves to an `:external_symbol` TreeRef, exactly as a
+        # direct `::OrderedDict` annotation does — resolve it through the env the
+        # same way `_settype_from_decl!` does.
+        store = resolve_treeref_store(r, state)
+        return store isa SymbolServer.DataTypeStore ? store : nothing
+    elseif r isa SymbolServer.DataTypeStore
+        return r
+    elseif r isa SymbolServer.FunctionStore
+        return get_eventual_datatype(r, state.env)
+    elseif r isa Binding
+        rb = get_root_method(r)
+        rb isa Binding || return nothing
+        # `const A = B`: chase B if it is itself an alias, else use it directly
+        # when it's a real workspace datatype.
+        nested = _resolve_type_alias(rb, state, depth + 1)
+        nested !== nothing && return nested
+        !_is_type_alias(rb) && CoreTypes.isdatatype(rb.type) && return rb
+    end
+    return nothing
+end
+
 # Shared tail of both `infer_type_decl` forms: `t` is the (unwrapped, resolved)
 # type expression of a `::T` declaration. A cross-file `TreeRef` annotation
 # (e.g. a sibling `using Base: PkgId`) is resolved through the env — since
@@ -267,7 +351,24 @@ function _settype_from_decl!(binding, t, state)
     elseif r isa Binding
         rb = get_root_method(r)
         if rb isa Binding && CoreTypes.isdatatype(rb.type)
-            settype!(binding, rb)
+            alias = _resolve_type_alias(rb, state)
+            if alias !== nothing
+                settype!(binding, alias)
+            elseif !_is_type_alias(rb)
+                # A real workspace datatype (`struct`/`abstract`/…): its supertype
+                # chain is walkable, narrow to it.
+                settype!(binding, rb)
+            end
+            # else: an alias whose base didn't resolve — leave the type unset so
+            # it reads as `Any`, exactly like a direct annotation to an
+            # unresolvable type. The opaque alias binding has no supertype chain
+            # and would false-flag method calls on the arg.
+        elseif rb isa Binding && rb.val isa EXPR && isassignment(rb.val)
+            # `x::Alias` where the alias's base was fully unresolvable, so it never
+            # even got a `DataType` type (`const A = SomethingUndefined`): leave
+            # the arg type unset (→ `Any`) rather than the opaque alias binding.
+            # Its broken supertype chain would false-flag method calls; the bad
+            # base is already reported as a missing reference.
         else
             settype!(binding, r)
         end

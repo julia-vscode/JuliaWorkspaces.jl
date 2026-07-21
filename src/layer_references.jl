@@ -434,6 +434,16 @@ function _get_definitions_from_val(b::StaticLint.Binding, tls, env, results, run
                 _get_definitions_from_val(method, tls, env, results, runtime, root; in_scope=in_scope)
             end
         end
+        # A type/function ALIAS (`const A = T`, `const g = f`) also carries a
+        # datatype/function type, but its `val` is a plain assignment rather than
+        # a definition. The ref-walk above still finds any methods/constructors
+        # defined ON the alias (`A(x) = ...`), but not the alias declaration
+        # itself — add it so go-to-def also lands on the `const` line (and yields
+        # something rather than nothing for a plain alias with no methods).
+        if b.val isa CSTParser.EXPR &&
+                !(CSTParser.defines_function(b.val) || CSTParser.defines_datatype(b.val) || CSTParser.defines_macro(b.val))
+            _get_definitions_from_val(b.val, tls, env, results, runtime, root; in_scope=in_scope)
+        end
     elseif b.val isa CSTParser.EXPR
         _get_definitions_from_val(b.val, tls, env, results, runtime, root; in_scope=in_scope)
     end

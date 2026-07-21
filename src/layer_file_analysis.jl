@@ -494,6 +494,10 @@ function _call_cross_file_arities(rt, root, path, call, meta_dict)
     root === nothing && return nothing
     func_ref = StaticLint.refof_call_func(call, meta_dict)
     (func_ref isa StaticLint.Binding || func_ref isa StaticLint.TreeRef) || return nothing
+    # A function-local callee fully shadows any same-named global, so its method
+    # set is exactly its own — describe from the local candidates, not the global
+    # name's cross-file arities (mirrors `check_call`'s gate).
+    func_ref isa StaticLint.Binding && StaticLint._is_local_callee_binding(func_ref, meta_dict) && return nothing
     nm = CSTParser.get_name(call)
     (nm isa CSTParser.EXPR && StaticLint.isidentifier(nm)) || return nothing
     name = StaticLint.valofid(nm)
