@@ -1099,6 +1099,58 @@ end
     @test !any(d -> startswith(d.message, "Failed to resolve"), diags)
 end
 
+@testitem "unresolved import: colon import `using Foo.Bar: x` through a workspace package's re-exported indexed module is not flagged" begin
+    using JuliaWorkspaces.URIs2: URI
+    using JuliaWorkspaces.SymbolServer: Package, ModuleStore, VarRef, FunctionStore, MethodStore
+
+    # The `using Revise.CodeTracking: MethodInfoKey` shape: `Outer` is a WORKSPACE
+    # (deved) package whose source brings in an indexed dependency `Inner` via
+    # `using Inner`. Resolving `Outer.Inner` runs through Outer's tree context,
+    # where `Inner` surfaces as an `:external_symbol` stand-in. The whole-module
+    # form (`using Outer.Inner`) binds it and stays silent; the COLON form's
+    # module-path component used to be flagged as an unresolved import even though
+    # `Inner` is indexed and resolvable.
+    inner_uuid = Base.UUID("22222222-2222-2222-2222-222222222222")
+    inner_tree = "2222222222222222222222222222222222222222"
+    inner_ms = ModuleStore(VarRef(nothing, :Inner), Dict{Symbol,Any}(), "", true, [:bar], Symbol[])
+    inner_ms.vals[:bar] = FunctionStore(VarRef(VarRef(nothing, :Inner), :bar), MethodStore[], "", VarRef(VarRef(nothing, :Inner), :bar), true)
+    inner_pkg = Package("Inner", inner_ms, inner_uuid, nothing)
+
+    outer_project = """
+    name = "Outer"
+    uuid = "11111111-1111-1111-1111-111111111111"
+    version = "0.1.0"
+    [deps]
+    Inner = "22222222-2222-2222-2222-222222222222"
+    """
+    outer_manifest = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    [[deps.Inner]]
+    uuid = "22222222-2222-2222-2222-222222222222"
+    git-tree-sha1 = "$inner_tree"
+    version = "1.0.0"
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/Outer/Project.toml"), SourceText(outer_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/Outer/Manifest.toml"), SourceText(outer_manifest, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/Outer/src/Outer.jl"), SourceText("module Outer\nusing Inner\nend\n", "julia")))
+    fileuri = URI("file:///ws/Outer/test/runtests.jl")
+    add_file!(jw, TextFile(fileuri, SourceText("using Outer.Inner: bar\n", "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+    JuliaWorkspaces.set_input_package_metadata!(jw.runtime, :Inner, inner_uuid, v"1.0.0", inner_tree, inner_pkg)
+
+    diags = get_diagnostic(jw, fileuri)
+
+    # `Inner` is indexed and reachable through Outer, so its colon import resolves.
+    @test !any(d -> occursin("Failed to resolve `Inner`", d.message), diags)
+    @test !any(d -> occursin("could not be indexed", d.message) && occursin("Inner", d.message), diags)
+end
+
 @testitem "unresolved import: as-aliased imports are flagged" begin
     using JuliaWorkspaces.URIs2: URI
 
