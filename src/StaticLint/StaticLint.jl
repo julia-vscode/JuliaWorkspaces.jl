@@ -103,17 +103,6 @@ Implemented by the concrete context type.
 function workspace_package_context end
 
 """
-    context_in_scope_syms(ctx::AbstractModuleContext) -> Union{Nothing,Set{Symbol}}
-
-The top-level symbols of the external/workspace-package modules `using`-ed into
-scope at `ctx`'s (whole-module, cross-file) path — the set method aggregation
-needs to widen its search past Base/Core. Used by type inference, which runs
-before the tree context is stripped so the scope's `:__tree__` is still
-reachable. Implemented by the concrete context type.
-"""
-function context_in_scope_syms end
-
-"""
     tree_context_declares_datatype(ctx::AbstractModuleContext, name::String) -> Bool
 
 Whether the module tree resolves `name` to a DATATYPE (struct/abstract/
@@ -331,7 +320,6 @@ function process_EXPR(x::EXPR, state::Delayed)
     if state.scope != s0
         retry_urefs!(state)
         for b in values(state.scope.names)
-            infer_type_by_use(b, state.env, meta_dict)
             # Defer the unused-binding check until the enclosing scope has been
             # fully traversed: a binding may be captured by a closure that is
             # defined textually later (see retry_urefs!).
@@ -407,7 +395,6 @@ function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; wo
             traverse(x, ds)
             retry_urefs!(ds)
             for (k, b) in scopeof(x, meta_dict).names
-                infer_type_by_use(b, env, meta_dict)
                 check_unused_binding(b, scopeof(x, meta_dict), meta_dict)
             end
         else

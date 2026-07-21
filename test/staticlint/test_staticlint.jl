@@ -2173,52 +2173,6 @@ end
     end
 end
 
-@testitem "type inference by use" setup=[shared_static_lint] begin
-    using JuliaWorkspaces.StaticLint: bindingof
-
-    cst, meta_dict = parse_and_pass("""
-    f(x::String) = true
-    function g(x)
-        f(x)
-    end""")
-    @test bindingof(cst.args[2].args[1].args[2], meta_dict).type !== nothing
-
-    cst, meta_dict = parse_and_pass("""
-    f(x::String) = true
-    f(x::Char) = true
-    function g(x)
-        f(x)
-    end""")
-    @test bindingof(cst.args[3].args[1].args[2], meta_dict).type === nothing
-
-    cst, meta_dict = parse_and_pass("""
-    f(x::String) = true
-    f1(x::String) = true
-    function g(x)
-        f(x)
-        f1(x)
-    end""")
-    @test bindingof(cst.args[3].args[1].args[2], meta_dict).type !== nothing
-
-    cst, meta_dict = parse_and_pass("""
-    f(x::String) = true
-    f1(x::Char) = true
-    function g(x)
-        f(x)
-        f1(x)
-    end""")
-    @test bindingof(cst.args[3].args[1].args[2], meta_dict).type === nothing
-
-    cst, meta_dict = parse_and_pass("""
-    f(x::String) = true
-    f1(x) = true
-    function g(x)
-        f(x)
-        f1(x)
-    end""")
-    @test bindingof(cst.args[3].args[1].args[2], meta_dict).type !== nothing
-end
-
 # @testitem "forward relative using/import" begin
 #    cst, meta_dict = parse_and_pass("""
 # module A
