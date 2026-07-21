@@ -1261,3 +1261,43 @@ end
     h = hov("usebaz() = baz")                                     # cross-file, internal
     @test h === nothing || !occursin("----", h)
 end
+
+@testitem "Hover: Base-submodule overloads of a Base function are aggregated" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    # `length` has overloads defined in Base SUBMODULES (e.g. `Base.Iterators`,
+    # `Base.IteratorsMD`), each stored with `extends = Base.length`. The per-file
+    # analysis scope has an empty `.modules`, but `Base` is implicitly available
+    # in a regular module, so these overloads must still be aggregated rather than
+    # dropped (the bug: only the 60-odd methods defined directly in `Base` showed).
+    jw = JuliaWorkspace()
+    uri = URI("file:///submeth/Foo.jl")
+    src = "module Foo\nlength([])\nend\n"
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+
+    h = get_hover_text(jw, uri, first(findfirst("length", src)))
+    @test h !== nothing
+    @test occursin("is a function with", h)
+    @test occursin("in `Iterators`", h)
+end
+
+@testitem "iterate_over_ss_methods: Base-submodule overloads aggregate outside baremodules" begin
+    using JuliaWorkspaces
+    SL = JuliaWorkspaces.StaticLint
+    SSr = JuliaWorkspaces.SymbolServer
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    env = JuliaWorkspaces._stdlib_only_env()
+    b = SSr.stdlibs[:Base][:length]
+    n_direct = length(b.methods)
+
+    mk(source) = SL.Scope(nothing, CSTParser.parse(source), Dict{String,SL.Binding}(), Dict{Symbol,Any}(), nothing)
+    nmethods(scope) = (c = Ref(0); SL.iterate_over_ss_methods(b, scope, env, m -> (c[] += 1; false)); c[])
+
+    # A regular module (empty `.modules`, as the per-file pass leaves it) still
+    # aggregates the Base-submodule overloads of `length`.
+    @test nmethods(mk("module Foo\nend")) > n_direct
+    # A baremodule does not implicitly `using Base`, so Base overloads are not aggregated.
+    @test nmethods(mk("baremodule Foo\nend")) == n_direct
+end

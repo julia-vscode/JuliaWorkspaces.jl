@@ -255,6 +255,32 @@ iterate_over_ss_methods(b, tls, env, f) = false
 # only collapse under this key, not under identity (`===`).
 _ss_method_key(m::SymbolServer.MethodStore) = (m.file, m.line, m.sig)
 
+# Nearest enclosing module/file scope is a `baremodule` (which does NOT implicitly
+# `using Base`). A file top level, or any regular `module`, is not.
+function _scope_is_baremodule(s)
+    while s isa Scope
+        x = s.expr
+        if CSTParser.defines_module(x)
+            return headof(x) === :module && x.args !== nothing &&
+                length(x.args) ≥ 1 && headof(x.args[1]) === :FALSE
+        elseif headof(x) === :file
+            return false
+        end
+        s = parentof(s)
+    end
+    return false
+end
+
+# Whether a module named `top` that provides extension methods is reachable from
+# scope `tls`. `Core` is available everywhere (including baremodules); `Base` in
+# every non-`baremodule` context — so their submodule overloads (always loaded in
+# the running process) are aggregated even though the per-file analysis pass
+# strips Base/Core from `scope.modules`. Any other module must be listed there.
+_extension_module_in_scope(top::Symbol, tls::Scope) =
+    top === :Core ? true :
+    top === :Base ? !_scope_is_baremodule(tls) :
+    (tls.modules !== nothing && haskey(tls.modules, top))
+
 function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env::ExternalEnv, f)
     seen = Set{Tuple{String,Int32,Vector{Pair{Any,Any}}}}()
     for m in b.methods
@@ -262,14 +288,14 @@ function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env:
         ret = f(m)
         ret && return true
     end
-    if b.extends in keys(getsymbolextendeds(env)) && tls.modules !== nothing
+    if b.extends in keys(getsymbolextendeds(env))
         # above should be modified,
         rootmod = SymbolServer._lookup(b.extends.parent, getsymbols(env)) # points to the module containing the initial function declaration
         if rootmod !== nothing && haskey(rootmod, b.extends.name) # check rootmod exists, and that it has the variable
             # find extensoions
             if haskey(getsymbolextendeds(env), b.extends) # method extensions listed
                 for vr in getsymbolextendeds(env)[b.extends] # iterate over packages with extensions
-                    !(SymbolServer.get_top_module(vr) in keys(tls.modules)) && continue
+                    !_extension_module_in_scope(SymbolServer.get_top_module(vr), tls) && continue
                     rootmod = SymbolServer._lookup(vr, getsymbols(env))
                     !(rootmod isa SymbolServer.ModuleStore) && continue
                     if haskey(rootmod.vals, b.extends.name) && (rootmod.vals[b.extends.name] isa SymbolServer.FunctionStore || rootmod.vals[b.extends.name] isa SymbolServer.DataTypeStore)# check package is available and has ref
@@ -304,14 +330,14 @@ function iterate_over_ss_methods(b::SymbolServer.DataTypeStore, tls::Scope, env:
         ret = f(m)
         ret && return true
     end
-    if (bname in keys(getsymbolextendeds(env))) && tls.modules !== nothing
+    if (bname in keys(getsymbolextendeds(env)))
         # above should be modified,
         rootmod = SymbolServer._lookup(bname.parent, getsymbols(env), true) # points to the module containing the initial function declaration
         if rootmod !== nothing && haskey(rootmod, bname.name) # check rootmod exists, and that it has the variable
             # find extensoions
             if haskey(getsymbolextendeds(env), bname) # method extensions listed
                 for vr in getsymbolextendeds(env)[bname] # iterate over packages with extensions
-                    !(SymbolServer.get_top_module(vr) in keys(tls.modules)) && continue
+                    !_extension_module_in_scope(SymbolServer.get_top_module(vr), tls) && continue
                     rootmod = SymbolServer._lookup(vr, getsymbols(env))
                     !(rootmod isa SymbolServer.ModuleStore) && continue
                     if haskey(rootmod.vals, bname.name) && (rootmod.vals[bname.name] isa SymbolServer.FunctionStore || rootmod.vals[bname.name] isa SymbolServer.DataTypeStore)# check package is available and has ref
