@@ -459,13 +459,18 @@ end
 
 # True when call-shaped `x` is the signature of a definition, possibly behind
 # `::T`/`where` wrappers. Position matters: only `args[1]` of the wrapping
-# `=`/`function` is a signature (the RHS of an assignment is a real call).
+# `=`/`function`/`macro` is a signature (the RHS of an assignment is a real
+# call). A macro's signature is call-shaped and can share a binding with a
+# same-named function, so it must be recognised here rather than checked as a
+# call against that function's methods.
 function _is_def_sig(x::EXPR)
     p = parentof(x)
     p isa EXPR || return false
     p.args !== nothing && !isempty(p.args) && p.args[1] == x || return false
     if headof(p) === :function || CSTParser.is_eq(headof(p))
         return CSTParser.defines_function(p)
+    elseif headof(p) === :macro
+        return CSTParser.defines_macro(p)
     elseif isdeclaration(p) || iswhere(p)
         return _is_def_sig(p)
     end

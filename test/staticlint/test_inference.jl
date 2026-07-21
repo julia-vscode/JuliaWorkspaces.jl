@@ -286,6 +286,32 @@ end
     @test occursin("Expected 1 argument", d.message) && occursin("got 3", d.message)
 end
 
+@testitem "macro definition sharing a function's name is not checked as a call" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # A macro and a function of the same name share one binding. A macro's own
+    # signature is call-shaped, so the method-set lint must recognise it as a
+    # definition (not a call to the function) — otherwise `macro foo(a)` looks
+    # like `foo(a)` and false-flags against `function foo(a, b)`'s arity.
+    root = URI("file:///t/src/M.jl")
+    f = URI("file:///t/src/t.jl")
+    jw = ws_files(
+        root => "module M\ninclude(\"t.jl\")\nend\n",
+        f => "function foo(a, b) end\nmacro foo(a) end\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, f)
+    @test !any(d -> occursin("No method matching", d.message), fa.diagnostics)
+
+    # Order-independent: macro first, function second.
+    g = URI("file:///t/src/g.jl")
+    jw2 = ws_files(
+        root => "module M\ninclude(\"g.jl\")\nend\n",
+        g => "macro foo(a) end\nfunction foo(a, b) end\n",
+    )
+    fa2 = JuliaWorkspaces.derived_file_analysis(jw2.runtime, root, g)
+    @test !any(d -> occursin("No method matching", d.message), fa2.diagnostics)
+end
+
 @testitem "infer property-destructure loop variable field types" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: CoreTypes
     # `for (; a, b) in coll` must infer each variable's OWN field type from the
