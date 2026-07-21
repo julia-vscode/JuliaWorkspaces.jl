@@ -103,6 +103,17 @@ Implemented by the concrete context type.
 function workspace_package_context end
 
 """
+    context_in_scope_syms(ctx::AbstractModuleContext) -> Union{Nothing,Set{Symbol}}
+
+The top-level symbols of the external/workspace-package modules `using`-ed into
+scope at `ctx`'s (whole-module, cross-file) path — the set method aggregation
+needs to widen its search past Base/Core. Used by type inference, which runs
+before the tree context is stripped so the scope's `:__tree__` is still
+reachable. Implemented by the concrete context type.
+"""
+function context_in_scope_syms end
+
+"""
     tree_context_declares_datatype(ctx::AbstractModuleContext, name::String) -> Bool
 
 Whether the module tree resolves `name` to a DATATYPE (struct/abstract/

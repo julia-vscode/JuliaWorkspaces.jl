@@ -406,6 +406,11 @@ function check_ref_against_calls(x, visitedmethods, new_possibles, env::External
         end
         argi = get_arg_position_in_call(sig, x) # what slot does ref sit in?
         tls = retrieve_toplevel_scope(x, meta_dict)
+        # In per-file mode the scope's tree context (still present during this
+        # inference pass) yields the whole-module in-scope set; whole-closure mode
+        # has no context, so fall back to scope.modules (`nothing`).
+        ctx = tls isa Scope ? enclosing_tree_context(tls) : nothing
+        in_scope = ctx === nothing ? nothing : context_in_scope_syms(ctx)
         if func isa Binding
             for method in func.refs
                 method = get_method(method)
@@ -417,11 +422,11 @@ function check_ref_against_calls(x, visitedmethods, new_possibles, env::External
                         # Can we ignore this? Default constructor gives us no type info?
                     end
                 else # elseif what?
-                    iterate_over_ss_methods(method, tls, env, m -> (get_arg_type_at_position(m, argi, new_possibles, meta_dict);false))
+                    iterate_over_ss_methods(method, tls, env, m -> (get_arg_type_at_position(m, argi, new_possibles, meta_dict);false); in_scope=in_scope)
                 end
             end
         else
-            iterate_over_ss_methods(func, tls, env, m -> (get_arg_type_at_position(m, argi, new_possibles, meta_dict);false))
+            iterate_over_ss_methods(func, tls, env, m -> (get_arg_type_at_position(m, argi, new_possibles, meta_dict);false); in_scope=in_scope)
         end
     end
 end

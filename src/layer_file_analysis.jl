@@ -44,6 +44,11 @@ StaticLint.parent_module_context(ctx::TreeModuleContext) =
     isempty(ctx.path) ? nothing :
     TreeModuleContext(ctx.rt, ctx.root, ctx.path[1:end - 1], ctx.item_cache)
 
+# `ctx.path` already includes the enclosing in-file modules (child_module_context
+# extends it per nested module), so it IS the call site's whole-module path.
+StaticLint.context_in_scope_syms(ctx::TreeModuleContext) =
+    _in_scope_module_syms(ctx.rt, ctx.root, ctx.path)
+
 # The context a module-kinded TreeRef denotes: same two-candidate validation
 # as `_denoted_tree_module_path` (extended path first — `origin_module` is
 # the declaring module for `:declared` names but the target module itself
