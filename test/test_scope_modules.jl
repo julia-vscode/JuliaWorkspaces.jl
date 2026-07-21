@@ -21,3 +21,24 @@
     base2 = derived_file_module_path(rt, root2, uri2)
     @test isempty(_in_scope_module_syms(rt, root2, vcat(base2, ["Bar"])))
 end
+
+@testitem "in-scope syms: selective and module-name imports contribute the module" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, URIs2,
+        _in_scope_module_syms, derived_best_root_for_uri, derived_file_module_path
+
+    function inscope(src)
+        uri = URIs2.uri"file:///imp/Foo.jl"
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+        rt = jw.runtime
+        root = derived_best_root_for_uri(rt, uri)
+        _in_scope_module_syms(rt, root, vcat(derived_file_module_path(rt, root, uri), ["Foo"]))
+    end
+
+    # Every import form that names a module LOADS it, so its overloads are in
+    # scope — not only the whole-module `using Foo`.
+    @test :Base in inscope("module Foo\nusing Base.Iterators\nend\n")            # whole-module using
+    @test :Base in inscope("module Foo\nusing Base.Iterators: partition\nend\n") # selective `using M: name`
+    @test :Base in inscope("module Foo\nusing Base: Base\nend\n")                # module-name `using M: M`
+    @test :Base in inscope("module Foo\nimport Base.Iterators\nend\n")           # bare `import M`
+end

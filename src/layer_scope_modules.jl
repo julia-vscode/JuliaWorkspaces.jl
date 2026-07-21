@@ -11,14 +11,19 @@ _using_external_origins(visible) =
                          if vn.origin === :using_external && !isempty(vn.origin_module))
 
 # Top-level symbol of every external/workspace-package module brought into scope
-# at `path` (their exported names can carry overloads of Base/other store
-# functions). Base/Core are implicit — handled by the always-available rule in
-# `iterate_over_ss_methods` — so they are intentionally NOT collected here.
+# at `path`. ANY import form that names a module loads it, so its overloads of
+# Base/other store functions are live dispatch candidates — hence all of:
+# `:using_external` (whole-module `using Foo`), `:import_binding` (selective
+# `using Foo: bar`, module-name `using Foo: Foo`, and bare `import Foo`), and
+# `:using_workspace_package` (cross-root packages). `origin_module` is the target
+# module's path in every case, so its head names the loaded module. Base/Core are
+# implicit (the always-available rule in `iterate_over_ss_methods`), but including
+# them here when explicitly imported is harmless.
+const _IN_SCOPE_ORIGINS = (:using_external, :import_binding, :using_workspace_package)
 function _in_scope_module_syms(rt, root, path::Vector{String})
-    visible = derived_module_visible_names(rt, root, path)
-    syms = Set{Symbol}(Symbol(p[1]) for p in _using_external_origins(visible))
-    for (_, vn) in visible
-        vn.origin === :using_workspace_package && !isempty(vn.origin_module) &&
+    syms = Set{Symbol}()
+    for (_, vn) in derived_module_visible_names(rt, root, path)
+        vn.origin in _IN_SCOPE_ORIGINS && !isempty(vn.origin_module) &&
             push!(syms, Symbol(vn.origin_module[1]))
     end
     return syms
