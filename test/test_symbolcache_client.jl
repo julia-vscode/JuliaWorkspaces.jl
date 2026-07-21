@@ -17,17 +17,23 @@ end
 @testitem "SymbolCache client: fetch_availability_index loads a real index tarball" begin
     using JuliaWorkspaces
     using JuliaWorkspaces.SymbolServer: fetch_availability_index
-    V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
-    mktempdir() do up
-        # lay out <up>/store/<version>/index.tar.gz containing index.txt
-        d = mkpath(joinpath(up, "store", V))
-        idxtxt = joinpath(up, "index.txt"); write(idxtxt, "u1/h1\nu2/h2\n")
-        run(`tar -czf $(joinpath(d, "index.tar.gz")) -C $up index.txt`)
-        got = fetch_availability_index("file://" * up)
-        @test got == Set(["u1/h1", "u2/h2"])
+
+    has_tar = Sys.which("tar") !== nothing
+    has_tar || @info "skipping symbol cache integration test: tar not on PATH"
+
+    if has_tar
+        V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
+        mktempdir() do up
+            # lay out <up>/store/<version>/index.tar.gz containing index.txt
+            d = mkpath(joinpath(up, "store", V))
+            idxtxt = joinpath(up, "index.txt"); write(idxtxt, "u1/h1\nu2/h2\n")
+            run(`tar -czf $(joinpath(d, "index.tar.gz")) -C $up index.txt`)
+            got = fetch_availability_index("file://" * up)
+            @test got == Set(["u1/h1", "u2/h2"])
+        end
+        # unreachable upstream -> nothing (graceful)
+        @test fetch_availability_index("file:///no/such/path/xyz") === nothing
     end
-    # unreachable upstream -> nothing (graceful)
-    @test fetch_availability_index("file:///no/such/path/xyz") === nothing
 end
 
 @testitem "SymbolCache client: keep_available! intersects with the index" begin
@@ -71,45 +77,50 @@ end
     using JuliaWorkspaces.SymbolServer: write_cache, Package, ModuleStore, VarRef, CACHE_STORE_VERSION
     using Base: UUID
 
-    V = CACHE_STORE_VERSION
-    mktempdir() do tmp
-        bucket = joinpath(tmp, "bucket")
-        name, uuid, stem, letter = "Foo", "764a87c0-6b3e-53db-9096-fe964310641d", "deadbeef", "F"
+    has_tar = Sys.which("tar") !== nothing
+    has_tar || @info "skipping symbol cache integration test: tar not on PATH"
 
-        # Server layout: a valid .jstore artifact for Foo + an index listing only Foo.
-        js = joinpath(tmp, "$stem.jstore")
-        mod = ModuleStore(VarRef(nothing, Symbol(name)), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
-        write_cache(UUID(uuid), Package(name, mod, UUID(uuid), nothing), js)
-        pkgdir = mkpath(joinpath(bucket, "store", V, "packages", letter, name, uuid))
-        run(`tar -czf $(joinpath(pkgdir, "$stem.tar.gz")) -C $tmp $stem.jstore`)
+    if has_tar
+        V = CACHE_STORE_VERSION
+        mktempdir() do tmp
+            bucket = joinpath(tmp, "bucket")
+            name, uuid, stem, letter = "Foo", "764a87c0-6b3e-53db-9096-fe964310641d", "deadbeef", "F"
 
-        idxdir = mkpath(joinpath(tmp, "idx"))
-        write(joinpath(idxdir, "index.txt"), "$uuid/$stem\n")
-        mkpath(joinpath(bucket, "store", V))
-        run(`tar -czf $(joinpath(bucket, "store", V, "index.tar.gz")) -C $idxdir index.txt`)
+            # Server layout: a valid .jstore artifact for Foo + an index listing only Foo.
+            js = joinpath(tmp, "$stem.jstore")
+            mod = ModuleStore(VarRef(nothing, Symbol(name)), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+            write_cache(UUID(uuid), Package(name, mod, UUID(uuid), nothing), js)
+            pkgdir = mkpath(joinpath(bucket, "store", V, "packages", letter, name, uuid))
+            run(`tar -czf $(joinpath(pkgdir, "$stem.tar.gz")) -C $tmp $stem.jstore`)
 
-        upstream = "file://" * bucket
-        store = mkpath(joinpath(tmp, "store"))
+            idxdir = mkpath(joinpath(tmp, "idx"))
+            write(joinpath(idxdir, "index.txt"), "$uuid/$stem\n")
+            mkpath(joinpath(bucket, "store", V))
+            run(`tar -czf $(joinpath(bucket, "store", V, "index.tar.gz")) -C $idxdir index.txt`)
 
-        available = MissingPackage((name, UUID(uuid), "1.0.0", stem))
-        # absent from the index — simulates a private / uncached package
-        private = MissingPackage(("Secret", UUID("00000000-0000-0000-0000-0000000000ff"), "2.0.0", "cafef00d"))
+            upstream = "file://" * bucket
+            store = mkpath(joinpath(tmp, "store"))
 
-        still = _download_missing_caches([available, private], store, upstream)
+            available = MissingPackage((name, UUID(uuid), "1.0.0", stem))
+            # absent from the index — simulates a private / uncached package
+            private = MissingPackage(("Secret", UUID("00000000-0000-0000-0000-0000000000ff"), "2.0.0", "cafef00d"))
 
-        # Only the indexed package was fetched, unpacked, and stored.
-        @test isfile(joinpath(store, letter, name, uuid, "$stem.jstore"))
-        # The unlisted package was never requested (no dir for it) and stays missing.
-        @test !ispath(joinpath(store, "S"))
-        @test [p.name for p in still] == ["Secret"]
-    end
+            still = _download_missing_caches([available, private], store, upstream)
 
-    # Index unavailable → no downloads attempted; everything stays missing.
-    mktempdir() do tmp
-        store = mkpath(joinpath(tmp, "store"))
-        pkg = MissingPackage(("Foo", UUID("764a87c0-6b3e-53db-9096-fe964310641d"), "1.0.0", "deadbeef"))
-        still = _download_missing_caches([pkg], store, "file:///no/such/upstream/xyz")
-        @test still == [pkg]
-        @test isempty(readdir(store))
+            # Only the indexed package was fetched, unpacked, and stored.
+            @test isfile(joinpath(store, letter, name, uuid, "$stem.jstore"))
+            # The unlisted package was never requested (no dir for it) and stays missing.
+            @test !ispath(joinpath(store, "S"))
+            @test [p.name for p in still] == ["Secret"]
+        end
+
+        # Index unavailable → no downloads attempted; everything stays missing.
+        mktempdir() do tmp
+            store = mkpath(joinpath(tmp, "store"))
+            pkg = MissingPackage(("Foo", UUID("764a87c0-6b3e-53db-9096-fe964310641d"), "1.0.0", "deadbeef"))
+            still = _download_missing_caches([pkg], store, "file:///no/such/upstream/xyz")
+            @test still == [pkg]
+            @test isempty(readdir(store))
+        end
     end
 end
