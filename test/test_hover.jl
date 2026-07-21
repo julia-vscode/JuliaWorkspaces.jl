@@ -1301,3 +1301,41 @@ end
     # A baremodule does not implicitly `using Base`, so Base overloads are not aggregated.
     @test nmethods(mk("baremodule Foo\nend")) == n_direct
 end
+
+@testitem "iterate_over_ss_methods: explicit in_scope set adds external overloads" begin
+    using JuliaWorkspaces
+    SL = JuliaWorkspaces.StaticLint
+    SSr = JuliaWorkspaces.SymbolServer
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # Build a synthetic env: stdlibs + a top-level module `FakeMod` that defines a
+    # `length` method extending `Base.length`.
+    base = JuliaWorkspaces._stdlib_only_env()
+    syms = copy(base.symbols)
+    fake_method = SSr.MethodStore(:length, :FakeMod, "fakemod.jl", Int32(1),
+        Pair{Any,Any}[:x => SSr.FakeTypeName(SSr.VarRef(SSr.VarRef(nothing, :FakeMod), :FakeThing), Any[])],
+        Symbol[], SSr.FakeTypeName(SSr.VarRef(SSr.VarRef(nothing, :Core), :Int), Any[]))
+    fake_len = SSr.FunctionStore(SSr.VarRef(SSr.VarRef(nothing, :FakeMod), :length),
+        SSr.MethodStore[fake_method], "", SSr.VarRef(SSr.VarRef(nothing, :Base), :length))
+    syms[:FakeMod] = SSr.ModuleStore(SSr.VarRef(nothing, :FakeMod),
+        Dict{Symbol,Any}(:length => fake_len), "", Symbol[:length], Symbol[:length], Symbol[])
+    env = SL.ExternalEnv(syms, JuliaWorkspaces._collect_extended_methods_shared(syms), collect(keys(syms)))
+
+    b = env.symbols[:Base][:length]
+    modscope = SL.Scope(nothing, CSTParser.parse("module Foo\nend"), Dict{String,SL.Binding}(), Dict{Symbol,Any}(), nothing)
+    mods(scope, in_scope) = begin
+        seen = Set{Symbol}()
+        SL.iterate_over_ss_methods(b, scope, env, m -> (push!(seen, m.mod); false); in_scope=in_scope)
+        seen
+    end
+
+    # With FakeMod in scope, its overload is aggregated; without it, it is not.
+    @test :FakeMod in mods(modscope, Set([:FakeMod]))
+    @test !(:FakeMod in mods(modscope, Set{Symbol}()))
+    # Base submodule overloads (top :Base) are still included in a regular module
+    # regardless of the external set (Base is implicit).
+    @test :Iterators in mods(modscope, Set{Symbol}())
+    # In a baremodule Base is NOT implicit, so Base-submodule overloads drop out.
+    barescope = SL.Scope(nothing, CSTParser.parse("baremodule Foo\nend"), Dict{String,SL.Binding}(), Dict{Symbol,Any}(), nothing)
+    @test !(:Iterators in mods(barescope, Set([:FakeMod])))
+end
