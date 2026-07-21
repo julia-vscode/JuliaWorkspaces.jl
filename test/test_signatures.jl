@@ -627,3 +627,22 @@ end
     # the store's own methods stay offered
     @test any(s -> !occursin("::P", s.label), result.signatures)
 end
+
+@testitem "Signatures: in-scope aggregation includes Base-submodule overloads" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    # `length` has overloads defined in Base SUBMODULES (e.g. `Base.Iterators`),
+    # each stored with `extends = Base.length`. The per-file analysis scope has
+    # an empty `.modules`, but `Base` is implicitly in scope in a regular
+    # module, so signature help must aggregate them (>62) rather than only the
+    # 62-odd methods defined directly in `Base`.
+    uri = URI("file:///sig/Foo.jl")
+    jw = JuliaWorkspace()
+    src = "module Foo\nlength()\nend\n"
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    # cursor just inside the parens of `length()`
+    idx = first(findfirst("length()", src)) + 7
+    result = get_signature_help(jw, uri, idx)
+    @test length(result.signatures) > 62
+end
