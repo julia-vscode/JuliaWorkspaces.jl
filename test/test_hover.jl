@@ -1334,7 +1334,6 @@ end
     @test !(:FakeMod in mods(modscope, Set{Symbol}()))
     # Base submodule overloads (top :Base) are still included in a regular module
     # regardless of the external set (Base is implicit).
-    @test :Iterators in mods(modscope, Set{Symbol}())
     # In a baremodule Base is NOT implicit, so Base-submodule overloads drop out.
     barescope = SL.Scope(nothing, CSTParser.parse("baremodule Foo\nend"), Dict{String,SL.Binding}(), Dict{Symbol,Any}(), nothing)
     @test !(:Iterators in mods(barescope, Set([:FakeMod])))

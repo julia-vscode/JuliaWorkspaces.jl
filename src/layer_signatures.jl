@@ -78,7 +78,6 @@ called function.
 """
 function _collect_signatures(x, meta_dict::MetaDict, env, runtime, root::URI)
     sigs = SignatureInfo[]
-    in_scope = _in_scope_syms_at(runtime, root, x, meta_dict)
 
     (x isa CSTParser.EXPR && CSTParser.parentof(x) isa CSTParser.EXPR && CSTParser.iscall(CSTParser.parentof(x))) || return sigs
     parent_call = CSTParser.parentof(x)
@@ -110,6 +109,7 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime, root::URI)
     else
         tls = _retrieve_toplevel_scope(call_name, meta_dict)
         tls === nothing && return sigs
+        in_scope = _in_scope_syms_at(runtime, root, x, meta_dict)
         _get_signatures(f_ref, tls, sigs, env, meta_dict, in_scope)
         # A store-backed callee the workspace extends (`Base.relpath(::T)` in a
         # sibling): the env store's method set misses that overload, so offer it

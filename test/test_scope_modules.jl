@@ -1,9 +1,6 @@
 @testitem "in-scope syms: external using contributes its top module" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, URIs2,
-        _in_scope_module_syms, _in_scope_syms_at, derived_best_root_for_uri,
-        derived_file_module_path, derived_julia_legacy_syntax_tree,
-        derived_static_lint_meta_for_root
-    SL = JuliaWorkspaces.StaticLint
+        _in_scope_module_syms, derived_best_root_for_uri, derived_file_module_path
     uri = URIs2.uri"file:///t/Foo.jl"
 
     jw = JuliaWorkspace()
