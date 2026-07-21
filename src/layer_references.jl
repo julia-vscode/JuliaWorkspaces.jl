@@ -182,13 +182,9 @@ root and looking up the owning URI from the Salsa-memoized expr→URI mapping.
 Returns `nothing` if the EXPR cannot be mapped to a file.
 """
 function _get_file_loc(x::CSTParser.EXPR, runtime)
-    root = x
-    while CSTParser.parentof(root) !== nothing
-        root = CSTParser.parentof(root)
-    end
-    CSTParser.headof(root) === :file || return nothing
-    expr_uri_map = derived_expr_uri_map(runtime)
-    uri = get(expr_uri_map, objectid(root), nothing)
+    root = _file_root(x)
+    root === nothing && return nothing
+    uri = get(derived_expr_uri_map(runtime), objectid(root), nothing)
     uri === nothing && return nothing
     _, offset = _descend(root, x)
     return (uri, offset)
@@ -362,7 +358,7 @@ end
 # Go-to-definition
 # ============================================================================
 
-function _get_definitions_from_val(x, tls, env, results, runtime, root=nothing) end # fallback
+function _get_definitions_from_val(x, tls, env, results, runtime, root=nothing; in_scope=nothing) end # fallback
 
 # The module's own source file. Preferred, in order: a member method file whose
 # basename is `<ModuleName>.jl` (the file declaring `module <Name>`); the entry
@@ -389,7 +385,7 @@ function _module_source_file(x::SymbolServer.ModuleStore)
     return fallback
 end
 
-function _get_definitions_from_val(x::SymbolServer.ModuleStore, tls, env, results, runtime, root=nothing)
+function _get_definitions_from_val(x::SymbolServer.ModuleStore, tls, env, results, runtime, root=nothing; in_scope=nothing)
     # Jump to the module's own source file. A package module's `eval` is a
     # `VarRef` (to `Core.EvalInto`), so the old `:eval`-only route produced
     # nothing for every package module.
@@ -402,11 +398,11 @@ function _get_definitions_from_val(x::SymbolServer.ModuleStore, tls, env, result
     # Fallback for modules with no locatable members but a real `eval`
     # FunctionStore (e.g. Base): route to its methods as before.
     if haskey(x.vals, :eval) && x[:eval] isa SymbolServer.FunctionStore
-        _get_definitions_from_val(x[:eval], tls, env, results, runtime, root)
+        _get_definitions_from_val(x[:eval], tls, env, results, runtime, root; in_scope=in_scope)
     end
 end
 
-function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, tls, env, results, runtime, root=nothing)
+function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, tls, env, results, runtime, root=nothing; in_scope=nothing)
     StaticLint.iterate_over_ss_methods(x, tls, env, function (m)
         if safe_isfile(m.file)
             pos = Position(m.line, 1)
@@ -417,7 +413,7 @@ function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolSer
             ))
         end
         return false
-    end)
+    end; in_scope=in_scope)
     # Workspace method extensions of the store callee (`Base.relpath(::T)` in a
     # sibling) are not in the env store's method set — offer them too.
     if root !== nothing
@@ -427,23 +423,23 @@ function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolSer
     end
 end
 
-function _get_definitions_from_val(b::StaticLint.Binding, tls, env, results, runtime, root=nothing)
+function _get_definitions_from_val(b::StaticLint.Binding, tls, env, results, runtime, root=nothing; in_scope=nothing)
     if !(b.val isa CSTParser.EXPR)
-        _get_definitions_from_val(b.val, tls, env, results, runtime, root)
+        _get_definitions_from_val(b.val, tls, env, results, runtime, root; in_scope=in_scope)
     end
     if b.type === StaticLint.CoreTypes.Function || b.type === StaticLint.CoreTypes.DataType
         for ref in b.refs
             method = StaticLint.get_method(ref)
             if method !== nothing
-                _get_definitions_from_val(method, tls, env, results, runtime, root)
+                _get_definitions_from_val(method, tls, env, results, runtime, root; in_scope=in_scope)
             end
         end
     elseif b.val isa CSTParser.EXPR
-        _get_definitions_from_val(b.val, tls, env, results, runtime, root)
+        _get_definitions_from_val(b.val, tls, env, results, runtime, root; in_scope=in_scope)
     end
 end
 
-function _get_definitions_from_val(x::CSTParser.EXPR, tls::StaticLint.Scope, env, results, runtime, root=nothing)
+function _get_definitions_from_val(x::CSTParser.EXPR, tls::StaticLint.Scope, env, results, runtime, root=nothing; in_scope=nothing)
     loc = _get_file_loc(x, runtime)
     if loc !== nothing
         uri, o = loc
@@ -486,7 +482,7 @@ end
 # any other tree-declared kind resolves to its single declaring item. Env
 # stand-ins (`item === nothing`) resolve their store leaf and reuse the
 # store-backed path.
-function _get_definitions_from_tree_ref(tr::StaticLint.TreeRef, tls, env, results, runtime, root::URI)
+function _get_definitions_from_tree_ref(tr::StaticLint.TreeRef, tls, env, results, runtime, root::URI; in_scope=nothing)
     if tr.item === nothing
         if tr.kind === :external_symbol && !isempty(tr.origin_module)
             store = _resolve_external_module(runtime, root, tr.origin_module)
@@ -494,7 +490,7 @@ function _get_definitions_from_tree_ref(tr::StaticLint.TreeRef, tls, env, result
                 val = get(store.vals, Symbol(tr.name), nothing)
                 val isa SymbolServer.VarRef && (val = StaticLint.maybe_lookup(val, env))
                 val isa SymbolServer.SymStore && tls isa StaticLint.Scope &&
-                    _get_definitions_from_val(val, tls, env, results, runtime, root)
+                    _get_definitions_from_val(val, tls, env, results, runtime, root; in_scope=in_scope)
             end
         elseif tr.kind === :external_module
             # A `using`/`import`ed external module name (`using CodeTracking`,
@@ -503,7 +499,7 @@ function _get_definitions_from_tree_ref(tr::StaticLint.TreeRef, tls, env, result
             # (jumps to the module's source via its `eval`), mirroring hover.
             store = _resolve_external_module(runtime, root, vcat(tr.origin_module, [tr.name]))
             store isa SymbolServer.ModuleStore && tls isa StaticLint.Scope &&
-                _get_definitions_from_val(store, tls, env, results, runtime, root)
+                _get_definitions_from_val(store, tls, env, results, runtime, root; in_scope=in_scope)
         end
         return
     end
@@ -557,13 +553,14 @@ function _get_definitions(runtime, uri::URI, offset::Int)
         # keeps the old per-file/env path unchanged.
         tr = b isa StaticLint.TreeRef ? b :
             (b isa StaticLint.Binding && b.val isa StaticLint.TreeRef) ? b.val : nothing
+        in_scope = _in_scope_syms_at(runtime, root, x, meta_dict)
         if tr !== nothing
-            _get_definitions_from_tree_ref(tr, tls, env, results, runtime, root)
+            _get_definitions_from_tree_ref(tr, tls, env, results, runtime, root; in_scope=in_scope)
         else
             b = _resolve_shadow_binding(b)
             b = _canonical_local_definition(b, meta_dict)
             tls === nothing && return results
-            _get_definitions_from_val(b, tls, env, results, runtime, root)
+            _get_definitions_from_val(b, tls, env, results, runtime, root; in_scope=in_scope)
         end
     end
 

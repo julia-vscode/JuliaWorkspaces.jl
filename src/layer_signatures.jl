@@ -109,7 +109,8 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime, root::URI)
     else
         tls = _retrieve_toplevel_scope(call_name, meta_dict)
         tls === nothing && return sigs
-        _get_signatures(f_ref, tls, sigs, env, meta_dict)
+        in_scope = _in_scope_syms_at(runtime, root, x, meta_dict)
+        _get_signatures(f_ref, tls, sigs, env, meta_dict, in_scope)
         # A store-backed callee the workspace extends (`Base.relpath(::T)` in a
         # sibling): the env store's method set misses that overload, so offer it
         # from its defining EXPR, like a tree method item.
@@ -190,18 +191,18 @@ function _method_items_root(rt, root::URI, origin_module::Vector{String})
 end
 
 # Fallback
-function _get_signatures(b, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) end
+function _get_signatures(b, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope=nothing) end
 
-function _get_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict)
+function _get_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope=nothing)
     if b.val isa StaticLint.Binding
-        _get_signatures(b.val, tls, sigs, env, meta_dict)
+        _get_signatures(b.val, tls, sigs, env, meta_dict, in_scope)
     end
     if b.type == StaticLint.CoreTypes.Function || b.type == StaticLint.CoreTypes.DataType
-        b.val isa SymbolServer.SymStore && _get_signatures(b.val, tls, sigs, env, meta_dict)
+        b.val isa SymbolServer.SymStore && _get_signatures(b.val, tls, sigs, env, meta_dict, in_scope)
         for ref in b.refs
             method = StaticLint.get_method(ref)
             if method !== nothing
-                _get_signatures(method, tls, sigs, env, meta_dict)
+                _get_signatures(method, tls, sigs, env, meta_dict, in_scope)
             end
         end
     end
@@ -240,7 +241,7 @@ function _ss_param_text(a, pred)
     return String(take!(buf))
 end
 
-function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
+function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope=nothing) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
     pred = _sig_shorten_pred(env)
     StaticLint.iterate_over_ss_methods(b, tls, env, function (m)
         label = sprint((io, x) -> print(IOContext(io, :ss_shorten => pred, :ss_omit_any => true), x), m)
@@ -264,10 +265,10 @@ function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo
         end
         push!(sigs, SignatureInfo(label, "", params))
         return false
-    end)
+    end; in_scope=in_scope)
 end
 
-_get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict) =
+_get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope=nothing) =
     _expr_signature!(sigs, x, meta_dict)
 
 # Build the `SignatureInfo` for a definition EXPR `x` (a function/macro

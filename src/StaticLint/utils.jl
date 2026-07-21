@@ -246,7 +246,7 @@ end
 # for a FunctionStore b, checks whether additional methods are provided by other packages
 # f is a function that returns `true` if we want to break early from the loop
 
-iterate_over_ss_methods(b, tls, env, f) = false
+iterate_over_ss_methods(b, tls, env, f; in_scope=nothing) = false
 
 # Structural de-dup key for a MethodStore, mirroring `SymbolServer._samestore`
 # (which matches on file/line/sig). `MethodStore` has no structural `Base.==`/
@@ -255,21 +255,58 @@ iterate_over_ss_methods(b, tls, env, f) = false
 # only collapse under this key, not under identity (`===`).
 _ss_method_key(m::SymbolServer.MethodStore) = (m.file, m.line, m.sig)
 
-function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env::ExternalEnv, f)
+# Nearest enclosing module/file scope is a `baremodule` (which does NOT implicitly
+# `using Base`). A file top level, or any regular `module`, is not.
+function _scope_is_baremodule(s)
+    while s isa Scope
+        x = s.expr
+        if CSTParser.defines_module(x)
+            return headof(x) === :module && x.args !== nothing &&
+                length(x.args) ≥ 1 && headof(x.args[1]) === :FALSE
+        elseif headof(x) === :file
+            return false
+        end
+        s = parentof(s)
+    end
+    return false
+end
+
+# Walk `s` and its parent scopes; `true` if any has module `top` in `.modules`.
+# `using` in ANY enclosing scope suffices (Julia lexical scoping).
+function _module_in_scope_chain(top::Symbol, s)
+    while s isa Scope
+        s.modules !== nothing && haskey(s.modules, top) && return true
+        s = parentof(s)
+    end
+    return false
+end
+
+# Whether an extension-method module `top` is reachable from `tls`.
+# `Core` everywhere; `Base` everywhere except a `baremodule`. For any other
+# module: use the explicit `in_scope` set when the caller supplied one (per-file
+# request mode, where `scope.modules` has been stripped), else walk the
+# `scope.modules` parent chain (whole-closure / pass-time linting).
+_extension_module_in_scope(top::Symbol, tls::Scope, in_scope::Union{Nothing,Set{Symbol}}) =
+    top === :Core ? true :
+    top === :Base ? !_scope_is_baremodule(tls) :
+    in_scope !== nothing ? (top in in_scope) :
+    _module_in_scope_chain(top, tls)
+
+function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env::ExternalEnv, f; in_scope::Union{Nothing,Set{Symbol}}=nothing)
     seen = Set{Tuple{String,Int32,Vector{Pair{Any,Any}}}}()
     for m in b.methods
         push!(seen, _ss_method_key(m))
         ret = f(m)
         ret && return true
     end
-    if b.extends in keys(getsymbolextendeds(env)) && tls.modules !== nothing
+    if b.extends in keys(getsymbolextendeds(env))
         # above should be modified,
         rootmod = SymbolServer._lookup(b.extends.parent, getsymbols(env)) # points to the module containing the initial function declaration
         if rootmod !== nothing && haskey(rootmod, b.extends.name) # check rootmod exists, and that it has the variable
             # find extensoions
             if haskey(getsymbolextendeds(env), b.extends) # method extensions listed
                 for vr in getsymbolextendeds(env)[b.extends] # iterate over packages with extensions
-                    !(SymbolServer.get_top_module(vr) in keys(tls.modules)) && continue
+                    !_extension_module_in_scope(SymbolServer.get_top_module(vr), tls, in_scope) && continue
                     rootmod = SymbolServer._lookup(vr, getsymbols(env))
                     !(rootmod isa SymbolServer.ModuleStore) && continue
                     if haskey(rootmod.vals, b.extends.name) && (rootmod.vals[b.extends.name] isa SymbolServer.FunctionStore || rootmod.vals[b.extends.name] isa SymbolServer.DataTypeStore)# check package is available and has ref
@@ -292,7 +329,7 @@ function iterate_over_ss_methods(b::SymbolServer.FunctionStore, tls::Scope, env:
     return false
 end
 
-function iterate_over_ss_methods(b::SymbolServer.DataTypeStore, tls::Scope, env::ExternalEnv, f)
+function iterate_over_ss_methods(b::SymbolServer.DataTypeStore, tls::Scope, env::ExternalEnv, f; in_scope::Union{Nothing,Set{Symbol}}=nothing)
     if b.name isa SymbolServer.VarRef
         bname = b.name
     elseif b.name isa SymbolServer.FakeTypeName
@@ -304,14 +341,14 @@ function iterate_over_ss_methods(b::SymbolServer.DataTypeStore, tls::Scope, env:
         ret = f(m)
         ret && return true
     end
-    if (bname in keys(getsymbolextendeds(env))) && tls.modules !== nothing
+    if (bname in keys(getsymbolextendeds(env)))
         # above should be modified,
         rootmod = SymbolServer._lookup(bname.parent, getsymbols(env), true) # points to the module containing the initial function declaration
         if rootmod !== nothing && haskey(rootmod, bname.name) # check rootmod exists, and that it has the variable
             # find extensoions
             if haskey(getsymbolextendeds(env), bname) # method extensions listed
                 for vr in getsymbolextendeds(env)[bname] # iterate over packages with extensions
-                    !(SymbolServer.get_top_module(vr) in keys(tls.modules)) && continue
+                    !_extension_module_in_scope(SymbolServer.get_top_module(vr), tls, in_scope) && continue
                     rootmod = SymbolServer._lookup(vr, getsymbols(env))
                     !(rootmod isa SymbolServer.ModuleStore) && continue
                     if haskey(rootmod.vals, bname.name) && (rootmod.vals[bname.name] isa SymbolServer.FunctionStore || rootmod.vals[bname.name] isa SymbolServer.DataTypeStore)# check package is available and has ref

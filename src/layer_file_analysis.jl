@@ -506,6 +506,11 @@ end
 function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[])
     diagnostics = Diagnostic[]
 
+    # In-scope external/workspace module set at a call site, for
+    # `describe_call_mismatch`'s method-set enumeration (mirrors the
+    # `tree_in_scope` closure `derived_file_analysis` passes to `check_all`).
+    tree_in_scope = root === nothing ? nothing : (x -> _in_scope_module_syms(rt, root, vcat(path, _in_file_module_names(x, meta_dict))))
+
     # Names the project declares as dependencies, for the UnresolvedImport
     # message split (same computation as the whole-closure pass; empty
     # without a project).
@@ -548,8 +553,8 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
                 # otherwise from the local candidates (store/local methods).
                 ar = _call_cross_file_arities(rt, root, path, err[2], meta_dict)
                 detail = ar !== nothing ?
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar) :
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict)
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar, tree_in_scope) :
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; tree_in_scope)
                 detail !== nothing && (description = detail)
             end
             severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
@@ -738,7 +743,12 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
         p = vcat(path, _in_file_module_names(x, meta_dict))
         derived_method_arities(rt, root, p, name)
     end
-    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities)
+    # `tree_in_scope` widens the method-set lints' search past Base/Core to the
+    # external/workspace modules actually in scope AT THE CALL SITE — mirrors
+    # hover/signatures/references' `_in_scope_syms_at`, but reuses the already-known
+    # per-file `path` instead of re-deriving it from `x`'s URI.
+    tree_in_scope = x -> _in_scope_module_syms(rt, root, vcat(path, _in_file_module_names(x, meta_dict)))
+    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file

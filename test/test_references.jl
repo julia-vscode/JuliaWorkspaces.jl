@@ -1011,3 +1011,14 @@ end
     # the overload is defined on line 2 of a.jl
     @test any(d -> d.uri == DEF_A_URI && d.start.line == 2, defs)
 end
+
+@testitem "Definitions: length resolves Base-submodule method locations" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_definitions
+    using JuliaWorkspaces.URIs2: URI
+    uri = URI("file:///nav/Foo.jl")
+    jw = JuliaWorkspace()
+    src = "module Foo\nlength([])\nend\n"
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    defs = get_definitions(jw, uri, first(findfirst("length", src)))
+    @test length(defs) > 62
+end

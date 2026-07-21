@@ -121,13 +121,13 @@ LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
 # decline — the lost true-positive direction (a genuinely method-less
 # module-level function) is sanctioned conservatism of the per-file
 # architecture.
-function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing)
+function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing)
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
     is_test_throws_macrocall(x, env, meta_dict) && return
 
     # Do checks
-    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities)
+    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
     opts.constif && check_if_conds(x, meta_dict)
@@ -144,7 +144,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
 
     if x.args !== nothing
         for i in 1:length(x.args)
-            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities)
+            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
         end
     end
 end
@@ -347,7 +347,7 @@ end
 is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} = true
 is_something_with_methods(x) = false
 
-function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing)
+function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
@@ -399,7 +399,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                                 # Match against the store's own methods; decline
                                 # (no flag) if we can't resolve a scope for them.
                                 tls = retrieve_toplevel_scope(x, meta_dict)
-                                if tls isa Scope && !iterate_over_ss_methods(store, tls, env, m -> compare_f_call(func_nargs(m), cc))
+                                if tls isa Scope && !iterate_over_ss_methods(store, tls, env, m -> compare_f_call(func_nargs(m), cc); in_scope = tree_in_scope === nothing ? nothing : tree_in_scope(x))
                                     seterror!(x, IncorrectCallArgs, meta_dict)
                                 end
                             else
@@ -437,7 +437,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
         func_ref === nothing && return
         if func_has_no_methods(func_ref, meta_dict)
             seterror!(x, FunctionHasNoMethods, meta_dict)
-        elseif !sig_match_any(func_ref, x, call_counts, tls, env, meta_dict)
+        elseif !sig_match_any(func_ref, x, call_counts, tls, env, meta_dict, tree_in_scope)
             seterror!(x, IncorrectCallArgs, meta_dict)
         end
     end
@@ -478,13 +478,14 @@ function func_has_no_methods(func_ref, meta_dict)
     return true
 end
 
-function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
+function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing)
+    in_scope = tree_in_scope === nothing ? nothing : tree_in_scope(x)
     # we can't statically determine how many arguments a splat will take up
     if call_has_splat(x)
-        return iterate_over_ss_methods(func_ref, tls, env, m -> compare_f_call(func_nargs(m), call_counts))
+        return iterate_over_ss_methods(func_ref, tls, env, m -> compare_f_call(func_nargs(m), call_counts); in_scope)
     end
     args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
-    iterate_over_ss_methods(func_ref, tls, env, m -> match_method(args, kws, m, getsymbols(env), meta_dict))
+    iterate_over_ss_methods(func_ref, tls, env, m -> match_method(args, kws, m, getsymbols(env), meta_dict); in_scope)
 end
 
 function call_has_splat(x::EXPR)
@@ -495,9 +496,9 @@ function call_has_splat(x::EXPR)
     return false
 end
 
-function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
+function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing)
     if func_ref.val isa SymbolServer.FunctionStore || func_ref.val isa SymbolServer.DataTypeStore
-        match = sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict)
+        match = sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict, tree_in_scope)
         match && return true
     end
 
@@ -516,19 +517,19 @@ function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::Exter
     # tolerate any arity. Such defs fall through to the refs/get_method path
     # below, matching upstream behaviour.
     if has_at_least_one_method && !(parentof(func_ref.val) isa EXPR && CSTParser.ismacrocall(parentof(func_ref.val)))
-        sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict) && return true
+        sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict, tree_in_scope) && return true
     end
 
     for r in func_ref.refs
         method = get_method(r)
         method === nothing && continue
         has_at_least_one_method = true
-        sig_match_any(method, x, call_counts, tls, env, meta_dict) && return true
+        sig_match_any(method, x, call_counts, tls, env, meta_dict, tree_in_scope) && return true
     end
     return !has_at_least_one_method
 end
 
-function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict)
+function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing)
     if CSTParser.defines_function(func) || CSTParser.defines_struct(func)
         # Macro-wrapped definitions can rewrite arity/constructors at expansion
         # time (`@kwdef` structs, `@kernel` functions, …). For unknown macros we
@@ -579,7 +580,7 @@ end
 # Candidate methods of a call's callee — store `MethodStore`s and/or workspace
 # method `EXPR`s — mirroring `sig_match_any`'s enumeration but without the match
 # filter. Returns `nothing` for a callee shape we can't enumerate confidently.
-function _candidate_methods(call::EXPR, env::ExternalEnv, meta_dict)
+function _candidate_methods(call::EXPR, env::ExternalEnv, meta_dict, tree_in_scope=nothing)
     func_ref = refof_call_func(call, meta_dict)
     func_ref === nothing && return nothing
     fuel = 20
@@ -594,7 +595,7 @@ function _candidate_methods(call::EXPR, env::ExternalEnv, meta_dict)
     if func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore
         tls = retrieve_toplevel_scope(call, meta_dict)
         if tls isa Scope
-            iterate_over_ss_methods(func_ref, tls, env, m -> (push!(cands, m); false))
+            iterate_over_ss_methods(func_ref, tls, env, m -> (push!(cands, m); false); in_scope = tree_in_scope === nothing ? nothing : tree_in_scope(call))
         else
             append!(cands, func_ref.methods)
         end
@@ -678,14 +679,14 @@ argument, the inferred type, and the expected type). Returns `nothing` when no
 specific reason is derivable (splatted call, unusual callee shape), so the caller
 keeps the generic wording.
 """
-function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_arities=nothing)
+function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_arities=nothing, tree_in_scope=nothing)
     call_has_splat(call) && return nothing
     # `cand_arities` (cross-file arity set, from `derived_method_arities`) drives
     # the arg-count / keyword reason for a callee whose method set spans files —
     # the local candidate EXPRs are then incomplete, so skip the type branch. With
     # no `cand_arities`, enumerate the local candidates (store methods / local
     # method EXPRs) and do the full arity + keyword + positional-type analysis.
-    cands = cand_arities === nothing ? _candidate_methods(call, env, meta_dict) : nothing
+    cands = cand_arities === nothing ? _candidate_methods(call, env, meta_dict, tree_in_scope) : nothing
     cand_arities === nothing && (cands === nothing || isempty(cands)) && return nothing
     name = _call_name_str(call)
     name === nothing && return nothing
