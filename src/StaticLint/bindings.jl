@@ -408,8 +408,16 @@ function add_binding(x, state, scope=state.scope)
                     elseif isexportedby(name, lhs_ref)
                         # Name is already available
                         tls.names[name] = b
+                        overloaded = maybe_lookup(lhs_ref[Symbol(name)], state)
+                        # A constructor overload keeps the type's meaning:
+                        # `function Base.Tuple(x)` must not retype `Tuple` as a
+                        # plain `Function`, or `isa(x, Tuple)` / `::Tuple` would
+                        # see a non-type.
+                        if resolves_to_datatype(overloaded, state.env)
+                            b.type = CoreTypes.DataType
+                        end
                         if !hasref(b.name, meta_dict) # Is this an appropriate indicator that we've not marked the overload?
-                            push!(b.refs, maybe_lookup(lhs_ref[Symbol(name)], state))
+                            push!(b.refs, overloaded)
                             setref!(b.name, b, meta_dict) # we actually set the rhs of the qualified name to point to this binding
                         end
                     else

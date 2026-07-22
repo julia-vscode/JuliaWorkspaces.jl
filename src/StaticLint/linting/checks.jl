@@ -162,7 +162,7 @@ function _typeof(x, state)
     elseif x isa SymbolServer.DataTypeStore
         return CoreTypes.DataType
     elseif x isa SymbolServer.FunctionStore
-        return CoreTypes.Function
+        return resolves_to_datatype(x, state.env) ? CoreTypes.DataType : CoreTypes.Function
     elseif x isa TreeRef
         # per-file traversal mode: map the tree item kind
         if x.kind === :function || x.kind === :macro

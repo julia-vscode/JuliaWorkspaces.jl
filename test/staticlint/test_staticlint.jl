@@ -804,6 +804,41 @@ end
     @test JuliaWorkspaces.StaticLint.errorof(cst.args[2].args[1], meta_dict) === nothing
 end
 
+@testitem "constructor overload of imported type keeps DataType (isa)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, scopeof, CoreTypes
+
+    # Adding a constructor method to an existing (imported) type must not retype
+    # its name as a plain `Function`: the name still denotes a type, so
+    # `isa(x, Tuple)` / `::Tuple` stay valid and are not flagged.
+    (cst, meta_dict) = parse_and_pass("""
+    function Base.Tuple(x)
+        (x,)
+    end
+    function foo(x)
+        return isa(x, Tuple)
+    end
+    """)
+
+    # the local `Tuple` binding stays a DataType, not a Function
+    @test CoreTypes.isdatatype(scopeof(cst, meta_dict).names["Tuple"].type)
+
+    # `isa(x, Tuple)` inside foo's body is not flagged
+    isacall = cst.args[2].args[2].args[1].args[1]
+    @test errorof(isacall, meta_dict) === nothing
+
+    # Same reasoning for an explicit `import Base: Tuple` (a constructor
+    # `FunctionStore`): the imported name is still a type.
+    (cst2, md2) = parse_and_pass("""
+    import Base: Tuple
+    function foo(x)
+        return isa(x, Tuple)
+    end
+    """)
+    @test CoreTypes.isdatatype(scopeof(cst2, md2).names["Tuple"].type)
+    isacall2 = cst2.args[2].args[2].args[1].args[1]
+    @test errorof(isacall2, md2) === nothing
+end
+
 @testitem "check_call macro-wrapped definition signature not flagged" setup=[shared_static_lint] begin
     using JuliaWorkspaces: CSTParser
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
