@@ -430,6 +430,11 @@ function get_eventual_datatype(b::SymbolServer.FunctionStore, env::ExternalEnv)
     return SymbolServer._lookup(b.extends, getsymbols(env))
 end
 
+# `store` denotes a datatype: a `DataTypeStore`, or a constructor `FunctionStore`
+# whose `extends` resolves to one (`Base.Tuple` → `Core.Tuple`). Such a name is a
+# type, so its binding must stay a `DataType` rather than become a `Function`.
+resolves_to_datatype(store, env::ExternalEnv) = get_eventual_datatype(store, env) isa SymbolServer.DataTypeStore
+
 # Per-file traversal mode only: does `b`'s declaration carry an explicit `::`
 # type annotation that resolved through the module tree (a `TreeRef`)? The
 # legacy `Binding.type` slot can't carry a TreeRef, so `infer_type_decl`
