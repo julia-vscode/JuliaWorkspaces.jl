@@ -809,32 +809,32 @@ end
 
     # Adding a constructor method to an existing (imported) type must not retype
     # its name as a plain `Function`: the name still denotes a type, so
-    # `isa(x, Tuple)` / `::Tuple` stay valid and are not flagged.
+    # `isa(x, BigInt)` / `::BigInt` stay valid and are not flagged.
     (cst, meta_dict) = parse_and_pass("""
-    function Base.Tuple(x)
-        (x,)
+    function Base.BigInt(x)
+        x + 1
     end
     function foo(x)
-        return isa(x, Tuple)
+        return isa(x, BigInt)
     end
     """)
 
-    # the local `Tuple` binding stays a DataType, not a Function
-    @test CoreTypes.isdatatype(scopeof(cst, meta_dict).names["Tuple"].type)
+    # the local `BigInt` binding stays a DataType, not a Function
+    @test CoreTypes.isdatatype(scopeof(cst, meta_dict).names["BigInt"].type)
 
-    # `isa(x, Tuple)` inside foo's body is not flagged
+    # `isa(x, BigInt)` inside foo's body is not flagged
     isacall = cst.args[2].args[2].args[1].args[1]
     @test errorof(isacall, meta_dict) === nothing
 
-    # Same reasoning for an explicit `import Base: Tuple` (a constructor
+    # Same reasoning for an explicit `import Base: BigInt` (a constructor
     # `FunctionStore`): the imported name is still a type.
     (cst2, md2) = parse_and_pass("""
-    import Base: Tuple
+    import Base: BigInt
     function foo(x)
-        return isa(x, Tuple)
+        return isa(x, BigInt)
     end
     """)
-    @test CoreTypes.isdatatype(scopeof(cst2, md2).names["Tuple"].type)
+    @test CoreTypes.isdatatype(scopeof(cst2, md2).names["BigInt"].type)
     isacall2 = cst2.args[2].args[2].args[1].args[1]
     @test errorof(isacall2, md2) === nothing
 end
