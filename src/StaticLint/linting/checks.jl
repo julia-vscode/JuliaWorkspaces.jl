@@ -1377,8 +1377,8 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
     is_in_fexpr(b.name, x -> headof(x) === :import || headof(x) === :using) && return
 
     b.val isa Binding && return check_const_decl(name, b.val, scope, meta_dict)
-    if b.val isa EXPR && (CSTParser.defines_datatype(b.val) || is_const(bind))
-        seterror!(b.val, CannotDeclareConst, meta_dict)
+    if b.val isa EXPR && (CSTParser.defines_datatype(b.val) || is_const(b))
+        seterror!(b.name, CannotDeclareConst, meta_dict)
     else
         prev = scope.names[name]
         if (CoreTypes.isdatatype(prev.type) && !is_mask_binding_of_datatype(prev, meta_dict)) || is_const(prev)

@@ -1355,13 +1355,52 @@ end
 
 @testitem "const redefinition cannot declare const" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: getmeta, CannotDeclareConst
+    using JuliaWorkspaces.CSTParser
 
     cst, meta_dict = parse_and_pass("""
         T = 1
         struct T end
         """)
 
-    @test getmeta(cst[2], meta_dict).error == CannotDeclareConst
+    # the error should mark only the datatype name, not the whole `struct` block
+    name = CSTParser.get_name(cst[2])
+    @test getmeta(name, meta_dict).error == CannotDeclareConst
+    @test getmeta(cst[2], meta_dict).error === nothing
+end
+
+@testitem "double const decl flags the redeclared name" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: getmeta, errorof, CannotDeclareConst
+
+    # a second `const` decl of the same name in the same scope cannot declare the
+    # constant; the error marks only the redeclared name.
+    cst, meta_dict = parse_and_pass("""
+        const x = 1
+        const x = 2
+        """)
+
+    name = cst[2].args[1].args[1] # `const` -> `x = 2` -> `x`
+    @test getmeta(name, meta_dict).error == CannotDeclareConst
+    @test getmeta(cst[2], meta_dict).error === nothing
+end
+
+@testitem "local does not shadow-flag a global const" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDeclareConst
+
+    any_error(x, meta_dict, err) =
+        errorof(x, meta_dict) === err ||
+        (x.args !== nothing && any(a -> any_error(a, meta_dict, err), x.args))
+
+    # a local binding lives in its own scope, so reusing a global const's name
+    # inside a function must not be flagged as a const redeclaration.
+    cst, meta_dict = parse_and_pass("""
+        const y = 1
+        function f()
+            y = 2
+            y
+        end
+        """)
+
+    @test !any_error(cst, meta_dict, CannotDeclareConst)
 end
 
 @testitem "const redefinition invalid redefinition" setup=[shared_static_lint] begin
@@ -1386,7 +1425,7 @@ end
 end
 
 @testitem "importing a type is not a const redefinition (#352)" setup=[shared_static_lint] begin
-    using JuliaWorkspaces.StaticLint: errorof, InvalidRedefofConst
+    using JuliaWorkspaces.StaticLint: errorof, InvalidRedefofConst, CannotDeclareConst
 
     has_error(cst, meta_dict, jw, err) =
         any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
@@ -1427,7 +1466,9 @@ end
         import Base: AbstractDict
         const AbstractDict = 1
         """)
-        @test has_error(cst, meta_dict, jw, InvalidRedefofConst)
+        # `const` over an imported name is a "cannot declare constant" error
+        # (Julia: "it was already declared as an import"), not a plain redefinition.
+        @test has_error(cst, meta_dict, jw, CannotDeclareConst)
     end
 end
 
@@ -3033,7 +3074,7 @@ end
             const X = 2
         end
         """)
-        @test has_error(cst, meta_dict, jw, InvalidRedefofConst)
+        @test has_error(cst, meta_dict, jw, CannotDeclareConst)
     end
 
     # References to file-level bindings still resolve from inside the block.
