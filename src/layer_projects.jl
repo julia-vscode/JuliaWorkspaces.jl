@@ -242,6 +242,8 @@ Salsa.@derived function derived_package_for_file(rt, file::URI)
     packages = derived_package_folders(rt)
 
     file_path = uri2filepath(file)
+
+    file_path === nothing && return nothing
     package = packages |>
         x -> map(x) do i
             package_folder_path = uri2filepath(i)
@@ -261,6 +263,8 @@ Salsa.@derived function derived_project_for_file(rt, file::URI)
     projects = derived_project_folders(rt)
 
     file_path = uri2filepath(file)
+
+    file_path === nothing && return nothing
     project = projects |>
         x -> map(x) do i
             project_folder_path = uri2filepath(i)

@@ -636,3 +636,28 @@ end
     @test isequal(ti_b, TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[]))
     @test hash(ts_b) == hash(TestSetupDetail(u, :n, :k, "code", 23:22, 23:22))
 end
+
+@testitem "get_test_items on untitled (non-file) URI" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: @uri_str
+
+    jw = JuliaWorkspace()
+
+    # A recognized package folder makes derived_package_folders non-empty, so
+    # derived_package_for_file iterates it for the untitled file below.
+    add_file!(jw, TextFile(uri"file:///home/foo/Project.toml", SourceText("name = \"Foo\"\nuuid = \"12345678-1234-1234-1234-123456789012\"\nversion = \"0.1.0\"\n", "toml")))
+    add_file!(jw, TextFile(uri"file:///home/foo/src/Foo.jl", SourceText("module Foo\nend\n", "julia")))
+
+    uri = uri"untitled:Untitled-1"
+    content = """@testitem "foo" begin
+    end
+    """
+    add_file!(jw, TextFile(uri, SourceText(content, "julia")))
+
+    # Non-file URIs have no filesystem path; this must not crash. The file is
+    # not inside any package, so the testitem is reported as a testerror.
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testitems) == 0
+    @test length(test_results.testerrors) == 1
+end
