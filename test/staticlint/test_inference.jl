@@ -132,6 +132,37 @@ end
     @test occursin("PkgId", string(argb.type.name))
 end
 
+@testitem "infer element type of a cross-file Vector eltype (TreeRef)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.URIs2: URI
+    const DataTypeStore = JuliaWorkspaces.SymbolServer.DataTypeStore
+
+    # Indexing a `Vector{T}` whose element type `T` lives in a sibling file
+    # resolves `T` to a TreeRef, which `Binding.type` can't hold — this used to
+    # crash `settype!` in `convert`. A workspace struct element stays unset; an
+    # external element (`Vector{PkgId}`) resolves through the env to its store.
+    root = URI("file:///t/src/Root.jl")
+    crayon = URI("file:///t/src/crayon.jl")
+    stack = URI("file:///t/src/stack.jl")
+    jw = ws_files(
+        root => "module Root\nusing Base: PkgId\ninclude(\"crayon.jl\")\ninclude(\"stack.jl\")\nend\n",
+        crayon => "struct Crayon\n    x\nend\n",
+        stack => "struct CrayonStack\n    crayons::Vector{Crayon}\n    ids::Vector{PkgId}\nend\nfunction f(s::CrayonStack)\n    c = s.crayons[1]\n    p = s.ids[1]\n    (c, p)\nend\n",
+    )
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, root, stack)
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, stack)
+
+    cb = find_binding(cst, fa.meta, "c")
+    @test cb !== nothing
+    @test cb.type === nothing  # workspace-struct element: unset, but no crash
+
+    pb = find_binding(cst, fa.meta, "p")
+    @test pb !== nothing
+    @test pb.type isa DataTypeStore
+    @test occursin("PkgId", string(pb.type.name))
+
+    @test isempty(fa.diagnostics)
+end
+
 @testitem "method through a const type alias with an unresolved base" setup=[shared_static_lint] begin
     using JuliaWorkspaces.URIs2: URI
 

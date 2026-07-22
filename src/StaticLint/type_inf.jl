@@ -1,10 +1,23 @@
-function settype!(b::Binding, type::Binding)
+function settype!(b::Binding, type::Binding, state=nothing)
     push!(type.refs, b)
     b.type = type
 end
 
-function settype!(b::Binding, type)
+function settype!(b::Binding, type, state=nothing)
     b.type = type
+end
+
+# `Binding.type` can't hold a `TreeRef` (a per-file cross-file/external ref), so
+# it's resolved to a store first: with `state` an external datatype resolves
+# through the env; anything unresolvable (e.g. a workspace struct, whose
+# declaration lives in another file's tree) — and any call made without `state`
+# — leaves the type unset rather than crashing in `convert`. `state` is optional
+# on every `settype!` method so callers can pass it uniformly, and a stray
+# TreeRef never reaches the `b.type = type` assignment.
+function settype!(b::Binding, tr::TreeRef, state=nothing)
+    store = state === nothing ? nothing : resolve_treeref_store(tr, state)
+    store isa SymbolServer.SymStore && settype!(b, store)
+    return
 end
 
 # `(a, b, …)::Tuple{T1, T2, …}` (a typed positional destructure, e.g. a function
@@ -132,7 +145,7 @@ function infer_type_assignment_rhs(binding, state, scope)
             # collection's eltype.
             infer_destructuring_type(binding, elt, meta_dict)
         else
-            settype!(binding, elt)
+            settype!(binding, elt, state)
         end
     elseif CSTParser.istuple(lhs) && !is_destructuring
         # Positional destructuring `a, b = rhs`: each variable is an element of
@@ -145,7 +158,7 @@ function infer_type_assignment_rhs(binding, state, scope)
         # otherwise non-scalar index yields an array, not an element (#449).
         ref = refof_maybe_getfield(rhs.args[1], meta_dict)
         if ref isa Binding && ref.val isa EXPR
-            settype!(binding, infer_eltype(ref.val, state))
+            settype!(binding, infer_eltype(ref.val, state), state)
         end
     elseif CSTParser.isdeclaration(rhs) && length(rhs.args) == 2 && !is_destructuring
         # RHS is a type assertion (`y = x::T`, `x = x::T`): the assigned binding
@@ -575,6 +588,8 @@ function maybe_get_vec_eltype(t, state)
     if iscurly(t)
         lhs_ref = refof_maybe_getfield(t.args[1], meta_dict)
         if lhs_ref isa SymbolServer.DataTypeStore && CoreTypes.isarray(lhs_ref) && length(t.args) > 1
+            # May be a cross-file element type (`Vector{Crayon}` with `Crayon` in
+            # a sibling file), i.e. a `TreeRef` — `settype!` resolves/drops it.
             refof(t.args[2], meta_dict)
         end
     end
