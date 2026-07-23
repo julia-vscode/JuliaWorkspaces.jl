@@ -516,3 +516,23 @@ end
     @test x1 ∉ launches
     @test df.pending_count[] == 1
 end
+
+@testitem "Dynamic reactor: completing many items never blocks on the update signal" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, WatchTestEnvironmentKey, DJPKey,
+        _complete_work_item!
+
+    df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> nothing)
+
+    # Nothing drains df.update_channel here. Completing far more items than the
+    # channel capacity must not block (the wakeup is coalesced); a blocking put!
+    # would wedge the reactor task and hang this test.
+    for i in 1:300
+        k = WatchTestEnvironmentKey("/ws/p$i", "P$i", UInt64(i))
+        push!(df.inflight, k)
+        Threads.atomic_add!(df.pending_count, 1)
+        _complete_work_item!(df, k)
+    end
+
+    @test df.pending_count[] == 0
+    @test isempty(df.inflight)
+end

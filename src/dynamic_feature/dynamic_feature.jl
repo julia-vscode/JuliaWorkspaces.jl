@@ -394,7 +394,7 @@ struct DynamicFeature
             Set{PkgCacheKey}(),
             Set{PkgCacheKey}(),
             Threads.Atomic{Int}(0),
-            Channel{Symbol}(100),
+            Channel{Symbol}(1),   # coalesced wakeup signal (see _complete_work_item!)
             progress_callback,
             Dict{DJPKey,Int}(),
             dynamic_controller_fsm("dynamic_controller"),
@@ -699,7 +699,11 @@ function _complete_work_item!(df::DynamicFeature, key::DJPKey)
     # the consumer side.
     key isa WatchEnvironmentKey && _report_progress(df, _progress_key("download", key), "Done", 100)
     _report_progress(df, _progress_key("index", key), "Done", 100)
-    try put!(df.update_channel, :data_available) catch; end
+    # `update_channel` is a coalesced wakeup: one pending signal is enough, and
+    # this runs on the reactor task, so it must never block. A blocking `put!`
+    # to a full bounded channel (consumer not keeping up / stopped) would wedge
+    # the reactor. Skip when a signal is already queued.
+    isready(df.update_channel) || try put!(df.update_channel, :data_available) catch; end
     return true
 end
 
