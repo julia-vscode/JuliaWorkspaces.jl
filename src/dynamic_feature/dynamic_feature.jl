@@ -639,7 +639,7 @@ completion fraction (0..1) after each finished download attempt.
 function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_path::String, upstream_url::String; report::Union{Nothing,Function}=nothing)
     index = SymbolServer.fetch_availability_index(upstream_url)
     if index === nothing
-        @warn "Could not fetch availability index, skipping cloud downloads"
+        @warn "Could not fetch availability index from $(upstream_url), skipping cloud downloads"
         return missing_pkgs
     end
 
