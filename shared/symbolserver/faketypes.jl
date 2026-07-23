@@ -62,7 +62,16 @@ function FakeTypeName(@nospecialize(x), budget::ExpandBudget=ExpandBudget())
     elseif x isa Module
         VarRef(x)
     else
-        error((x, typeof(x)))
+        # Reached only for a non-type value that isn't a type parameter (those
+        # go through `_parameter`). Report the value so the culprit binding is
+        # identifiable instead of the bare `(x, typeof(x))` tuple.
+        v = try
+            s = repr(x)
+            length(s) > 100 ? first(s, 100) * "…" : s
+        catch
+            "<unprintable>"
+        end
+        error("FakeTypeName: expected a type/TypeVar/Union/UnionAll/Module, got $v::$(typeof(x))")
     end
 end
 
