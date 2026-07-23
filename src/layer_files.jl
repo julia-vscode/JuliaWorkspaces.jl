@@ -8,8 +8,19 @@ end
 Salsa.@derived function derived_julia_files(rt)
     files = derived_text_files(rt)
 
-    # TODO Actually filter this properly
-    return Set{URI}(file for file in files if endswith(string(file), ".jl"))
+    # File-scheme URIs keep the cheap suffix check; non-file buffers (e.g.
+    # untitled) are Julia when their language id says so. The language query is
+    # value-stable, so a keystroke in an untitled buffer never invalidates the
+    # root set.
+    return Set{URI}(file for file in files if
+        endswith(string(file), ".jl") ||
+        (file.scheme != "file" && derived_file_language_id(rt, file) == "julia"))
+end
+
+Salsa.@derived function derived_file_language_id(rt, uri)
+    tf = derived_text_file_content(rt, uri)
+    tf === nothing && return nothing
+    return tf.content.language_id
 end
 
 Salsa.@derived function derived_has_file(rt, uri)

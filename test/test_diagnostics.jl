@@ -1683,3 +1683,23 @@ end
     @test !isempty(new)         # diagnostics now appear
     @test any(d -> occursin("JSON", d.message), new)  # the real-package import now flags
 end
+
+@testitem "derived_julia_files admits untitled Julia buffers, not markdown" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    jl = URI("untitled:Untitled-1")
+    md = URI("untitled:Untitled-2")
+    add_file!(jw, TextFile(jl, SourceText("x = 1\n", "julia")))
+    add_file!(jw, TextFile(md, SourceText("# hi\n", "markdown")))
+
+    julia_files = JuliaWorkspaces.derived_julia_files(jw.runtime)
+
+    @test jl in julia_files
+    @test !(md in julia_files)
+
+    # value-stable language query
+    @test JuliaWorkspaces.derived_file_language_id(jw.runtime, jl) == "julia"
+    @test JuliaWorkspaces.derived_file_language_id(jw.runtime, md) == "markdown"
+end
