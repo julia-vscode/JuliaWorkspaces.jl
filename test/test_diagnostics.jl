@@ -1683,3 +1683,111 @@ end
     @test !isempty(new)         # diagnostics now appear
     @test any(d -> occursin("JSON", d.message), new)  # the real-package import now flags
 end
+
+@testitem "derived_julia_files admits untitled Julia buffers, not markdown" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    jl = URI("untitled:Untitled-1")
+    md = URI("untitled:Untitled-2")
+    add_file!(jw, TextFile(jl, SourceText("x = 1\n", "julia")))
+    add_file!(jw, TextFile(md, SourceText("# hi\n", "markdown")))
+
+    julia_files = JuliaWorkspaces.derived_julia_files(jw.runtime)
+
+    @test jl in julia_files
+    @test !(md in julia_files)
+
+    # value-stable language query
+    @test JuliaWorkspaces.derived_file_language_id(jw.runtime, jl) == "julia"
+    @test JuliaWorkspaces.derived_file_language_id(jw.runtime, md) == "markdown"
+end
+
+@testitem "derived_julia_files: one predicate for roots and the diagnostics gate" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    upper = URI("file:///Foo.JL")             # uppercase ext -> julia (case-insensitive)
+    untitled_jl_md = URI("untitled:Buf-1.jl")  # .jl-suffixed but tagged markdown -> not julia
+    untitled_julia = URI("untitled:Buf-2")     # no suffix, tagged julia -> julia
+    add_file!(jw, TextFile(upper, SourceText("x = 1\n", "julia")))
+    add_file!(jw, TextFile(untitled_jl_md, SourceText("# hi\n", "markdown")))
+    add_file!(jw, TextFile(untitled_julia, SourceText("y = 2\n", "julia")))
+
+    julia_files = JuliaWorkspaces.derived_julia_files(jw.runtime)
+
+    # Root admission agrees with `_is_julia_uri` (the diagnostics gate): the raw
+    # `.jl`-suffix no longer decides it.
+    @test upper in julia_files
+    @test !(untitled_jl_md in julia_files)
+    @test untitled_julia in julia_files
+    @test JuliaWorkspaces._is_julia_uri(jw.runtime, upper)
+    @test !JuliaWorkspaces._is_julia_uri(jw.runtime, untitled_jl_md)
+    @test JuliaWorkspaces._is_julia_uri(jw.runtime, untitled_julia)
+end
+
+@testitem "Untitled Julia buffer reports syntax diagnostics" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("untitled:Untitled-1")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "julia")))
+
+    diags = get_diagnostic(jw, uri)
+
+    @test length(diags) == 1
+    @test diags[1].severity == :error
+    @test diags[1].source == "JuliaSyntax.jl"
+end
+
+@testitem "Untitled markdown buffer reports no diagnostics" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("untitled:Untitled-2")
+    jw = JuliaWorkspace()
+    # Content that is a Julia syntax error but the buffer is markdown: it must
+    # not be parsed as Julia, so no diagnostics.
+    add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "markdown")))
+
+    diags = get_diagnostic(jw, uri)
+
+    @test isempty(diags)
+end
+
+@testitem "Untitled buffer uses active project as fallback environment" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText,
+        set_active_project!, set_input_env_ready!, derived_project_uri_for_root
+    using JuliaWorkspaces.URIs2: URI
+
+    env_dir = URI("file:///env")
+    uri = URI("untitled:Untitled-1")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///env/Project.toml"), SourceText("""
+    name = "Env"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0013"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///env/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(uri, SourceText("import JSON\n", "julia")))
+    set_active_project!(jw, env_dir)
+    set_input_env_ready!(jw.runtime, true)
+
+    # The untitled buffer's project is the active project (fallback env).
+    @test derived_project_uri_for_root(jw.runtime, uri) == env_dir
+
+    # With the env ready, the unresolvable package import now flags.
+    diags = get_diagnostic(jw, uri)
+    @test any(d -> d.source == "StaticLint.jl", diags)
+    @test any(d -> occursin("JSON", d.message), diags)
+end
