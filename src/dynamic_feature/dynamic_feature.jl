@@ -878,6 +878,13 @@ end
 function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
     key = msg.key
 
+    # The key may have been reaped (re-keyed / no longer required) while its prep
+    # ran; drop the stale result rather than launch or mark it ready.
+    if key ∉ df.inflight
+        @debug "Stale EnvironmentPrepDoneMsg; ignoring" key
+        return false
+    end
+
     if !msg.still_missing
         @info "All package caches available, skipping DJP" project_path=key.project_path
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
@@ -966,6 +973,12 @@ end
 
 function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
     key = msg.key
+
+    # Reaped (re-keyed / no longer required) while prep ran; drop the stale result.
+    if key ∉ df.inflight
+        @debug "Stale StandaloneProjectPrepDoneMsg; ignoring" key
+        return false
+    end
 
     if msg.fast_lane
         @info "Serving existing standalone project; refreshing in background" package_path=key.package_path
@@ -1263,6 +1276,15 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
         end
         delete!(df.launching, key)
         _report_progress(df, _progress_key("refresh", key), "Done", 100)
+    end
+
+    # Work items caught in their async prep window (in `inflight`, but with no
+    # process, queue entry, or refresh yet) are invisible to the cancel loops
+    # above. Without this a re-key orphans the stale key in `inflight` —
+    # inflating `pending_count` and leaving its progress bar open forever.
+    for key in collect(df.inflight)
+        key in required && continue
+        _complete_work_item!(df, key)
     end
 
     # ── Spawn work for newly-required keys ─────────────────────────────────

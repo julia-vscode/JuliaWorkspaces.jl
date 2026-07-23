@@ -469,3 +469,50 @@ end
     @test isempty(launches)
     @test fkey in df.done
 end
+
+@testitem "Dynamic reconcile: re-keying an env reaps the stale key caught in its prep window" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg,
+        WatchEnvironmentKey, DJPKey, handle!
+
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=4, launcher=(df, djp) -> nothing)
+
+    x1 = WatchEnvironmentKey("/ws/x", UInt64(1))
+    x2 = WatchEnvironmentKey("/ws/x", UInt64(2))   # same path, new content hash
+
+    # Dispatch x1: WatchEnvironmentMsg pushes it inflight and spawns its async
+    # prep (no DJP, not queued yet — the "prep window").
+    handle!(df, ReconcileMsg(Set{DJPKey}([x1])))
+    @test x1 in df.inflight
+    @test df.pending_count[] == 1
+
+    # Re-key to x2 while x1 is still in that window. x1 is no longer required and
+    # is in neither procs, launch_queue, nor refreshing — reconcile must still
+    # reap it rather than orphan it in inflight with an inflated pending_count.
+    handle!(df, ReconcileMsg(Set{DJPKey}([x2])))
+    @test x1 ∉ df.inflight
+    @test x2 in df.inflight
+    @test df.pending_count[] == 1
+end
+
+@testitem "Dynamic reconcile: a prep-done for a reaped stale key is ignored" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg, EnvironmentPrepDoneMsg,
+        WatchEnvironmentKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir();
+        max_concurrent_djps=4, launcher=(df, djp) -> push!(launches, djp.key))
+
+    x1 = WatchEnvironmentKey("/ws/x", UInt64(1))
+    x2 = WatchEnvironmentKey("/ws/x", UInt64(2))
+    handle!(df, ReconcileMsg(Set{DJPKey}([x1])))
+    handle!(df, ReconcileMsg(Set{DJPKey}([x2])))    # reaps x1
+    @test x1 ∉ df.inflight
+
+    # x1's async prep completes late (still-missing). It must be dropped, not
+    # relaunched, and must not touch the accounting for the live x2.
+    handle!(df, EnvironmentPrepDoneMsg(x1, true))
+    @test x1 ∉ df.inflight
+    @test x1 ∉ launches
+    @test df.pending_count[] == 1
+end
