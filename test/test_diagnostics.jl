@@ -1704,6 +1704,30 @@ end
     @test JuliaWorkspaces.derived_file_language_id(jw.runtime, md) == "markdown"
 end
 
+@testitem "derived_julia_files: one predicate for roots and the diagnostics gate" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    upper = URI("file:///Foo.JL")             # uppercase ext -> julia (case-insensitive)
+    untitled_jl_md = URI("untitled:Buf-1.jl")  # .jl-suffixed but tagged markdown -> not julia
+    untitled_julia = URI("untitled:Buf-2")     # no suffix, tagged julia -> julia
+    add_file!(jw, TextFile(upper, SourceText("x = 1\n", "julia")))
+    add_file!(jw, TextFile(untitled_jl_md, SourceText("# hi\n", "markdown")))
+    add_file!(jw, TextFile(untitled_julia, SourceText("y = 2\n", "julia")))
+
+    julia_files = JuliaWorkspaces.derived_julia_files(jw.runtime)
+
+    # Root admission agrees with `_is_julia_uri` (the diagnostics gate): the raw
+    # `.jl`-suffix no longer decides it.
+    @test upper in julia_files
+    @test !(untitled_jl_md in julia_files)
+    @test untitled_julia in julia_files
+    @test JuliaWorkspaces._is_julia_uri(jw.runtime, upper)
+    @test !JuliaWorkspaces._is_julia_uri(jw.runtime, untitled_jl_md)
+    @test JuliaWorkspaces._is_julia_uri(jw.runtime, untitled_julia)
+end
+
 @testitem "Untitled Julia buffer reports syntax diagnostics" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI

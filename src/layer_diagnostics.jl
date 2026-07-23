@@ -20,16 +20,6 @@ function _is_env_dependent_diagnostic(d::Diagnostic)
     return d.message in _ENV_DEPENDENT_LINT_MESSAGES
 end
 
-# A URI whose content should be treated as Julia: a file-scheme `.jl` path, or
-# a non-file buffer (e.g. untitled) whose language id is "julia".
-function _is_julia_uri(rt, uri)
-    if uri.scheme == "file"
-        return is_path_julia_file(uri2filepath(uri))
-    else
-        return derived_file_language_id(rt, uri) == "julia"
-    end
-end
-
 Salsa.@derived function derived_lintconfig_files(rt)
     files = derived_text_files(rt)
 
