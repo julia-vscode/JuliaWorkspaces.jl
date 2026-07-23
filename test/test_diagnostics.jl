@@ -1733,3 +1733,37 @@ end
 
     @test isempty(diags)
 end
+
+@testitem "Untitled buffer uses active project as fallback environment" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText,
+        set_active_project!, set_input_env_ready!, derived_project_uri_for_root
+    using JuliaWorkspaces.URIs2: URI
+
+    env_dir = URI("file:///env")
+    uri = URI("untitled:Untitled-1")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///env/Project.toml"), SourceText("""
+    name = "Env"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0013"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///env/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(uri, SourceText("import JSON\n", "julia")))
+    set_active_project!(jw, env_dir)
+    set_input_env_ready!(jw.runtime, true)
+
+    # The untitled buffer's project is the active project (fallback env).
+    @test derived_project_uri_for_root(jw.runtime, uri) == env_dir
+
+    # With the env ready, the unresolvable package import now flags.
+    diags = get_diagnostic(jw, uri)
+    @test any(d -> d.source == "StaticLint.jl", diags)
+    @test any(d -> occursin("JSON", d.message), diags)
+end
