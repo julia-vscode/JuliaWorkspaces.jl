@@ -489,6 +489,24 @@ end
     @test back.fieldnames == [:a, :b]
 end
 
+@testitem "SymbolServer: DataTypeStore handles value-parameter tuple types" begin
+    using JuliaWorkspaces.SymbolServer: DataTypeStore
+    using JuliaWorkspaces.SymbolServer.CacheStore: write, read
+
+    # `Tuple{2,3}` (e.g. a StaticArrays `Size` alias bound to a name) is not
+    # concrete, so caching walks its `.types` — which holds the integer
+    # *values* `2, 3`, not types. Those must be encoded like type parameters
+    # instead of erroring out and aborting the whole index request.
+    d = DataTypeStore(Tuple{2,3}, :S, @__MODULE__)
+    @test d.types == Any[2, 3]
+    # No fieldnames, so the value entries in `.types` are never indexed as
+    # field types by downstream consumers (they all key off `fieldnames`).
+    @test isempty(d.fieldnames)
+    io = IOBuffer(); write(io, d); seekstart(io)
+    back = read(io)
+    @test back.types == Any[2, 3]                            # survives round-trip
+end
+
 @testitem "SymbolServer: CacheStore validates file header" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, write
     using JuliaWorkspaces.SymbolServer: VarRef

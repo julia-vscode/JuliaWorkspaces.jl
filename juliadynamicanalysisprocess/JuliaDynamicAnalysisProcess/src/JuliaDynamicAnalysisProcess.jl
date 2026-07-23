@@ -22,16 +22,31 @@ function progress_reporter(state::JuliaDynamicAnalysisProcessState)
     end
 end
 
+# Turn any indexing failure into an ErrorException whose message carries the
+# context (what we were indexing) plus the child-side stacktrace. Only the
+# message crosses the JSONRPC boundary, so embedding the backtrace here is what
+# lets the orchestrator log a meaningful cause instead of a bare exception.
+function _index_failure(err, bt, what)
+    error("Failed to index $what: $(sprint(showerror, err, bt))")
+end
+
 function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProjectParams, state::JuliaDynamicAnalysisProcessState, token)
-    Pkg.activate(params.projectPath)
+    try
+        Pkg.activate(params.projectPath)
 
-    if params.package!==nothing
-        TestEnv.activate(params.package);
+        if params.package!==nothing
+            TestEnv.activate(params.package);
+        end
+
+        SymbolServer.get_store(params.storePath, progress_reporter(state))
+
+        return dirname(Base.active_project())
+    catch err
+        err isa InterruptException && rethrow()
+        _index_failure(err, catch_backtrace(),
+            "project at $(params.projectPath)" *
+            (params.package === nothing ? "" : " (test env for package $(params.package))"))
     end
-
-    SymbolServer.get_store(params.storePath, progress_reporter(state))
-
-    return dirname(Base.active_project())
 end
 
 function create_standalone_project_request(params::JuliaDynamicAnalysisProtocol.CreateStandaloneProjectParams, state::JuliaDynamicAnalysisProcessState, token)
@@ -45,9 +60,14 @@ function create_standalone_project_request(params::JuliaDynamicAnalysisProtocol.
         @warn "Failed to resolve standalone package project" params.packagePath exception=(err, catch_backtrace())
     end
 
-    SymbolServer.get_store(params.storePath, progress_reporter(state))
+    try
+        SymbolServer.get_store(params.storePath, progress_reporter(state))
 
-    return dirname(Base.active_project())
+        return dirname(Base.active_project())
+    catch err
+        err isa InterruptException && rethrow()
+        _index_failure(err, catch_backtrace(), "standalone project for package at $(params.packagePath)")
+    end
 end
 
 JSONRPC.@message_dispatcher dispatch_msg begin

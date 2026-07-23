@@ -98,9 +98,9 @@ function DataTypeStore(@nospecialize(t), symbol, parent_mod)
     end
     has_fields = isconcretetype(ur_t) && fieldcount(ur_t) > 0
     types = if has_fields
-        Any[FakeTypeName(p) for p in Base.fieldtypes(ur_t)]
+        Any[_parameter(p) for p in Base.fieldtypes(ur_t)]
     elseif isdefined(ur_t, :types)
-        map(FakeTypeName, ur_t.types)
+        Any[_parameter(p) for p in ur_t.types]
     else
         []
     end
