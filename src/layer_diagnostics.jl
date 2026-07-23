@@ -20,6 +20,16 @@ function _is_env_dependent_diagnostic(d::Diagnostic)
     return d.message in _ENV_DEPENDENT_LINT_MESSAGES
 end
 
+# A URI whose content should be treated as Julia: a file-scheme `.jl` path, or
+# a non-file buffer (e.g. untitled) whose language id is "julia".
+function _is_julia_uri(rt, uri)
+    if uri.scheme == "file"
+        return is_path_julia_file(uri2filepath(uri))
+    else
+        return derived_file_language_id(rt, uri) == "julia"
+    end
+end
+
 Salsa.@derived function derived_lintconfig_files(rt)
     files = derived_text_files(rt)
 
@@ -65,6 +75,9 @@ end
 
 Salsa.@derived function derived_lint_configuration(rt, uri)
     @debug "derived_lint_configuration" uri=uri
+
+    # Non-file buffers have no folder-based config; defaults apply.
+    uri.scheme == "file" || return Dict{String,Any}()
 
     config_files = derived_lintconfig_files(rt)
 
@@ -131,8 +144,10 @@ Salsa.@derived function derived_diagnostics(rt, uri)
 
     results = Diagnostic[]
 
-    if uri.scheme == "file"
-        if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "syntax-errors", true) == true || get(lint_config, "syntax-warnings", false) == true
+    # Julia-content diagnostics run for file-scheme .jl files AND non-file
+    # (e.g. untitled) buffers whose language is julia.
+    if _is_julia_uri(rt, uri)
+        if get(lint_config, "syntax-errors", true) == true || get(lint_config, "syntax-warnings", false) == true
             syntax_diagnostics = derived_julia_syntax_diagnostics(rt, uri)
 
             if get(lint_config, "syntax-errors", true) == true
@@ -144,12 +159,12 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             end
         end
 
-        if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "testitem-errors", true) == true
+        if get(lint_config, "testitem-errors", true) == true
             tis = derived_testitems(rt, uri)
             append!(results, Diagnostic(i.range, :error, i.message, nothing, Symbol[], "Testitem") for i in tis.testerrors)
         end
 
-        if is_path_julia_file(uri2filepath(uri)) && get(lint_config, "static-lint", true) == true
+        if get(lint_config, "static-lint", true) == true
             sl = derived_new_static_lint_diagnostics(rt, uri)
             env_ready = derived_file_env_ready(rt, uri)
             if env_ready
@@ -164,7 +179,10 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             # semantic static-lint pass above.
             append!(results, derived_include_diagnostics(rt, uri))
         end
+    end
 
+    # Config/TOML diagnostics are filesystem-file only.
+    if uri.scheme == "file"
         if (is_path_lintconfig_file(uri2filepath(uri)) || is_path_formatconfig_file(uri2filepath(uri)) || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri)) ) && get(lint_config, "toml-syntax-errors", true) == true
             toml_syntax_errors = derived_toml_syntax_diagnostics(rt, uri)
             append!(results, toml_syntax_errors)

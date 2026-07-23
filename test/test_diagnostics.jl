@@ -1703,3 +1703,33 @@ end
     @test JuliaWorkspaces.derived_file_language_id(jw.runtime, jl) == "julia"
     @test JuliaWorkspaces.derived_file_language_id(jw.runtime, md) == "markdown"
 end
+
+@testitem "Untitled Julia buffer reports syntax diagnostics" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("untitled:Untitled-1")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "julia")))
+
+    diags = get_diagnostic(jw, uri)
+
+    @test length(diags) == 1
+    @test diags[1].severity == :error
+    @test diags[1].source == "JuliaSyntax.jl"
+end
+
+@testitem "Untitled markdown buffer reports no diagnostics" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("untitled:Untitled-2")
+    jw = JuliaWorkspace()
+    # Content that is a Julia syntax error but the buffer is markdown: it must
+    # not be parsed as Julia, so no diagnostics.
+    add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "markdown")))
+
+    diags = get_diagnostic(jw, uri)
+
+    @test isempty(diags)
+end
