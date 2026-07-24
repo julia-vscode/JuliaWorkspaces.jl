@@ -50,3 +50,30 @@ end
         @test !any(p -> p.name == "TOML", _get_missing_packages(proj, store))
     end
 end
+
+@testitem "Stdlib key: derived_project classifies a tree-sha'd stdlib as stdlib" begin
+    using JuliaWorkspaces: workspace_from_folders, derived_project, get_projects,
+        filepath2uri, _stdlib_cache_version
+    using UUIDs: UUID
+
+    toml = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+    sv = _stdlib_cache_version(UUID(toml))
+
+    mktempdir() do root
+        proj = joinpath(root, "proj"); mkpath(proj)
+        write(joinpath(proj, "Project.toml"), "[deps]\nTOML = \"$toml\"\n")
+        write(joinpath(proj, "Manifest.toml"), """
+        [[TOML]]
+        git-tree-sha1 = "d0ac7eaad0fb9f6ba023a1d743edca974ae637c4"
+        uuid = "$toml"
+        version = "1.0.0"
+        """)
+
+        jw = workspace_from_folders([proj])
+        p = derived_project(jw.runtime, first(get_projects(jw)))
+        @test p !== nothing
+        @test haskey(p.stdlib_packages, "TOML")             # reclassified as stdlib
+        @test p.stdlib_packages["TOML"].version == string(sv)
+        @test !haskey(p.regular_packages, "TOML")           # not keyed by the tree-sha
+    end
+end
