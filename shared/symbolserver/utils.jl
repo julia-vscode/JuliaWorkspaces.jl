@@ -767,12 +767,25 @@ function get_cache_path(manifest, uuid)
     name = packagename(manifest, uuid)
     pkg_info = frommanifest(manifest, uuid)
     ver = version(pkg_info)
-    if ver === nothing
-        if isdefined(Pkg.Types, :is_stdlib) && Pkg.Types.is_stdlib(uuid)
+    th = tree_hash(pkg_info)
+
+    if isdefined(Pkg.Types, :is_stdlib) && Pkg.Types.is_stdlib(uuid)
+        # A stdlib resolves to the Julia-bundled identity regardless of what the
+        # manifest pins (a stale tree hash or version), and Pkg's Context does not
+        # always normalize the in-memory entry. Key any versioned stdlib entry by
+        # the bundled version, dropping the tree hash, so the key is deterministic
+        # and matches the language server's own stdlib keying; a versionless entry
+        # keeps the running-VERSION fallback.
+        if ver !== nothing
+            th = nothing
+            if isdefined(Pkg.Types, :stdlib_infos)
+                info = get(Pkg.Types.stdlib_infos(), uuid, nothing)
+                info === nothing || (ver = something(info.version, VERSION))
+            end
+        else
             ver = VERSION
         end
     end
-    th = tree_hash(pkg_info)
 
     filename = something(th, ver, "unknown")
     filename = replace(string(filename), '+'=>'_')

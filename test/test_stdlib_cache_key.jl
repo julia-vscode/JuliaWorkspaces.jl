@@ -77,3 +77,64 @@ end
         @test !haskey(p.regular_packages, "TOML")           # not keyed by the tree-sha
     end
 end
+
+@testitem "Stdlib key: child caches a tree-sha'd stdlib at the bundled version and the parent finds it" begin
+    using JuliaWorkspaces: _get_missing_packages, _stdlib_cache_version
+    using UUIDs: UUID
+
+    symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
+
+    toml    = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+    dates   = "ade2ca70-3891-5945-98fb-dc099432e06a"
+    printf  = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+    unicode = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
+    tree = "d0ac7eaad0fb9f6ba023a1d743edca974ae637c4"
+    sv = _stdlib_cache_version(UUID(toml))
+
+    mktempdir() do root
+        proj = joinpath(root, "proj"); store = joinpath(root, "store")
+        mkpath(proj); mkpath(store)
+        write(joinpath(proj, "Project.toml"), "[deps]\nTOML = \"$toml\"\n")
+        # v1 manifest: TOML pinned as a registered package (git-tree-sha1); the
+        # child re-resolves it to the bundled stdlib and caches by its version.
+        write(joinpath(proj, "Manifest.toml"), """
+        [[Dates]]
+        deps = ["Printf"]
+        uuid = "$dates"
+
+        [[Printf]]
+        deps = ["Unicode"]
+        uuid = "$printf"
+
+        [[TOML]]
+        deps = ["Dates"]
+        git-tree-sha1 = "$tree"
+        uuid = "$toml"
+        version = "1.0.0"
+
+        [[Unicode]]
+        uuid = "$unicode"
+        """)
+
+        runner = joinpath(root, "run.jl")
+        write(runner, """
+        include(raw"$symbolserver_jl")
+        using Pkg
+        Pkg.activate(raw"$proj"; io=devnull)
+        SymbolServer.get_store(raw"$store", nothing)
+        """)
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+            run(ignorestatus(`$jl --startup-file=no --project=$proj $runner`))
+        end
+        @test proc.exitcode == 0
+
+        # The child cached TOML at the bundled-version key, NOT the manifest tree-sha.
+        @test isfile(joinpath(store, "T", "TOML", toml, "$(sv).jstore"))
+        @test !isfile(joinpath(store, "T", "TOML", toml, "$tree.jstore"))
+
+        # The parent's launch gate keys TOML the same way and finds it (no relaunch).
+        @test !any(p -> p.name == "TOML", _get_missing_packages(proj, store))
+    end
+end
