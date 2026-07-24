@@ -676,6 +676,10 @@ function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_pa
         SymbolServer.cache_key(pkg.uuid, stem) in index
     end
 
+    num_downloadable = length(missing_pkgs) - length(downloadable)
+
+    @info "Downloading $(length(downloadable)) cache files ($(num_downloadable) not available in cloud cache)..."
+
     isempty(downloadable) && return missing_pkgs
 
     download_dir_parent = joinpath(store_path, "_downloads")
@@ -888,7 +892,6 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
         missing_pkgs = _get_missing_packages(project_path, df.store_path)
 
         if !isempty(missing_pkgs) && df.download_enabled
-            @info "Downloading missing package caches" count=length(missing_pkgs)
             # Progress is routed through the reactor as `PrepProgressMsg`s
             # carrying the download phase's own completion fraction; the
             # reactor reports them onto the item's dedicated download bar.
@@ -932,7 +935,6 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
     end
 
     if !msg.still_missing
-        @info "Every package is cached or tombstoned as uncacheable; skipping indexing child" project_path=key.project_path
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
@@ -944,10 +946,11 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         # forever.
         _drain_launch_queue!(df)
     elseif df.djp_mode != DynamicOff
+        @info "$(key.project_path) not fully resolved, starting local indexing process..."
         _report_progress(df, _progress_key("index", key), "Starting indexer for $(basename(key.project_path))...", 0)
         _request_launch!(df, key)
     else
-        @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=key.project_path
+        @info "$(key.project_path) not fully resolved, but local indexing is disabled"
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
