@@ -25,6 +25,8 @@ function _stdlib_cache_version(uuid::UUID)
         _STDLIB_INFOS_CACHE[] = infos
     end
     info = get(infos, uuid, nothing)
+    # is_stdlib ⊆ keys(stdlib_infos) on supported Julias, so this fallback is
+    # effectively unreachable; VERSION keeps it consistent with get_cache_path.
     info === nothing && return VERSION
     return something(info.version, VERSION)
 end
