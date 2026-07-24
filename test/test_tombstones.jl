@@ -195,3 +195,80 @@ end
         @test !isfile(tomb)      # deved → NOT tombstoned
     end
 end
+
+@testitem "Tombstones: parent classifier drops current-tombstoned packages" begin
+    using JuliaWorkspaces: _get_missing_packages, _drop_tombstoned
+    using JuliaWorkspaces.SymbolServer: tombstone_path, write_tombstone
+
+    mktempdir() do root
+        proj = joinpath(root, "proj"); store = joinpath(root, "store")
+        mkpath(proj); mkpath(store)
+        reg_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        dev_uuid = "cccccccc-dddd-eeee-ffff-000000000000"
+        tree = "abcdef0123456789abcdef0123456789abcdef01"
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "$(VERSION)"
+        manifest_format = "2.0"
+        project_hash = "0000000000000000000000000000000000000000"
+
+        [[deps.RegPkg]]
+        git-tree-sha1 = "$tree"
+        uuid = "$reg_uuid"
+        version = "1.2.3"
+
+        [[deps.DevPkg]]
+        path = "../DevPkg"
+        uuid = "$dev_uuid"
+        version = "0.1.0"
+        """)
+
+        missing = _get_missing_packages(proj, store)
+        @test any(p -> p.name == "RegPkg", missing)   # regular, no jstore → missing
+        @test !any(p -> p.name == "DevPkg", missing)  # deved → skipped entirely
+
+        # No tombstone yet: RegPkg still needs caching.
+        @test any(p -> p.name == "RegPkg", _drop_tombstoned(missing, store))
+
+        # Current tombstone for RegPkg → dropped (env can fast-lane, no DJP).
+        cp = joinpath(store, "R", "RegPkg", reg_uuid, "$tree.jstore")
+        write_tombstone(tombstone_path(cp))
+        @test isempty(_drop_tombstoned(missing, store))
+
+        # A version-mismatched tombstone does NOT drop it (retry).
+        write(tombstone_path(cp), "indexer_version = 999\njulia_version = \"$(VERSION)\"\ntimestamp = $(round(Int, time()))\n")
+        @test any(p -> p.name == "RegPkg", _drop_tombstoned(missing, store))
+    end
+end
+
+@testitem "Tombstones: successful download clears the sibling tombstone" begin
+    using JuliaWorkspaces: _download_single_cache, MissingPackage
+    using JuliaWorkspaces.SymbolServer: Package, ModuleStore, VarRef, CacheStore,
+        CACHE_STORE_VERSION, tombstone_path, write_tombstone
+
+    # `return` does not skip a @testitem body (module-scope eval); gate with if.
+    if !Sys.iswindows()   # file:// download pattern is exercised on POSIX
+        mktempdir() do root
+            store = joinpath(root, "store"); mkpath(store)
+            up = joinpath(root, "upstream")
+            name = "DownPkg"; uuid = "dddddddd-eeee-ffff-0000-111111111111"
+            tree = "0123456789abcdef0123456789abcdef01234567"
+
+            pkg = Package(name, ModuleStore(VarRef(nothing, Symbol(name)), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[]), Base.UUID(uuid), nothing)
+            srcdir = joinpath(root, "src_$tree"); mkpath(srcdir)
+            jname = "$tree.jstore"
+            open(io -> CacheStore.write(io, pkg), joinpath(srcdir, jname), "w")
+            updir = joinpath(up, "store", CACHE_STORE_VERSION, "packages", "D", name, uuid); mkpath(updir)
+            run(`tar -czf $(joinpath(updir, "$tree.tar.gz")) -C $srcdir $jname`)
+
+            dest = joinpath(store, "D", name, uuid, "$tree.jstore")
+            tomb = tombstone_path(dest)
+            mkpath(dirname(dest)); write_tombstone(tomb)
+            @test isfile(tomb)
+
+            mp = MissingPackage((name, Base.UUID(uuid), "1.0.0", tree))
+            @test _download_single_cache(mp, store, "file://" * up, mktempdir())
+            @test isfile(dest)     # downloaded
+            @test !isfile(tomb)    # tombstone cleared
+        end
+    end
+end

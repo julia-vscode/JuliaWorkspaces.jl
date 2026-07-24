@@ -548,6 +548,23 @@ function _get_missing_packages(project_path::String, store_path::String)
     return missing
 end
 
+# Store-relative `.jstore` path for a missing package, matching the layout
+# `_get_missing_packages` and `_download_single_cache` build inline.
+function _jstore_path(pkg::MissingPackage, store_path::String)
+    filename = replace(string(something(pkg.git_tree_sha1, pkg.version)), '+'=>'_')
+    joinpath(store_path, uppercase(pkg.name[1:1]), pkg.name, string(pkg.uuid), string(filename, ".jstore"))
+end
+
+# Drop packages whose sibling tombstone says local caching was already tried and
+# failed for this exact version under the current indexer/Julia and hasn't
+# expired. A missing/mismatched/expired tombstone keeps the package (retry).
+function _drop_tombstoned(pkgs::Vector{MissingPackage}, store_path::String)
+    filter(pkgs) do pkg
+        tomb = SymbolServer.tombstone_path(_jstore_path(pkg, store_path))
+        !SymbolServer.tombstone_is_current(SymbolServer.read_tombstone(tomb))
+    end
+end
+
 """
     _download_single_cache(pkg, store_path, upstream_url, download_dir) -> Bool
 
@@ -616,6 +633,7 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
         end
 
         @info "Successfully downloaded cache" name=name version=version
+        SymbolServer.delete_tombstone(SymbolServer.tombstone_path(dest_filepath))
         return true
     catch err
         @warn "Failed to download cache" name=name version=version exception=(err, catch_backtrace())
@@ -859,6 +877,9 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
             put!(df.in_channel, PrepProgressMsg(key, "Downloaded caches for $(basename(project_path))", 1.0))
         end
 
+        # A package we can neither cache nor download is dropped if it carries a
+        # current tombstone, so a permanently-uncacheable pin stops re-launching a DJP.
+        missing_pkgs = _drop_tombstoned(missing_pkgs, df.store_path)
         put!(df.in_channel, EnvironmentPrepDoneMsg(key, !isempty(missing_pkgs)))
     catch err
         @error "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
@@ -965,7 +986,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
     store_path = df.store_path
     @async try
         usable = isfile(joinpath(dir, "Project.toml")) && isfile(joinpath(dir, "Manifest.toml"))
-        fast_lane = usable && isempty(_get_missing_packages(dir, store_path))
+        fast_lane = usable && isempty(_drop_tombstoned(_get_missing_packages(dir, store_path), store_path))
         put!(df.in_channel, StandaloneProjectPrepDoneMsg(key, fast_lane))
     catch err
         @error "Standalone project prep failed" key exception=(err, catch_backtrace())
