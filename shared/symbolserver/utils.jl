@@ -763,6 +763,32 @@ end
 
 Returns a vector containing the cache storage path for a package structured: [folder, folder, file].
 """
+const _STDLIB_VERSIONS_CACHE = Ref{Any}(nothing)
+
+# UUID => bundled stdlib version for the running Julia, across Pkg versions:
+# `stdlib_infos` (1.12+, StdlibInfo structs) or `stdlibs` (earlier, (name, ver)
+# tuples). Cached because each Pkg call rebuilds the dict.
+function _stdlib_versions()
+    cache = _STDLIB_VERSIONS_CACHE[]
+    cache === nothing || return cache
+    d = Dict{UUID,Union{Nothing,VersionNumber}}()
+    if isdefined(Pkg.Types, :stdlib_infos)
+        for (u, info) in Pkg.Types.stdlib_infos()
+            d[u] = info.version
+        end
+    elseif isdefined(Pkg.Types, :stdlibs)
+        for (u, entry) in Pkg.Types.stdlibs()
+            d[u] = entry isa Tuple ? entry[2] : nothing
+        end
+    end
+    _STDLIB_VERSIONS_CACHE[] = d
+    return d
+end
+
+# Bundled version of a stdlib UUID (or `nothing` when not a stdlib / unknown /
+# versionless). Works on both `stdlib_infos` and `stdlibs` Julias.
+_stdlib_bundled_version(uuid) = get(_stdlib_versions(), uuid, nothing)
+
 function get_cache_path(manifest, uuid)
     name = packagename(manifest, uuid)
     pkg_info = frommanifest(manifest, uuid)
@@ -778,12 +804,9 @@ function get_cache_path(manifest, uuid)
         # keeps the running-VERSION fallback.
         if ver !== nothing
             th = nothing
-            if isdefined(Pkg.Types, :stdlib_infos)
-                info = get(Pkg.Types.stdlib_infos(), uuid, nothing)
-                info === nothing || (ver = something(info.version, VERSION))
-            end
+            ver = something(_stdlib_bundled_version(uuid), ver)
         else
-            ver = VERSION
+            ver = something(_stdlib_bundled_version(uuid), VERSION)
         end
     end
 

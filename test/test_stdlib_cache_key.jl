@@ -1,14 +1,14 @@
 @testitem "Stdlib key: _stdlib_cache_version maps stdlibs to the bundled version" begin
     using JuliaWorkspaces: _stdlib_cache_version
-    import Pkg
+    using JuliaWorkspaces.SymbolServer: _stdlib_bundled_version
     using UUIDs: UUID
 
     toml  = UUID("fa267f1f-6049-4f14-aa54-33bafae1ed76")   # stdlib (was registered pre-1.6)
     prefs = UUID("21216c6a-2e73-6563-6e65-726566657250")   # registered package, not a stdlib
 
-    infos = Pkg.Types.stdlib_infos()
     @test _stdlib_cache_version(toml) isa VersionNumber
-    @test _stdlib_cache_version(toml) == something(infos[toml].version, VERSION)  # matches the child's key
+    # Matches the child's key: same cross-Julia bundled-version lookup get_cache_path uses.
+    @test _stdlib_cache_version(toml) == something(_stdlib_bundled_version(toml), VERSION)
     @test _stdlib_cache_version(prefs) === nothing                                 # non-stdlib → no normalization
 end
 
@@ -85,37 +85,19 @@ end
     symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
         "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
 
-    toml    = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
-    dates   = "ade2ca70-3891-5945-98fb-dc099432e06a"
-    printf  = "de0858da-6303-5e67-8744-51eddeeeb8d7"
-    unicode = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
-    tree = "d0ac7eaad0fb9f6ba023a1d743edca974ae637c4"
+    toml = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+    tree = "d0ac7eaad0fb9f6ba023a1d743edca974ae637c4"   # TOML's git-tree-sha1 in the fixture manifest
     sv = _stdlib_cache_version(UUID(toml))
 
     mktempdir() do root
-        proj = joinpath(root, "proj"); store = joinpath(root, "store")
-        mkpath(proj); mkpath(store)
-        write(joinpath(proj, "Project.toml"), "[deps]\nTOML = \"$toml\"\n")
-        # v1 manifest: TOML pinned as a registered package (git-tree-sha1); the
-        # child re-resolves it to the bundled stdlib and caches by its version.
-        write(joinpath(proj, "Manifest.toml"), """
-        [[Dates]]
-        deps = ["Printf"]
-        uuid = "$dates"
-
-        [[Printf]]
-        deps = ["Unicode"]
-        uuid = "$printf"
-
-        [[TOML]]
-        deps = ["Dates"]
-        git-tree-sha1 = "$tree"
-        uuid = "$toml"
-        version = "1.0.0"
-
-        [[Unicode]]
-        uuid = "$unicode"
-        """)
+        # The real UsesPreferences fixture records TOML (a stdlib) with a
+        # git-tree-sha1, the exact case that used to relaunch. Copy the whole
+        # Preferences package so its `[sources]`-deved `../..` path still resolves,
+        # and index a temp store — a hand-written manifest can't be loaded by the
+        # child on all Julia versions.
+        cp(joinpath(@__DIR__, "..", "packages", "Preferences"), joinpath(root, "Preferences"))
+        proj = joinpath(root, "Preferences", "test", "UsesPreferences")
+        store = joinpath(root, "store"); mkpath(store)
 
         runner = joinpath(root, "run.jl")
         write(runner, """
