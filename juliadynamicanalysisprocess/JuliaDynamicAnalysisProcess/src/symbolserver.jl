@@ -81,6 +81,9 @@ function get_store(store_path::String, progress_callback)
             else
                 @info "Package $pk_name ($uuid) is cached."
             end
+        elseif !is_package_deved(manifest(ctx), uuid) &&
+               tombstone_is_current(read_tombstone(tombstone_path(cache_path)))
+            @info "Package $pk_name ($uuid) tombstoned as uncacheable, skipping."
         else
             @info "Will cache package $pk_name ($uuid)"
             push!(packages_to_load, uuid)
@@ -107,8 +110,12 @@ function get_store(store_path::String, progress_callback)
         @info "Loading package $pe_name ($i/$n_to_load)."
         progress_callback === nothing || progress_callback("Indexing $pe_name ($i/$n_to_load)...", step_pct(i))
         t_load = time()
-        load_package(ctx, uuid, nothing, loading_bay)
-        @info "Loaded package $pe_name in $(round(time() - t_load, digits=1)) seconds."
+        try
+            load_package(ctx, uuid, nothing, loading_bay)
+            @info "Loaded package $pe_name in $(round(time() - t_load, digits=1)) seconds."
+        catch err
+            @warn "Failed to load package $pe_name; it will be tombstoned if it produces no cache." exception=(err, catch_backtrace())
+        end
     end
 
     # Create image of whole package env. This creates the module structure only.
@@ -144,6 +151,19 @@ function get_store(store_path::String, progress_callback)
 
     progress_callback === nothing || progress_callback("Writing symbol caches to disc...", step_pct(n_to_load + 2))
     write_depot(server, server.context, written_caches)
+
+    # Record the outcome for every package this run tried to cache: clear a stale
+    # tombstone when a cache now exists, write one when a non-deved package
+    # produced none, so the launch gate stops re-attempting it.
+    for uuid in packages_to_load
+        cache_path = joinpath(server.storedir, SymbolServer.get_cache_path(manifest(ctx), uuid)...)
+        tomb = SymbolServer.tombstone_path(cache_path)
+        if isfile(cache_path)
+            SymbolServer.delete_tombstone(tomb)
+        elseif !is_package_deved(manifest(ctx), uuid)
+            SymbolServer.write_tombstone(tomb)
+        end
+    end
 
     @info "Symbol server indexing took $((time_ns() - start_time) / 1e9) seconds."
 end
