@@ -759,17 +759,27 @@ _has_free_slot(df::DynamicFeature) =
 
 # Construct the DJP for `key` and launch it, occupying a slot. The DJP is
 # derived from the key alone so queued keys carry no state that can go stale.
+# The trailing path segments of `path`, for logs/progress that would otherwise
+# show a bare basename — ambiguous when same-named projects live under different
+# roots (no workspace root is threaded into the reactor to relativize against).
+function _short_path(path::AbstractString; segments::Int=3)
+    parts = splitpath(path)
+    length(parts) <= segments && return path
+    return joinpath(parts[end-segments+1:end]...)
+end
+
 # The reason a child is running and the path it targets, shared by the spawn and
 # completion logs so they stay in sync. Package-cache tombstones only avoid the
 # watch-environment first index; test environments and standalone refreshes
 # always need a child, so those keep spawning across restarts by design.
+# `target` is always a real path so callers can `_short_path` it.
 function _djp_reason_target(df::DynamicFeature, key::DJPKey)
     if key in df.refreshing
         ("refreshing served standalone project (background; picks up changes)", key.package_path)
     elseif key isa WatchEnvironmentKey
         ("indexing packages that still lack a symbol cache", key.project_path)
     elseif key isa WatchTestEnvironmentKey
-        ("materializing a test environment (only a child can produce it)", string(key.package_name, " @ ", key.project_path))
+        ("materializing the '$(key.package_name)' test environment (only a child can produce it)", key.project_path)
     else
         ("creating a standalone project (only a child can produce it)", key.package_path)
     end
@@ -786,7 +796,7 @@ function _launch_now!(df::DynamicFeature, key::DJPKey)
     df.procs[key] = djp
     push!(df.launching, key)
     reason, target = _djp_reason_target(df, key)
-    @info "Spawning indexing child process for $(basename(target)): $(reason)"
+    @info "Spawning indexing child process for $(_short_path(target)): $(reason)"
     df.launcher(df, djp)
     return
 end
@@ -951,11 +961,11 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         # forever.
         _drain_launch_queue!(df)
     elseif df.djp_mode != DynamicOff
-        @info "$(basename(key.project_path)) not fully resolved, enqueueing local indexing process..."
+        @info "$(_short_path(key.project_path)) not fully resolved, enqueueing local indexing process..."
         _report_progress(df, _progress_key("index", key), "Enqueueing indexer for $(basename(key.project_path))...", 0)
         _request_launch!(df, key)
     else
-        @info "$(basename(key.project_path)) not fully resolved, but local indexing is disabled"
+        @info "$(_short_path(key.project_path)) not fully resolved, but local indexing is disabled"
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
@@ -1124,7 +1134,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         # freshness lands via the rewritten Manifest and the result path's
         # package-cache loading. Never touches pending_count.
         reason, target = _djp_reason_target(df, key)   # before clearing df.refreshing
-        @info "Indexing child process done for $(basename(target)): $(reason)"
+        @info "Indexing child process done for $(_short_path(target)): $(reason)"
         delete!(df.refreshing, key)
         delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
@@ -1152,7 +1162,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     end
 
     reason, target = _djp_reason_target(df, key)
-    @info "Indexing child process done for $(basename(target)): $(reason)"
+    @info "Indexing child process done for $(_short_path(target)): $(reason)"
 
     if key isa WatchEnvironmentKey
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
