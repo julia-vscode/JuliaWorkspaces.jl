@@ -163,7 +163,11 @@ function get_store(store_path::String, progress_callback)
             tomb = SymbolServer.tombstone_path(cache_path)
             if isfile(cache_path)
                 SymbolServer.delete_tombstone(tomb)
-            elseif !is_package_deved(manifest(ctx), uuid)
+            elseif !is_package_deved(manifest(ctx), uuid) &&
+                   !SymbolServer.tombstone_is_current(SymbolServer.read_tombstone(tomb))
+                # Keep an existing current tombstone's timestamp so incidental child
+                # runs (for some other missing package) don't reset its TTL; only
+                # stamp fresh when none is current (absent / version-mismatched / expired).
                 SymbolServer.write_tombstone(tomb)
             end
         catch err

@@ -330,3 +330,59 @@ end
         end
     end
 end
+
+@testitem "Tombstones: child preserves a current tombstone's timestamp (TTL not reset)" begin
+    using JuliaWorkspaces.SymbolServer: read_tombstone, INDEXER_VERSION
+
+    symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
+
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    tree = "abcdef0123456789abcdef0123456789abcdef01"
+
+    function run_get_store(proj, store)
+        runner = tempname() * ".jl"
+        write(runner, """
+        include(raw"$symbolserver_jl")
+        using Pkg
+        Pkg.activate(raw"$proj"; io=devnull)
+        SymbolServer.get_store(raw"$store", nothing)
+        """)
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+            run(ignorestatus(`$jl --startup-file=no --project=$proj $runner`))
+        end
+        proc.exitcode
+    end
+
+    mktempdir() do root
+        proj = joinpath(root, "proj"); store = joinpath(root, "store")
+        mkpath(proj); mkpath(store)
+        write(joinpath(proj, "Project.toml"), "[deps]\nFakeRegPkg = \"$uuid\"\n")
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "$(VERSION)"
+        manifest_format = "2.0"
+        project_hash = "0000000000000000000000000000000000000000"
+
+        [[deps.FakeRegPkg]]
+        git-tree-sha1 = "$tree"
+        uuid = "$uuid"
+        version = "1.2.3"
+        """)
+
+        tomb = joinpath(store, "F", "FakeRegPkg", uuid, "$tree.tombstone")
+
+        # First run tombstones the uncacheable package.
+        @test run_get_store(proj, store) == 0
+        @test isfile(tomb)
+
+        # Re-stamp it older-but-still-current, then run again. The package is
+        # skipped (current tombstone) and must NOT be re-stamped, so its TTL keeps
+        # counting down rather than resetting on every incidental child run.
+        old_ts = round(Int, time()) - 1000
+        write(tomb, "indexer_version = $(INDEXER_VERSION)\njulia_version = \"$(VERSION)\"\ntimestamp = $(old_ts)\n")
+
+        @test run_get_store(proj, store) == 0
+        @test read_tombstone(tomb).timestamp == old_ts   # preserved, not reset to ~now
+    end
+end
