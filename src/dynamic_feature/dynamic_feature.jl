@@ -523,7 +523,16 @@ function _get_missing_packages(project_path::String, store_path::String)
         uuid = tryparse(UUID, uuid_str)
         uuid === nothing && continue
 
-        if haskey(entry, "git-tree-sha1") && haskey(entry, "version")
+        stdlib_ver = haskey(entry, "version") ? _stdlib_cache_version(uuid) : nothing
+        if stdlib_ver !== nothing
+            # A stdlib recorded as registered (git-tree-sha1) or with a stale
+            # version is resolved to the bundled stdlib by the child; key it there.
+            filename = replace(string(stdlib_ver), '+'=>'_')
+            cache_path = joinpath(store_path, uppercase(k_entry[1:1]), k_entry, string(uuid), string(filename, ".jstore"))
+            if !isfile(cache_path)
+                push!(missing, MissingPackage((k_entry, uuid, string(stdlib_ver), nothing)))
+            end
+        elseif haskey(entry, "git-tree-sha1") && haskey(entry, "version")
             # Regular package
             ver = entry["version"]
             tree_sha = entry["git-tree-sha1"]
