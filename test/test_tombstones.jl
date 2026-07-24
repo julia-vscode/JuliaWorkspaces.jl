@@ -107,7 +107,7 @@ end
     end
 end
 
-@testitem "Tombstones: child clears a stale tombstone when a package caches" begin
+@testitem "Tombstones: child attempts a deved package despite a current tombstone and clears it" begin
     b_uuid = "b8d7f5ca-4a81-4f4a-b8c7-1f4a0d2b3c4e"
     symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
         "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
@@ -132,7 +132,8 @@ end
         cache_dir = joinpath(store, "B", "B", b_uuid); mkpath(cache_dir)
         jstore = joinpath(cache_dir, "0.1.0.jstore")
         tomb   = joinpath(cache_dir, "0.1.0.tombstone")
-        write(tomb, "indexer_version = 1\njulia_version = \"stale\"\ntimestamp = 1\n")  # pre-seed
+        # pre-seed a CURRENT tombstone: a deved package must be attempted anyway
+        write(tomb, "indexer_version = 1\njulia_version = \"$(VERSION)\"\ntimestamp = $(round(Int, time()))\n")
         @test isfile(tomb)
 
         runner = joinpath(root, "run.jl")
@@ -147,7 +148,50 @@ end
             run(ignorestatus(`$jl --startup-file=no --project=$proj $runner`))
         end
         @test proc.exitcode == 0
-        @test isfile(jstore)     # deved B cached successfully
-        @test !isfile(tomb)      # its stale tombstone was cleared
+        @test isfile(jstore)     # deved B cached despite a current tombstone (skip-read gate didn't apply)
+        @test !isfile(tomb)      # its tombstone was cleared
+    end
+end
+
+@testitem "Tombstones: child never tombstones a deved package that fails to load" begin
+    b_uuid = "c9e8f6db-5b92-4b5b-c9d8-2f5b1e3c4d5f"
+    symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
+
+    mktempdir() do root
+        proj = joinpath(root, "proj"); bdir = joinpath(root, "B"); store = joinpath(root, "store")
+        mkpath(joinpath(bdir, "src")); mkpath(proj); mkpath(store)
+        write(joinpath(bdir, "Project.toml"), "name = \"B\"\nuuid = \"$b_uuid\"\nversion = \"0.1.0\"\n")
+        write(joinpath(bdir, "src", "B.jl"), "module B\nerror(\"boom during load\")\nend\n")
+        write(joinpath(proj, "Project.toml"), "[deps]\nB = \"$b_uuid\"\n")
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "$(VERSION)"
+        manifest_format = "2.0"
+        project_hash = "0000000000000000000000000000000000000000"
+
+        [[deps.B]]
+        path = "../B"
+        uuid = "$b_uuid"
+        version = "0.1.0"
+        """)
+
+        cache_dir = joinpath(store, "B", "B", b_uuid); mkpath(cache_dir)
+        jstore = joinpath(cache_dir, "0.1.0.jstore")
+        tomb   = joinpath(cache_dir, "0.1.0.tombstone")
+
+        runner = joinpath(root, "run.jl")
+        write(runner, """
+        include(raw"$symbolserver_jl")
+        using Pkg
+        Pkg.activate(raw"$proj"; io=devnull)
+        SymbolServer.get_store(raw"$store", nothing)
+        """)
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+            run(ignorestatus(`$jl --startup-file=no --project=$proj $runner`))
+        end
+        @test proc.exitcode == 0
+        @test !isfile(jstore)    # failed to cache
+        @test !isfile(tomb)      # deved → NOT tombstoned
     end
 end
