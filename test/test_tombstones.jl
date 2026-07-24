@@ -108,6 +108,7 @@ end
 end
 
 @testitem "Tombstones: child attempts a deved package despite a current tombstone and clears it" begin
+    using JuliaWorkspaces.SymbolServer: INDEXER_VERSION
     b_uuid = "b8d7f5ca-4a81-4f4a-b8c7-1f4a0d2b3c4e"
     symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
         "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
@@ -133,7 +134,7 @@ end
         jstore = joinpath(cache_dir, "0.1.0.jstore")
         tomb   = joinpath(cache_dir, "0.1.0.tombstone")
         # pre-seed a CURRENT tombstone: a deved package must be attempted anyway
-        write(tomb, "indexer_version = 1\njulia_version = \"$(VERSION)\"\ntimestamp = $(round(Int, time()))\n")
+        write(tomb, "indexer_version = $(INDEXER_VERSION)\njulia_version = \"$(VERSION)\"\ntimestamp = $(round(Int, time()))\n")
         @test isfile(tomb)
 
         runner = joinpath(root, "run.jl")

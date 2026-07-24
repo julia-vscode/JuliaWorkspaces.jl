@@ -114,6 +114,7 @@ function get_store(store_path::String, progress_callback)
             load_package(ctx, uuid, nothing, loading_bay)
             @info "Loaded package $pe_name in $(round(time() - t_load, digits=1)) seconds."
         catch err
+            err isa InterruptException && rethrow()
             @warn "Failed to load package $pe_name; it will be tombstoned if it produces no cache." exception=(err, catch_backtrace())
         end
     end
