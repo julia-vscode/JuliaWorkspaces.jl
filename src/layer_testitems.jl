@@ -11,25 +11,6 @@ function vec_startswith(a, b)
     return true
 end
 
-function find_project_for_file(projects::Vector{URI}, file::URI)
-    file.scheme != "file" && return nothing
-
-    file_path = uri2filepath(file)
-    project = projects |>
-        x -> map(x) do i
-            project_folder_path = uri2filepath(i)
-            parts = splitpath(project_folder_path)
-            return (uri = i, parts = parts)
-        end |>
-        x -> filter(x) do i
-            return vec_startswith(splitpath(file_path), i.parts)
-        end |>
-        x -> sort(x, by=i->length(i.parts), rev=true) |>
-        x -> length(x) == 0 ? nothing : first(x).uri
-
-    return project
-end
-
 Salsa.@derived function derived_testitems(rt, uri)
     @debug "derived_testitems" uri=uri
 
@@ -132,9 +113,7 @@ Salsa.@derived function derived_all_testitems(rt)
 end
 
 Salsa.@derived function derived_testenv(rt, uri)
-    projects = derived_project_folders(rt)
-
-    project_uri = find_project_for_file(projects, uri)
+    project_uri = derived_project_for_file(rt, uri)
     package_uri = derived_package_for_file(rt, uri)
 
     if project_uri === nothing
@@ -150,7 +129,7 @@ Salsa.@derived function derived_testenv(rt, uri)
     package_name = package_uri === nothing ? nothing : derived_package(rt, package_uri).name
 
     if project_uri == package_uri
-    elseif project_uri in projects
+    elseif project_uri in derived_project_folders(rt)
         relevant_project = derived_project(rt, project_uri)
 
         if relevant_project === nothing || findfirst(i->i.uri == package_uri, collect(values(relevant_project.deved_packages))) === nothing

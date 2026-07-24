@@ -115,6 +115,69 @@ end
     @test isempty(lint_result.workspace_packages)
 end
 
+@testitem "derived_package_for_file and derived_project_for_file pick the deepest folder" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText,
+        derived_package_for_file, derived_project_for_file,
+        derived_package_folders, derived_project_folders
+    using JuliaWorkspaces.URIs2: URI
+
+    outer_project = """
+    name = "Outer"
+    uuid = "3c9a1b52-1f0f-4a9e-9c7d-7a1e0b7d4c11"
+    version = "1.0.0"
+    """
+
+    inner_project = """
+    name = "Inner"
+    uuid = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    version = "2.0.0"
+    """
+
+    manifest = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+
+    [deps]
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///nesting/Project.toml"), SourceText(outer_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///nesting/Manifest.toml"), SourceText(manifest, "toml")))
+    add_file!(jw, TextFile(URI("file:///nesting/lib/Inner/Project.toml"), SourceText(inner_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///nesting/lib/Inner/Manifest.toml"), SourceText(manifest, "toml")))
+
+    @test length(derived_package_folders(jw.runtime)) == 2
+    @test length(derived_project_folders(jw.runtime)) == 2
+
+    # A file in the nested package belongs to the nested package, not the outer one
+    nested_file = URI("file:///nesting/lib/Inner/src/Inner.jl")
+    @test derived_package_for_file(jw.runtime, nested_file) == URI("file:///nesting/lib/Inner")
+    @test derived_project_for_file(jw.runtime, nested_file) == URI("file:///nesting/lib/Inner")
+
+    # A file only inside the outer package belongs to the outer package
+    outer_file = URI("file:///nesting/src/Outer.jl")
+    @test derived_package_for_file(jw.runtime, outer_file) == URI("file:///nesting")
+    @test derived_project_for_file(jw.runtime, outer_file) == URI("file:///nesting")
+
+    # A file sitting exactly at a package root
+    root_file = URI("file:///nesting/lib/Inner/Project.toml")
+    @test derived_package_for_file(jw.runtime, root_file) == URI("file:///nesting/lib/Inner")
+    @test derived_project_for_file(jw.runtime, root_file) == URI("file:///nesting/lib/Inner")
+
+    # A file outside of any package or project
+    outside_file = URI("file:///somewhere_else/foo.jl")
+    @test derived_package_for_file(jw.runtime, outside_file) === nothing
+    @test derived_project_for_file(jw.runtime, outside_file) === nothing
+
+    # A file that has no path at all
+    untitled_file = URI("untitled:Untitled-1")
+    @test derived_package_for_file(jw.runtime, untitled_file) === nothing
+    @test derived_project_for_file(jw.runtime, untitled_file) === nothing
+
+    # A sibling prefix must not match: /nesting/libextra is not inside /nesting/lib
+    @test derived_package_for_file(jw.runtime, URI("file:///nesting/libextra/Inner/src/Inner.jl")) == URI("file:///nesting")
+end
+
 @testitem "derived_project with Manifest.toml but no Project.toml does not crash" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_diagnostics
     using JuliaWorkspaces.URIs2: URI
