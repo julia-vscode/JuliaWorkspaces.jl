@@ -187,3 +187,21 @@ is then looked up at `1.0.3.jstore`, found, and the env fast-lanes.
 - The two classifiers (`derived_project`, `_get_missing_packages`) must apply the
   normalization identically; the shared helper is the single source of truth to
   keep them from drifting.
+
+## Revision (post-review)
+
+The whole-branch review + a child-subprocess integration test disproved this
+design's assumption that the child always keys a stdlib by its bundled version.
+`Pkg.Types.Context()` normalizes a tree-sha'd stdlib entry to the bundled
+identity only *sometimes* (e.g. when a deved dependency's content drift forces a
+re-resolution, as in `UsesPreferences`); otherwise it reads the entry as-is and
+the child keys by the tree hash. So parent-only normalization matched the
+re-resolve case but would mismatch — and regress — the as-is case.
+
+**Correction:** the shared `get_cache_path` (`shared/symbolserver/utils.jl`, used
+by the child and the cloud indexer) now keys any *versioned* stdlib entry by the
+bundled stdlib version and drops the tree hash, making the child's key
+deterministic across envs. This supersedes the "no change to the child" non-goal
+above — that non-goal was predicated on the disproven assumption. Versionless
+stdlibs keep the running-`VERSION` fallback (unchanged). Combined with the
+parent-side normalization, child and parent now agree in every env.
