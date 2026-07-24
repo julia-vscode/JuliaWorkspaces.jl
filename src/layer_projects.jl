@@ -205,16 +205,27 @@ Salsa.@derived function derived_project(rt, uri)
             uuid_of_regular_package = tryparse(UUID, v_entry[1]["uuid"])
             uuid_of_regular_package !== nothing || continue
 
-            git_tree_sha1_of_regular_package = v_entry[1]["git-tree-sha1"]
-
-            version_of_regular_package = v_entry[1]["version"]
-
-            regular_packages[k_entry] = JuliaProjectEntryRegularPackage(k_entry, uuid_of_regular_package, version_of_regular_package, git_tree_sha1_of_regular_package)
+            # A now-stdlib package recorded as registered (git-tree-sha1) is
+            # resolved to the bundled stdlib by the indexer child; classify it as
+            # a stdlib keyed by the bundled version to match.
+            stdlib_ver = _stdlib_cache_version(uuid_of_regular_package)
+            if stdlib_ver !== nothing
+                stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_regular_package, string(stdlib_ver))
+            else
+                git_tree_sha1_of_regular_package = v_entry[1]["git-tree-sha1"]
+                version_of_regular_package = v_entry[1]["version"]
+                regular_packages[k_entry] = JuliaProjectEntryRegularPackage(k_entry, uuid_of_regular_package, version_of_regular_package, git_tree_sha1_of_regular_package)
+            end
         elseif haskey(v_entry[1], "uuid")
             uuid_of_stdlib_package = tryparse(UUID, v_entry[1]["uuid"])
             uuid_of_stdlib_package !== nothing || continue
 
             version_of_stdlib_package = get(v_entry[1], "version", nothing)
+            # A stdlib recorded with a stale version is keyed by the bundled one.
+            if version_of_stdlib_package !== nothing
+                stdlib_ver = _stdlib_cache_version(uuid_of_stdlib_package)
+                stdlib_ver !== nothing && (version_of_stdlib_package = string(stdlib_ver))
+            end
 
             stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_stdlib_package, version_of_stdlib_package)
         else

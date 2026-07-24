@@ -137,8 +137,7 @@ end
 # `CancellationToken`, and runs a message loop that reads messages from the
 # child. Lifecycle events are reported back to the reactor via `reactor_channel`.
 function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::CancellationTokens.CancellationToken)
-    @info "Starting DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
-
+    # The reactor's `_launch_now!` already logged the categorized spawn reason.
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
     try
@@ -173,7 +172,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
             )
 
             proc_kill_registration = CancellationTokens.register(token) do
-                @info "Killing DynamicJuliaProcess due to cancellation" kind=djp.kind project_path=djp.project_path
+                @debug "Killing DynamicJuliaProcess due to cancellation" kind=djp.kind project_path=djp.project_path
                 try kill(jl_process) catch end
             end
 
@@ -299,7 +298,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
 end
 
 function Base.kill(djp::DynamicJuliaProcess)
-    @info "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
+    @debug "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
 
     # Killing the child process is done exclusively through the cancellation
     # source: `start` registers a callback on this source's token that performs
@@ -524,7 +523,16 @@ function _get_missing_packages(project_path::String, store_path::String)
         uuid = tryparse(UUID, uuid_str)
         uuid === nothing && continue
 
-        if haskey(entry, "git-tree-sha1") && haskey(entry, "version")
+        stdlib_ver = haskey(entry, "version") ? _stdlib_cache_version(uuid) : nothing
+        if stdlib_ver !== nothing
+            # A stdlib recorded as registered (git-tree-sha1) or with a stale
+            # version is resolved to the bundled stdlib by the child; key it there.
+            filename = replace(string(stdlib_ver), '+'=>'_')
+            cache_path = joinpath(store_path, uppercase(k_entry[1:1]), k_entry, string(uuid), string(filename, ".jstore"))
+            if !isfile(cache_path)
+                push!(missing, MissingPackage((k_entry, uuid, string(stdlib_ver), nothing)))
+            end
+        elseif haskey(entry, "git-tree-sha1") && haskey(entry, "version")
             # Regular package
             ver = entry["version"]
             tree_sha = entry["git-tree-sha1"]
@@ -546,6 +554,23 @@ function _get_missing_packages(project_path::String, store_path::String)
     end
 
     return missing
+end
+
+# Store-relative `.jstore` path for a missing package, matching the layout
+# `_get_missing_packages` and `_download_single_cache` build inline.
+function _jstore_path(pkg::MissingPackage, store_path::String)
+    filename = replace(string(something(pkg.git_tree_sha1, pkg.version)), '+'=>'_')
+    joinpath(store_path, uppercase(pkg.name[1:1]), pkg.name, string(pkg.uuid), string(filename, ".jstore"))
+end
+
+# Drop packages whose sibling tombstone says local caching was already tried and
+# failed for this exact version under the current indexer/Julia and hasn't
+# expired. A missing/mismatched/expired tombstone keeps the package (retry).
+function _drop_tombstoned(pkgs::Vector{MissingPackage}, store_path::String)
+    filter(pkgs) do pkg
+        tomb = SymbolServer.tombstone_path(_jstore_path(pkg, store_path))
+        !SymbolServer.tombstone_is_current(SymbolServer.read_tombstone(tomb))
+    end
 end
 
 """
@@ -616,6 +641,7 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
         end
 
         @info "Successfully downloaded cache" name=name version=version
+        SymbolServer.delete_tombstone(SymbolServer.tombstone_path(dest_filepath))
         return true
     catch err
         @warn "Failed to download cache" name=name version=version exception=(err, catch_backtrace())
@@ -649,6 +675,10 @@ function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_pa
         stem = replace(string(something(pkg.git_tree_sha1, pkg.version)), '+' => '_')
         SymbolServer.cache_key(pkg.uuid, stem) in index
     end
+
+    num_downloadable = length(missing_pkgs) - length(downloadable)
+
+    @info "Downloading $(length(downloadable)) cache files ($(num_downloadable) not available in cloud cache)..."
 
     isempty(downloadable) && return missing_pkgs
 
@@ -729,6 +759,32 @@ _has_free_slot(df::DynamicFeature) =
 
 # Construct the DJP for `key` and launch it, occupying a slot. The DJP is
 # derived from the key alone so queued keys carry no state that can go stale.
+# The trailing path segments of `path`, for logs/progress that would otherwise
+# show a bare basename — ambiguous when same-named projects live under different
+# roots (no workspace root is threaded into the reactor to relativize against).
+function _short_path(path::AbstractString; segments::Int=3)
+    parts = splitpath(path)
+    length(parts) <= segments && return path
+    return joinpath(parts[end-segments+1:end]...)
+end
+
+# The reason a child is running and the path it targets, shared by the spawn and
+# completion logs so they stay in sync. Package-cache tombstones only avoid the
+# watch-environment first index; test environments and standalone refreshes
+# always need a child, so those keep spawning across restarts by design.
+# `target` is always a real path so callers can `_short_path` it.
+function _djp_reason_target(df::DynamicFeature, key::DJPKey)
+    if key in df.refreshing
+        ("refreshing served standalone project (background; picks up changes)", key.package_path)
+    elseif key isa WatchEnvironmentKey
+        ("indexing packages that still lack a symbol cache", key.project_path)
+    elseif key isa WatchTestEnvironmentKey
+        ("materializing the '$(key.package_name)' test environment (only a child can produce it)", key.project_path)
+    else
+        ("creating a standalone project (only a child can produce it)", key.package_path)
+    end
+end
+
 function _launch_now!(df::DynamicFeature, key::DJPKey)
     djp = if key isa WatchEnvironmentKey
         DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
@@ -739,6 +795,8 @@ function _launch_now!(df::DynamicFeature, key::DJPKey)
     end
     df.procs[key] = djp
     push!(df.launching, key)
+    reason, target = _djp_reason_target(df, key)
+    @info "Spawning indexing child process for $(_short_path(target)): $(reason)"
     df.launcher(df, djp)
     return
 end
@@ -849,7 +907,6 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
         missing_pkgs = _get_missing_packages(project_path, df.store_path)
 
         if !isempty(missing_pkgs) && df.download_enabled
-            @info "Downloading missing package caches" count=length(missing_pkgs)
             # Progress is routed through the reactor as `PrepProgressMsg`s
             # carrying the download phase's own completion fraction; the
             # reactor reports them onto the item's dedicated download bar.
@@ -859,6 +916,9 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
             put!(df.in_channel, PrepProgressMsg(key, "Downloaded caches for $(basename(project_path))", 1.0))
         end
 
+        # A package we can neither cache nor download is dropped if it carries a
+        # current tombstone, so a permanently-uncacheable pin stops re-launching a DJP.
+        missing_pkgs = _drop_tombstoned(missing_pkgs, df.store_path)
         put!(df.in_channel, EnvironmentPrepDoneMsg(key, !isempty(missing_pkgs)))
     catch err
         @error "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
@@ -890,7 +950,6 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
     end
 
     if !msg.still_missing
-        @info "All package caches available, skipping DJP" project_path=key.project_path
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
@@ -902,11 +961,11 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         # forever.
         _drain_launch_queue!(df)
     elseif df.djp_mode != DynamicOff
-        @info "Launching DJP for remaining missing packages" project_path=key.project_path
-        _report_progress(df, _progress_key("index", key), "Starting indexer for $(basename(key.project_path))...", 0)
+        @info "$(_short_path(key.project_path)) not fully resolved, enqueueing local indexing process..."
+        _report_progress(df, _progress_key("index", key), "Enqueueing indexer for $(basename(key.project_path))...", 0)
         _request_launch!(df, key)
     else
-        @info "Some packages missing but DJP disabled, proceeding with best-effort" project_path=key.project_path
+        @info "$(_short_path(key.project_path)) not fully resolved, but local indexing is disabled"
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
@@ -965,7 +1024,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
     store_path = df.store_path
     @async try
         usable = isfile(joinpath(dir, "Project.toml")) && isfile(joinpath(dir, "Manifest.toml"))
-        fast_lane = usable && isempty(_get_missing_packages(dir, store_path))
+        fast_lane = usable && isempty(_drop_tombstoned(_get_missing_packages(dir, store_path), store_path))
         put!(df.in_channel, StandaloneProjectPrepDoneMsg(key, fast_lane))
     catch err
         @error "Standalone project prep failed" key exception=(err, catch_backtrace())
@@ -1074,6 +1133,8 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         # Background refresh finished: re-emit the (idempotent) ready result —
         # freshness lands via the rewritten Manifest and the result path's
         # package-cache loading. Never touches pending_count.
+        reason, target = _djp_reason_target(df, key)   # before clearing df.refreshing
+        @info "Indexing child process done for $(_short_path(target)): $(reason)"
         delete!(df.refreshing, key)
         delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
@@ -1099,6 +1160,9 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     if djp !== nothing && state(djp.fsm) == DynamicProcessIndexing
         transition!(djp.fsm, DynamicProcessDone; reason="indexed")
     end
+
+    reason, target = _djp_reason_target(df, key)
+    @info "Indexing child process done for $(_short_path(target)): $(reason)"
 
     if key isa WatchEnvironmentKey
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))

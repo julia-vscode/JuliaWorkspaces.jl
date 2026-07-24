@@ -10,6 +10,14 @@ const CACHE_FORMAT_VERSION = 3
 # The "vN" path element under store/.
 const CACHE_STORE_VERSION = "v$(CACHE_FORMAT_VERSION)"
 
+# Bump when caching/indexing logic changes: invalidates all existing tombstones
+# (they become version-mismatched and are retried). Read identically by the
+# language server and the DJP child — no protocol passing.
+const INDEXER_VERSION = 1
+# A tombstone older than this is retried even if versions still match, so a
+# genuinely-transient failure self-heals without an INDEXER_VERSION bump.
+const TOMBSTONE_TTL_SECONDS = 7 * 24 * 60 * 60
+
 @static if VERSION < v"1.1"
     const PackageEntry = Vector{Dict{String,Any}}
 else
@@ -21,6 +29,57 @@ end
 else
     parsed_toml(file) = Pkg.TOML.parsefile(file)
 end
+
+# ─── Per-package cache tombstones ────────────────────────────────────────────
+# A `.tombstone` sits beside the `.jstore` it would shadow and records that local
+# caching was attempted for that exact package version and produced nothing. The
+# `.jstore` check always precedes the tombstone check, so a real cache wins.
+
+tombstone_path(cache_path::AbstractString) = replace(cache_path, r"\.jstore$" => ".tombstone")
+
+function read_tombstone(path::AbstractString)
+    isfile(path) || return nothing
+    data = try
+        parsed_toml(path)
+    catch
+        return nothing
+    end
+    iv = get(data, "indexer_version", nothing)
+    jv = get(data, "julia_version", nothing)
+    ts = get(data, "timestamp", nothing)
+    (iv isa Integer && jv isa AbstractString && ts isa Integer) || return nothing
+    return (indexer_version=Int(iv), julia_version=String(jv), timestamp=Int(ts))
+end
+
+function tombstone_is_current(t)
+    t === nothing && return false
+    t.indexer_version == INDEXER_VERSION || return false
+    t.julia_version == string(VERSION) || return false
+    (time() - t.timestamp) < TOMBSTONE_TTL_SECONDS || return false
+    return true
+end
+
+function write_tombstone(path::AbstractString)
+    mkpath(dirname(path))
+    data = Dict{String,Any}(
+        "indexer_version" => INDEXER_VERSION,
+        "julia_version" => string(VERSION),
+        "timestamp" => round(Int, time()),
+    )
+    tmp, io = mktemp(dirname(path))
+    try
+        Pkg.TOML.print(io, data)
+        close(io)
+        mv(tmp, path; force=true)
+    catch
+        close(io)
+        rm(tmp; force=true)
+        rethrow()
+    end
+    return path
+end
+
+delete_tombstone(path::AbstractString) = (isfile(path) && rm(path; force=true); nothing)
 
 """
     manifest(c::Pkg.Types.Context)
@@ -704,16 +763,52 @@ end
 
 Returns a vector containing the cache storage path for a package structured: [folder, folder, file].
 """
+const _STDLIB_VERSIONS_CACHE = Ref{Any}(nothing)
+
+# UUID => bundled stdlib version for the running Julia, across Pkg versions:
+# `stdlib_infos` (1.12+, StdlibInfo structs) or `stdlibs` (earlier, (name, ver)
+# tuples). Cached because each Pkg call rebuilds the dict.
+function _stdlib_versions()
+    cache = _STDLIB_VERSIONS_CACHE[]
+    cache === nothing || return cache
+    d = Dict{UUID,Union{Nothing,VersionNumber}}()
+    if isdefined(Pkg.Types, :stdlib_infos)
+        for (u, info) in Pkg.Types.stdlib_infos()
+            d[u] = info.version
+        end
+    elseif isdefined(Pkg.Types, :stdlibs)
+        for (u, entry) in Pkg.Types.stdlibs()
+            d[u] = entry isa Tuple ? entry[2] : nothing
+        end
+    end
+    _STDLIB_VERSIONS_CACHE[] = d
+    return d
+end
+
+# Bundled version of a stdlib UUID (or `nothing` when not a stdlib / unknown /
+# versionless). Works on both `stdlib_infos` and `stdlibs` Julias.
+_stdlib_bundled_version(uuid) = get(_stdlib_versions(), uuid, nothing)
+
 function get_cache_path(manifest, uuid)
     name = packagename(manifest, uuid)
     pkg_info = frommanifest(manifest, uuid)
     ver = version(pkg_info)
-    if ver === nothing
-        if isdefined(Pkg.Types, :is_stdlib) && Pkg.Types.is_stdlib(uuid)
-            ver = VERSION
+    th = tree_hash(pkg_info)
+
+    if isdefined(Pkg.Types, :is_stdlib) && Pkg.Types.is_stdlib(uuid)
+        # A stdlib resolves to the Julia-bundled identity regardless of what the
+        # manifest pins (a stale tree hash or version), and Pkg's Context does not
+        # always normalize the in-memory entry. Key any versioned stdlib entry by
+        # the bundled version, dropping the tree hash, so the key is deterministic
+        # and matches the language server's own stdlib keying; a versionless entry
+        # keeps the running-VERSION fallback.
+        if ver !== nothing
+            th = nothing
+            ver = something(_stdlib_bundled_version(uuid), ver)
+        else
+            ver = something(_stdlib_bundled_version(uuid), VERSION)
         end
     end
-    th = tree_hash(pkg_info)
 
     filename = something(th, ver, "unknown")
     filename = replace(string(filename), '+'=>'_')
