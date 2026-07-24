@@ -566,7 +566,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
             any_env_ready = true
 
         elseif msg isa EnvironmentReadyResult
-            @info "Processing new env"
+            @debug "Processing new env"
             _load_missing_package_metadata!(jw)
 
             # Mark THIS specific project's environment as ready. Per-project

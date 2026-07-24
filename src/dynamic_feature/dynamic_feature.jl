@@ -137,8 +137,7 @@ end
 # `CancellationToken`, and runs a message loop that reads messages from the
 # child. Lifecycle events are reported back to the reactor via `reactor_channel`.
 function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::CancellationTokens.CancellationToken)
-    @info "Starting DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
-
+    # The reactor's `_launch_now!` already logged the categorized spawn reason.
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
     try
@@ -757,6 +756,19 @@ function _launch_now!(df::DynamicFeature, key::DJPKey)
     end
     df.procs[key] = djp
     push!(df.launching, key)
+    # Spell out why a child is spawning. Package-cache tombstones only avoid the
+    # watch-environment first index; test environments and standalone refreshes
+    # always need a child, so those keep spawning across restarts by design.
+    reason, target = if key in df.refreshing
+        ("refreshing served standalone project (background; picks up changes)", key.package_path)
+    elseif key isa WatchEnvironmentKey
+        ("indexing packages that still lack a symbol cache", key.project_path)
+    elseif key isa WatchTestEnvironmentKey
+        ("materializing a test environment (only a child can produce it)", string(key.package_name, " @ ", key.project_path))
+    else
+        ("creating a standalone project (only a child can produce it)", key.package_path)
+    end
+    @info "Spawning indexing child process: $reason" target
     df.launcher(df, djp)
     return
 end
@@ -911,7 +923,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
     end
 
     if !msg.still_missing
-        @info "All package caches available, skipping DJP" project_path=key.project_path
+        @info "Every package is cached or tombstoned as uncacheable; skipping indexing child" project_path=key.project_path
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
@@ -923,7 +935,6 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         # forever.
         _drain_launch_queue!(df)
     elseif df.djp_mode != DynamicOff
-        @info "Launching DJP for remaining missing packages" project_path=key.project_path
         _report_progress(df, _progress_key("index", key), "Starting indexer for $(basename(key.project_path))...", 0)
         _request_launch!(df, key)
     else
