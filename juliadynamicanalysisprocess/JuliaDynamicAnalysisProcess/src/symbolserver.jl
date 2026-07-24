@@ -153,16 +153,21 @@ function get_store(store_path::String, progress_callback)
     progress_callback === nothing || progress_callback("Writing symbol caches to disc...", step_pct(n_to_load + 2))
     write_depot(server, server.context, written_caches)
 
-    # Record the outcome for every package this run tried to cache: clear a stale
-    # tombstone when a cache now exists, write one when a non-deved package
-    # produced none, so the launch gate stops re-attempting it.
-    for uuid in packages_to_load
-        cache_path = joinpath(server.storedir, SymbolServer.get_cache_path(manifest(ctx), uuid)...)
-        tomb = SymbolServer.tombstone_path(cache_path)
-        if isfile(cache_path)
-            SymbolServer.delete_tombstone(tomb)
-        elseif !is_package_deved(manifest(ctx), uuid)
-            SymbolServer.write_tombstone(tomb)
+    # Record the outcome for every manifest package: clear a stale tombstone when
+    # a cache now exists, write one when a non-deved package produced none, so the
+    # launch gate stops re-attempting it. The gate checks the whole manifest, so
+    # transitive deps must be covered too, not just the top-level packages_to_load.
+    for uuid in keys(manifest(ctx))
+        try
+            cache_path = joinpath(server.storedir, SymbolServer.get_cache_path(manifest(ctx), uuid)...)
+            tomb = SymbolServer.tombstone_path(cache_path)
+            if isfile(cache_path)
+                SymbolServer.delete_tombstone(tomb)
+            elseif !is_package_deved(manifest(ctx), uuid)
+                SymbolServer.write_tombstone(tomb)
+            end
+        catch err
+            @warn "Failed to record tombstone outcome for $uuid" exception=(err, catch_backtrace())
         end
     end
 

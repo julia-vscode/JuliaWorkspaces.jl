@@ -107,6 +107,63 @@ end
     end
 end
 
+@testitem "Tombstones: child tombstones an un-indexable transitive dependency" begin
+    symbolserver_jl = abspath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "symbolserver.jl"))
+
+    top_uuid = "aaaaaaaa-0000-0000-0000-000000000001"
+    trans_uuid = "bbbbbbbb-0000-0000-0000-000000000002"
+    top_tree = "1111111111111111111111111111111111111111"
+    trans_tree = "2222222222222222222222222222222222222222"
+
+    mktempdir() do root
+        proj = joinpath(root, "proj"); store = joinpath(root, "store")
+        mkpath(proj); mkpath(store)
+        # TopPkg is the only top-level dep; TransPkg is a transitive-only manifest
+        # entry. Both are regular packages pinned to versions that aren't installed,
+        # so neither can be cached.
+        write(joinpath(proj, "Project.toml"), "[deps]\nTopPkg = \"$top_uuid\"\n")
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "$(VERSION)"
+        manifest_format = "2.0"
+        project_hash = "0000000000000000000000000000000000000000"
+
+        [[deps.TopPkg]]
+        deps = ["TransPkg"]
+        git-tree-sha1 = "$top_tree"
+        uuid = "$top_uuid"
+        version = "1.0.0"
+
+        [[deps.TransPkg]]
+        git-tree-sha1 = "$trans_tree"
+        uuid = "$trans_uuid"
+        version = "2.0.0"
+        """)
+
+        runner = joinpath(root, "run.jl")
+        write(runner, """
+        include(raw"$symbolserver_jl")
+        using Pkg
+        Pkg.activate(raw"$proj"; io=devnull)
+        SymbolServer.get_store(raw"$store", nothing)
+        """)
+        jl = joinpath(Sys.BINDIR, Base.julia_exename())
+        proc = withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+            run(ignorestatus(`$jl --startup-file=no --project=$proj $runner`))
+        end
+        @test proc.exitcode == 0
+
+        top_tomb   = joinpath(store, "T", "TopPkg", top_uuid, "$top_tree.tombstone")
+        trans_tomb = joinpath(store, "T", "TransPkg", trans_uuid, "$trans_tree.tombstone")
+
+        # The top-level dep is tombstoned (already covered), and so is the
+        # transitive-only dep — the launch gate checks the whole manifest, so every
+        # un-indexable package must be covered or the env keeps re-launching.
+        @test isfile(top_tomb)
+        @test isfile(trans_tomb)
+    end
+end
+
 @testitem "Tombstones: child attempts a deved package despite a current tombstone and clears it" begin
     using JuliaWorkspaces.SymbolServer: INDEXER_VERSION
     b_uuid = "b8d7f5ca-4a81-4f4a-b8c7-1f4a0d2b3c4e"
