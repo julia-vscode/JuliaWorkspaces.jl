@@ -1,5 +1,4 @@
-# Layer 1 of the inventory architecture (see
-# docs/superpowers/specs/2026-07-16-inventory-architecture-design.md):
+# Layer 1 of the inventory architecture:
 # a per-file, position-free, plain-data summary of top-level items. Values in
 # this file are the firewall: they must contain only plain data (Symbols,
 # Strings, Ints, vectors/structs of those) — never an EXPR reference, an
