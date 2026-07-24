@@ -172,7 +172,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
             )
 
             proc_kill_registration = CancellationTokens.register(token) do
-                @info "Killing DynamicJuliaProcess due to cancellation" kind=djp.kind project_path=djp.project_path
+                @debug "Killing DynamicJuliaProcess due to cancellation" kind=djp.kind project_path=djp.project_path
                 try kill(jl_process) catch end
             end
 
@@ -298,7 +298,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
 end
 
 function Base.kill(djp::DynamicJuliaProcess)
-    @info "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
+    @debug "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
 
     # Killing the child process is done exclusively through the cancellation
     # source: `start` registers a callback on this source's token that performs
@@ -759,6 +759,22 @@ _has_free_slot(df::DynamicFeature) =
 
 # Construct the DJP for `key` and launch it, occupying a slot. The DJP is
 # derived from the key alone so queued keys carry no state that can go stale.
+# The reason a child is running and the path it targets, shared by the spawn and
+# completion logs so they stay in sync. Package-cache tombstones only avoid the
+# watch-environment first index; test environments and standalone refreshes
+# always need a child, so those keep spawning across restarts by design.
+function _djp_reason_target(df::DynamicFeature, key::DJPKey)
+    if key in df.refreshing
+        ("refreshing served standalone project (background; picks up changes)", key.package_path)
+    elseif key isa WatchEnvironmentKey
+        ("indexing packages that still lack a symbol cache", key.project_path)
+    elseif key isa WatchTestEnvironmentKey
+        ("materializing a test environment (only a child can produce it)", string(key.package_name, " @ ", key.project_path))
+    else
+        ("creating a standalone project (only a child can produce it)", key.package_path)
+    end
+end
+
 function _launch_now!(df::DynamicFeature, key::DJPKey)
     djp = if key isa WatchEnvironmentKey
         DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
@@ -769,19 +785,8 @@ function _launch_now!(df::DynamicFeature, key::DJPKey)
     end
     df.procs[key] = djp
     push!(df.launching, key)
-    # Spell out why a child is spawning. Package-cache tombstones only avoid the
-    # watch-environment first index; test environments and standalone refreshes
-    # always need a child, so those keep spawning across restarts by design.
-    reason, target = if key in df.refreshing
-        ("refreshing served standalone project (background; picks up changes)", key.package_path)
-    elseif key isa WatchEnvironmentKey
-        ("indexing packages that still lack a symbol cache", key.project_path)
-    elseif key isa WatchTestEnvironmentKey
-        ("materializing a test environment (only a child can produce it)", string(key.package_name, " @ ", key.project_path))
-    else
-        ("creating a standalone project (only a child can produce it)", key.package_path)
-    end
-    @info "Spawning indexing child process: $reason" target
+    reason, target = _djp_reason_target(df, key)
+    @info "Spawning indexing child process for $(basename(target)): $(reason)"
     df.launcher(df, djp)
     return
 end
@@ -946,11 +951,11 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         # forever.
         _drain_launch_queue!(df)
     elseif df.djp_mode != DynamicOff
-        @info "$(key.project_path) not fully resolved, starting local indexing process..."
-        _report_progress(df, _progress_key("index", key), "Starting indexer for $(basename(key.project_path))...", 0)
+        @info "$(basename(key.project_path)) not fully resolved, enqueueing local indexing process..."
+        _report_progress(df, _progress_key("index", key), "Enqueueing indexer for $(basename(key.project_path))...", 0)
         _request_launch!(df, key)
     else
-        @info "$(key.project_path) not fully resolved, but local indexing is disabled"
+        @info "$(basename(key.project_path)) not fully resolved, but local indexing is disabled"
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
         _complete_work_item!(df, key)
@@ -1118,6 +1123,8 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         # Background refresh finished: re-emit the (idempotent) ready result —
         # freshness lands via the rewritten Manifest and the result path's
         # package-cache loading. Never touches pending_count.
+        reason, target = _djp_reason_target(df, key)   # before clearing df.refreshing
+        @info "Indexing child process done for $(basename(target)): $(reason)"
         delete!(df.refreshing, key)
         delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
@@ -1143,6 +1150,9 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     if djp !== nothing && state(djp.fsm) == DynamicProcessIndexing
         transition!(djp.fsm, DynamicProcessDone; reason="indexed")
     end
+
+    reason, target = _djp_reason_target(df, key)
+    @info "Indexing child process done for $(basename(target)): $(reason)"
 
     if key isa WatchEnvironmentKey
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
