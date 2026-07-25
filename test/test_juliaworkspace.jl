@@ -248,3 +248,22 @@ end
     process_from_dynamic(jw2)
     @test is_ready(jw2)
 end
+
+@testitem "is_ready is independent of the manual env-ready override" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, EnvironmentReadyResult,
+        process_from_dynamic, is_ready, input_env_ready, set_input_env_ready!
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+
+    # The override is a per-file diagnostics gate only; it must not make the
+    # dynamic feature look done.
+    set_input_env_ready!(jw.runtime, true)
+    @test !is_ready(jw)
+
+    # And completed dynamic work must not set the override.
+    jw2 = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    put!(jw2.dynamic_feature.out_channel, EnvironmentReadyResult("/some/project", UInt64(1)))
+    process_from_dynamic(jw2)
+    @test is_ready(jw2)
+    @test !input_env_ready(jw2.runtime)
+end

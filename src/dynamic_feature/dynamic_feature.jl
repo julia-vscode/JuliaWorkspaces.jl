@@ -348,6 +348,11 @@ struct DynamicFeature
     # re-reading (and re-`set_input`ing) multi-MB cache files.
     loaded_pkg_metadata::Set{PkgCacheKey}
     pending_count::Threads.Atomic{Int}
+    # Whether any result has been consumed by `process_from_dynamic`. Together
+    # with `pending_count` this is what `is_ready` reports: a workspace that has
+    # not produced a single result yet is not "done", however empty its queues
+    # look at that moment.
+    saw_result::Threads.Atomic{Bool}
     update_channel::Channel{Symbol}
     progress_callback::Union{Nothing,Function}
     # Last child-reported indexing percentage per work item (reactor-owned).
@@ -393,6 +398,7 @@ struct DynamicFeature
             Set{PkgCacheKey}(),
             Set{PkgCacheKey}(),
             Threads.Atomic{Int}(0),
+            Threads.Atomic{Bool}(false),
             Channel{Symbol}(1),   # coalesced wakeup signal (see _complete_work_item!)
             progress_callback,
             Dict{DJPKey,Int}(),

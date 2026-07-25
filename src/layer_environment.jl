@@ -78,13 +78,41 @@ Salsa.@derived function derived_project_environment_ready(rt, project_uri, conte
 end
 
 """
-    derived_ready_test_environment(rt, project_uri, package, content_hash) -> Union{Nothing,URI}
+    derived_project_requires_indexing(rt, project_uri, content_hash) -> Bool
 
-The ready test-project URI for `project_uri` + `package`, or `nothing` if the
-test environment has not been indexed yet.
+Whether a dynamic process is scheduled to index `project_uri` (at
+`content_hash`). A project no work item covers — e.g. one without a manifest —
+can never become "ready", so readiness gates must not wait for it.
+
+Its own derived function so per-file gates depend on this per-project `Bool`
+instead of on the workspace-wide required set: when an unrelated workspace
+change recomputes the set, this key's answer usually does not change and
+Salsa's early cutoff stops the invalidation here.
 """
-Salsa.@derived function derived_ready_test_environment(rt, project_uri, package, content_hash::UInt64)
-    key = WatchTestEnvironmentKey(uri2filepath(project_uri), package, content_hash)
+Salsa.@derived function derived_project_requires_indexing(rt, project_uri, content_hash::UInt64)
+    key = WatchEnvironmentKey(uri2filepath(project_uri), content_hash)
+    return key in derived_required_dynamic_projects(rt)
+end
+
+"""
+    derived_test_environment_pending(rt, key::WatchTestEnvironmentKey) -> Bool
+
+Whether the test-environment work item `key` is scheduled and can still produce
+a result. False when none is scheduled and false once the item failed
+terminally — waiting for either would gate forever.
+"""
+Salsa.@derived function derived_test_environment_pending(rt, key::WatchTestEnvironmentKey)
+    key in input_failed_dynamic_keys(rt) && return false
+    return key in derived_required_dynamic_projects(rt)
+end
+
+"""
+    derived_ready_test_environment(rt, key::WatchTestEnvironmentKey) -> Union{Nothing,URI}
+
+The ready test-project URI recorded for the test-environment work item `key`, or
+`nothing` if that environment has not been indexed yet.
+"""
+Salsa.@derived function derived_ready_test_environment(rt, key::WatchTestEnvironmentKey)
     return get(input_ready_test_environments(rt), key, nothing)
 end
 
@@ -203,25 +231,11 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         file_needs_test_env = lowercase(uri2filepath(uri)) == lowercase(runtests_path) ||
             _file_has_testitems(rt, uri)
 
-        if file_needs_test_env
-            package_name = pkg.name
+        if file_needs_test_env && pkg !== nothing
+            test_env_key = _test_environment_key(rt, package_folder_uri, pkg)
 
-            project_for_test_env = if package_folder_uri in derived_project_folders(rt)
-                package_folder_uri
-            else
-                # Check if there's a standalone project for this package
-                standalone_uri = derived_ready_standalone_project(rt, package_folder_uri, pkg_content_hash)
-                if standalone_uri !== nothing
-                    standalone_uri
-                else
-                    active_project
-                end
-            end
-
-            if project_for_test_env !== nothing
-                test_env_project = derived_project(rt, project_for_test_env)
-                test_env_hash = test_env_project === nothing ? UInt64(0) : test_env_project.content_hash
-                test_project_uri = derived_ready_test_environment(rt, project_for_test_env, package_name, test_env_hash)
+            if test_env_key !== nothing
+                test_project_uri = derived_ready_test_environment(rt, test_env_key)
 
                 if test_project_uri !== nothing
                     return test_project_uri
@@ -281,32 +295,68 @@ _is_package_deved_in_workspace(rt, package_folder_uri) =
     derived_deving_project(rt, package_folder_uri) !== nothing
 
 """
+    _test_environment_key(rt, package_folder_uri, pkg) -> Union{Nothing,WatchTestEnvironmentKey}
+
+The identity of the test-environment work item for the package `pkg` at
+`package_folder_uri`, or `nothing` if no project can provide that environment.
+
+Single source of truth for that identity: the required set (which schedules the
+item), the result recorder and every readiness query must derive the same key, or
+a recorded result is looked up under a key nobody ever produced.
+
+The environment comes from the package's own folder when the package is a project
+itself, and likewise when no workspace project `dev`s it (a standalone project is
+fabricated for it under that same folder). Only for a deved package does the
+active project provide it.
+"""
+function _test_environment_key(rt, package_folder_uri, pkg)
+    project_for_test = if package_folder_uri in derived_project_folders(rt) ||
+            !_is_package_deved_in_workspace(rt, package_folder_uri)
+        package_folder_uri
+    else
+        input_active_project(rt)
+    end
+    project_for_test === nothing && return nothing
+
+    project = derived_project(rt, project_for_test)
+    return WatchTestEnvironmentKey(
+        uri2filepath(project_for_test),
+        pkg.name,
+        project === nothing ? UInt64(0) : project.content_hash,
+    )
+end
+
+"""
     derived_file_env_ready(rt, uri)
 
 Return true if this file's effective environment is ready for static-lint
 analysis that depends on environment data (e.g. missing-reference checks).
 
-Per-project gating: each file's *own* project must have completed dynamic
-indexing (the corresponding `:environment_ready` /
-`:standalone_package_project_ready` / `:test_environment_ready` message has
-been consumed). The legacy global `input_env_ready` flag is honored as a
-manual override for tests.
+Per-project gating: each file's *own* project must be settled — either its
+environment finished indexing (or failed, which is terminal too), or no work
+item is scheduled for it at all, in which case there is nothing to wait for.
 
 Files that need a test environment (`test/runtests.jl` or files with
-`@testitem`) additionally require the test-env DJP to have produced a merged
-test project URI before we consider their env "ready". Otherwise missing-ref
-diagnostics for test-only deps (TestItemRunner, Test, @testitem, @test, …)
-would flash as false positives until indexing finishes.
+`@testitem`) additionally require the test-env work item to have produced a
+merged test project URI, unless that item is not scheduled or failed
+terminally. Otherwise missing-ref diagnostics for test-only deps
+(TestItemRunner, Test, @testitem, @test, …) would flash as false positives
+until indexing finishes.
+
+The global `input_env_ready` flag is honored as a manual override for tests: it
+pretends every environment is ready.
 """
 Salsa.@derived function derived_file_env_ready(rt, uri)
-    # Determine the file's effective project URI and require its env to have
-    # been processed. The legacy global flag (settable in tests) acts as an
-    # override that pretends every project's env is ready.
+    input_env_ready(rt) && return true
+
+    # Determine the file's effective project URI and require its env to be
+    # settled.
     project_uri = derived_project_uri_for_root(rt, uri)
     if project_uri !== nothing
         project = derived_project(rt, project_uri)
         project_hash = project === nothing ? UInt64(0) : project.content_hash
-        if !derived_project_environment_ready(rt, project_uri, project_hash) && !input_env_ready(rt)
+        if !derived_project_environment_ready(rt, project_uri, project_hash) &&
+                derived_project_requires_indexing(rt, project_uri, project_hash)
             return false
         end
     end
@@ -316,24 +366,18 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
 
     pkg = derived_package(rt, package_folder_uri)
     pkg === nothing && return true
-    pkg_content_hash = pkg.content_hash
 
     runtests_path = joinpath(uri2filepath(package_folder_uri), "test", "runtests.jl")
     file_needs_test_env = lowercase(uri2filepath(uri)) == lowercase(runtests_path) ||
         _file_has_testitems(rt, uri)
     file_needs_test_env || return true
 
-    project_for_test_env = if package_folder_uri in derived_project_folders(rt)
-        package_folder_uri
-    else
-        standalone = derived_ready_standalone_project(rt, package_folder_uri, pkg_content_hash)
-        standalone !== nothing ? standalone : input_active_project(rt)
-    end
-    project_for_test_env === nothing && return true
+    test_env_key = _test_environment_key(rt, package_folder_uri, pkg)
+    test_env_key === nothing && return true
 
-    test_env_project = derived_project(rt, project_for_test_env)
-    test_env_hash = test_env_project === nothing ? UInt64(0) : test_env_project.content_hash
-    return derived_ready_test_environment(rt, project_for_test_env, pkg.name, test_env_hash) !== nothing
+    derived_ready_test_environment(rt, test_env_key) === nothing || return true
+    # No test project yet: only gate while one can still arrive.
+    return !derived_test_environment_pending(rt, test_env_key)
 end
 
 """
@@ -392,25 +436,10 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
         pkg = derived_package(rt, package_uri)
         pkg === nothing && continue
 
-        # Determine which project provides the test environment
-        project_for_test = if package_uri in derived_project_folders(rt)
-            package_uri
-        elseif !_is_package_deved_in_workspace(rt, package_uri)
-            # Would use standalone project
-            package_uri
-        else
-            input_active_project(rt)
-        end
-        project_for_test === nothing && continue
+        test_env_key = _test_environment_key(rt, package_uri, pkg)
+        test_env_key === nothing && continue
 
-        proj = derived_project(rt, project_for_test)
-        proj_hash = proj === nothing ? UInt64(0) : proj.content_hash
-
-        push!(required, WatchTestEnvironmentKey(
-            uri2filepath(project_for_test),
-            pkg.name,
-            proj_hash,
-        ))
+        push!(required, test_env_key)
     end
 
     return required

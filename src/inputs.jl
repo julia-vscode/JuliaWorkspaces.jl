@@ -6,6 +6,9 @@ Salsa.@declare_input input_active_project(rt)::Union{URI,Nothing}
 
 Salsa.@declare_input input_notebook_file(rt, uri)::NotebookFile
 
+# Manual override that makes every file's environment count as ready (see
+# `derived_file_env_ready`). Only tests set it: readiness is tracked per
+# project/work item, never workspace-wide.
 Salsa.@declare_input input_env_ready(rt)::Bool
 
 # Whether the workspace fabricates environments (standalone projects for
@@ -64,6 +67,11 @@ Salsa.@declare_input input_ready_test_environments(rt)::Dict{WatchTestEnvironmen
 # Created standalone package projects, mapping each standalone key to the
 # resulting project URI.
 Salsa.@declare_input input_standalone_projects(rt)::Dict{CreateStandaloneProjectKey,URI}
+
+# Work items that failed terminally. Their artifacts (a test/standalone project
+# URI) will never appear, so readiness gates treat these keys as settled and
+# proceed best-effort with whatever symbol caches exist.
+Salsa.@declare_input input_failed_dynamic_keys(rt)::Set{DJPKey}
 
 Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{Nothing,String})::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
 
