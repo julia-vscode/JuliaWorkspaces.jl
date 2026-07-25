@@ -507,6 +507,28 @@ end
     @test back.types == Any[2, 3]                            # survives round-trip
 end
 
+@testitem "SymbolServer: Vararg with a value type parameter" begin
+    using JuliaWorkspaces.SymbolServer: DataTypeStore, FakeTypeName, FakeTypeofVararg
+    using JuliaWorkspaces.SymbolServer.CacheStore: write, read
+
+    # `NTuple{N,2}` is `Tuple{Vararg{2,N}}`: a `Vararg` whose `T` is the integer
+    # *value* 2, not a type. It stays unnormalised while `N` is free, so it
+    # reaches the crawler through any type carrying it — e.g. RegionTrees'
+    # `TwosArray{N,T,L} <: StaticArray{NTuple{N,2},T,N}`, whose supertype alone
+    # aborted indexing of its whole environment.
+    va = Base.unwrap_unionall(NTuple{N,2} where N).parameters[1]
+    ft = FakeTypeName(va)
+    @test ft isa FakeTypeofVararg
+    @test ft.T == 2
+
+    abstract type ValueParamArray{S,T,N} end
+    struct Twos{N,T,L} <: ValueParamArray{NTuple{N,2},T,N} end
+
+    d = DataTypeStore(Twos, :Twos, @__MODULE__)
+    io = IOBuffer(); write(io, d); seekstart(io)
+    @test read(io).super == d.super                          # survives round-trip
+end
+
 @testitem "SymbolServer: CacheStore validates file header" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, write
     using JuliaWorkspaces.SymbolServer: VarRef

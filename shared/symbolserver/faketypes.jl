@@ -195,12 +195,14 @@ Base.hash(::FakeTypeofBottom, h::UInt) = hash(:FakeTypeofBottom, h)
         FakeTypeofVararg(T) = (new(T))
         FakeTypeofVararg(T, N) = new(T, N)
     end
+    # Both slots go through `_parameter`: `T` is a type in ordinary varargs
+    # but a bare value in ones like `NTuple{N,2}` (`Vararg{2,N}`), and `N` is
+    # either an `Int` or a `TypeVar`.
     function FakeTypeofVararg(va::typeof(Vararg))
         if isdefined(va, :N)
-            vaN = va.N isa TypeVar ? FakeTypeVar(va.N) : va.N
-            FakeTypeofVararg(FakeTypeName(va.T), vaN) # This should be FakeTypeName(va.N) but seems to crash inference.
+            FakeTypeofVararg(_parameter(va.T), _parameter(va.N))
         elseif isdefined(va, :T)
-            FakeTypeofVararg(FakeTypeName(va.T))
+            FakeTypeofVararg(_parameter(va.T))
         else
             FakeTypeofVararg()
         end
