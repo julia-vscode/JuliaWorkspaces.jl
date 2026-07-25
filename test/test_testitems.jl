@@ -604,6 +604,45 @@ version = "0.1.0"
     end
 end
 
+@testitem "derived_testenv for a file in a deved package of a project" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_env
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    [deps]
+    Inner = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    """
+
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+
+    [[deps.Inner]]
+    deps = []
+    path = "Inner"
+    uuid = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    version = "2.0.0"
+    """
+
+    inner_project = """
+    name = "Inner"
+    uuid = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    version = "2.0.0"
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///devedenv/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///devedenv/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///devedenv/Inner/Project.toml"), SourceText(inner_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///devedenv/Inner/src/Inner.jl"), SourceText("module Inner end", "julia")))
+
+    # The deved package is the package, the outer folder is the project
+    test_env = get_test_env(jw, URI("file:///devedenv/Inner/src/Inner.jl"))
+    @test test_env.package_name == "Inner"
+    @test test_env.package_uri == URI("file:///devedenv/Inner")
+    @test test_env.project_uri == URI("file:///devedenv")
+end
+
 @testitem "Test-item detail equality distinguishes empty ranges by position" begin
     using JuliaWorkspaces: TestItemDetail, TestSetupDetail, TestErrorDetail
     using JuliaWorkspaces.URIs2: @uri_str

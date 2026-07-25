@@ -249,44 +249,49 @@ Salsa.@derived function derived_project_folders(rt)
     return URI[i for i in keys(derived_potential_project_folders(rt)) if derived_project(rt, i)!==nothing]
 end
 
+const FolderParts = @NamedTuple{uri::URI, parts::Vector{String}}
+
+# Deepest folder first, and total-ordered so the table is stable across
+# revisions for an unchanged set of folders.
+function folder_parts_table(folders)
+    table = FolderParts[]
+    for folder_uri in folders
+        folder_path = uri2filepath(folder_uri)
+        folder_path === nothing && continue
+        push!(table, (uri=folder_uri, parts=splitpath(folder_path)))
+    end
+    sort!(table, by=i -> (-length(i.parts), i.parts))
+    return table
+end
+
+# The table is deepest first, so the first prefix match is the deepest folder.
+function deepest_folder_for_parts(table, file_parts)
+    for i in table
+        vec_startswith(file_parts, i.parts) && return i.uri
+    end
+    return nothing
+end
+
+# Splitting the folder paths once per revision instead of once per file keeps
+# the per-file lookup down to a single `splitpath`.
+Salsa.@derived function derived_package_folder_parts(rt)
+    return folder_parts_table(derived_package_folders(rt))
+end
+
+Salsa.@derived function derived_project_folder_parts(rt)
+    return folder_parts_table(derived_project_folders(rt))
+end
+
 Salsa.@derived function derived_package_for_file(rt, file::URI)
-    packages = derived_package_folders(rt)
-
     file_path = uri2filepath(file)
-
     file_path === nothing && return nothing
-    package = packages |>
-        x -> map(x) do i
-            package_folder_path = uri2filepath(i)
-            parts = splitpath(package_folder_path)
-            return (uri = i, parts = parts)
-        end |>
-        x -> filter(x) do i
-            return vec_startswith(splitpath(file_path), i.parts)
-        end |>
-        x -> sort(x, by=i->length(i.parts), rev=true) |>
-        x -> length(x) == 0 ? nothing : first(x).uri
 
-    return package
+    return deepest_folder_for_parts(derived_package_folder_parts(rt), splitpath(file_path))
 end
 
 Salsa.@derived function derived_project_for_file(rt, file::URI)
-    projects = derived_project_folders(rt)
-
     file_path = uri2filepath(file)
-
     file_path === nothing && return nothing
-    project = projects |>
-        x -> map(x) do i
-            project_folder_path = uri2filepath(i)
-            parts = splitpath(project_folder_path)
-            return (uri = i, parts = parts)
-        end |>
-        x -> filter(x) do i
-            return vec_startswith(splitpath(file_path), i.parts)
-        end |>
-        x -> sort(x, by=i->length(i.parts), rev=true) |>
-        x -> length(x) == 0 ? nothing : first(x).uri
 
-    return project
+    return deepest_folder_for_parts(derived_project_folder_parts(rt), splitpath(file_path))
 end
