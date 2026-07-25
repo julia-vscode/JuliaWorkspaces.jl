@@ -566,6 +566,21 @@ end
     @test b.remaining == 0
 end
 
+@testitem "SymbolServer: return-type caching tolerates uninferable methods" begin
+    using JuliaWorkspaces.SymbolServer: getenvtree, symbols, cache_methods, VarRef,
+        FakeTypeName, FakeUnion, FakeUnionAll, FakeTypeVar, FakeTypeofBottom
+
+    # `Core.Compiler.typeinf_type` returns `nothing` when it produced no
+    # CodeInstance, and `FakeTypeName(nothing)` throws. Nothing enables
+    # `get_return_type` today, so this smoke-tests the path for whoever does:
+    # every method must come back with a cached *type*, never a bare `nothing`.
+    env = getenvtree([:Base, :Core])
+    symbols(env)
+    ms = cache_methods(sin, :sin, env, true)
+    @test !isempty(ms)
+    @test all(m -> m[2].rt isa Union{FakeTypeName,FakeUnion,FakeUnionAll,FakeTypeVar,FakeTypeofBottom,VarRef}, ms)
+end
+
 @testitem "SymbolServer: CacheStore validates file header" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, write
     using JuliaWorkspaces.SymbolServer: VarRef

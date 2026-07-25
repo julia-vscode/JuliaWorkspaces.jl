@@ -258,6 +258,9 @@ function cache_methods(@nospecialize(f), name, env, get_return_type; min_world::
             catch e
                 Any
             end
+            # `typeinf_type` hands back `nothing` when inference produced no
+            # `CodeInstance`; `FakeTypeName` needs a type.
+            rt === nothing && (rt = Any)
         else
             rt = Any
         end
