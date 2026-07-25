@@ -529,6 +529,43 @@ end
     @test read(io).super == d.super                          # survives round-trip
 end
 
+@testitem "SymbolServer: FakeTypeofVararg hashes consistently with ==" begin
+    using JuliaWorkspaces.SymbolServer: FakeTypeName
+
+    # `==` is custom, so `hash` has to be too — the object-identity fallback
+    # disagreed with it, which silently breaks any Set/Dict keyed on a signature.
+    for T in (Vararg{Int,2}, Vararg{Int}, Vararg{Tuple{Int,String}}, Vararg)
+        a, b = FakeTypeName(T), FakeTypeName(T)
+        @test a == b
+        @test hash(a) == hash(b)
+        @test length(Set([a, b])) == 1
+    end
+
+    # Which slots are filled is part of the identity.
+    @test hash(FakeTypeName(Vararg{Int})) != hash(FakeTypeName(Vararg{Int,2}))
+    @test hash(FakeTypeName(Vararg)) != hash(FakeTypeName(Vararg{Int}))
+    @test hash(FakeTypeName(Vararg{Int,2})) != hash(FakeTypeName(Vararg{Int,3}))
+end
+
+@testitem "SymbolServer: the expansion budget survives a Vararg" begin
+    using JuliaWorkspaces.SymbolServer: FakeTypeName, FakeTypeofVararg, ExpandBudget, Unserializable
+
+    deep = Tuple{Tuple{Tuple{Tuple{Int}}}}
+    has_sentinel(x) = x isa Unserializable ||
+        (x isa FakeTypeName && any(has_sentinel, x.parameters)) ||
+        (x isa FakeTypeofVararg && isdefined(x, :T) && has_sentinel(x.T))
+
+    # A budget of one expansion truncates this type...
+    b = ExpandBudget(1)
+    @test has_sentinel(FakeTypeName(deep, b))
+
+    # ...and must still truncate it behind a `Vararg`. The Vararg branch used to
+    # start a fresh budget, so `MAX_EXPANDED_TYPES` reset at every Vararg hop.
+    b = ExpandBudget(1)
+    @test has_sentinel(FakeTypeName(Tuple{Vararg{deep}}, b))
+    @test b.remaining == 0
+end
+
 @testitem "SymbolServer: CacheStore validates file header" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, write
     using JuliaWorkspaces.SymbolServer: VarRef
