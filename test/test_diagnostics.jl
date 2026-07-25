@@ -1967,3 +1967,196 @@ end
 
     @test derived_file_env_ready(jw.runtime, runtests_uri)
 end
+
+@testitem "env gating: a manifest-less package's test files wait for their test environment" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, process_from_dynamic, derived_package, derived_file_env_ready,
+        derived_required_dynamic_projects, derived_ready_test_environment,
+        derived_test_environment_pending, _test_environment_key,
+        TestEnvironmentReadyResult, WatchTestEnvironmentKey
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    # A package without a manifest is not a project folder, so its test-env work
+    # item is keyed on the package folder itself with a zero content hash.
+    dir = mktempdir()
+    mkpath(joinpath(dir, "src"))
+    mkpath(joinpath(dir, "test"))
+    files = [
+        joinpath(dir, "Project.toml") => ("""
+        name = "BareGate"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee46"
+        version = "0.1.0"
+        """, "toml"),
+        joinpath(dir, "src", "BareGate.jl") => ("module BareGate\nend\n", "julia"),
+        joinpath(dir, "test", "runtests.jl") => ("using Test\n", "julia"),
+        joinpath(dir, "test", "test_gate.jl") => ("""
+        @testitem "t" begin
+            @test true
+        end
+        """, "julia"),
+    ]
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    for (path, (content, lang)) in files
+        write(path, content)
+        _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+
+    package_uri = filepath2uri(dir)
+    key = _test_environment_key(jw.runtime, package_uri, derived_package(jw.runtime, package_uri))
+    @test key == WatchTestEnvironmentKey(dir, "BareGate", UInt64(0))
+    @test key in derived_required_dynamic_projects(jw.runtime)
+
+    runtests_uri = filepath2uri(joinpath(dir, "test", "runtests.jl"))
+    testitem_uri = filepath2uri(joinpath(dir, "test", "test_gate.jl"))
+
+    # The work item is scheduled and unresolved, so both test files must wait.
+    @test derived_test_environment_pending(jw.runtime, key)
+    @test derived_ready_test_environment(jw.runtime, key) === nothing
+    @test !derived_file_env_ready(jw.runtime, runtests_uri)
+    @test !derived_file_env_ready(jw.runtime, testitem_uri)
+
+    merged_uri = filepath2uri(joinpath(mktempdir(), "merged"))
+    put!(jw.dynamic_feature.out_channel, TestEnvironmentReadyResult(
+        filepath2uri(key.project_path), key.package_name, merged_uri, key.content_hash))
+    process_from_dynamic(jw)
+
+    # Ready because the result was found, not because nothing is scheduled.
+    @test derived_ready_test_environment(jw.runtime, key) == merged_uri
+    @test derived_test_environment_pending(jw.runtime, key)
+    @test derived_file_env_ready(jw.runtime, runtests_uri)
+    @test derived_file_env_ready(jw.runtime, testitem_uri)
+end
+
+@testitem "env gating: a failed test-environment DJP unblocks a manifest-less package" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, process_from_dynamic, derived_package, derived_file_env_ready,
+        derived_required_dynamic_projects, derived_test_environment_pending,
+        _test_environment_key, FailedResult
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    dir = mktempdir()
+    mkpath(joinpath(dir, "src"))
+    mkpath(joinpath(dir, "test"))
+    files = [
+        joinpath(dir, "Project.toml") => ("""
+        name = "BareGateFail"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee47"
+        version = "0.1.0"
+        """, "toml"),
+        joinpath(dir, "src", "BareGateFail.jl") => ("module BareGateFail\nend\n", "julia"),
+        joinpath(dir, "test", "runtests.jl") => ("using Test\n", "julia"),
+    ]
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    for (path, (content, lang)) in files
+        write(path, content)
+        _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+
+    package_uri = filepath2uri(dir)
+    key = _test_environment_key(jw.runtime, package_uri, derived_package(jw.runtime, package_uri))
+    @test key in derived_required_dynamic_projects(jw.runtime)
+
+    runtests_uri = filepath2uri(joinpath(dir, "test", "runtests.jl"))
+    @test !derived_file_env_ready(jw.runtime, runtests_uri)
+
+    put!(jw.dynamic_feature.out_channel, FailedResult(key))
+    process_from_dynamic(jw)
+
+    @test !derived_test_environment_pending(jw.runtime, key)
+    @test derived_file_env_ready(jw.runtime, runtests_uri)
+end
+
+@testitem "env gating: test-environment keys agree between producer and consumers" begin
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, _add_file!,
+        _set_active_project!, derived_package, derived_required_dynamic_projects,
+        _test_environment_key, WatchTestEnvironmentKey, derived_project
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    # Three shapes of package folder, all with a `test/runtests.jl` on disc (the
+    # required set only fabricates a test-env item for those): the package is its
+    # own project, the package has no manifest and no project devs it, and the
+    # package is deved by an enclosing project.
+    root = mktempdir()
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    function write_package(dir, name, uuid; manifest=nothing)
+        mkpath(joinpath(dir, "src"))
+        mkpath(joinpath(dir, "test"))
+        out = [
+            joinpath(dir, "Project.toml") => ("""
+            name = "$name"
+            uuid = "$uuid"
+            version = "0.1.0"
+            """, "toml"),
+            joinpath(dir, "src", "$name.jl") => ("module $name\nend\n", "julia"),
+            joinpath(dir, "test", "runtests.jl") => ("using Test\n", "julia"),
+        ]
+        manifest === nothing || push!(out, joinpath(dir, "Manifest.toml") => (manifest, "toml"))
+        return out
+    end
+
+    own_dir = joinpath(root, "Own")
+    bare_dir = joinpath(root, "Bare")
+    outer_dir = joinpath(root, "Outer")
+    deved_dir = joinpath(outer_dir, "Deved")
+
+    files = [
+        write_package(own_dir, "Own", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee48"; manifest=manifest_toml);
+        write_package(bare_dir, "Bare", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee49");
+        write_package(deved_dir, "Deved", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee4a");
+        [
+            joinpath(outer_dir, "Project.toml") => ("""
+            [deps]
+            Deved = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee4a"
+            """, "toml"),
+            joinpath(outer_dir, "Manifest.toml") => ("""
+            julia_version = "1.11.0"
+            manifest_format = "2.0"
+            project_hash = "abc123"
+
+            [[deps.Deved]]
+            deps = []
+            path = "Deved"
+            uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee4a"
+            version = "0.1.0"
+            """, "toml"),
+        ]
+    ]
+
+    jw = JuliaWorkspace()
+    for (path, (content, lang)) in files
+        write(path, content)
+        _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+    outer_uri = filepath2uri(outer_dir)
+    _set_active_project!(jw, outer_uri)
+
+    required = derived_required_dynamic_projects(jw.runtime)
+    key_of(dir) = _test_environment_key(jw.runtime, filepath2uri(dir),
+        derived_package(jw.runtime, filepath2uri(dir)))
+
+    outer_hash = derived_project(jw.runtime, outer_uri).content_hash
+
+    # A package that is its own project provides its own test env.
+    @test key_of(own_dir) == WatchTestEnvironmentKey(own_dir, "Own",
+        derived_project(jw.runtime, filepath2uri(own_dir)).content_hash)
+    # No manifest and nothing devs it: keyed on the package folder, hash 0.
+    @test key_of(bare_dir) == WatchTestEnvironmentKey(bare_dir, "Bare", UInt64(0))
+    # Deved: the active project provides the test env.
+    @test key_of(deved_dir) == WatchTestEnvironmentKey(outer_dir, "Deved", outer_hash)
+
+    for dir in (own_dir, bare_dir, deved_dir)
+        @test key_of(dir) in required
+    end
+    # ...and every test-env item in the required set is one of those keys.
+    @test Set(k for k in required if k isa WatchTestEnvironmentKey) ==
+        Set(key_of(dir) for dir in (own_dir, bare_dir, deved_dir))
+end
