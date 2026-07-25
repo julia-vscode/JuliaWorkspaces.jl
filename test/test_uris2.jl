@@ -160,3 +160,37 @@ end
     @test value.query === nothing
     @test value.fragment === nothing
 end
+
+@testitem "hash agrees with equality regardless of how a URI was built" begin
+    using JuliaWorkspaces.URIs2
+
+    from_string = URI("file:///home/me/a%20file.jl?q=1#frag")
+    from_fields = URI(scheme="file", authority="", path="/home/me/a file.jl", query="q=1", fragment="frag")
+
+    @test from_string == from_fields
+    @test isequal(from_string, from_fields)
+    @test hash(from_string) == hash(from_fields)
+    @test hash(from_string, UInt(7)) == hash(from_fields, UInt(7))
+
+    d = Dict(from_string => 1)
+    @test d[from_fields] == 1
+
+    # Differing in any single component must not compare equal.
+    others = [
+        URI(scheme="http", authority="", path="/home/me/a file.jl", query="q=1", fragment="frag"),
+        URI(scheme="file", authority="host", path="/home/me/a file.jl", query="q=1", fragment="frag"),
+        URI(scheme="file", authority="", path="/home/me/other.jl", query="q=1", fragment="frag"),
+        URI(scheme="file", authority="", path="/home/me/a file.jl", query="q=2", fragment="frag"),
+        URI(scheme="file", authority="", path="/home/me/a file.jl", query="q=1", fragment="other"),
+        URI(scheme="file", authority="", path="/home/me/a file.jl", query=nothing, fragment="frag"),
+    ]
+    for other in others
+        @test from_string != other
+        @test !haskey(d, other)
+    end
+
+    # Round-tripping through `string` preserves identity as a dict key.
+    @test URI(string(from_string)) == from_string
+    @test hash(URI(string(from_string))) == hash(from_string)
+    @test filepath2uri("/home/me/a file.jl") == URI(string(filepath2uri("/home/me/a file.jl")))
+end

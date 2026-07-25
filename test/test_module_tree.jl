@@ -1436,3 +1436,56 @@ end
     @test isempty(JuliaWorkspaces.derived_method_items(jw.runtime, root_uri, ["Pkg"], "nope"))
     @test isempty(JuliaWorkspaces.derived_method_items(jw.runtime, root_uri, ["Nope"], "foo"))
 end
+
+@testitem "method arity / external extension indices agree with the per-name queries" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+        derived_external_method_extensions, derived_external_method_extensions_index,
+        derived_external_extension_names
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///ws/A/src/A.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("""
+    module A
+    import Base: relpath
+    f(x) = 1
+    f(x, y) = 2
+    f(; kw=1) = 3
+    relpath(x::Int) = "workspace overload"
+    Base.length(x::Int) = 0
+    module Inner
+    g(x) = 1
+    end
+    A.Inner.g(x, y) = 2
+    include("more.jl")
+    end
+    """, "julia")))
+    add_file!(jw, TextFile(URI("file:///ws/A/src/more.jl"), SourceText("f(x, y, z) = 4\n", "julia")))
+
+    arities = derived_method_arities_index(jw.runtime, root)
+    # Methods spliced from an include are part of the same name's set.
+    @test length(derived_method_arities(jw.runtime, root, ["A"], "f")) == 4
+    @test derived_method_arities(jw.runtime, root, ["A"], "f") == arities[(["A"], "f")]
+    # A qualified extension counts for the module its qualifier resolves to.
+    @test length(derived_method_arities(jw.runtime, root, ["A", "Inner"], "g")) == 2
+    # Every index entry must be exactly what the per-name query returns.
+    for ((path, name), v) in arities
+        @test derived_method_arities(jw.runtime, root, path, name) == v
+    end
+    # An unknown module path or name yields no arities.
+    @test isempty(derived_method_arities(jw.runtime, root, ["A"], "nosuchname"))
+    @test isempty(derived_method_arities(jw.runtime, root, ["Nope"], "f"))
+
+    ext = derived_external_method_extensions_index(jw.runtime, root)
+    @test derived_external_extension_names(jw.runtime, root) == Set(keys(ext))
+    @test "length" in derived_external_extension_names(jw.runtime, root)
+    # `import Base: relpath` makes the bare definition an external extension too.
+    @test "relpath" in derived_external_extension_names(jw.runtime, root)
+    for (name, v) in ext
+        @test derived_external_method_extensions(jw.runtime, root, name) == v
+    end
+    @test isempty(derived_external_method_extensions(jw.runtime, root, "nosuchname"))
+    # A workspace-local function is not an external extension.
+    @test !("f" in derived_external_extension_names(jw.runtime, root))
+end

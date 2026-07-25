@@ -826,16 +826,39 @@ check a call's argument count against the callee's FULL cross-file method set.
 Salsa.@derived function derived_method_arities(rt, root, path, name)
     @debug "derived_method_arities" root=root path=path name=name
 
+    return get(derived_method_arities_index(rt, root), (path, name), _NO_ARITIES)
+end
+
+const _NO_ARITIES = MethodArity[]
+
+"""
+    derived_method_arities_index(rt, root) -> Dict{Tuple{Vector{String},String},Vector{MethodArity}}
+
+Every `(module path, name) => arities` entry of `root`'s tree in one node: the
+same selection [`derived_method_arities`](@ref) exposes per name, computed by a
+single splice walk.
+
+The walk reads the inventory of *every* file in the root, so computing it per
+name made each of the (many thousands of) per-name nodes depend on every file —
+the dominant term in the size of the dependency graph, hence in the cost of
+every incremental re-verification. Funnelling them through this one node makes
+each per-name node a single lookup, and keeps early cutoff: an edit that leaves
+the index equal backdates it, and one that changes it only re-runs the (O(1))
+per-name lookups.
+"""
+Salsa.@derived function derived_method_arities_index(rt, root)
+    @debug "derived_method_arities_index" root=root
+
     tree = derived_module_tree(rt, root)
     modpaths = Set{Vector{String}}(n.path for n in tree.modules)
-    result = MethodArity[]
-    path in modpaths || return result
+    result = Dict{Tuple{Vector{String},String},Vector{MethodArity}}()
 
-    _walk_spliced_binding_items!(rt, root, String[], name, Set{URI}([root])) do F, item, loc
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
         item.arity === nothing && return
         resolved = isempty(item.qualifier) ? loc :
             _resolve_extension_qualifier(modpaths, loc, item.qualifier)
-        resolved == path && push!(result, item.arity)
+        (resolved === nothing || resolved ∉ modpaths) && return
+        push!(get!(() -> MethodArity[], result, (resolved, item.name)), item.arity)
     end
     return result
 end
@@ -913,13 +936,32 @@ per-file inventories; plain data throughout.
 Salsa.@derived function derived_external_method_extensions(rt, root, name)
     @debug "derived_external_method_extensions" root=root name=name
 
+    return get(derived_external_method_extensions_index(rt, root), name, _NO_EXTERNAL_EXTENSIONS)
+end
+
+const _NO_EXTERNAL_EXTENSIONS = ExternalExtension[]
+
+"""
+    derived_external_method_extensions_index(rt, root) -> Dict{String,Vector{ExternalExtension}}
+
+Every `name => extensions` entry of `root`'s tree in one node, computed by a
+single splice walk. Same rationale as
+[`derived_method_arities_index`](@ref): the walk reads every file in the root,
+so a per-name node would make the graph the incremental engine re-verifies grow
+as files × names.
+"""
+Salsa.@derived function derived_external_method_extensions_index(rt, root)
+    @debug "derived_external_method_extensions_index" root=root
+
     tree = derived_module_tree(rt, root)
     modpaths = Set{Vector{String}}(n.path for n in tree.modules)
     import_targets = _external_import_targets(tree)
-    result = ExternalExtension[]
-    _walk_spliced_binding_items!(rt, root, String[], name, Set{URI}([root])) do F, item, loc
+    result = Dict{String,Vector{ExternalExtension}}()
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
         q = _external_extension_qualifier(modpaths, import_targets, item, loc)
-        q === nothing || push!(result, (qualifier=q, signature=item.signature, ref=(file=F, id=item.id)))
+        q === nothing && return
+        push!(get!(() -> ExternalExtension[], result, item.name),
+            (qualifier=q, signature=item.signature, ref=(file=F, id=item.id)))
     end
     return result
 end
@@ -937,12 +979,5 @@ added/removed, so most edits leave it unchanged and dependents backdate.
 Salsa.@derived function derived_external_extension_names(rt, root)
     @debug "derived_external_extension_names" root=root
 
-    tree = derived_module_tree(rt, root)
-    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
-    import_targets = _external_import_targets(tree)
-    result = Set{String}()
-    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
-        _external_extension_qualifier(modpaths, import_targets, item, loc) === nothing || push!(result, item.name)
-    end
-    return result
+    return Set{String}(keys(derived_external_method_extensions_index(rt, root)))
 end
