@@ -35,7 +35,9 @@ ExpandBudget() = ExpandBudget(MAX_EXPANDED_TYPES)
 
 function FakeTypeName(@nospecialize(x), budget::ExpandBudget=ExpandBudget())
     @static if !(Vararg isa Type)
-        x isa typeof(Vararg) && return FakeTypeofVararg(x)
+        # Pass the budget on: expansion below a `Vararg` counts against the same
+        # cap as everything else.
+        x isa typeof(Vararg) && return _fake_vararg(x, budget)
     end
     if x isa DataType
         xname = x.name
@@ -195,16 +197,21 @@ Base.hash(::FakeTypeofBottom, h::UInt) = hash(:FakeTypeofBottom, h)
         FakeTypeofVararg(T) = (new(T))
         FakeTypeofVararg(T, N) = new(T, N)
     end
-    function FakeTypeofVararg(va::typeof(Vararg))
+    # Convert a `Vararg` instance. Both slots go through `_parameter`: `T` is a
+    # type in ordinary varargs but a bare value in ones like `NTuple{N,2}`
+    # (`Vararg{2,N}`), and `N` is either an `Int` or a `TypeVar`.
+    function _fake_vararg(va::typeof(Vararg), budget::ExpandBudget)
         if isdefined(va, :N)
-            vaN = va.N isa TypeVar ? FakeTypeVar(va.N) : va.N
-            FakeTypeofVararg(FakeTypeName(va.T), vaN) # This should be FakeTypeName(va.N) but seems to crash inference.
+            FakeTypeofVararg(_parameter(va.T, budget), _parameter(va.N, budget))
         elseif isdefined(va, :T)
-            FakeTypeofVararg(FakeTypeName(va.T))
+            FakeTypeofVararg(_parameter(va.T, budget))
         else
             FakeTypeofVararg()
         end
     end
+    # Entry point for callers outside the recursion; without this method a
+    # `Vararg` would land in the field constructor below and be stored raw.
+    FakeTypeofVararg(va::typeof(Vararg)) = _fake_vararg(va, ExpandBudget())
     function Base.print(io::IO, va::FakeTypeofVararg)
         print(io, "Vararg")
         if isdefined(va, :T)
@@ -214,6 +221,14 @@ Base.hash(::FakeTypeofBottom, h::UInt) = hash(:FakeTypeofBottom, h)
             end
             print(io, "}")
         end
+    end
+    # Mirrors `==` below: which fields are defined is part of the identity, so a
+    # bare `Vararg`, a `Vararg{T}` and a `Vararg{T,N}` hash differently.
+    function Base.hash(a::FakeTypeofVararg, h::UInt)
+        h = hash(:FakeTypeofVararg, h)
+        isdefined(a, :T) || return h
+        h = hash(a.T, h)
+        return isdefined(a, :N) ? hash(a.N, h) : h
     end
     function Base.:(==)(a::FakeTypeofVararg, b::FakeTypeofVararg)
         if isdefined(a, :T)

@@ -507,6 +507,80 @@ end
     @test back.types == Any[2, 3]                            # survives round-trip
 end
 
+@testitem "SymbolServer: Vararg with a value type parameter" begin
+    using JuliaWorkspaces.SymbolServer: DataTypeStore, FakeTypeName, FakeTypeofVararg
+    using JuliaWorkspaces.SymbolServer.CacheStore: write, read
+
+    # `NTuple{N,2}` is `Tuple{Vararg{2,N}}`: a `Vararg` whose `T` is the integer
+    # *value* 2, not a type. It stays unnormalised while `N` is free, so it
+    # reaches the crawler through any type carrying it — e.g. RegionTrees'
+    # `TwosArray{N,T,L} <: StaticArray{NTuple{N,2},T,N}`, whose supertype alone
+    # aborted indexing of its whole environment.
+    va = Base.unwrap_unionall(NTuple{N,2} where N).parameters[1]
+    ft = FakeTypeName(va)
+    @test ft isa FakeTypeofVararg
+    @test ft.T == 2
+
+    abstract type ValueParamArray{S,T,N} end
+    struct Twos{N,T,L} <: ValueParamArray{NTuple{N,2},T,N} end
+
+    d = DataTypeStore(Twos, :Twos, @__MODULE__)
+    io = IOBuffer(); write(io, d); seekstart(io)
+    @test read(io).super == d.super                          # survives round-trip
+end
+
+@testitem "SymbolServer: FakeTypeofVararg hashes consistently with ==" begin
+    using JuliaWorkspaces.SymbolServer: FakeTypeName
+
+    # `==` is custom, so `hash` has to be too — the object-identity fallback
+    # disagreed with it, which silently breaks any Set/Dict keyed on a signature.
+    for T in (Vararg{Int,2}, Vararg{Int}, Vararg{Tuple{Int,String}}, Vararg)
+        a, b = FakeTypeName(T), FakeTypeName(T)
+        @test a == b
+        @test hash(a) == hash(b)
+        @test length(Set([a, b])) == 1
+    end
+
+    # Which slots are filled is part of the identity.
+    @test hash(FakeTypeName(Vararg{Int})) != hash(FakeTypeName(Vararg{Int,2}))
+    @test hash(FakeTypeName(Vararg)) != hash(FakeTypeName(Vararg{Int}))
+    @test hash(FakeTypeName(Vararg{Int,2})) != hash(FakeTypeName(Vararg{Int,3}))
+end
+
+@testitem "SymbolServer: the expansion budget survives a Vararg" begin
+    using JuliaWorkspaces.SymbolServer: FakeTypeName, FakeTypeofVararg, ExpandBudget, Unserializable
+
+    deep = Tuple{Tuple{Tuple{Tuple{Int}}}}
+    has_sentinel(x) = x isa Unserializable ||
+        (x isa FakeTypeName && any(has_sentinel, x.parameters)) ||
+        (x isa FakeTypeofVararg && isdefined(x, :T) && has_sentinel(x.T))
+
+    # A budget of one expansion truncates this type...
+    b = ExpandBudget(1)
+    @test has_sentinel(FakeTypeName(deep, b))
+
+    # ...and must still truncate it behind a `Vararg`. The Vararg branch used to
+    # start a fresh budget, so `MAX_EXPANDED_TYPES` reset at every Vararg hop.
+    b = ExpandBudget(1)
+    @test has_sentinel(FakeTypeName(Tuple{Vararg{deep}}, b))
+    @test b.remaining == 0
+end
+
+@testitem "SymbolServer: return-type caching tolerates uninferable methods" begin
+    using JuliaWorkspaces.SymbolServer: getenvtree, symbols, cache_methods, VarRef,
+        FakeTypeName, FakeUnion, FakeUnionAll, FakeTypeVar, FakeTypeofBottom
+
+    # `Core.Compiler.typeinf_type` returns `nothing` when it produced no
+    # CodeInstance, and `FakeTypeName(nothing)` throws. Nothing enables
+    # `get_return_type` today, so this smoke-tests the path for whoever does:
+    # every method must come back with a cached *type*, never a bare `nothing`.
+    env = getenvtree([:Base, :Core])
+    symbols(env)
+    ms = cache_methods(sin, :sin, env, true)
+    @test !isempty(ms)
+    @test all(m -> m[2].rt isa Union{FakeTypeName,FakeUnion,FakeUnionAll,FakeTypeVar,FakeTypeofBottom,VarRef}, ms)
+end
+
 @testitem "SymbolServer: CacheStore validates file header" begin
     using JuliaWorkspaces.SymbolServer.CacheStore: CacheCorruptedError, MagicHeader, StoreVersion, read, write
     using JuliaWorkspaces.SymbolServer: VarRef
