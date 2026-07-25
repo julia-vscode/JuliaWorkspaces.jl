@@ -420,6 +420,7 @@ struct JuliaWorkspace
         set_input_ready_project_environments!(rt, Set{WatchEnvironmentKey}())
         set_input_ready_test_environments!(rt, Dict{WatchTestEnvironmentKey,URI}())
         set_input_standalone_projects!(rt, Dict{CreateStandaloneProjectKey,URI}())
+        set_input_failed_dynamic_keys!(rt, Set{DJPKey}())
 
         new(rt, dynamic_feature)
     end
@@ -540,30 +541,33 @@ function process_from_dynamic(jw::JuliaWorkspace)
     ready_envs = copy(input_ready_project_environments(jw.runtime))
     ready_test_envs = copy(input_ready_test_environments(jw.runtime))
     standalone_projects = copy(input_standalone_projects(jw.runtime))
+    failed_keys = copy(input_failed_dynamic_keys(jw.runtime))
     envs_dirty = false
     test_envs_dirty = false
     standalone_dirty = false
-    any_env_ready = false
+    failed_dirty = false
+    saw_result = false
 
     while isready(df.out_channel)
         msg = take!(df.out_channel)
+        saw_result = true
 
         if msg isa FailedResult
             @warn "DJP reported failure" msg.key
             # `failed_projects` was already populated in the reactor. A failure
             # is treated as a terminal state for readiness (best-effort, with
             # whatever symbol caches exist) so `is_ready` doesn't stay false
-            # forever and per-project gating doesn't suppress diagnostics
-            # indefinitely. A failed watched environment is recorded like a
-            # successful one; failed test environments and standalone projects
-            # have nothing to record — the artifacts their success paths
-            # register (a test/standalone project URI) don't exist on failure —
-            # so they only contribute to the global readiness flag.
+            # forever and gating doesn't suppress diagnostics indefinitely. A
+            # failed watched environment is recorded like a successful one;
+            # failed test environments and standalone projects have no artifact
+            # to record — the test/standalone project URI their success paths
+            # register doesn't exist — so the key is only remembered as failed.
+            push!(failed_keys, msg.key)
+            failed_dirty = true
             if msg.key isa WatchEnvironmentKey
                 push!(ready_envs, msg.key)
                 envs_dirty = true
             end
-            any_env_ready = true
 
         elseif msg isa EnvironmentReadyResult
             @debug "Processing new env"
@@ -575,7 +579,6 @@ function process_from_dynamic(jw::JuliaWorkspace)
             # while their own DJPs are still pending.
             push!(ready_envs, WatchEnvironmentKey(msg.project_path, msg.content_hash))
             envs_dirty = true
-            any_env_ready = true
 
         elseif msg isa TestEnvironmentReadyResult
             @info "Processing new test env" msg.project_uri msg.package msg.test_project_uri
@@ -590,7 +593,6 @@ function process_from_dynamic(jw::JuliaWorkspace)
             test_proj_hash = test_proj === nothing ? UInt64(0) : test_proj.content_hash
             push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.test_project_uri), test_proj_hash))
             envs_dirty = true
-            any_env_ready = true
 
         elseif msg isa StandaloneProjectReadyResult
             @info "Processing new standalone package project" msg.package_folder_uri msg.project_uri
@@ -603,7 +605,6 @@ function process_from_dynamic(jw::JuliaWorkspace)
             standalone_proj_hash = standalone_proj === nothing ? UInt64(0) : standalone_proj.content_hash
             push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), standalone_proj_hash))
             envs_dirty = true
-            any_env_ready = true
         else
             error("Unknown message: $msg")
         end
@@ -612,7 +613,8 @@ function process_from_dynamic(jw::JuliaWorkspace)
     envs_dirty && set_input_ready_project_environments!(jw.runtime, ready_envs)
     test_envs_dirty && set_input_ready_test_environments!(jw.runtime, ready_test_envs)
     standalone_dirty && set_input_standalone_projects!(jw.runtime, standalone_projects)
-    any_env_ready && set_input_env_ready!(jw.runtime, true)
+    failed_dirty && set_input_failed_dynamic_keys!(jw.runtime, failed_keys)
+    saw_result && (df.saw_result[] = true)
 
     return
 end

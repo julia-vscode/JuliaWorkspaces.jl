@@ -628,14 +628,18 @@ end
     is_ready(jw::JuliaWorkspace)
 
 Check whether the workspace's dynamic environment loading has completed.
-Returns `true` if no dynamic feature is configured, or if the environment
-has finished loading and no tasks are pending.
+Returns `true` if no dynamic feature is configured, or if at least one result
+has been consumed (successful or failed) and no work item is pending.
+
+This is a whole-workspace question and stays coarse: per-file consumers want
+[`derived_file_env_ready`](@ref) instead, which is settled per project.
 """
 function is_ready(jw::JuliaWorkspace)
     @debug "is_ready"
 
-    jw.dynamic_feature === nothing && return true
-    return input_env_ready(jw.runtime) && jw.dynamic_feature.pending_count[] == 0
+    df = jw.dynamic_feature
+    df === nothing && return true
+    return df.saw_result[] && df.pending_count[] == 0
 end
 
 """

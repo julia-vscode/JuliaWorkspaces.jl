@@ -1791,3 +1791,179 @@ end
     @test any(d -> d.source == "StaticLint.jl", diags)
     @test any(d -> occursin("JSON", d.message), diags)
 end
+
+# ──────────────────────────────────────────────────────────────────────
+# Per-project environment gating
+# ──────────────────────────────────────────────────────────────────────
+
+# `_add_file!` instead of `add_file!` in these tests: it skips the reconcile, so
+# the dynamic reactor stays idle and the only results are the injected ones.
+
+@testitem "env gating: a ready environment only unblocks its own project" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, get_diagnostic, process_from_dynamic, derived_project,
+        EnvironmentReadyResult, input_env_ready, set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI, uri2filepath
+
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    for (name, n) in (("EnvGateA", "41"), ("EnvGateB", "42"))
+        _add_file!(jw, TextFile(URI("file:///ws/$name/Project.toml"), SourceText("""
+        name = "$name"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee$n"
+        version = "0.1.0"
+        """, "toml")))
+        _add_file!(jw, TextFile(URI("file:///ws/$name/Manifest.toml"), SourceText(manifest_toml, "toml")))
+        _add_file!(jw, TextFile(URI("file:///ws/$name/src/$name.jl"), SourceText("""
+        module $name
+        f() = undefined_symbol
+        end
+        """, "julia")))
+    end
+
+    uri_a = URI("file:///ws/EnvGateA/src/EnvGateA.jl")
+    uri_b = URI("file:///ws/EnvGateB/src/EnvGateB.jl")
+    folder_b = URI("file:///ws/EnvGateB")
+
+    missing_refs(uri) = filter(d -> startswith(d.message, "Missing reference"), get_diagnostic(jw, uri))
+
+    # Nothing is ready yet: both projects gate their env-dependent diagnostics.
+    @test isempty(missing_refs(uri_a))
+    @test isempty(missing_refs(uri_b))
+
+    # Only B's environment finishes indexing.
+    put!(jw.dynamic_feature.out_channel, EnvironmentReadyResult(
+        uri2filepath(folder_b), derived_project(jw.runtime, folder_b).content_hash))
+    process_from_dynamic(jw)
+
+    @test !isempty(missing_refs(uri_b))
+    @test isempty(missing_refs(uri_a))     # A's own environment is still pending
+    @test !input_env_ready(jw.runtime)     # production never sets the manual override
+
+    # The manual override still unblocks every project.
+    set_input_env_ready!(jw.runtime, true)
+    @test !isempty(missing_refs(uri_a))
+end
+
+@testitem "env gating: a failed environment DJP unblocks its own project" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, get_diagnostic, process_from_dynamic, derived_project,
+        FailedResult, WatchEnvironmentKey
+    using JuliaWorkspaces.URIs2: URI, uri2filepath
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    _add_file!(jw, TextFile(URI("file:///ws/EnvFail/Project.toml"), SourceText("""
+    name = "EnvFail"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee43"
+    version = "0.1.0"
+    """, "toml")))
+    _add_file!(jw, TextFile(URI("file:///ws/EnvFail/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    fileuri = URI("file:///ws/EnvFail/src/EnvFail.jl")
+    _add_file!(jw, TextFile(fileuri, SourceText("module EnvFail\nf() = undefined_symbol\nend\n", "julia")))
+
+    folder = URI("file:///ws/EnvFail")
+    missing_refs() = filter(d -> startswith(d.message, "Missing reference"), get_diagnostic(jw, fileuri))
+
+    @test isempty(missing_refs())
+
+    # A failure is terminal: gating must not wait for an environment that will
+    # never arrive, so the (best-effort) diagnostics are published.
+    put!(jw.dynamic_feature.out_channel, FailedResult(WatchEnvironmentKey(
+        uri2filepath(folder), derived_project(jw.runtime, folder).content_hash)))
+    process_from_dynamic(jw)
+
+    @test !isempty(missing_refs())
+end
+
+@testitem "env gating: a project no DJP is scheduled for does not gate forever" begin
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!, get_diagnostic,
+        set_active_project!, derived_project, derived_project_uri_for_root
+    using JuliaWorkspaces.URIs2: URI
+
+    # Project.toml but no Manifest.toml: no environment is ever indexed for this
+    # project, so its files must not wait for a readiness signal that can never
+    # arrive.
+    env_dir = URI("file:///noman")
+    fileuri = URI("file:///noman/foo.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///noman/Project.toml"), SourceText("""
+    name = "NoMan"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee44"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(fileuri, SourceText("import JSON\n", "julia")))
+    set_active_project!(jw, env_dir)
+
+    @test derived_project(jw.runtime, env_dir) === nothing
+    @test derived_project_uri_for_root(jw.runtime, fileuri) == env_dir
+
+    diags = get_diagnostic(jw, fileuri)
+    @test any(d -> d.source == "StaticLint.jl" && occursin("JSON", d.message), diags)
+end
+
+@testitem "env gating: a failed test-environment DJP unblocks the package's test files" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, process_from_dynamic, derived_project, derived_file_env_ready,
+        derived_required_dynamic_projects, EnvironmentReadyResult, FailedResult,
+        WatchTestEnvironmentKey
+    using JuliaWorkspaces.URIs2: URI, filepath2uri
+
+    # The test-env work item is only scheduled for a package with a real
+    # `test/runtests.jl` on disc, so this fixture is written to disc.
+    dir = mktempdir()
+    mkpath(joinpath(dir, "src"))
+    mkpath(joinpath(dir, "test"))
+    files = Dict(
+        joinpath(dir, "Project.toml") => ("""
+        name = "TestEnvGate"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee45"
+        version = "0.1.0"
+        """, "toml"),
+        joinpath(dir, "Manifest.toml") => ("""
+        julia_version = "1.11.0"
+        manifest_format = "2.0"
+        project_hash = "abc123"
+
+        [deps]
+        """, "toml"),
+        joinpath(dir, "src", "TestEnvGate.jl") => ("module TestEnvGate\nend\n", "julia"),
+        joinpath(dir, "test", "runtests.jl") => ("f() = undefined_symbol\n", "julia"),
+    )
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    for (path, (content, lang)) in files
+        write(path, content)
+        _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+
+    proj_uri = filepath2uri(dir)
+    proj_hash = derived_project(jw.runtime, proj_uri).content_hash
+    test_key = WatchTestEnvironmentKey(dir, "TestEnvGate", proj_hash)
+    @test test_key in derived_required_dynamic_projects(jw.runtime)
+
+    put!(jw.dynamic_feature.out_channel, EnvironmentReadyResult(dir, proj_hash))
+    process_from_dynamic(jw)
+
+    runtests_uri = filepath2uri(joinpath(dir, "test", "runtests.jl"))
+    # The project env is ready, but the test env this file needs is still pending.
+    @test !derived_file_env_ready(jw.runtime, runtests_uri)
+
+    put!(jw.dynamic_feature.out_channel, FailedResult(test_key))
+    process_from_dynamic(jw)
+
+    @test derived_file_env_ready(jw.runtime, runtests_uri)
+end
