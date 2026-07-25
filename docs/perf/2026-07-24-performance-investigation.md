@@ -132,6 +132,110 @@ into ~14 s (4.5 s init + ~7 s load + 2.5 s first file).
 7. Harden typed-param construction against malformed requests.
 8. Skip startup publishes for files that never had diagnostics.
 
+## Addendum (2026-07-25): splitpath fix + dynamic-sweep attribution
+
+Follow-ups on ranked items 3 and 1, on branches `sp/project-for-file-splitpath` and
+`sp/dynamic-sweep-perf` (the latter includes the former; both local).
+
+### Item 3: splitpath hotspot — fixed (`41f4924`)
+
+`derived_package_folder_parts` / `derived_project_folder_parts` precompute the
+folder-parts tables once per revision (sorted deepest-first with a total order so an
+unchanged folder set stays structurally equal and backdates); the per-file lookups do a
+single `splitpath(file_path)` + one scan. `find_project_for_file` in `layer_testitems.jl`
+was a verbatim copy of the old logic with no other callers and was replaced by
+`derived_project_for_file`. Cold sweep: **41.0 s / 18.0 GiB → 27.8 s / 11.5 GiB**
+(−32% wall, −36% alloc; same-session remeasure of the baseline). `splitpath`/regex
+dropped from ~19% of sweep samples to 1–4 of 1331. New testitems cover
+deepest-folder-wins semantics and `derived_testenv`'s deved-package branch (previously
+zero coverage).
+
+### Item 1: the "~2 s dynamic-mode sweep" was misattributed
+
+Measured in-process (`DynamicIndexingOnly`, warm store, same edit+sweep protocol):
+
+- A **quiescent** dynamic workspace sweeps at ~371–407 ms vs 352 ms DynamicOff — only
+  ~1.16× (deeper env-ready chains). The end-to-end 1.8–2.4 s numbers were **churn**:
+  during the indexing phase the Salsa revision advanced **213× with no user edit**, and
+  every background env result forces a full-workspace verification walk (~375 ms of pure
+  verification for **0.3 ms** of real recomputation — 169 re-executions of
+  `derived_project_environment_ready`, counted via a TraceLogging receiver). The
+  1.5–2.4 s spikes are sweeps where newly-loaded package metadata genuinely changed
+  `derived_environment` and a root re-linted (legitimate work).
+- `set_input!`'s isequal early-exit does fire (re-applying an identical env result
+  leaves the revision unchanged; next sweep 0.02 ms) — the "volatile env value defeats
+  backdating" hypothesis is false. `process_from_dynamic` is a no-op on an empty
+  channel, but it does synchronous multi-MB `.jstore` reads on the caller's task when
+  results are pending (per result, not per sweep).
+
+**The verification floor is graph edges**: 96,190 nodes / 1,588,958 edges ≈ 240 ns/edge
+≈ 380 ms/sweep, ~44% of samples in `_probe_derived` dict probes dominated by
+`Tuple{URI}` hashing. 85% of edges came from three fan-ins, each re-walking whole-root
+state per name:
+
+| derived function | edges | nodes | avg deps |
+|---|---|---|---|
+| `derived_method_arities` | 1,108,206 (70%) | 11,827 | 93.7 |
+| `derived_project_uri_for_root` | 169,778 (11%) | 2,186 | 77.7 |
+| `derived_external_method_extensions` | 57,208 | 490 | 116.8 |
+
+### Fix (`5f59af8`)
+
+- `derived_method_arities_index(root)` / `derived_external_method_extensions_index(root)`:
+  one splice walk per root; per-name queries become dict lookups
+  (`derived_external_extension_names` reads the same index). Indices backdate when
+  equal, so the early-cutoff behavior is preserved.
+- `derived_deving_project(package_folder_uri)` replaces the two inlined every-project
+  scans in `derived_project_uri_for_root`.
+- `URI` caches its content hash in a private field (Windows lowercase rule preserved);
+  `==` short-circuits on it.
+
+| | edges | DynamicOff sweep | dynamic quiescent | after one env result |
+|---|---|---|---|---|
+| before | 1.59 M | 352 ms | 407 ms | 375 ms |
+| after | 0.30 M | **133 ms** | **153 ms** | **124 ms** |
+
+Churn-phase sweeps: ~400 ms median with 1.5–2.4 s spikes → ~204 ms median / 700 ms p90
+(one 3.6 s outlier = real re-lint + GC; churn comparison is across differently-warm
+stores, the quiescent columns are the rigorous ones). Cold full-workspace diagnostics
+unchanged. Full suite: 5778 pass / 7 broken / 0 fail / 0 error (+39 asserts: URI
+hash/equality invariants, index-vs-query agreement, identical-env-result backdating).
+
+### 30 s diagnostic flip: not reproduced in-process
+
+After quiescence, 90 s idle polling: revision constant, both flagged URIs steady at 3
+diagnostics. A reproduced warm-restart refresh tail (238 fast-laned items, 53 standalone
+refreshes over ~6 min at cap 4) **never advanced the revision** — the in-process refresh
+path is not the churn source, and refresh children rewrote no workspace manifest.
+Best remaining hypothesis (needs the LS in the loop): the LS registers file watchers on
+the fabricated standalone-project dirs next to the symbol store; a refresh child
+rewrites their Project/Manifest → watcher pushes new content → `derived_project`
+content-hash changes → env-ready flips until the next refresh result re-registers the
+key, at the refresh cadence.
+
+### New bug, needs a decision (not fixed on the perf branch)
+
+`process_from_dynamic` sets the **global** `input_env_ready` to `true` on the *first*
+env result, and `derived_file_env_ready` ORs it in — per-project gating of
+env-dependent diagnostics is effectively disabled from the first completed environment
+onward (verified: deleting a project's `WatchEnvironmentKey` from the ready set changes
+no file's readiness). Fixing it restores the documented suppression semantics but
+changes visible diagnostic behavior.
+
+### Still open after this round
+
+- Chunk the (now ~130–150 ms) debounced sweep on the dispatch loop; coalesce bursts of
+  dynamic-result applications into one revision instead of N.
+- Manifest-content gating for warm-restart refreshes (6 of 12 in-process minutes were
+  53 standalone refreshes producing byte-identical inputs).
+- Salsa (held for review): the per-edge dict re-probe in `_derived_changed_at` is now
+  essentially the entire remaining sweep cost — intern dependency keys or store
+  `DerivedValue` pointers in `dependencies`.
+- `derived_project_folders`/`derived_package_folders` iterate `Dict` keys — unstable
+  order can spuriously defeat backdating; sort them.
+- Test-infra note: a bare `@run_package_tests` from the package dir pulls in sibling
+  packages; drive the full suite through `test/runtests.jl`.
+
 ## Reproduction
 
 - Driver + event logs + summaries: session scratchpad (`lsbench.py`, `run*/events.jsonl`,

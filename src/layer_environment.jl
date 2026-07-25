@@ -236,18 +236,16 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
 
         # If the package is not a project (no manifest) and not dev'd into any workspace project,
         # trigger creation of a standalone project for it
-        if !_is_package_deved_in_workspace(rt, package_folder_uri)
+        deving_project = derived_deving_project(rt, package_folder_uri)
+        if deving_project === nothing
             standalone_uri = derived_ready_standalone_project(rt, package_folder_uri, pkg_content_hash)
             if standalone_uri !== nothing
                 return standalone_uri
             end
         else
             # Package IS deved in a workspace project (possibly the standalone project
-            # that was created for it) — find and return that project
-            deving_project = _find_deving_project(rt, package_folder_uri)
-            if deving_project !== nothing
-                return deving_project
-            end
+            # that was created for it) — use that project
+            return deving_project
         end
     end
 
@@ -255,20 +253,18 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
     return active_project
 end
 
-function _is_package_deved_in_workspace(rt, package_folder_uri)
-    for project_folder_uri in derived_project_folders(rt)
-        project = derived_project(rt, project_folder_uri)
-        project === nothing && continue
-        for (_, v) in project.deved_packages
-            if v.uri == package_folder_uri
-                return true
-            end
-        end
-    end
-    return false
-end
+"""
+    derived_deving_project(rt, package_folder_uri) -> Union{Nothing,URI}
 
-function _find_deving_project(rt, package_folder_uri)
+The workspace project that `dev`s the package at `package_folder_uri`, or
+`nothing` if no project does.
+
+Memoized because the scan touches *every* project in the workspace: called
+inline, each caller (one per file, via `derived_project_uri_for_root`) would
+take a dependency on all of them, so the number of edges the incremental engine
+walks would grow as files × projects.
+"""
+Salsa.@derived function derived_deving_project(rt, package_folder_uri)
     for project_folder_uri in derived_project_folders(rt)
         project = derived_project(rt, project_folder_uri)
         project === nothing && continue
@@ -280,6 +276,9 @@ function _find_deving_project(rt, package_folder_uri)
     end
     return nothing
 end
+
+_is_package_deved_in_workspace(rt, package_folder_uri) =
+    derived_deving_project(rt, package_folder_uri) !== nothing
 
 """
     derived_file_env_ready(rt, uri)

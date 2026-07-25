@@ -6,6 +6,11 @@ include("vendored_from_uris.jl")
 
 export URI, uri2filepath, filepath2uri, @uri_str
 
+# The private `_hash` field caches the content hash of the other five, computed
+# once at construction. URI-keyed dict probes are the hottest operation in the
+# system (every memoized per-file query, and every edge of the dependency graph
+# the incremental engine walks), and re-hashing the path string on each probe
+# dominated that walk.
 """
     struct URI
 
@@ -23,10 +28,35 @@ struct URI
     path::String
     query::Union{String,Nothing}
     fragment::Union{String,Nothing}
+    _hash::UInt
+
+    function URI(scheme, authority, path, query, fragment)
+        scheme = _as_string(scheme)
+        authority = _as_string(authority)
+        path = something(_as_string(path), "")
+        query = _as_string(query)
+        fragment = _as_string(fragment)
+        return new(scheme, authority, path, query, fragment, _content_hash(scheme, authority, path, query, fragment))
+    end
 end
 
+_as_string(x::Nothing) = nothing
+_as_string(x::AbstractString) = String(x)
+
 @static if Sys.iswindows()
+    # Chained field hashes: hashing a tuple here heap-allocates it (the
+    # Union-typed query/fragment fields defeat stack allocation).
+    function _content_hash(scheme, authority, path, query, fragment)
+        h = hash(scheme, zero(UInt))
+        h = hash(authority, h)
+        h = scheme == "file" ? hash(lowercase(path), h) : hash(path, h)
+        h = hash(query, h)
+        return hash(fragment, h)
+    end
+
     function Base.:(==)(a::URI, b::URI)
+        a._hash == b._hash || return false
+
         if a.scheme=="file" && b.scheme=="file"
             a_path_norm = lowercase(a.path)
             b_path_norm = lowercase(b.path)
@@ -44,36 +74,27 @@ end
                 a.fragment == b.fragment
         end
     end
-
-    # Chained field hashes: hashing a tuple here heap-allocates it (the
-    # Union-typed query/fragment fields defeat stack allocation), and URI
-    # hashing is on the hot dict-probe path of every per-file query.
-    function Base.hash(a::URI, h::UInt)
-        h = hash(a.scheme, h)
-        h = hash(a.authority, h)
-        h = a.scheme == "file" ? hash(lowercase(a.path), h) : hash(a.path, h)
-        h = hash(a.query, h)
-        return hash(a.fragment, h)
-    end
 else
+    function _content_hash(scheme, authority, path, query, fragment)
+        h = hash(scheme, zero(UInt))
+        h = hash(authority, h)
+        h = hash(path, h)
+        h = hash(query, h)
+        return hash(fragment, h)
+    end
+
     function Base.:(==)(a::URI, b::URI)
+        a._hash == b._hash || return false
+
         return a.scheme == b.scheme &&
             a.authority == b.authority &&
             a.path == b.path &&
             a.query == b.query &&
             a.fragment == b.fragment
     end
-
-    # Chained field hashes — see the case-insensitive branch above for why
-    # the tuple version allocates.
-    function Base.hash(a::URI, h::UInt)
-        h = hash(a.scheme, h)
-        h = hash(a.authority, h)
-        h = hash(a.path, h)
-        h = hash(a.query, h)
-        return hash(a.fragment, h)
-    end
 end
+
+Base.hash(a::URI, h::UInt) = hash(a._hash, h)
 
 function percent_decode(str::AbstractString)
     return unescapeuri(str)

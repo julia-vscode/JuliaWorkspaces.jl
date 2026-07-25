@@ -536,3 +536,35 @@ end
     @test df.pending_count[] == 0
     @test isempty(df.inflight)
 end
+
+@testitem "Dynamic results: an unchanged env result does not invalidate anything" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, EnvironmentReadyResult,
+        process_from_dynamic, derived_all_diagnostics
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    add_file!(jw, TextFile(URI("file:///ws/A/src/A.jl"), SourceText("module A\nf(x) = 1\nend\n", "julia")))
+
+    apply(path, hash) = begin
+        put!(jw.dynamic_feature.out_channel, EnvironmentReadyResult(path, UInt64(hash)))
+        process_from_dynamic(jw)
+        jw.runtime.storage.current_revision
+    end
+
+    rev0 = jw.runtime.storage.current_revision
+    rev1 = apply("/ws/A", 1)
+    @test rev1 > rev0                          # first result is new information
+    diags = derived_all_diagnostics(jw.runtime)
+
+    # Re-applying the identical result must hit the input's equality early exit:
+    # no revision bump, so nothing downstream even needs re-verifying.
+    @test apply("/ws/A", 1) == rev1
+
+    # A result for a *different* env is new information (revision advances), but
+    # it changes no diagnostic, so `derived_all_diagnostics` must backdate rather
+    # than recompute — the memoized value is handed back unchanged.
+    rev2 = apply("/ws/B", 2)
+    @test rev2 > rev1
+    @test derived_all_diagnostics(jw.runtime) === diags
+end
