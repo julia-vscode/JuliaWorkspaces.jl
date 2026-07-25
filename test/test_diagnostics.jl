@@ -1920,11 +1920,11 @@ end
         _add_file!, process_from_dynamic, derived_project, derived_file_env_ready,
         derived_required_dynamic_projects, EnvironmentReadyResult, FailedResult,
         WatchTestEnvironmentKey
-    using JuliaWorkspaces.URIs2: URI, filepath2uri
+    using JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
 
     # The test-env work item is only scheduled for a package with a real
     # `test/runtests.jl` on disc, so this fixture is written to disc.
-    dir = mktempdir()
+    dir = uri2filepath(filepath2uri(mktempdir()))  # round-trip: drive-letter casing must match production-derived keys on Windows
     mkpath(joinpath(dir, "src"))
     mkpath(joinpath(dir, "test"))
     files = Dict(
@@ -1974,11 +1974,11 @@ end
         derived_required_dynamic_projects, derived_ready_test_environment,
         derived_test_environment_pending, _test_environment_key,
         TestEnvironmentReadyResult, WatchTestEnvironmentKey
-    using JuliaWorkspaces.URIs2: filepath2uri
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
 
     # A package without a manifest is not a project folder, so its test-env work
     # item is keyed on the package folder itself with a zero content hash.
-    dir = mktempdir()
+    dir = uri2filepath(filepath2uri(mktempdir()))  # round-trip: drive-letter casing must match production-derived keys on Windows
     mkpath(joinpath(dir, "src"))
     mkpath(joinpath(dir, "test"))
     files = [
@@ -2033,9 +2033,9 @@ end
         _add_file!, process_from_dynamic, derived_package, derived_file_env_ready,
         derived_required_dynamic_projects, derived_test_environment_pending,
         _test_environment_key, FailedResult
-    using JuliaWorkspaces.URIs2: filepath2uri
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
 
-    dir = mktempdir()
+    dir = uri2filepath(filepath2uri(mktempdir()))  # round-trip: drive-letter casing must match production-derived keys on Windows
     mkpath(joinpath(dir, "src"))
     mkpath(joinpath(dir, "test"))
     files = [
@@ -2072,13 +2072,13 @@ end
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, _add_file!,
         _set_active_project!, derived_package, derived_required_dynamic_projects,
         _test_environment_key, WatchTestEnvironmentKey, derived_project
-    using JuliaWorkspaces.URIs2: filepath2uri
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
 
     # Three shapes of package folder, all with a `test/runtests.jl` on disc (the
     # required set only fabricates a test-env item for those): the package is its
     # own project, the package has no manifest and no project devs it, and the
     # package is deved by an enclosing project.
-    root = mktempdir()
+    root = uri2filepath(filepath2uri(mktempdir()))  # round-trip: drive-letter casing must match production-derived keys on Windows
     manifest_toml = """
     julia_version = "1.11.0"
     manifest_format = "2.0"
