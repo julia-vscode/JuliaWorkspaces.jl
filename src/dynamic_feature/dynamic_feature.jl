@@ -684,9 +684,9 @@ function _download_missing_caches(missing_pkgs::Vector{MissingPackage}, store_pa
 
     num_downloadable = length(missing_pkgs) - length(downloadable)
 
-    @info "Downloading $(length(downloadable)) cache files ($(num_downloadable) not available in cloud cache)..."
-
     isempty(downloadable) && return missing_pkgs
+
+    @info "Downloading $(length(downloadable)) cache files ($(num_downloadable) not available in cloud cache)..."
 
     download_dir_parent = joinpath(store_path, "_downloads")
     mkpath(download_dir_parent)
