@@ -430,6 +430,25 @@ function _strip_module_stores!(meta_dict::Dict{UInt64,StaticLint.Meta})
     return
 end
 
+"""
+    _pruned_meta(meta_dict) -> Dict
+
+The dict to freeze into a `FileAnalysis`: every all-`nothing` `Meta` dropped.
+These are `ensuremeta` residue of the pass — typically more than half of all
+entries — and every reader guards `hasmeta` with a field check, so an empty
+entry is indistinguishable from an absent one. Builds a fresh dict (rather
+than `filter!`) so the slot arrays shrink to the surviving entry count.
+"""
+function _pruned_meta(meta_dict::Dict{UInt64,StaticLint.Meta})
+    out = Dict{UInt64,StaticLint.Meta}()
+    for (k, m) in meta_dict
+        if m.binding !== nothing || m.scope !== nothing || m.ref !== nothing || m.error !== nothing
+            out[k] = m
+        end
+    end
+    return out
+end
+
 # Aggregate every tree-resolved reference site in `meta_dict` by
 # (name, origin_module). Two shapes count:
 # - a `Meta.ref` that IS a `TreeRef` (plain tree resolution, and body uses
@@ -772,7 +791,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
 
     _strip_module_stores!(meta_dict)
 
-    return FileAnalysis(meta_dict, outbound, diagnostics)
+    return FileAnalysis(_pruned_meta(meta_dict), outbound, diagnostics)
 end
 
 """

@@ -2109,3 +2109,38 @@ end
     call_id = anns[end]
     @test SL.refof(call_id, meta_dict) isa SL.Binding
 end
+
+@testitem "derived_file_analysis: frozen meta carries no empty entries" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "afunc() = 1\n",
+        B => """
+        function bfunc(x)
+            y = x + afunc()
+            return y * 2
+        end
+        """,
+    ))
+
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+
+    # `ensuremeta` residue (all fields `nothing`) is indistinguishable from
+    # absence for every reader and must not survive the freeze.
+    @test !isempty(fa.meta)
+    @test all(values(fa.meta)) do m
+        m.binding !== nothing || m.scope !== nothing || m.ref !== nothing || m.error !== nothing
+    end
+
+    # Queries against the pruned dict still resolve.
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, B)
+    @test SL.refof(only(find_identifiers(cst, "afunc")), fa.meta) isa SL.TreeRef
+    @test SL.scopeof(cst, fa.meta) isa SL.Scope
+    xs = find_identifiers(cst, "y")
+    @test length(xs) == 2
+    @test all(x -> SL.hasbinding(x, fa.meta) || SL.hasref(x, fa.meta), xs)
+end
