@@ -1,21 +1,14 @@
-Salsa.@derived function derived_julia_parse_result(rt, uri)
-    @debug "derived_julia_parse_result" uri=uri
-
-    tf = derived_text_file_content(rt, uri)
-
-    content = tf.content.content
-
+# Deliberately not a derived function: caching a tree per workspace file
+# retains hundreds of MiB on large repos, and a fresh `SyntaxNode` never
+# backdates (identity `isequal`) so the cache provides no early cutoff.
+# Consumers parse on demand (~1 ms/file) and cache only their small,
+# structurally-comparable outputs.
+function parse_julia_syntax_tree(content::AbstractString)
     stream = JuliaSyntax.ParseStream(content; version=VERSION)
     JuliaSyntax.parse!(stream; rule=:all)
     tree = JuliaSyntax.build_tree(SyntaxNode, stream)
 
     return tree, stream.diagnostics
-end
-
-Salsa.@derived function derived_julia_syntax_tree(rt, uri)
-    parse_result = derived_julia_parse_result(rt, uri)
-
-    return parse_result[1]
 end
 
 @static if isdefined(JuliaSyntax, :byte_range)
@@ -25,9 +18,11 @@ else
 end
 
 Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
-    parse_result = derived_julia_parse_result(rt, uri)
+    tf = derived_text_file_content(rt, uri)
 
-    diag_results = map(parse_result[2]) do i
+    _, syntax_diagnostics = parse_julia_syntax_tree(tf.content.content)
+
+    diag_results = map(syntax_diagnostics) do i
         Diagnostic(
             _range(i),
             i.level,

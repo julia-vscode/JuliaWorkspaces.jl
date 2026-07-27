@@ -19,7 +19,7 @@ Salsa.@derived function derived_testitems(rt, uri)
     testerrors = []
 
     text_file = derived_text_file_content(rt, uri)
-    syntax_tree = derived_julia_syntax_tree(rt, uri)
+    syntax_tree, _ = parse_julia_syntax_tree(text_file.content.content)
 
     TestItemDetection.find_test_detail!(syntax_tree, testitems, testsetups, testerrors)
 

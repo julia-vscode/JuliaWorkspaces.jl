@@ -484,19 +484,21 @@ end
 """
     get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
 
-Get the syntax tree of a Julia file from the workspace.
+Get the syntax tree of a Julia file from the workspace. The tree is parsed
+on demand and not cached.
 
 # Returns
 
-- The tuple `(tree, diagnostics)`, where `tree` is the syntax tree
-  and `diagnostics` is a vector of `Diagnostic` structs.
+- The `JuliaSyntax.SyntaxNode` root of the parsed file.
 """
 function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     @debug "get_julia_syntax_tree" uri=uri
 
     process_from_dynamic(jw)
 
-    return derived_julia_syntax_tree(jw.runtime, uri)
+    tf = derived_text_file_content(jw.runtime, uri)
+
+    return parse_julia_syntax_tree(tf.content.content)[1]
 end
 
 """
