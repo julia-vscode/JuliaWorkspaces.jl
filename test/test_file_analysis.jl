@@ -674,7 +674,7 @@ end
     @test get(recv.counts, "derived_file_analysis", 0) == 0
 end
 
-@testitem "derived_file_analysis: a referenced-name id shift re-runs only the analyses that reference it" setup=[FileAnalysisWS] begin
+@testitem "derived_file_analysis: a sibling reorder leaves referencing analyses untouched" setup=[FileAnalysisWS] begin
     import JuliaWorkspaces.Salsa as Salsa
     import JuliaWorkspaces.Salsa.TraceLogging as TL
 
@@ -711,28 +711,28 @@ end
     old_a = only(filter(o -> o.name == "a", fa_d0.outbound)).target
     @test old_a !== nothing
 
-    # swap `a` and `b`: their (positional) item ids swap, `c`'s id is
-    # untouched
+    # Swap `a` and `b`. Item ids are content-based, so no name's id moves — the
+    # edit is invisible to every consumer that only holds ItemRefs.
     JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("""
     b() = 2
     a() = 1
     c() = 3
     """, "julia")))
 
-    # B references only `c` — its per-name item lookup backdates, so the
-    # analysis must not re-execute
+    # B references only `c` — untouched either way.
     recv_b = CountReceiver()
     TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, ROOT, B), recv_b)
     @test get(recv_b.counts, "derived_file_analysis", 0) == 0
 
-    # D references `a` — its outbound ItemRef changed, so exactly one
-    # re-execution, with the updated target
+    # D references `a`. Before stable ids, `a`'s ItemRef shifted and this cost
+    # one re-execution; now the outbound target is unchanged and the analysis
+    # backdates too.
     recv_d = CountReceiver()
     fa_d1 = TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, ROOT, d), recv_d)
-    @test get(recv_d.counts, "derived_file_analysis", 0) == 1
+    @test get(recv_d.counts, "derived_file_analysis", 0) == 0
     new_a = only(filter(o -> o.name == "a", fa_d1.outbound)).target
     @test new_a !== nothing
-    @test new_a != old_a
+    @test new_a == old_a
     @test new_a == JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])["a"]
 end
 
@@ -960,8 +960,8 @@ end
     @test probe_names(rt, ROOT)["c"] === :function
     before_declared = JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])
 
-    # swap the adjacent same-kind `a`/`b`: their item ids swap, the
-    # name/kind SET is identical, `c`'s id is untouched
+    # swap the adjacent same-kind `a`/`b`: with content-based ids no id moves,
+    # so the tree's value and the name/kind set are both identical
     JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("""
     b() = 2
     a() = 1
@@ -975,11 +975,11 @@ end
         probe_names(rt, ROOT)
     end
 
-    # B references only the unshifted `c`: its per-name item backdates, so
-    # the analysis never re-executes
+    # B references only `c`: its per-name item backdates, so the analysis never
+    # re-executes
     @test get(recv.counts, "derived_file_analysis", 0) == 0
-    # the tree's VALUE changed (the ItemRefs for `a`/`b` swapped): exactly
-    # one re-execution
+    # the tree re-executes (the inventory's `order` fields moved) but its VALUE
+    # is now unchanged, so it backdates
     @test get(recv.counts, "derived_module_tree", 0) == 1
     # `derived_module_names` re-executes (its dependency's value changed) but
     # BACKDATES: the name→kind set is unchanged, so its consumer early-exits.
@@ -987,14 +987,13 @@ end
     @test get(recv.counts, "derived_module_names", 0) == 1
     @test get(recv.counts, "probe_names", 0) == 0
 
-    # sanity: the ids really did shift (this is the fixture the fix-wave
-    # testitem "a referenced-name id shift re-runs only the analyses that
-    # reference it" builds on — the counterpart case, a file referencing a
-    # SHIFTED name re-executing exactly once with its outbound ItemRef
-    # updated, is pinned there and not re-proven here)
+    # The declaring ItemRefs are what used to churn here: a reorder swapped
+    # `a`'s and `b`'s positional ids, which is what forced the tree's value to
+    # change and its consumers to re-run. Content-based ids leave all three
+    # untouched — the reason the counts above can be zero.
     after_declared = JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])
-    @test after_declared["a"] != before_declared["a"]
-    @test after_declared["b"] != before_declared["b"]
+    @test after_declared["a"] == before_declared["a"]
+    @test after_declared["b"] == before_declared["b"]
     @test after_declared["c"] == before_declared["c"]
 end
 

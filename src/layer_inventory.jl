@@ -175,21 +175,118 @@ This walker is the single source of truth for item ids: the inventory
 extractor and the position map both use it, so ids always agree.
 """
 function _foreach_toplevel_item(f, cst::CSTParser.EXPR)
-    next_order = Ref(0)
-    _walk_toplevel!(f, cst.args, String[], 0, next_order)
+    _walk_toplevel!(f, cst.args, String[], 0, _ItemIdAllocator())
     return nothing
 end
 
-function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
+# An identity key for one top-level statement: coarse kind, the name as written
+# (qualifier included), and the in-file module path. Statements sharing a key are
+# separated by a disambiguator, so this only has to be a good HINT — a coarse or
+# even wrong key costs id stability, never uniqueness. The degenerate case where
+# every statement keys the same is exactly the positional numbering this replaces.
+const _IdKey = Tuple{Symbol,String,String}
+
+const _ID_HASH_BITS = 46
+const _ID_DIS_BITS = 16
+const _ID_HASH_MASK = (1 << _ID_HASH_BITS) - 1
+const _ID_DIS_MAX = (1 << _ID_DIS_BITS) - 1
+
+# Per-file id allocation state. `order` is the dense visit counter; `buckets`
+# counts earlier statements per identity key; `assigned` keeps ids unique within
+# the file when a 46-bit hash collides or a bucket overflows its 16 bits.
+mutable struct _ItemIdAllocator
+    order::Int
+    buckets::Dict{_IdKey,Int}
+    assigned::Set{Int}
+end
+_ItemIdAllocator() = _ItemIdAllocator(0, Dict{_IdKey,Int}(), Set{Int}())
+
+# Mint the `(order, id)` pair for one statement. Called exactly once per visited
+# statement, so every record the classifier derives from it shares both.
+function _mint_ids!(alloc::_ItemIdAllocator, x::CSTParser.EXPR, parent_module::Vector{String})
+    alloc.order += 1
+
+    key = _statement_id_key(x, parent_module)
+    n = get(alloc.buckets, key, 0)
+    alloc.buckets[key] = n + 1
+
+    id = ((Int(hash(key) & _ID_HASH_MASK)) << _ID_DIS_BITS) | min(n, _ID_DIS_MAX)
+    while id in alloc.assigned
+        id += 1
+    end
+    push!(alloc.assigned, id)
+
+    return alloc.order, id
+end
+
+# Never throws: a malformed statement degrades to a coarse key rather than
+# breaking inventory extraction (unlike `func_nargs`, this runs for every
+# statement, including ones no classifier arm claims).
+function _statement_id_key(x::CSTParser.EXPR, parent_module::Vector{String})::_IdKey
+    return try
+        (_id_kind_class(x), _id_dotted_name(x), join(parent_module, '.'))
+    catch err
+        err isa InterruptException && rethrow()
+        (:unknown, "", join(parent_module, '.'))
+    end
+end
+
+function _id_kind_class(x::CSTParser.EXPR)
+    h = CSTParser.headof(x)
+    CSTParser.defines_module(x) && return :module
+    h === :function && return :function
+    h === :macro && return :macro
+    CSTParser.defines_datatype(x) && return :datatype
+    h in (:const, :global, :export, :public, :using, :import) && return h
+    _is_include_call(x) && return :include
+    CSTParser.isassignment(x) && return :assignment
+    CSTParser.ismacrocall(x) && return :macrocall
+    return :other
+end
+
+# The name as written, qualifier included, so `Base.foo` and `foo` key apart.
+# `""` when the statement binds no single name.
+function _id_dotted_name(x::CSTParser.EXPR)
+    h = CSTParser.headof(x)
+    if CSTParser.defines_module(x)
+        return CSTParser.isidentifier(x.args[2]) ? something(_item_name(x.args[2]), "") : ""
+    elseif h === :const || h === :global
+        for inner in something(x.args, CSTParser.EXPR[])
+            inner isa CSTParser.EXPR && return _id_dotted_name(inner)
+        end
+        return ""
+    elseif h in (:export, :public, :using, :import)
+        # No single bound name; the statement's own text distinguishes it from a
+        # sibling of the same kind. These have no bodies, so this is stable
+        # against every edit except an edit to the statement itself.
+        return _id_statement_text(x)
+    end
+
+    name = CSTParser.get_name(x)
+    name isa CSTParser.EXPR || return ""
+    base = _symbol_name(name)
+    base === nothing && return ""
+    qualifier = _item_qualifier(name)
+    return isempty(qualifier) ? base : join(vcat(qualifier, base), '.')
+end
+
+_id_statement_text(x) = try
+    string(CSTParser.to_codeobject(x))
+catch err
+    err isa InterruptException && rethrow()
+    ""
+end
+
+function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, alloc::_ItemIdAllocator)
     args === nothing && return offset
     for a in args
-        _walk_one!(f, a, parent_module, offset, next_order)
+        _walk_one!(f, a, parent_module, offset, alloc)
         offset += a.fullspan
     end
     return offset
 end
 
-function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
+function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, alloc::_ItemIdAllocator)
     item = a
     item_offset = offset
     wrapped = _doc_wrapped_item(a)
@@ -212,18 +309,13 @@ function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, next_order
     # real keyword; a ternary falls through to the `else` branch below and
     # is treated as a single opaque item (no descent into its arms).
     if CSTParser.headof(item) === :if && CSTParser.headof(item.trivia[1]) === :IF
-        _walk_if_chain!(f, item, parent_module, item_offset, next_order)
+        _walk_if_chain!(f, item, parent_module, item_offset, alloc)
     elseif CSTParser.headof(item) === :block
-        _walk_transparent_block!(f, item, parent_module, item_offset, next_order)
+        _walk_transparent_block!(f, item, parent_module, item_offset, alloc)
     elseif CSTParser.ismacrocall(item) && !_is_enum_macro(item) && !_is_isolated_scope_macrocall(item)
-        _walk_macrocall!(f, item, parent_module, item_offset, next_order)
+        _walk_macrocall!(f, item, parent_module, item_offset, alloc)
     else
-        next_order[] += 1
-        order = next_order[]
-        # `id` is the statement's stable identity; it is a separate field from
-        # `order` so that a content-based scheme can replace this line without
-        # disturbing the splice ordering that `order` carries.
-        id = order
+        order, id = _mint_ids!(alloc, item, parent_module)
         f(item, order, id, parent_module, item_offset)
 
         if CSTParser.defines_module(item) && item.args !== nothing && length(item.args) >= 3
@@ -236,7 +328,7 @@ function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, next_order
                 # latter is a synthetic bare/non-bare flag with span 0; see
                 # layer_navigation.jl:122) and the name.
                 block_offset = item_offset + item.trivia[1].fullspan + item.args[2].fullspan
-                _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, next_order)
+                _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, alloc)
             end
         end
     end
@@ -276,13 +368,13 @@ end
 # interleaves args and trivia in source order), which stays correct for the
 # call form `@foo(a, b)` where paren/comma TRIVIA sit between the args —
 # summing arg fullspans alone would drift there.
-function _walk_macrocall!(f, mc::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
+function _walk_macrocall!(f, mc::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, alloc::_ItemIdAllocator)
     margs = mc.args
     (margs === nothing || length(margs) < 3) && return nothing
     child_offset = offset
     for c in mc
         if any(j -> margs[j] === c, 3:length(margs))
-            _walk_one!(f, c, parent_module, child_offset, next_order)
+            _walk_one!(f, c, parent_module, child_offset, alloc)
         end
         child_offset += c.fullspan
     end
@@ -295,11 +387,11 @@ end
 # explicit top-level `begin...end` it carries `BEGIN`/`END` keyword trivia, so
 # its statements start after the `begin` keyword's fullspan. Both shapes were
 # confirmed via `CSTParser.parse` exploration (see the task report).
-function _walk_transparent_block!(f, block::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
+function _walk_transparent_block!(f, block::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, alloc::_ItemIdAllocator)
     if block.trivia !== nothing && !isempty(block.trivia) && CSTParser.headof(block.trivia[1]) === :BEGIN
         offset += block.trivia[1].fullspan
     end
-    _walk_toplevel!(f, block.args, parent_module, offset, next_order)
+    _walk_toplevel!(f, block.args, parent_module, offset, alloc)
     return nothing
 end
 
@@ -310,19 +402,19 @@ end
 # in ITS `trivia[1]`, not this node's) or a plain `:block` (a trailing `else`,
 # whose `ELSE` keyword sits at this node's `trivia[2]`, right after the own
 # keyword).
-function _walk_if_chain!(f, node::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
+function _walk_if_chain!(f, node::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, alloc::_ItemIdAllocator)
     offset += node.trivia[1].fullspan  # IF or ELSEIF keyword
     offset += node.args[1].fullspan    # condition
-    _walk_transparent_block!(f, node.args[2], parent_module, offset, next_order)
+    _walk_transparent_block!(f, node.args[2], parent_module, offset, alloc)
     offset += node.args[2].fullspan
 
     if length(node.args) >= 3
         tail = node.args[3]
         if CSTParser.headof(tail) === :elseif
-            _walk_if_chain!(f, tail, parent_module, offset, next_order)
+            _walk_if_chain!(f, tail, parent_module, offset, alloc)
         else
             offset += node.trivia[2].fullspan  # ELSE keyword
-            _walk_transparent_block!(f, tail, parent_module, offset, next_order)
+            _walk_transparent_block!(f, tail, parent_module, offset, alloc)
         end
     end
     return nothing

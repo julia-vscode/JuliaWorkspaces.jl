@@ -298,6 +298,172 @@ end
     @test pos2[g_item.id].offset != pos1[g_item.id].offset
 end
 
+@testitem "stable ids: inserting a statement does not renumber later items" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("file:///inv/src/stable.jl")
+    src1 = """
+    f() = 1
+    struct S
+        a
+    end
+    g() = 2
+    const K = 3
+    """
+    inv1, jw = inventory_of(src1; uri=uri)
+    ids1 = Dict(i.name => i.id for i in inv1.items)
+    orders1 = Dict(i.name => i.order for i in inv1.items)
+
+    # Prepend a `using` line: adds a name to nothing, shifts every later
+    # statement's position.
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText("using Printf\n" * src1, "julia")))
+    inv2 = JuliaWorkspaces.derived_file_inventory(jw.runtime, uri)
+    ids2 = Dict(i.name => i.id for i in inv2.items)
+    orders2 = Dict(i.name => i.order for i in inv2.items)
+
+    @test keys(ids2) == keys(ids1)
+    for n in keys(ids1)
+        @test ids2[n] == ids1[n]        # identity is stable
+        @test orders2[n] == orders1[n] + 1   # position is not
+    end
+end
+
+@testitem "stable ids: allocator keeps ids unique when a slot is taken" begin
+    using JuliaWorkspaces: _ItemIdAllocator, _mint_ids!, CSTParser
+
+    # Two statements with the SAME identity key must still get distinct ids…
+    cst = CSTParser.parse("f(x::Int) = 1\nf(x::String) = 2\n", true)
+    alloc = _ItemIdAllocator()
+    o1, i1 = _mint_ids!(alloc, cst.args[1], String[])
+    o2, i2 = _mint_ids!(alloc, cst.args[2], String[])
+    @test (o1, o2) == (1, 2)
+    @test i1 != i2
+
+    # …and a statement whose computed slot is already taken probes to a free one
+    # rather than aliasing onto it (the hash-collision / bucket-overflow path).
+    alloc2 = _ItemIdAllocator()
+    _, taken = _mint_ids!(alloc2, cst.args[1], String[])
+    alloc3 = _ItemIdAllocator()
+    push!(alloc3.assigned, taken)
+    _, probed = _mint_ids!(alloc3, cst.args[1], String[])
+    @test probed != taken
+    @test probed == taken + 1
+end
+
+@testitem "stable ids: inserting a statement does not invalidate ItemRef consumers" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    Salsa.@derived function probe_declared(rt, root, path)
+        return JuliaWorkspaces.derived_module_declared(rt, root, path)
+    end
+
+    jw = JuliaWorkspace()
+    root_uri = URI("file:///t/src/F.jl")
+    body = """
+    f() = 1
+    g() = 2
+    """
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\n" * body * "end\n", "julia")))
+    rt = jw.runtime
+
+    # untraced baseline (see the trace-baseline note in test_module_tree.jl)
+    before = probe_declared(rt, root_uri, ["Pkg"])
+    @test Set(keys(before)) == Set(["f", "g"])
+
+    # Insert a `using` line above both declarations. This is the edit that used
+    # to renumber every later item and so change every ItemRef-carrying value
+    # in the root; the declaring ids must now be untouched and the consumer
+    # must not re-execute at all.
+    recv = CountReceiver()
+    JuliaWorkspaces.update_file!(jw, TextFile(root_uri,
+        SourceText("module Pkg\nusing Printf\n" * body * "end\n", "julia")))
+    after = TL.with_tracing(() -> probe_declared(rt, root_uri, ["Pkg"]), recv)
+
+    @test after == before
+    @test get(recv.counts, "probe_declared", 0) == 0
+end
+
+@testitem "stable ids: identity survives signature edits and reordering" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("file:///inv/src/stable2.jl")
+    inv1, jw = inventory_of("f(x::Int) = 1\ng(y) = 2\n"; uri=uri)
+    f1 = only(filter(i -> i.name == "f", inv1.items))
+    g1 = only(filter(i -> i.name == "g", inv1.items))
+
+    # An annotation edit changes the item (its signature/arity) but not its id.
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText("f(x::String) = 1\ng(y) = 2\n", "julia")))
+    inv2 = JuliaWorkspaces.derived_file_inventory(jw.runtime, uri)
+    f2 = only(filter(i -> i.name == "f", inv2.items))
+    @test f2.id == f1.id
+    @test f2.signature != f1.signature
+
+    # Swapping two differently-named declarations swaps their order, not their ids.
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText("g(y) = 2\nf(x::Int) = 1\n", "julia")))
+    inv3 = JuliaWorkspaces.derived_file_inventory(jw.runtime, uri)
+    f3 = only(filter(i -> i.name == "f", inv3.items))
+    g3 = only(filter(i -> i.name == "g", inv3.items))
+    @test f3.id == f1.id
+    @test g3.id == g1.id
+    @test f3.order > g3.order
+end
+
+@testitem "stable ids: same-name methods disambiguate; shared-statement ids preserved" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Two methods of one generic in one file must still be distinguishable.
+    inv, _ = inventory_of("f(x::Int) = 1\nf(x::String) = 2\nh() = 3\n";
+                          uri=URI("file:///inv/src/multi.jl"))
+    fs = filter(i -> i.name == "f", inv.items)
+    @test length(fs) == 2
+    @test allunique([i.id for i in fs])
+
+    # Inserting a third method of `f` leaves an unrelated name's id alone.
+    inv2, _ = inventory_of("f(x::Float64) = 0\nf(x::Int) = 1\nf(x::String) = 2\nh() = 3\n";
+                           uri=URI("file:///inv/src/multi.jl"))
+    @test only(filter(i -> i.name == "h", inv2.items)).id ==
+          only(filter(i -> i.name == "h", inv.items)).id
+
+    # Records minted from ONE statement still share an id — the module tree's
+    # include-first tie-break and `_itemref_is_ambiguous` both depend on it.
+    inv3, _ = inventory_of("a, b = 1, 2\n@enum E x y\n";
+                           uri=URI("file:///inv/src/shared.jl"))
+    @test only(filter(i -> i.name == "a", inv3.items)).id ==
+          only(filter(i -> i.name == "b", inv3.items)).id
+    enum_ids = [i.id for i in inv3.items if i.kind in (:enum, :enum_member)]
+    @test length(enum_ids) == 3 && allunique([enum_ids[1]]) && all(==(enum_ids[1]), enum_ids)
+
+    inv4, _ = inventory_of("const DATA = include(\"data.jl\")\n";
+                           uri=URI("file:///inv/src/wrapped.jl"))
+    @test only(inv4.items).id == only(inv4.includes).id
+
+    # Every id in a file exercising many branches is distinct.
+    inv5, _ = inventory_of("""
+    module M
+        q() = 1
+    end
+    abstract type A end
+    macro m(x) end
+    export q
+    using Printf
+    z = 1
+    """; uri=URI("file:///inv/src/uniq.jl"))
+    all_ids = vcat([i.id for i in inv5.items], [i.id for i in inv5.imports],
+                   [i.id for i in inv5.exports], [i.id for i in inv5.includes],
+                   [i.id for i in inv5.modules])
+    @test allunique(all_ids)
+end
+
 @testitem "inventory invalidation: body edits backdate, API edits propagate" setup=[InventoryWS] begin
     using JuliaWorkspaces.URIs2: URI
     import JuliaWorkspaces.Salsa as Salsa

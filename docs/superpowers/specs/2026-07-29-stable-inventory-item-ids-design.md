@@ -198,6 +198,15 @@ id  = (hash46(key) << 16) | disambiguator
   `:macro`, `:assignment`, `:macrocall`, `:other`).
 - **`dotted_name`** — the name as written, qualifier included, so
   `Base.foo` and `foo` differ. `""` when the statement binds no name.
+
+  *As implemented*, statements that bind no single name (`export`, `public`,
+  `using`, `import`) use their own normalized statement text instead of `""`.
+  That is strictly better than the `""` fallback: sibling `using` lines no
+  longer share a bucket, so inserting one does not shift the others' ids —
+  removing the residue rust-analyzer still accepts for unnamed items
+  (`ast_id.rs:141-148`). These statements have no bodies, and
+  `CSTParser.to_codeobject` normalizes whitespace, so reformatting does not
+  churn the id either.
 - **`parent_module`** — the in-file module path, so same-named declarations in
   two modules of one file do not share a bucket.
 - **`disambiguator`** — how many earlier statements in this file produced the

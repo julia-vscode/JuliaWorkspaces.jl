@@ -688,7 +688,7 @@ end
     @test JuliaWorkspaces.derived_module_imports(jw.runtime, root_uri, ["Nope"]) == ResolvedImport[]
 end
 
-@testitem "module selectors: projections and id-shift survival" begin
+@testitem "module selectors: projections and reorder survival" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: module_node
     using JuliaWorkspaces.URIs2: URI
@@ -731,10 +731,10 @@ end
     before_declared = probe_declared(rt, root_uri, ["Pkg"])
     @test Set(keys(before_declared)) == Set(["f", "g"])
 
-    # Reorder f and g: a same-kind adjacent swap. This shifts their item ids
-    # (the tree's, and so `derived_module_declared`'s, VALUE changes — the
-    # ItemRefs for "f" and "g" swap) but the name→kind SET at `declared` is
-    # unchanged, so `derived_module_names`'s VALUE must compare equal.
+    # Reorder f and g: a same-kind adjacent swap. Item ids are content-based, so
+    # neither name's id moves — `derived_module_declared`'s VALUE is unchanged
+    # too, and BOTH selectors' consumers must now stay untouched. Before stable
+    # ids this swapped the two ItemRefs and cost a `probe_declared` re-run.
     recv = CountReceiver()
     JuliaWorkspaces.update_file!(jw, TextFile(root_uri, SourceText("""
     module Pkg
@@ -747,12 +747,14 @@ end
     end
 
     @test names_after == Dict("f" => :function, "g" => :function)
-    # Sanity: the ids actually did shift.
-    @test declared_after["f"].id != before_declared["f"].id
-    @test declared_after["g"].id != before_declared["g"].id
+    # The declaring ids survive the reorder — this is what makes the
+    # zero-executions assertions below possible.
+    @test declared_after["f"].id == before_declared["f"].id
+    @test declared_after["g"].id == before_declared["g"].id
+    @test declared_after == before_declared
 
     @test get(recv.counts, "probe_names", 0) == 0
-    @test get(recv.counts, "probe_declared", 0) == 1
+    @test get(recv.counts, "probe_declared", 0) == 0
 end
 
 # --- Module visibility: names reachable through classified imports ---
