@@ -14,11 +14,21 @@
 # *changed* env would still invalidate any tree that depended on it.
 
 """
-    ItemRef
+    ItemRef(file, id)
 
 Reference to a top-level item (in a file inventory) by file URI and item ID.
+
+A named type rather than a `@NamedTuple{file::URI, id::Int}` alias: this is the
+identity of a declaration and it is carried in most of this layer's derived
+values, so it should dispatch and it should not accept any structurally similar
+tuple. `@auto_hash_equals` is required — the fallback for an immutable struct is
+field-wise egality, and `URI`'s own `==`/`hash` must be the ones used, since
+Salsa's early exit compares whole values with `isequal`.
 """
-const ItemRef = @NamedTuple{file::URI, id::Int}
+@auto_hash_equals struct ItemRef
+    file::URI
+    id::Int
+end
 
 """
     ImportTarget
@@ -298,7 +308,7 @@ function _build_tree_structure(rt, root::URI)
         for (_, kind, payload) in events
             if kind === :item
                 item = payload
-                _declare!(ensure_node!(vcat(P, item.parent_module)), item.name, (file=F, id=item.id), item.kind)
+                _declare!(ensure_node!(vcat(P, item.parent_module)), item.name, ItemRef(F, item.id), item.kind)
             elseif kind === :module
                 # Rule 3: create/extend the module's own node...
                 m = payload
@@ -307,10 +317,10 @@ function _build_tree_structure(rt, root::URI)
                 node.bare = m.bare
                 # ...last splice wins (deterministic under DFS) when the same
                 # module path is declared across more than one file.
-                node.declared_at = (file=F, id=m.id)
+                node.declared_at = ItemRef(F, m.id)
                 # ...and the module's own name also enters the *parent*
                 # node's `declared`, exactly like a binding item (rule 5).
-                _declare!(ensure_node!(vcat(P, m.parent_module)), m.name, (file=F, id=m.id), :module)
+                _declare!(ensure_node!(vcat(P, m.parent_module)), m.name, ItemRef(F, m.id), :module)
             elseif kind === :export
                 # Rule 6.
                 e = payload
@@ -464,7 +474,7 @@ function _classify_imports!(rt, builders)
     for (path, b) in builders
         for (F, imp) in b.raw_imports
             target = _classify_import(builders, workspace_roots, path, imp)
-            push!(b.imports, ResolvedImport(imp.kind, target, imp.symbols, imp.alias, (file=F, id=imp.id)))
+            push!(b.imports, ResolvedImport(imp.kind, target, imp.symbols, imp.alias, ItemRef(F, imp.id)))
         end
     end
 end
@@ -808,7 +818,7 @@ Salsa.@derived function derived_method_items(rt, root, path, name)
     _walk_spliced_binding_items!(rt, root, String[], name, Set{URI}([root])) do F, item, loc
         resolved = isempty(item.qualifier) ? loc :
             _resolve_extension_qualifier(modpaths, loc, item.qualifier)
-        resolved == path && push!(result, (file=F, id=item.id))
+        resolved == path && push!(result, ItemRef(F, item.id))
     end
     return result
 end
@@ -961,7 +971,7 @@ Salsa.@derived function derived_external_method_extensions_index(rt, root)
         q = _external_extension_qualifier(modpaths, import_targets, item, loc)
         q === nothing && return
         push!(get!(() -> ExternalExtension[], result, item.name),
-            (qualifier=q, signature=item.signature, ref=(file=F, id=item.id)))
+            (qualifier=q, signature=item.signature, ref=ItemRef(F, item.id)))
     end
     return result
 end

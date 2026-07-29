@@ -6,10 +6,10 @@
     f = URI("file:///t/src/T.jl")
     make() = ModuleTree(f,
         [ModuleNode(String[], false, nothing, [f],
-            Dict("g" => (file=f, id=2)), ["g"], String[],
+            Dict("g" => ItemRef(f, 2)), ["g"], String[],
             [ResolvedImport(:using, ImportTarget(:external, ["Base64"]),
-                            JuliaWorkspaces.ImportSymbol[], nothing, (file=f, id=1))]),
-         ModuleNode(["M"], false, (file=f, id=3), [f], Dict{String,ItemRef}(), String[], String[], ResolvedImport[])],
+                            JuliaWorkspaces.ImportSymbol[], nothing, ItemRef(f, 1))]),
+         ModuleNode(["M"], false, ItemRef(f, 3), [f], Dict{String,ItemRef}(), String[], String[], ResolvedImport[])],
         Dict(f => String[]))
 
     a = make(); b = make()
