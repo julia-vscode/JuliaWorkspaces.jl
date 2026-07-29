@@ -1,3 +1,20 @@
+@testsnippet SigLabels begin
+    # UTF-16 code-unit slice of `s` for a 0-based `[start, end)` range, the LSP
+    # form of `ParameterInformation.label`. The test signatures are ASCII, so
+    # this coincides with a plain character slice.
+    function utf16_slice(s, range)
+        units = Char[]
+        for c in s
+            push!(units, c)
+            codepoint(c) >= 0x10000 && push!(units, c)  # surrogate pair filler
+        end
+        return String(units[(range[1] + 1):range[2]])
+    end
+
+    # The parameters of `sig` as the text each one selects in its label.
+    param_texts(sig) = [utf16_slice(sig.label, p.label) for p in sig.parameters]
+end
+
 @testitem "Signatures: basic function call" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
@@ -168,7 +185,7 @@ end
     @test !isempty(result.signatures)
 end
 
-@testitem "Signatures: struct constructor with var\"\" field (#3867)" begin
+@testitem "Signatures: struct constructor with var\"\" field (#3867)" setup=[SigLabels] begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
@@ -190,7 +207,42 @@ end
     result = get_signature_help(jw, uri, idx)
     @test !isempty(result.signatures)
     sig = first(result.signatures)
-    @test [p.label for p in sig.parameters] == ["var\"hello world\"", "normal"]
+    # the implicit field constructor reads as a call, not as the struct body
+    @test sig.label == "Foo(var\"hello world\"::Int, normal::Int)"
+    @test param_texts(sig) == ["var\"hello world\"::Int", "normal::Int"]
+end
+
+@testitem "Signatures: store-backed methods list their keyword arguments" setup=[SigLabels] begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    # Store methods and workspace definitions go through the same label
+    # assembly, so a store method's keywords are listed after its positional
+    # parameters just like a definition's — the store records only their names.
+    source = """
+    sort(
+    """
+
+    jw = JuliaWorkspace()
+    uri = URI("file:///sigkw/test.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    sigs = get_signature_help(jw, uri, ncodeunits("sort(")).signatures
+    @test !isempty(sigs)
+    kwsigs = filter(s -> occursin("; ", s.label), sigs)
+    @test !isempty(kwsigs)
+    @test any(s -> occursin("by", s.label), kwsigs)
+
+    # Keywords come after the positional parameters, so no parameter range may
+    # reach into them — the highlighted parameter stays the positional one.
+    for s in kwsigs
+        semi = first(findfirst("; ", s.label))
+        for p in s.parameters
+            @test p.label isa Tuple{Int,Int}
+            @test !occursin(";", utf16_slice(s.label, p.label))
+            @test p.label[2] < semi
+        end
+    end
 end
 
 @testitem "Signatures: stdlib types unqualified and ::Any omitted" begin
@@ -224,7 +276,7 @@ end
     @test any(s -> any(p -> p.documentation == "IO", s.parameters), psigs)
 end
 
-@testitem "Signatures: parameter labels are offset ranges into the signature" begin
+@testitem "Signatures: parameter labels are offset ranges into the signature" setup=[SigLabels] begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
@@ -241,17 +293,6 @@ end
     uri = URI("file:///sigunused/test.jl")
     add_file!(jw, TextFile(uri, SourceText(source, "julia")))
 
-    # UTF-16 code-unit slice of `s` for a 0-based `[start, end)` range. The test
-    # signatures are ASCII, so this coincides with a plain character slice.
-    function utf16_slice(s, range)
-        units = Char[]
-        for c in s
-            push!(units, c)
-            codepoint(c) >= 0x10000 && push!(units, c)  # surrogate pair filler
-        end
-        return String(units[(range[1] + 1):range[2]])
-    end
-
     result = get_signature_help(jw, uri, ncodeunits("get("))
     @test !isempty(result.signatures)
     params = [(sig.label, p) for sig in result.signatures for p in sig.parameters]
@@ -266,7 +307,7 @@ end
     @test any(((label, p),) -> startswith(utf16_slice(label, p.label), "::"), params)
 end
 
-@testitem "Signatures: function with var\"\" argument (#3867)" begin
+@testitem "Signatures: function with var\"\" argument (#3867)" setup=[SigLabels] begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
@@ -283,7 +324,65 @@ end
     result = get_signature_help(jw, uri, idx)
     @test !isempty(result.signatures)
     sig = first(result.signatures)
-    @test [p.label for p in sig.parameters] == ["var\"weird arg\"", "normal"]
+    @test param_texts(sig) == ["var\"weird arg\"", "normal"]
+end
+
+@testitem "Signatures: unnamed parameters keep their position" setup=[SigLabels] begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    function sig_at(src, call)
+        jw = JuliaWorkspace()
+        uri = URI("file:///signoname/s.jl")
+        add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+        return get_signature_help(jw, uri, findlast(call, src)[end])
+    end
+
+    # An unnamed argument (`::Int`) has no binding, so it used to be dropped from
+    # the parameter list: `active_parameter` then pointed one parameter too far
+    # and highlighted `a` while the cursor was still at the first argument.
+    src = "foo(::Int, a) = a\nfoo("
+    result = sig_at(src, "foo(")
+    sig = only(result.signatures)
+    @test sig.label == "foo(::Int, a)"
+    @test length(sig.parameters) == 2
+    @test result.active_parameter == 0
+    @test utf16_slice(sig.label, sig.parameters[1].label) == "::Int"
+    @test utf16_slice(sig.label, sig.parameters[2].label) == "a"
+
+    # ... and at the second argument the signature must not be filtered out for
+    # having too few parameters.
+    result = sig_at("foo(::Int, a) = a\nfoo(1, ", "foo(1, ")
+    @test result.active_parameter == 1
+    @test length(only(result.signatures).parameters) == 2
+
+    # Identically rendered parameters must select distinct spans, so the client
+    # highlights the second `::Int` rather than the first.
+    result = sig_at("baz(::Int, ::Int) = 1\nbaz(", "baz(")
+    sig = only(result.signatures)
+    @test param_texts(sig) == ["::Int", "::Int"]
+    @test sig.parameters[1].label != sig.parameters[2].label
+
+    # A parameter text that also occurs in the callee name or in an earlier
+    # parameter's type must not be matched there.
+    result = sig_at("barb(a::Abc, b) = a\nbarb(", "barb(")
+    sig = only(result.signatures)
+    @test param_texts(sig) == ["a::Abc", "b"]
+
+    # `@nospecialize` wrappers are dropped from the label; default values are
+    # kept, and both keep their parameter positions.
+    result = sig_at("qux(@nospecialize(x::Any), ::Int, y=1) = x\nqux(", "qux(")
+    sig = only(result.signatures)
+    @test sig.label == "qux(x::Any, ::Int, y = 1)"
+    @test param_texts(sig) == ["x::Any", "::Int", "y = 1"]
+
+    result = sig_at("quux(a, b::Int=1, ::Int=2) = a\nquux(", "quux(")
+    @test param_texts(only(result.signatures)) == ["a", "b::Int = 1", "::Int = 2"]
+
+    # Keyword arguments are still not offered as parameters, so they cannot
+    # shift the positional ones either.
+    result = sig_at("f5(::Int, a; kw=1) = a\nf5(", "f5(")
+    @test param_texts(only(result.signatures)) == ["::Int", "a"]
 end
 
 @testitem "Signatures: methods with 0 positional arguments are not skipped" begin
@@ -315,7 +414,7 @@ end
     @test !isempty(sigs)
 end
 
-@testitem "Signatures: cross-file callee shows all method signatures with parameter names" begin
+@testitem "Signatures: cross-file callee shows all method signatures with parameter names" setup=[SigLabels] begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
@@ -359,12 +458,12 @@ end
     @test any(l -> occursin("greet(name)", l), labels)
     @test any(l -> occursin("greet(first, last)", l), labels)
     # Parameter names are carried through from the cross-file definitions.
-    allparams = [p.label for s in result.signatures for p in s.parameters]
+    allparams = [t for s in result.signatures for t in param_texts(s)]
     @test "name" in allparams
     @test "first" in allparams && "last" in allparams
 end
 
-@testitem "Signatures: deved workspace-package callee shows its signatures" begin
+@testitem "Signatures: deved workspace-package callee shows its signatures" setup=[SigLabels] begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
@@ -417,15 +516,15 @@ end
     idx = findfirst("myfunc(", entry)[end] + 1
     result = get_signature_help(jw, uri, idx)
     @test any(s -> occursin("myfunc(alpha, beta)", s.label), result.signatures)
-    @test any(s -> [p.label for p in s.parameters] == ["alpha", "beta"], result.signatures)
+    @test any(s -> param_texts(s) == ["alpha", "beta"], result.signatures)
 
     idx_q = findlast("myfunc(", entry)[end] + 1
     result_q = get_signature_help(jw, uri, idx_q)
     @test any(s -> occursin("myfunc(alpha, beta)", s.label), result_q.signatures)
-    @test any(s -> [p.label for p in s.parameters] == ["alpha", "beta"], result_q.signatures)
+    @test any(s -> param_texts(s) == ["alpha", "beta"], result_q.signatures)
 end
 
-@testitem "Signatures: cross-file struct with only an inner constructor shows it" begin
+@testitem "Signatures: cross-file struct with only an inner constructor shows it" setup=[SigLabels] begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
@@ -471,7 +570,7 @@ end
     @test length(result.signatures) == 1
     sig = only(result.signatures)
     @test occursin("Inner(x::Int)", sig.label)
-    @test [p.label for p in sig.parameters] == ["x"]
+    @test param_texts(sig) == ["x::Int"]
 
     # The SAME-FILE case goes through the unchanged local Binding path and
     # must keep rendering the inner constructor exactly once (no double
@@ -537,7 +636,7 @@ end
     @test any(s -> occursin("println(", s.label) && occursin(" in Base", s.label), result_q.signatures)
 end
 
-@testitem "Signatures: cross-file struct constructor shows field-based signature" begin
+@testitem "Signatures: cross-file struct constructor shows field-based signature" setup=[SigLabels] begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
     using JuliaWorkspaces.URIs2: URI
 
@@ -580,7 +679,8 @@ end
     result = get_signature_help(jw, uri, idx)
     @test !isempty(result.signatures)
     sig = first(result.signatures)
-    @test [p.label for p in sig.parameters] == ["a", "b"]
+    @test sig.label == "T(a, b)"
+    @test param_texts(sig) == ["a", "b"]
 end
 
 @testitem "Signatures: workspace overload of a store-backed function is offered" begin
