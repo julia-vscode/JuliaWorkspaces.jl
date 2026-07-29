@@ -4,12 +4,12 @@
     using JuliaWorkspaces.URIs2: URI
 
     make() = FileInventory(
-        [InventoryItem(1, "f", String[], :function, "f(x)", String[], String[]),
-         InventoryItem(2, "S", String[], :struct, nothing, ["a", "b"], ["M"])],
-        [InventoryImport(3, :using, [".", "Sibling"], ImportSymbol[], nothing, ["M"])],
-        [InventoryExport(4, :export, ["f"], String[])],
-        [InventoryInclude(5, URI("file:///pkg/src/a.jl"), String[])],
-        [InventoryModule(6, "M", false, String[])],
+        [InventoryItem(1, 101, "f", String[], :function, "f(x)", String[], String[]),
+         InventoryItem(2, 102, "S", String[], :struct, nothing, ["a", "b"], ["M"])],
+        [InventoryImport(3, 103, :using, [".", "Sibling"], ImportSymbol[], nothing, ["M"])],
+        [InventoryExport(4, 104, :export, ["f"], String[])],
+        [InventoryInclude(5, 105, URI("file:///pkg/src/a.jl"), String[])],
+        [InventoryModule(6, 106, "M", false, String[])],
     )
 
     a = make()
@@ -19,7 +19,7 @@
     @test hash(a) == hash(b)
 
     c = FileInventory(
-        [InventoryItem(1, "g", String[], :function, "g(x)", String[], String[])],
+        [InventoryItem(1, 101, "g", String[], :function, "g(x)", String[], String[])],
         a.imports, a.exports, a.includes, a.modules)
     @test !isequal(a, c)
 end
@@ -45,13 +45,16 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, id, parent_module, offset
-        push!(visited, (id=id, parent=copy(parent_module), offset=offset,
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+        push!(visited, (order=order, id=id, parent=copy(parent_module), offset=offset,
                         ismod=CSTParser.defines_module(x)))
     end
 
-    # 7 item-like nodes: f, g (unwrapped), M, h, Inner, k, w — pre-order ids
-    @test [v.id for v in visited] == collect(1:7)
+    # 7 item-like nodes: f, g (unwrapped), M, h, Inner, k, w — pre-order.
+    # `order` is the dense visit sequence; `id` is only required to identify a
+    # statement uniquely within the file.
+    @test [v.order for v in visited] == collect(1:7)
+    @test allunique([v.id for v in visited])
     @test visited[1].parent == String[]          # f
     @test visited[2].parent == String[]          # g (doc-unwrapped)
     @test visited[3].ismod                       # M itself, at top level
@@ -96,13 +99,14 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, id, parent_module, offset
-        push!(visited, (id=id, parent=copy(parent_module), offset=offset))
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+        push!(visited, (order=order, id=id, parent=copy(parent_module), offset=offset))
     end
 
-    # The if/elseif/else/begin containers themselves consume no id — only the
-    # 4 defined functions plus the trailing `w` do.
-    @test [v.id for v in visited] == collect(1:5)
+    # The if/elseif/else/begin containers themselves are never visited — only the
+    # 4 defined functions plus the trailing `w` are.
+    @test [v.order for v in visited] == collect(1:5)
+    @test allunique([v.id for v in visited])
     @test all(v -> v.parent == String[], visited)
 
     # Names use distinct first letters (compat/mid/tail/block/w) so that a
@@ -292,6 +296,190 @@ end
     pos2 = JuliaWorkspaces.derived_item_positions(jw.runtime, uri)
     @test src2[pos2[g_item.id].offset + 1] == 'g'   # same id, new offset
     @test pos2[g_item.id].offset != pos1[g_item.id].offset
+end
+
+@testitem "stable ids: inserting a statement does not renumber later items" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("file:///inv/src/stable.jl")
+    src1 = """
+    f() = 1
+    struct S
+        a
+    end
+    g() = 2
+    const K = 3
+    """
+    inv1, jw = inventory_of(src1; uri=uri)
+    ids1 = Dict(i.name => i.id for i in inv1.items)
+    orders1 = Dict(i.name => i.order for i in inv1.items)
+
+    # Prepend a `using` line: adds a name to nothing, shifts every later
+    # statement's position.
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText("using Printf\n" * src1, "julia")))
+    inv2 = JuliaWorkspaces.derived_file_inventory(jw.runtime, uri)
+    ids2 = Dict(i.name => i.id for i in inv2.items)
+    orders2 = Dict(i.name => i.order for i in inv2.items)
+
+    @test keys(ids2) == keys(ids1)
+    for n in keys(ids1)
+        @test ids2[n] == ids1[n]        # identity is stable
+        @test orders2[n] == orders1[n] + 1   # position is not
+    end
+end
+
+@testitem "stable ids: ids are Int64 on every platform" begin
+    using JuliaWorkspaces: InventoryItem, InventoryImport, InventoryExport,
+        InventoryInclude, InventoryModule, ItemRef, _ItemIdAllocator, _mint_ids!, CSTParser
+
+    # An id packs 46 hash bits with a 16-bit disambiguator, so it needs 62 bits.
+    # `Int` is `Int32` on 32-bit platforms and cannot hold that — every id slot
+    # must be explicitly `Int64` or those builds fail (and only there).
+    for T in (InventoryItem, InventoryImport, InventoryExport, InventoryInclude, InventoryModule)
+        @test fieldtype(T, :id) === Int64
+        @test fieldtype(T, :order) === Int   # a dense counter; genuinely machine-sized
+    end
+    @test fieldtype(ItemRef, :id) === Int64
+
+    cst = CSTParser.parse("f() = 1\n", true)
+    _, id = _mint_ids!(_ItemIdAllocator(), cst.args[1], String[])
+    @test id isa Int64
+    @test id > 0
+end
+
+@testitem "stable ids: allocator keeps ids unique when a slot is taken" begin
+    using JuliaWorkspaces: _ItemIdAllocator, _mint_ids!, CSTParser
+
+    # Two statements with the SAME identity key must still get distinct ids…
+    cst = CSTParser.parse("f(x::Int) = 1\nf(x::String) = 2\n", true)
+    alloc = _ItemIdAllocator()
+    o1, i1 = _mint_ids!(alloc, cst.args[1], String[])
+    o2, i2 = _mint_ids!(alloc, cst.args[2], String[])
+    @test (o1, o2) == (1, 2)
+    @test i1 != i2
+
+    # …and a statement whose computed slot is already taken probes to a free one
+    # rather than aliasing onto it (the hash-collision / bucket-overflow path).
+    alloc2 = _ItemIdAllocator()
+    _, taken = _mint_ids!(alloc2, cst.args[1], String[])
+    alloc3 = _ItemIdAllocator()
+    push!(alloc3.assigned, taken)
+    _, probed = _mint_ids!(alloc3, cst.args[1], String[])
+    @test probed != taken
+    @test probed == taken + 1
+end
+
+@testitem "stable ids: inserting a statement does not invalidate ItemRef consumers" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+    import JuliaWorkspaces.Salsa as Salsa
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct CountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    CountReceiver() = CountReceiver(Dict{String,Int}())
+    TL.receive_span(r::CountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    Salsa.@derived function probe_declared(rt, root, path)
+        return JuliaWorkspaces.derived_module_declared(rt, root, path)
+    end
+
+    jw = JuliaWorkspace()
+    root_uri = URI("file:///t/src/F.jl")
+    body = """
+    f() = 1
+    g() = 2
+    """
+    add_file!(jw, TextFile(root_uri, SourceText("module Pkg\n" * body * "end\n", "julia")))
+    rt = jw.runtime
+
+    # untraced baseline (see the trace-baseline note in test_module_tree.jl)
+    before = probe_declared(rt, root_uri, ["Pkg"])
+    @test Set(keys(before)) == Set(["f", "g"])
+
+    # Insert a `using` line above both declarations: it adds a name to nothing
+    # and shifts every later statement's position. The declaring ids must be
+    # untouched and the consumer must not re-execute at all.
+    recv = CountReceiver()
+    JuliaWorkspaces.update_file!(jw, TextFile(root_uri,
+        SourceText("module Pkg\nusing Printf\n" * body * "end\n", "julia")))
+    after = TL.with_tracing(() -> probe_declared(rt, root_uri, ["Pkg"]), recv)
+
+    @test after == before
+    @test get(recv.counts, "probe_declared", 0) == 0
+end
+
+@testitem "stable ids: identity survives signature edits and reordering" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("file:///inv/src/stable2.jl")
+    inv1, jw = inventory_of("f(x::Int) = 1\ng(y) = 2\n"; uri=uri)
+    f1 = only(filter(i -> i.name == "f", inv1.items))
+    g1 = only(filter(i -> i.name == "g", inv1.items))
+
+    # An annotation edit changes the item (its signature/arity) but not its id.
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText("f(x::String) = 1\ng(y) = 2\n", "julia")))
+    inv2 = JuliaWorkspaces.derived_file_inventory(jw.runtime, uri)
+    f2 = only(filter(i -> i.name == "f", inv2.items))
+    @test f2.id == f1.id
+    @test f2.signature != f1.signature
+
+    # Swapping two differently-named declarations swaps their order, not their ids.
+    JuliaWorkspaces.update_file!(jw, TextFile(uri, SourceText("g(y) = 2\nf(x::Int) = 1\n", "julia")))
+    inv3 = JuliaWorkspaces.derived_file_inventory(jw.runtime, uri)
+    f3 = only(filter(i -> i.name == "f", inv3.items))
+    g3 = only(filter(i -> i.name == "g", inv3.items))
+    @test f3.id == f1.id
+    @test g3.id == g1.id
+    @test f3.order > g3.order
+end
+
+@testitem "stable ids: same-name methods disambiguate; shared-statement ids preserved" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Two methods of one generic in one file must still be distinguishable.
+    inv, _ = inventory_of("f(x::Int) = 1\nf(x::String) = 2\nh() = 3\n";
+                          uri=URI("file:///inv/src/multi.jl"))
+    fs = filter(i -> i.name == "f", inv.items)
+    @test length(fs) == 2
+    @test allunique([i.id for i in fs])
+
+    # Inserting a third method of `f` leaves an unrelated name's id alone.
+    inv2, _ = inventory_of("f(x::Float64) = 0\nf(x::Int) = 1\nf(x::String) = 2\nh() = 3\n";
+                           uri=URI("file:///inv/src/multi.jl"))
+    @test only(filter(i -> i.name == "h", inv2.items)).id ==
+          only(filter(i -> i.name == "h", inv.items)).id
+
+    # Records minted from ONE statement still share an id — the module tree's
+    # include-first tie-break and `_itemref_is_ambiguous` both depend on it.
+    inv3, _ = inventory_of("a, b = 1, 2\n@enum E x y\n";
+                           uri=URI("file:///inv/src/shared.jl"))
+    @test only(filter(i -> i.name == "a", inv3.items)).id ==
+          only(filter(i -> i.name == "b", inv3.items)).id
+    enum_ids = [i.id for i in inv3.items if i.kind in (:enum, :enum_member)]
+    @test length(enum_ids) == 3 && allunique([enum_ids[1]]) && all(==(enum_ids[1]), enum_ids)
+
+    inv4, _ = inventory_of("const DATA = include(\"data.jl\")\n";
+                           uri=URI("file:///inv/src/wrapped.jl"))
+    @test only(inv4.items).id == only(inv4.includes).id
+
+    # Every id in a file exercising many branches is distinct.
+    inv5, _ = inventory_of("""
+    module M
+        q() = 1
+    end
+    abstract type A end
+    macro m(x) end
+    export q
+    using Printf
+    z = 1
+    """; uri=URI("file:///inv/src/uniq.jl"))
+    all_ids = vcat([i.id for i in inv5.items], [i.id for i in inv5.imports],
+                   [i.id for i in inv5.exports], [i.id for i in inv5.includes],
+                   [i.id for i in inv5.modules])
+    @test allunique(all_ids)
 end
 
 @testitem "inventory invalidation: body edits backdate, API edits propagate" setup=[InventoryWS] begin
@@ -705,15 +893,16 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, id, parent_module, offset
-        push!(visited, (id=id, head=CSTParser.headof(x), offset=offset))
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+        push!(visited, (order=order, id=id, head=CSTParser.headof(x), offset=offset))
     end
 
     # 3 item-like nodes: foo's `function` (unwrapped from the macrocall),
     # baz's assignment (unwrapped from the call-form macrocall, past the
     # opening paren), and the `@testset` macrocall itself (isolating scope —
     # stays opaque; `inner` is never visited).
-    @test [v.id for v in visited] == collect(1:3)
+    @test [v.order for v in visited] == collect(1:3)
+    @test allunique([v.id for v in visited])
     @test visited[1].head === :function
     @test src[visited[1].offset + 1] == 'f'   # `function ...`
     @test src[visited[2].offset + 1] == 'b'   # `baz() = 1`

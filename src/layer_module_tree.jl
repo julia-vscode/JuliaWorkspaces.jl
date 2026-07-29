@@ -14,11 +14,17 @@
 # *changed* env would still invalidate any tree that depended on it.
 
 """
-    ItemRef
+    ItemRef(file, id)
 
 Reference to a top-level item (in a file inventory) by file URI and item ID.
 """
-const ItemRef = @NamedTuple{file::URI, id::Int}
+# `@auto_hash_equals` is load-bearing: the fallback for an immutable struct is
+# field-wise egality, whereas `URI`'s own `==`/`hash` must be the ones used —
+# Salsa's early exit compares whole values with `isequal`.
+@auto_hash_equals struct ItemRef
+    file::URI
+    id::Int64   # Int64, not Int: an item id needs 62 bits (see `_mint_ids!`)
+end
 
 """
     ImportTarget
@@ -253,7 +259,7 @@ function _build_tree_structure(rt, root::URI)
     # does, rule 5), and rule 4's include-target recursion can itself mutate
     # that same dict at the same path — so every record kind is merged into
     # one event stream ordered by the walker's globally-sequential per-file
-    # `id` and processed in that single pass, `include` events recursing
+    # `order` and processed in that single pass, `include` events recursing
     # in-place, to reproduce true textual splice order exactly.
     function splice_file!(F::URI, P::Vector{String})
         # Rule 7.
@@ -271,23 +277,23 @@ function _build_tree_structure(rt, root::URI)
         events = Tuple{Int,Symbol,Any}[]
         for item in inv.items
             if isempty(item.qualifier) && item.kind in _BINDING_ITEM_KINDS
-                push!(events, (item.id, :item, item))
+                push!(events, (item.order, :item, item))
             end
         end
         for m in inv.modules
-            push!(events, (m.id, :module, m))
+            push!(events, (m.order, :module, m))
         end
         for e in inv.exports
-            push!(events, (e.id, :export, e))
+            push!(events, (e.order, :export, e))
         end
         for imp in inv.imports
-            push!(events, (imp.id, :import, imp))
+            push!(events, (imp.order, :import, imp))
         end
         for inc in inv.includes
-            push!(events, (inc.id, :include, inc))
+            push!(events, (inc.order, :include, inc))
         end
         # Secondary key: for an assignment-wrapped include (`const DATA =
-        # include("data.jl")`), the item and the include share the SAME id —
+        # include("data.jl")`), the item and the include share the SAME order —
         # both come from the one top-level statement. Real Julia evaluates
         # the include's spliced content before the outer assignment
         # completes, so on a tie the `:include` event must be processed
@@ -298,7 +304,7 @@ function _build_tree_structure(rt, root::URI)
         for (_, kind, payload) in events
             if kind === :item
                 item = payload
-                _declare!(ensure_node!(vcat(P, item.parent_module)), item.name, (file=F, id=item.id), item.kind)
+                _declare!(ensure_node!(vcat(P, item.parent_module)), item.name, ItemRef(F, item.id), item.kind)
             elseif kind === :module
                 # Rule 3: create/extend the module's own node...
                 m = payload
@@ -307,10 +313,10 @@ function _build_tree_structure(rt, root::URI)
                 node.bare = m.bare
                 # ...last splice wins (deterministic under DFS) when the same
                 # module path is declared across more than one file.
-                node.declared_at = (file=F, id=m.id)
+                node.declared_at = ItemRef(F, m.id)
                 # ...and the module's own name also enters the *parent*
                 # node's `declared`, exactly like a binding item (rule 5).
-                _declare!(ensure_node!(vcat(P, m.parent_module)), m.name, (file=F, id=m.id), :module)
+                _declare!(ensure_node!(vcat(P, m.parent_module)), m.name, ItemRef(F, m.id), :module)
             elseif kind === :export
                 # Rule 6.
                 e = payload
@@ -464,7 +470,7 @@ function _classify_imports!(rt, builders)
     for (path, b) in builders
         for (F, imp) in b.raw_imports
             target = _classify_import(builders, workspace_roots, path, imp)
-            push!(b.imports, ResolvedImport(imp.kind, target, imp.symbols, imp.alias, (file=F, id=imp.id)))
+            push!(b.imports, ResolvedImport(imp.kind, target, imp.symbols, imp.alias, ItemRef(F, imp.id)))
         end
     end
 end
@@ -507,7 +513,7 @@ end
 # for why that distinction is the whole point of this layer.
 
 """
-    _build_kind_index(rt, uri::URI) -> Dict{Tuple{Int,String},Symbol}
+    _build_kind_index(rt, uri::URI) -> Dict{Tuple{Int64,String},Symbol}
 
 The `(id, name) → kind` index of one file's inventory, built once so a caller
 resolving many declared names against the same defining file does a single
@@ -526,9 +532,9 @@ per the module-tree splicing rule that a module's own name enters its
 `_build_tree_structure`'s docstring) — so it must report kind `:module`,
 without consulting `inv.items`, exactly as the previous per-name lookup did.
 """
-function _build_kind_index(rt, uri::URI)::Dict{Tuple{Int,String},Symbol}
+function _build_kind_index(rt, uri::URI)::Dict{Tuple{Int64,String},Symbol}
     inv = derived_file_inventory(rt, uri)
-    idx = Dict{Tuple{Int,String},Symbol}()
+    idx = Dict{Tuple{Int64,String},Symbol}()
     for m in inv.modules
         idx[(m.id, m.name)] = :module
     end
@@ -573,7 +579,7 @@ Salsa.@derived function derived_module_names(rt, root, path)
     node = module_node(tree, path)
     node === nothing && return Dict{String,Symbol}()
 
-    indices = Dict{URI,Dict{Tuple{Int,String},Symbol}}()
+    indices = Dict{URI,Dict{Tuple{Int64,String},Symbol}}()
     result = Dict{String,Symbol}()
     for (name, ref) in node.declared
         idx = get!(() -> _build_kind_index(rt, ref.file), indices, ref.file)
@@ -740,7 +746,7 @@ end
 # interleaving) that calls `emit(F, item, loc)` for every binding-kind item —
 # name-filtered when `name !== nothing` — in true splice order, where `loc` is
 # the item's absolute module path (`vcat(P, item.parent_module)`). Item and
-# include events are merged and processed in id order (include-first on an id
+# include events are merged and processed in `order` order (include-first on a
 # tie, matching `_build_tree_structure`), so an include's subtree is spliced
 # before the includer's later items. Only binding kinds declare (or, qualified,
 # extend) a name — an `:opaque_macrocall` row named `@foo` is a top-level USAGE
@@ -753,11 +759,11 @@ function _walk_spliced_binding_items!(emit, rt, F::URI, P::Vector{String},
     events = Tuple{Int,Symbol,Any}[]
     for item in inv.items
         if (name === nothing || item.name == name) && item.kind in _BINDING_ITEM_KINDS
-            push!(events, (item.id, :item, item))
+            push!(events, (item.order, :item, item))
         end
     end
     for inc in inv.includes
-        push!(events, (inc.id, :include, inc))
+        push!(events, (inc.order, :include, inc))
     end
     sort!(events; by=e -> (e[1], e[2] === :include ? 0 : 1), alg=Base.Sort.MergeSort)
 
@@ -808,7 +814,7 @@ Salsa.@derived function derived_method_items(rt, root, path, name)
     _walk_spliced_binding_items!(rt, root, String[], name, Set{URI}([root])) do F, item, loc
         resolved = isempty(item.qualifier) ? loc :
             _resolve_extension_qualifier(modpaths, loc, item.qualifier)
-        resolved == path && push!(result, (file=F, id=item.id))
+        resolved == path && push!(result, ItemRef(F, item.id))
     end
     return result
 end
@@ -961,7 +967,7 @@ Salsa.@derived function derived_external_method_extensions_index(rt, root)
         q = _external_extension_qualifier(modpaths, import_targets, item, loc)
         q === nothing && return
         push!(get!(() -> ExternalExtension[], result, item.name),
-            (qualifier=q, signature=item.signature, ref=(file=F, id=item.id)))
+            (qualifier=q, signature=item.signature, ref=ItemRef(F, item.id)))
     end
     return result
 end
