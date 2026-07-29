@@ -10,10 +10,58 @@
     diags = get_diagnostic(jw, uri)
 
     @test length(diags) == 1
-    @test diags[1].range == 19:24
+    @test diags[1].range == 19:25
     @test diags[1].severity == :error
     @test diags[1].message == "extra tokens after end of expression"
     @test diags[1].source == "JuliaSyntax.jl"
+end
+
+@testitem "Syntax diagnostic ranges cover the offending bytes" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # Our ranges are 1-based with an exclusive end (as `StaticLint`'s
+    # `offset+1:offset+span+1`), JuliaSyntax reports both endpoints inclusive:
+    # only the end gets bumped, the start is already right.
+    function syntax_diags(source)
+        uri = URI("file:/range.jl")
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        return filter(d -> d.source == "JuliaSyntax.jl", get_diagnostic(jw, uri))
+    end
+    covered(source, d) = source[first(d.range):last(d.range)-1]
+
+    # Error on a token with no preceding whitespace: shifting the start would
+    # underline `x` instead of `0x`.
+    ds = syntax_diags("x = 0x")
+    @test length(ds) == 1
+    @test ds[1].range == 5:7
+    @test covered("x = 0x", ds[1]) == "0x"
+
+    ds = syntax_diags("\"\\q\"")
+    @test length(ds) == 1
+    @test covered("\"\\q\"", ds[1]) == "\\q"
+
+    # JuliaSyntax includes the whitespace before the extra token
+    ds = syntax_diags("a b")
+    @test length(ds) == 1
+    @test ds[1].range == 2:4
+    @test covered("a b", ds[1]) == " b"
+
+    # A single-byte error must not come out zero-width
+    ds = syntax_diags("@ foo")
+    @test length(ds) == 1
+    @test covered("@ foo", ds[1]) == " "
+
+    # Errors at EOF are zero-width markers one past the last byte: the start is
+    # `sizeof+1` and the end must not point past it (the consumer converts
+    # `last-1` to a position and throws for offsets beyond the content).
+    source = "f(x"
+    ds = syntax_diags(source)
+    @test length(ds) == 1
+    @test ds[1].range == 4:4
+    @test first(ds[1].range) == sizeof(source) + 1
+    @test covered(source, ds[1]) == ""
 end
 
 @testitem "Diagnostic equality distinguishes empty ranges by position" begin
