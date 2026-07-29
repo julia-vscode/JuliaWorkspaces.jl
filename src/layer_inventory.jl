@@ -40,8 +40,14 @@ extension of an already-existing name elsewhere). `signature` is a normalized
 callable's `MethodArity` (argument-count shape) computed from the defining EXPR —
 plain data (so it backdates), used by the cross-file argument-count check for
 methods whose full set spans files.
+
+`order` and `id` are the two halves of what a single positional counter used to
+do; see [`_foreach_toplevel_item`](@ref). `order` is dense and monotone in source
+order and exists only so the module tree can recover Julia's textual-splice
+semantics; `id` is a stable identity and is what `ItemRef` carries.
 """
 @auto_hash_equals struct InventoryItem
+    order::Int
     id::Int
     name::String
     qualifier::Vector{String}
@@ -54,8 +60,8 @@ end
 
 # Back-compat constructor: non-callable items (assignments, consts, enums, …)
 # carry no arity.
-InventoryItem(id, name, qualifier, kind, signature, field_names, parent_module) =
-    InventoryItem(id, name, qualifier, kind, signature, field_names, parent_module, nothing)
+InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module) =
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing)
 
 "An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
 `alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
@@ -71,6 +77,7 @@ entries encoding relative levels (`using ..Sibling` → `[".", ".", "Sibling"]`)
 imports); `alias` is the `as` name if present.
 """
 @auto_hash_equals struct InventoryImport
+    order::Int
     id::Int
     kind::Symbol
     path::Vector{String}
@@ -81,6 +88,7 @@ end
 
 "An `export` or `public` statement and the names it lists."
 @auto_hash_equals struct InventoryExport
+    order::Int
     id::Int
     kind::Symbol
     names::Vector{String}
@@ -89,6 +97,7 @@ end
 
 "An `include(...)` call with its resolved target (or `nothing` if unresolvable)."
 @auto_hash_equals struct InventoryInclude
+    order::Int
     id::Int
     target::Union{Nothing,URI}
     parent_module::Vector{String}
@@ -96,6 +105,7 @@ end
 
 "A `module`/`baremodule` declared in this file."
 @auto_hash_equals struct InventoryModule
+    order::Int
     id::Int
     name::String
     bare::Bool
@@ -135,18 +145,25 @@ end
 """
     _foreach_toplevel_item(f, cst)
 
-Call `f(x, id, parent_module, offset)` for every top-level item-like node of a
-`:file` CST in pre-order: the file's direct children, plus — for
+Call `f(x, order, id, parent_module, offset)` for every top-level item-like node
+of a `:file` CST in pre-order: the file's direct children, plus — for
 `module`/`baremodule` declarations — the module node itself and then the
 children of its body block (never the bodies of functions, structs, etc.).
-Ids are sequential in visit order; doc-macro wrappers are transparent (the
+
+`order` is sequential in visit order and is what the module tree sorts on to
+recover textual-splice semantics. `id` is the statement's identity, which is
+what `ItemRef` carries; both are minted once per statement, so every record a
+statement produces shares them (deliberately — see `_classify_assignment!`'s
+tuple-destructure arm).
+
+Doc-macro wrappers are transparent (the
 wrapped item is visited, with `offset` pointing at it, not the docstring).
 `if`/`elseif`/`else` and bare `begin...end` blocks are ALSO transparent (they
 introduce no scope — StaticLint's `introduces_scope`, scope.jl:78-107, has no
 arm for `:if`/`:block`, so definitions inside them bind at the enclosing
 level): their statement lists are walked as if they were direct siblings of
-the container, at the same `parent_module` and continuing the same id
-sequence; the container node itself gets no id and is never passed to `f`.
+the container, at the same `parent_module` and continuing the same order
+sequence; the container node itself gets no order/id and is never passed to `f`.
 Non-isolating macrocalls (everything except the testitem/testset families and
 `@enum`, see `_is_isolated_scope_macrocall`) are transparent the same way:
 StaticLint traverses a macrocall's arguments in the enclosing scope, so
@@ -158,21 +175,21 @@ This walker is the single source of truth for item ids: the inventory
 extractor and the position map both use it, so ids always agree.
 """
 function _foreach_toplevel_item(f, cst::CSTParser.EXPR)
-    next_id = Ref(0)
-    _walk_toplevel!(f, cst.args, String[], 0, next_id)
+    next_order = Ref(0)
+    _walk_toplevel!(f, cst.args, String[], 0, next_order)
     return nothing
 end
 
-function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+function _walk_toplevel!(f, args, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
     args === nothing && return offset
     for a in args
-        _walk_one!(f, a, parent_module, offset, next_id)
+        _walk_one!(f, a, parent_module, offset, next_order)
         offset += a.fullspan
     end
     return offset
 end
 
-function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
     item = a
     item_offset = offset
     wrapped = _doc_wrapped_item(a)
@@ -195,14 +212,19 @@ function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, next_id::R
     # real keyword; a ternary falls through to the `else` branch below and
     # is treated as a single opaque item (no descent into its arms).
     if CSTParser.headof(item) === :if && CSTParser.headof(item.trivia[1]) === :IF
-        _walk_if_chain!(f, item, parent_module, item_offset, next_id)
+        _walk_if_chain!(f, item, parent_module, item_offset, next_order)
     elseif CSTParser.headof(item) === :block
-        _walk_transparent_block!(f, item, parent_module, item_offset, next_id)
+        _walk_transparent_block!(f, item, parent_module, item_offset, next_order)
     elseif CSTParser.ismacrocall(item) && !_is_enum_macro(item) && !_is_isolated_scope_macrocall(item)
-        _walk_macrocall!(f, item, parent_module, item_offset, next_id)
+        _walk_macrocall!(f, item, parent_module, item_offset, next_order)
     else
-        next_id[] += 1
-        f(item, next_id[], parent_module, item_offset)
+        next_order[] += 1
+        order = next_order[]
+        # `id` is the statement's stable identity; it is a separate field from
+        # `order` so that a content-based scheme can replace this line without
+        # disturbing the splice ordering that `order` carries.
+        id = order
+        f(item, order, id, parent_module, item_offset)
 
         if CSTParser.defines_module(item) && item.args !== nothing && length(item.args) >= 3
             mod_name = CSTParser.isidentifier(item.args[2]) ? StaticLint.valofid(item.args[2]) : nothing
@@ -214,7 +236,7 @@ function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, next_id::R
                 # latter is a synthetic bare/non-bare flag with span 0; see
                 # layer_navigation.jl:122) and the name.
                 block_offset = item_offset + item.trivia[1].fullspan + item.args[2].fullspan
-                _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, next_id)
+                _walk_toplevel!(f, item.args[3].args, inner_parent, block_offset, next_order)
             end
         end
     end
@@ -254,13 +276,13 @@ end
 # interleaves args and trivia in source order), which stays correct for the
 # call form `@foo(a, b)` where paren/comma TRIVIA sit between the args —
 # summing arg fullspans alone would drift there.
-function _walk_macrocall!(f, mc::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+function _walk_macrocall!(f, mc::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
     margs = mc.args
     (margs === nothing || length(margs) < 3) && return nothing
     child_offset = offset
     for c in mc
         if any(j -> margs[j] === c, 3:length(margs))
-            _walk_one!(f, c, parent_module, child_offset, next_id)
+            _walk_one!(f, c, parent_module, child_offset, next_order)
         end
         child_offset += c.fullspan
     end
@@ -273,11 +295,11 @@ end
 # explicit top-level `begin...end` it carries `BEGIN`/`END` keyword trivia, so
 # its statements start after the `begin` keyword's fullspan. Both shapes were
 # confirmed via `CSTParser.parse` exploration (see the task report).
-function _walk_transparent_block!(f, block::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+function _walk_transparent_block!(f, block::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
     if block.trivia !== nothing && !isempty(block.trivia) && CSTParser.headof(block.trivia[1]) === :BEGIN
         offset += block.trivia[1].fullspan
     end
-    _walk_toplevel!(f, block.args, parent_module, offset, next_id)
+    _walk_toplevel!(f, block.args, parent_module, offset, next_order)
     return nothing
 end
 
@@ -288,19 +310,19 @@ end
 # in ITS `trivia[1]`, not this node's) or a plain `:block` (a trailing `else`,
 # whose `ELSE` keyword sits at this node's `trivia[2]`, right after the own
 # keyword).
-function _walk_if_chain!(f, node::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_id::Ref{Int})
+function _walk_if_chain!(f, node::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, next_order::Ref{Int})
     offset += node.trivia[1].fullspan  # IF or ELSEIF keyword
     offset += node.args[1].fullspan    # condition
-    _walk_transparent_block!(f, node.args[2], parent_module, offset, next_id)
+    _walk_transparent_block!(f, node.args[2], parent_module, offset, next_order)
     offset += node.args[2].fullspan
 
     if length(node.args) >= 3
         tail = node.args[3]
         if CSTParser.headof(tail) === :elseif
-            _walk_if_chain!(f, tail, parent_module, offset, next_id)
+            _walk_if_chain!(f, tail, parent_module, offset, next_order)
         else
             offset += node.trivia[2].fullspan  # ELSE keyword
-            _walk_transparent_block!(f, tail, parent_module, offset, next_id)
+            _walk_transparent_block!(f, tail, parent_module, offset, next_order)
         end
     end
     return nothing
@@ -326,8 +348,8 @@ Salsa.@derived function derived_file_inventory(rt, uri)
 
     acc = (items=InventoryItem[], imports=InventoryImport[], exports=InventoryExport[],
            includes=InventoryInclude[], modules=InventoryModule[])
-    _foreach_toplevel_item(cst) do x, id, parent_module, offset
-        _classify_item!(acc, x, id, copy(parent_module), offset, include_targets_by_offset, include_records)
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+        _classify_item!(acc, x, order, id, copy(parent_module), offset, include_targets_by_offset, include_records)
     end
     return FileInventory(acc.items, acc.imports, acc.exports, acc.includes, acc.modules)
 end
@@ -557,7 +579,7 @@ end
 # outer `:const`/`:global` node for a wrapped one) and, together with
 # `records`, support detecting an assignment-wrapped include (`const DATA =
 # include("data.jl")`, Finding 6b) regardless of which arm below fires.
-function _classify_assignment!(acc, x, id, parent_module, kind_override, container_offset, container_fullspan, records)
+function _classify_assignment!(acc, x, order, id, parent_module, kind_override, container_offset, container_fullspan, records)
     if CSTParser.is_func_call(x.args[1])
         # `_symbol_name`, not `_item_name`: a function-definition name may be
         # an operator (`+(a, b) = 1`, or the quoted-operator getfield form
@@ -567,14 +589,14 @@ function _classify_assignment!(acc, x, id, parent_module, kind_override, contain
         name = _symbol_name(CSTParser.get_name(x))
         if name !== nothing
             qualifier = _item_qualifier(CSTParser.get_name(x))
-            push!(acc.items, InventoryItem(id, name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
+            push!(acc.items, InventoryItem(order, id,name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
         end
     elseif CSTParser.iscurly(x.args[1])
         # Typealias: `Vector{T} = ...` — name comes from the curly's base
         # identifier, mirroring `mark_typealias_bindings!` (bindings.jl:288-301).
         name = _item_name(CSTParser.get_name(x.args[1]))
         if name !== nothing
-            push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
+            push!(acc.items, InventoryItem(order, id,name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
         end
     elseif _is_tuple_destructure_lhs(x.args[1])
         # Tuple-destructuring lhs (`a, b = 1, 2`, splats, nested tuples, or
@@ -589,7 +611,7 @@ function _classify_assignment!(acc, x, id, parent_module, kind_override, contain
         # destructuring statement, which is exactly what a future goto-def
         # would want to target anyway.
         for name in _destructure_names!(String[], x.args[1])
-            push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
+            push!(acc.items, InventoryItem(order, id,name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
         end
     elseif !CSTParser.is_getfield(x.args[1])
         # Plain identifier lhs, possibly behind a `::` type declaration
@@ -603,23 +625,23 @@ function _classify_assignment!(acc, x, id, parent_module, kind_override, contain
         end
         name = _item_name(lhs)
         if name !== nothing
-            push!(acc.items, InventoryItem(id, name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
+            push!(acc.items, InventoryItem(order, id,name, String[], something(kind_override, :assignment), nothing, String[], parent_module))
         end
     end
 
     if _is_include_call(x.args[2])
         target = _wrapped_include_target(records, container_offset, container_offset + container_fullspan)
-        push!(acc.includes, InventoryInclude(id, target, parent_module))
+        push!(acc.includes, InventoryInclude(order, id,target, parent_module))
     end
     return
 end
 
-function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_offset, include_records)
+function _classify_item!(acc, x, order, id, parent_module, offset, include_targets_by_offset, include_records)
     if CSTParser.defines_module(x)
         # name/bare per bindings.jl:90-92 and scope.jl:172-181
         name = CSTParser.isidentifier(x.args[2]) ? StaticLint.valofid(x.args[2]) : nothing
         name === nothing && return
-        push!(acc.modules, InventoryModule(id, name, CSTParser.headof(x.args[1]) === :FALSE, parent_module))
+        push!(acc.modules, InventoryModule(order, id, name, CSTParser.headof(x.args[1]) === :FALSE, parent_module))
     elseif CSTParser.headof(x) === :function || CSTParser.headof(x) === :macro
         # bindings.jl:83-89. `_symbol_name`, not `_item_name`: covers
         # `function Base.:*(a, b) end`-style operator definitions, whose name
@@ -635,7 +657,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             name = "@" * name
         end
         qualifier = _item_qualifier(CSTParser.get_name(x))
-        push!(acc.items, InventoryItem(id, name, qualifier, kind, _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
+        push!(acc.items, InventoryItem(order, id,name, qualifier, kind, _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
         name = _item_name(CSTParser.get_name(x))
@@ -664,20 +686,20 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             field_names = String[]
         end
         arity = CSTParser.defines_struct(x) ? MethodArity(StaticLint.struct_nargs(x)...) : nothing
-        push!(acc.items, InventoryItem(id, name, String[], kind, nothing, field_names, parent_module, arity))
+        push!(acc.items, InventoryItem(order, id,name, String[], kind, nothing, field_names, parent_module, arity))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;
         # curly lhs → :assignment (typealias); plain identifier lhs → :assignment
-        _classify_assignment!(acc, x, id, parent_module, nothing, offset, x.fullspan, include_records)
+        _classify_assignment!(acc, x, order, id, parent_module, nothing, offset, x.fullspan, include_records)
     elseif CSTParser.headof(x) === :const || CSTParser.headof(x) === :global
         # unwrap and recurse into the inner assignment with kind override
         kind_override = CSTParser.headof(x) === :const ? :const : :global
         for inner in something(x.args, CSTParser.EXPR[])
             if CSTParser.isassignment(inner)
-                _classify_assignment!(acc, inner, id, parent_module, kind_override, offset, x.fullspan, include_records)
+                _classify_assignment!(acc, inner, order, id, parent_module, kind_override, offset, x.fullspan, include_records)
             elseif CSTParser.isidentifier(inner)
                 name = _item_name(inner)
-                name === nothing || push!(acc.items, InventoryItem(id, name, String[], kind_override, nothing, String[], parent_module))
+                name === nothing || push!(acc.items, InventoryItem(order, id,name, String[], kind_override, nothing, String[], parent_module))
             elseif CSTParser.isdeclaration(inner) && CSTParser.isidentifier(inner.args[1])
                 # `global x::T` (typed declaration, no assignment): the inner is a
                 # `::` declaration node, not an identifier or assignment. Unwrap to
@@ -686,7 +708,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
                 # `mark_bindings!` (bindings.jl). Without this, e.g. Revise's
                 # module-wide `global juliadir::String` is invisible cross-file.
                 name = _item_name(inner.args[1])
-                name === nothing || push!(acc.items, InventoryItem(id, name, String[], kind_override, nothing, String[], parent_module))
+                name === nothing || push!(acc.items, InventoryItem(order, id,name, String[], kind_override, nothing, String[], parent_module))
             end
         end
     elseif CSTParser.headof(x) === :export || CSTParser.headof(x) === :public
@@ -695,7 +717,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             nm = _symbol_name(a)
             nm === nothing || push!(names, nm)
         end
-        isempty(names) || push!(acc.exports, InventoryExport(id, CSTParser.headof(x) === :export ? :export : :public, names, parent_module))
+        isempty(names) || push!(acc.exports, InventoryExport(order, id, CSTParser.headof(x) === :export ? :export : :public, names, parent_module))
     elseif CSTParser.headof(x) === :using || CSTParser.headof(x) === :import
         # mirror imports.jl's structure walking; emit InventoryImport entries
         kind = CSTParser.headof(x) === :using ? :using : :import
@@ -714,17 +736,17 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
                     spath, salias = _walk_import_block(cargs[i])
                     isempty(spath) || push!(symbols, (name=last(spath), alias=salias))
                 end
-                isempty(path) || push!(acc.imports, InventoryImport(id, kind, path, symbols, alias, parent_module))
+                isempty(path) || push!(acc.imports, InventoryImport(order, id, kind, path,symbols, alias, parent_module))
             end
         else
             # Non-colon form: each top-level arg (`using A, B`) is its own target.
             for block in something(args, CSTParser.EXPR[])
                 path, alias = _walk_import_block(block)
-                isempty(path) || push!(acc.imports, InventoryImport(id, kind, path, ImportSymbol[], alias, parent_module))
+                isempty(path) || push!(acc.imports, InventoryImport(order, id, kind, path,ImportSymbol[], alias, parent_module))
             end
         end
     elseif _is_include_call(x)  # call named "include"/"includet" with one argument
-        push!(acc.includes, InventoryInclude(id, get(include_targets_by_offset, offset, nothing), parent_module))
+        push!(acc.includes, InventoryInclude(order, id,get(include_targets_by_offset, offset, nothing), parent_module))
     elseif CSTParser.ismacrocall(x)
         if _is_enum_macro(x)   # per macros.jl:55-67: name via _points_to_Base_macro-style check on x.args[1]
             # x.args[3] is always the enum type name (args[1]=macro name,
@@ -734,7 +756,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             margs = x.args
             if margs !== nothing && length(margs) >= 3
                 tname = _enum_item_name(margs[3])
-                tname === nothing || push!(acc.items, InventoryItem(id, tname, String[], :enum, nothing, String[], parent_module))
+                tname === nothing || push!(acc.items, InventoryItem(order, id,tname, String[], :enum, nothing, String[], parent_module))
                 members = if length(margs) == 4 && CSTParser.headof(margs[4]) === :block
                     margs[4].args
                 else
@@ -742,7 +764,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
                 end
                 for member in something(members, CSTParser.EXPR[])
                     mname = _enum_item_name(member)
-                    mname === nothing || push!(acc.items, InventoryItem(id, mname, String[], :enum_member, nothing, String[], parent_module))
+                    mname === nothing || push!(acc.items, InventoryItem(order, id,mname, String[], :enum_member, nothing, String[], parent_module))
                 end
             end
         else
@@ -751,7 +773,7 @@ function _classify_item!(acc, x, id, parent_module, offset, include_targets_by_o
             # macrocall transparently, so their contents were classified as
             # ordinary items and no opaque row is emitted for them.
             mname = _macro_name_string(x.args[1])
-            push!(acc.items, InventoryItem(id, something(mname, ""), String[], :opaque_macrocall, nothing, String[], parent_module))
+            push!(acc.items, InventoryItem(order, id,something(mname, ""), String[], :opaque_macrocall, nothing, String[], parent_module))
         end
     end
     return
@@ -774,7 +796,7 @@ Salsa.@derived function derived_item_positions(rt, uri)
     cst = derived_julia_legacy_syntax_tree(rt, uri)
     (cst isa CSTParser.EXPR && CSTParser.headof(cst) === :file) || return result
 
-    _foreach_toplevel_item(cst) do x, id, parent_module, offset
+    _foreach_toplevel_item(cst) do x, _order, id, parent_module, offset
         result[id] = (expr=x, offset=offset)
     end
     return result

@@ -4,12 +4,12 @@
     using JuliaWorkspaces.URIs2: URI
 
     make() = FileInventory(
-        [InventoryItem(1, "f", String[], :function, "f(x)", String[], String[]),
-         InventoryItem(2, "S", String[], :struct, nothing, ["a", "b"], ["M"])],
-        [InventoryImport(3, :using, [".", "Sibling"], ImportSymbol[], nothing, ["M"])],
-        [InventoryExport(4, :export, ["f"], String[])],
-        [InventoryInclude(5, URI("file:///pkg/src/a.jl"), String[])],
-        [InventoryModule(6, "M", false, String[])],
+        [InventoryItem(1, 101, "f", String[], :function, "f(x)", String[], String[]),
+         InventoryItem(2, 102, "S", String[], :struct, nothing, ["a", "b"], ["M"])],
+        [InventoryImport(3, 103, :using, [".", "Sibling"], ImportSymbol[], nothing, ["M"])],
+        [InventoryExport(4, 104, :export, ["f"], String[])],
+        [InventoryInclude(5, 105, URI("file:///pkg/src/a.jl"), String[])],
+        [InventoryModule(6, 106, "M", false, String[])],
     )
 
     a = make()
@@ -19,7 +19,7 @@
     @test hash(a) == hash(b)
 
     c = FileInventory(
-        [InventoryItem(1, "g", String[], :function, "g(x)", String[], String[])],
+        [InventoryItem(1, 101, "g", String[], :function, "g(x)", String[], String[])],
         a.imports, a.exports, a.includes, a.modules)
     @test !isequal(a, c)
 end
@@ -45,13 +45,16 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, id, parent_module, offset
-        push!(visited, (id=id, parent=copy(parent_module), offset=offset,
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+        push!(visited, (order=order, id=id, parent=copy(parent_module), offset=offset,
                         ismod=CSTParser.defines_module(x)))
     end
 
-    # 7 item-like nodes: f, g (unwrapped), M, h, Inner, k, w — pre-order ids
-    @test [v.id for v in visited] == collect(1:7)
+    # 7 item-like nodes: f, g (unwrapped), M, h, Inner, k, w — pre-order.
+    # `order` is the dense visit sequence; `id` is only required to identify a
+    # statement uniquely within the file.
+    @test [v.order for v in visited] == collect(1:7)
+    @test allunique([v.id for v in visited])
     @test visited[1].parent == String[]          # f
     @test visited[2].parent == String[]          # g (doc-unwrapped)
     @test visited[3].ismod                       # M itself, at top level
@@ -96,13 +99,14 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, id, parent_module, offset
-        push!(visited, (id=id, parent=copy(parent_module), offset=offset))
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+        push!(visited, (order=order, id=id, parent=copy(parent_module), offset=offset))
     end
 
-    # The if/elseif/else/begin containers themselves consume no id — only the
-    # 4 defined functions plus the trailing `w` do.
-    @test [v.id for v in visited] == collect(1:5)
+    # The if/elseif/else/begin containers themselves are never visited — only the
+    # 4 defined functions plus the trailing `w` are.
+    @test [v.order for v in visited] == collect(1:5)
+    @test allunique([v.id for v in visited])
     @test all(v -> v.parent == String[], visited)
 
     # Names use distinct first letters (compat/mid/tail/block/w) so that a
@@ -705,15 +709,16 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, id, parent_module, offset
-        push!(visited, (id=id, head=CSTParser.headof(x), offset=offset))
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+        push!(visited, (order=order, id=id, head=CSTParser.headof(x), offset=offset))
     end
 
     # 3 item-like nodes: foo's `function` (unwrapped from the macrocall),
     # baz's assignment (unwrapped from the call-form macrocall, past the
     # opening paren), and the `@testset` macrocall itself (isolating scope —
     # stays opaque; `inner` is never visited).
-    @test [v.id for v in visited] == collect(1:3)
+    @test [v.order for v in visited] == collect(1:3)
+    @test allunique([v.id for v in visited])
     @test visited[1].head === :function
     @test src[visited[1].offset + 1] == 'f'   # `function ...`
     @test src[visited[2].offset + 1] == 'b'   # `baz() = 1`

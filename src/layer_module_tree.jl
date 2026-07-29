@@ -263,7 +263,7 @@ function _build_tree_structure(rt, root::URI)
     # does, rule 5), and rule 4's include-target recursion can itself mutate
     # that same dict at the same path — so every record kind is merged into
     # one event stream ordered by the walker's globally-sequential per-file
-    # `id` and processed in that single pass, `include` events recursing
+    # `order` and processed in that single pass, `include` events recursing
     # in-place, to reproduce true textual splice order exactly.
     function splice_file!(F::URI, P::Vector{String})
         # Rule 7.
@@ -281,23 +281,23 @@ function _build_tree_structure(rt, root::URI)
         events = Tuple{Int,Symbol,Any}[]
         for item in inv.items
             if isempty(item.qualifier) && item.kind in _BINDING_ITEM_KINDS
-                push!(events, (item.id, :item, item))
+                push!(events, (item.order, :item, item))
             end
         end
         for m in inv.modules
-            push!(events, (m.id, :module, m))
+            push!(events, (m.order, :module, m))
         end
         for e in inv.exports
-            push!(events, (e.id, :export, e))
+            push!(events, (e.order, :export, e))
         end
         for imp in inv.imports
-            push!(events, (imp.id, :import, imp))
+            push!(events, (imp.order, :import, imp))
         end
         for inc in inv.includes
-            push!(events, (inc.id, :include, inc))
+            push!(events, (inc.order, :include, inc))
         end
         # Secondary key: for an assignment-wrapped include (`const DATA =
-        # include("data.jl")`), the item and the include share the SAME id —
+        # include("data.jl")`), the item and the include share the SAME order —
         # both come from the one top-level statement. Real Julia evaluates
         # the include's spliced content before the outer assignment
         # completes, so on a tie the `:include` event must be processed
@@ -750,7 +750,7 @@ end
 # interleaving) that calls `emit(F, item, loc)` for every binding-kind item —
 # name-filtered when `name !== nothing` — in true splice order, where `loc` is
 # the item's absolute module path (`vcat(P, item.parent_module)`). Item and
-# include events are merged and processed in id order (include-first on an id
+# include events are merged and processed in `order` order (include-first on a
 # tie, matching `_build_tree_structure`), so an include's subtree is spliced
 # before the includer's later items. Only binding kinds declare (or, qualified,
 # extend) a name — an `:opaque_macrocall` row named `@foo` is a top-level USAGE
@@ -763,11 +763,11 @@ function _walk_spliced_binding_items!(emit, rt, F::URI, P::Vector{String},
     events = Tuple{Int,Symbol,Any}[]
     for item in inv.items
         if (name === nothing || item.name == name) && item.kind in _BINDING_ITEM_KINDS
-            push!(events, (item.id, :item, item))
+            push!(events, (item.order, :item, item))
         end
     end
     for inc in inv.includes
-        push!(events, (inc.id, :include, inc))
+        push!(events, (inc.order, :include, inc))
     end
     sort!(events; by=e -> (e[1], e[2] === :include ? 0 : 1), alg=Base.Sort.MergeSort)
 
