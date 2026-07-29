@@ -124,14 +124,12 @@ end
 
 # Signatures of the workspace method extensions of a store-backed callee,
 # rendered exactly like `_collect_tree_signatures!` renders a tree method item:
-# the defining EXPR is materialized request-time and paired with its own
-# file-analysis meta so parameter names recover.
+# from the defining EXPR, materialized request-time.
 function _workspace_extension_signatures!(sigs::Vector{SignatureInfo}, f_ref, env, runtime, root::URI)
     for e in _matching_workspace_extensions(runtime, root, env, f_ref)
         entry = get(derived_item_positions(runtime, e.ref.file), e.ref.id, nothing)
         entry === nothing && continue
-        item_meta = derived_file_analysis(runtime, root, e.ref.file).meta
-        _expr_signature!(sigs, entry.expr, item_meta)
+        _expr_signature!(sigs, entry.expr)
     end
     return
 end
@@ -140,16 +138,13 @@ end
 # in the callee's origin module (`derived_method_items`), rendered from its
 # defining EXPR. The EXPR is materialized request-time from the item's own file
 # (`derived_item_positions`) — allowed in a request handler, never in a derived
-# value — and paired with that file's per-file analysis meta (same memoized
-# CST, so the arg bindings match by objectid), so `_expr_signature!` recovers
-# parameter names (and var"..." quoting) exactly as for a local definition.
+# value — and rendered on its own, without analyzing the defining file.
 function _collect_tree_signatures!(sigs::Vector{SignatureInfo}, tr::StaticLint.TreeRef, runtime, root::URI)
     qroot = _method_items_root(runtime, root, tr.origin_module)
     for ref in derived_method_items(runtime, qroot, tr.origin_module, tr.name)
         entry = get(derived_item_positions(runtime, ref.file), ref.id, nothing)
         entry === nothing && continue
-        item_meta = derived_file_analysis(runtime, qroot, ref.file).meta
-        _expr_signature!(sigs, entry.expr, item_meta)
+        _expr_signature!(sigs, entry.expr)
         # A struct's INNER constructors are not separate top-level items (they
         # live inside the struct body), and `_expr_signature!`'s struct branch
         # deliberately suppresses the implicit field constructor when they
@@ -162,7 +157,7 @@ function _collect_tree_signatures!(sigs::Vector{SignatureInfo}, tr::StaticLint.T
             body = entry.expr.args[3]
             if body isa CSTParser.EXPR && body.args !== nothing
                 for member in body.args
-                    CSTParser.defines_function(member) && _expr_signature!(sigs, member, item_meta)
+                    CSTParser.defines_function(member) && _expr_signature!(sigs, member)
                 end
             end
         end
@@ -229,10 +224,43 @@ _sig_type_str(@nospecialize(t), pred) =
 # signature label.
 _utf16_length(s::AbstractString) = sum(c -> codepoint(c) >= 0x10000 ? 2 : 1, s; init=0)
 
-# Text of a single SymbolServer method parameter exactly as it is rendered in
-# the signature label by `Base.print(io, ::MethodStore)` under the same
-# `:ss_shorten`/`:ss_omit_any` context: `name::type`, `::type` for an unnamed
-# (`#unused#`) argument, or just `name` when the `::Any` annotation is omitted.
+# Assemble a signature label from its rendered pieces, returning it together
+# with the `[start, end)` UTF-16 offset range of each positional parameter.
+#
+# `ParameterInformation.label` may be a substring of the signature label or such
+# an offset range (LSP spec); we always emit ranges, because a substring cannot
+# tell apart two parameters that render identically (`::Any, ::Any`) and would
+# match a name that also occurs in the callee (the `a` of `bar(a::Int)`). Since
+# the label is built here from the very same parameter texts, the ranges are
+# exact by construction — no searching, and nothing to keep in sync with a
+# separate renderer.
+#
+# Every signature source funnels through this: symbol-store methods and
+# workspace definitions alike, so both produce identical label and range shapes.
+function _assemble_signature(callee::AbstractString, positional::Vector{String};
+        kwargs::Vector{String}=String[], suffix::AbstractString="")
+    buf = IOBuffer()
+    print(buf, callee, "(")
+    off = _utf16_length(callee) + 1  # past "callee("
+    ranges = Tuple{Int,Int}[]
+    for (i, text) in enumerate(positional)
+        if i > 1
+            print(buf, ", ")
+            off += 2
+        end
+        w = _utf16_length(text)
+        push!(ranges, (off, off + w))
+        print(buf, text)
+        off += w
+    end
+    isempty(kwargs) || print(buf, "; ", join(kwargs, ", "))
+    print(buf, ")", suffix)
+    return String(take!(buf)), ranges
+end
+
+# Text of a single SymbolServer method parameter: `name::type`, `::type` for an
+# unnamed (`#unused#`) argument, or just `name` when the annotation is `::Any`
+# (which reads as noise in a parameter hint).
 function _ss_param_text(a, pred)
     buf = IOBuffer()
     io = IOContext(buf, :ss_shorten => pred)
@@ -241,76 +269,113 @@ function _ss_param_text(a, pred)
     return String(take!(buf))
 end
 
+# Where a store method comes from, as `Base.print(io, ::MethodStore)` renders it.
+_ss_method_suffix(m::SymbolServer.MethodStore) =
+    string(" in ", m.mod, " at ", replace(m.file, SymbolServer.JULIA_DIR => ""), ':', m.line)
+
 function _get_signatures(b::T, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope=nothing) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
     pred = _sig_shorten_pred(env)
     StaticLint.iterate_over_ss_methods(b, tls, env, function (m)
-        label = sprint((io, x) -> print(IOContext(io, :ss_shorten => pred, :ss_omit_any => true), x), m)
-        # `ParameterInformation.label` is a `[start, end)` UTF-16 offset range
-        # into the signature label (LSP spec). The label starts with `name(` and
-        # joins parameters with `, `, so each parameter's span follows from the
-        # accumulated rendered widths — a positional map, so it can never emit
-        # the `#unused#` placeholder and stays unambiguous even when two
-        # parameters render identically (e.g. `::Any, ::Any`).
-        off = _utf16_length(string(m.name)) + 1  # advance past "name("
-        n = length(m.sig)
-        params = ParameterInfo[]
-        for (i, a) in enumerate(m.sig)
-            w = _utf16_length(_ss_param_text(a, pred))
-            push!(params, ParameterInfo(
-                (off, off + w),
-                SymbolServer.isfakeany(a[2]) ? "" : _sig_type_str(a[2], pred)
-            ))
-            off += w
-            i == n || (off += 2)  # ", " separator
-        end
+        texts = String[_ss_param_text(a, pred) for a in m.sig]
+        # The store records keyword names but no types or defaults, so they are
+        # listed bare — same as a workspace definition, they belong in the label
+        # but are not offered as parameters.
+        label, ranges = _assemble_signature(string(m.name), texts;
+            kwargs=String[string(k) for k in m.kws], suffix=_ss_method_suffix(m))
+        params = [ParameterInfo(
+            ranges[i],
+            SymbolServer.isfakeany(m.sig[i][2]) ? "" : _sig_type_str(m.sig[i][2], pred)
+        ) for i in eachindex(ranges)]
         push!(sigs, SignatureInfo(label, "", params))
         return false
     end; in_scope=in_scope)
 end
 
 _get_signatures(x::CSTParser.EXPR, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope=nothing) =
-    _expr_signature!(sigs, x, meta_dict)
+    _expr_signature!(sigs, x)
 
-# Build the `SignatureInfo` for a definition EXPR `x` (a function/macro
-# definition or a struct) and push it onto `sigs`. Uses `meta_dict` only to
-# recover argument bindings' names (var"..." quoting) — the struct branch needs
-# no meta. Shared by the local-binding path (`_get_signatures`) and the
-# tree-resolved path (`_collect_tree_signatures!`), which materializes the
-# defining EXPR of a cross-file inventory item and passes that item's own
-# file-analysis meta.
-function _expr_signature!(sigs::Vector{SignatureInfo}, x::CSTParser.EXPR, meta_dict)
+# Text of a name or type EXPR in a signature label: a `var"..."` name keeps its
+# quoting (as a bare `Symbol` it would render unquoted), everything else is
+# rendered by `to_codeobject`.
+_sig_expr_text(x::CSTParser.EXPR) =
+    CSTParser.isidentifier(x) ? something(_name_expr_label(x), "") : string(CSTParser.to_codeobject(x))
+
+# Text of one parameter of a definition EXPR (or one field of a struct), spelled
+# the way the call site reads it: `a`, `a::Int`, `::Int`, `a...`, `a = default`.
+# A `@nospecialize` wrapper and a `const` field marker are dropped — neither says
+# anything about the call. Rendering each parameter separately (rather than
+# printing the whole signature) is what lets `_assemble_signature` know the
+# parameters' offsets.
+function _sig_param_text(arg::CSTParser.EXPR)
+    inner = StaticLint.unwrap_nospecialize(arg)
+    inner === arg || return _sig_param_text(inner)
+    args = arg.args
+    n = args === nothing ? 0 : length(args)
+    if CSTParser.headof(arg) === :const && n == 1
+        return _sig_param_text(args[1])
+    elseif CSTParser.iskwarg(arg) && n == 2
+        return string(_sig_param_text(args[1]), " = ", _sig_expr_text(args[2]))
+    elseif CSTParser.issplat(arg) && n == 1
+        return string(_sig_param_text(args[1]), "...")
+    elseif CSTParser.isdeclaration(arg) && n == 2
+        return string(_sig_param_text(args[1]), "::", _sig_expr_text(args[2]))
+    end
+    # an unnamed `::Int` (a declaration with no name) lands here
+    return _sig_expr_text(arg)
+end
+
+# Text of what is being called: `foo`, `Base.getindex`, `Foo{T}`, or a functor's
+# `(f::Foo)`, which needs its parens to read as a call.
+_sig_callee_text(x::CSTParser.EXPR) =
+    CSTParser.isdeclaration(x) ? string("(", _sig_param_text(x), ")") : _sig_expr_text(x)
+
+# Build the `SignatureInfo` for a definition EXPR `x` (a function definition or a
+# struct) and push it onto `sigs`. Shared by the local-binding path
+# (`_get_signatures`) and the tree-resolved path (`_collect_tree_signatures!`),
+# which materializes the defining EXPR of a cross-file inventory item. The EXPR
+# alone is enough: parameters are rendered from the definition's own syntax, so
+# no file analysis of the defining file is needed.
+function _expr_signature!(sigs::Vector{SignatureInfo}, x::CSTParser.EXPR)
     if CSTParser.defines_function(x)
         sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(x))
-        params = ParameterInfo[]
-        if sig isa CSTParser.EXPR && sig.args !== nothing
-            for i = 2:length(sig.args)
-                argbinding = StaticLint.bindingof(sig.args[i], meta_dict)
-                if argbinding !== nothing
-                    # var"..." argument names keep their quoting
-                    n = argbinding.name isa CSTParser.EXPR ? _name_expr_label(argbinding.name) : nothing
-                    push!(params, ParameterInfo(something(n, ""), nothing))
-                end
+        (sig isa CSTParser.EXPR && sig.args !== nothing && !isempty(sig.args)) || return
+        # An anonymous `function (x) ... end` has no callee to render — and no
+        # name a call site could resolve, so it does not reach here either.
+        CSTParser.iscall(sig) || return
+        positional = String[]
+        kwargs = String[]
+        for i = 2:length(sig.args)
+            arg = sig.args[i]
+            if CSTParser.isparameters(arg)
+                # kwargs appear in the label but are not offered as parameters
+                arg.args === nothing || append!(kwargs, (_sig_param_text(a) for a in arg.args))
+            else
+                # EVERY positional parameter gets an entry, named or not: the
+                # highlighted parameter is selected by index, so dropping an
+                # unnamed `::Int` would shift every later parameter.
+                push!(positional, _sig_param_text(arg))
             end
-            push!(sigs, SignatureInfo(string(CSTParser.to_codeobject(sig)), "", params))
         end
+        _push_expr_signature!(sigs, _sig_callee_text(sig.args[1]), positional, kwargs)
     elseif CSTParser.defines_struct(x)
-        args = x.args[3]
-        if length(args) > 0
-            if !any(CSTParser.defines_function, args.args)
-                params = ParameterInfo[]
-                for field in args.args
-                    field_name = CSTParser.rem_decl(field)
-                    label = ""
-                    if field_name isa CSTParser.EXPR && CSTParser.isidentifier(field_name)
-                        # var"..." field names keep their quoting
-                        label = something(_name_expr_label(field_name), "")
-                    end
-                    push!(params, ParameterInfo(label, nothing))
-                end
-                push!(sigs, SignatureInfo(string(CSTParser.to_codeobject(x)), "", params))
-            end
-        end
+        # a struct still being typed can be missing its name or body
+        (x.args !== nothing && length(x.args) >= 3) || return
+        body = x.args[3]
+        (body isa CSTParser.EXPR && body.args !== nothing && !isempty(body.args)) || return
+        # With an explicit inner constructor there is no implicit field
+        # constructor to offer (`_collect_tree_signatures!` renders the inner
+        # ones from the struct body instead).
+        any(CSTParser.defines_function, body.args) && return
+        fields = String[_sig_param_text(f) for f in body.args]
+        _push_expr_signature!(sigs, _sig_callee_text(CSTParser.rem_subtype(x.args[2])), fields, String[])
     end
+    return
+end
+
+function _push_expr_signature!(sigs::Vector{SignatureInfo}, callee::String, positional::Vector{String}, kwargs::Vector{String})
+    label, ranges = _assemble_signature(callee, positional; kwargs=kwargs)
+    push!(sigs, SignatureInfo(label, "", ParameterInfo[ParameterInfo(r, nothing) for r in ranges]))
+    return
 end
 
 # ============================================================================
