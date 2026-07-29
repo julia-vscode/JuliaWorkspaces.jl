@@ -17,17 +17,13 @@
     ItemRef(file, id)
 
 Reference to a top-level item (in a file inventory) by file URI and item ID.
-
-A named type rather than a `@NamedTuple{file::URI, id::Int}` alias: this is the
-identity of a declaration and it is carried in most of this layer's derived
-values, so it should dispatch and it should not accept any structurally similar
-tuple. `@auto_hash_equals` is required — the fallback for an immutable struct is
-field-wise egality, and `URI`'s own `==`/`hash` must be the ones used, since
-Salsa's early exit compares whole values with `isequal`.
 """
+# `@auto_hash_equals` is load-bearing: the fallback for an immutable struct is
+# field-wise egality, whereas `URI`'s own `==`/`hash` must be the ones used —
+# Salsa's early exit compares whole values with `isequal`.
 @auto_hash_equals struct ItemRef
     file::URI
-    id::Int
+    id::Int64   # Int64, not Int: an item id needs 62 bits (see `_mint_ids!`)
 end
 
 """
@@ -517,7 +513,7 @@ end
 # for why that distinction is the whole point of this layer.
 
 """
-    _build_kind_index(rt, uri::URI) -> Dict{Tuple{Int,String},Symbol}
+    _build_kind_index(rt, uri::URI) -> Dict{Tuple{Int64,String},Symbol}
 
 The `(id, name) → kind` index of one file's inventory, built once so a caller
 resolving many declared names against the same defining file does a single
@@ -536,9 +532,9 @@ per the module-tree splicing rule that a module's own name enters its
 `_build_tree_structure`'s docstring) — so it must report kind `:module`,
 without consulting `inv.items`, exactly as the previous per-name lookup did.
 """
-function _build_kind_index(rt, uri::URI)::Dict{Tuple{Int,String},Symbol}
+function _build_kind_index(rt, uri::URI)::Dict{Tuple{Int64,String},Symbol}
     inv = derived_file_inventory(rt, uri)
-    idx = Dict{Tuple{Int,String},Symbol}()
+    idx = Dict{Tuple{Int64,String},Symbol}()
     for m in inv.modules
         idx[(m.id, m.name)] = :module
     end
@@ -583,7 +579,7 @@ Salsa.@derived function derived_module_names(rt, root, path)
     node = module_node(tree, path)
     node === nothing && return Dict{String,Symbol}()
 
-    indices = Dict{URI,Dict{Tuple{Int,String},Symbol}}()
+    indices = Dict{URI,Dict{Tuple{Int64,String},Symbol}}()
     result = Dict{String,Symbol}()
     for (name, ref) in node.declared
         idx = get!(() -> _build_kind_index(rt, ref.file), indices, ref.file)

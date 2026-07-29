@@ -328,6 +328,25 @@ end
     end
 end
 
+@testitem "stable ids: ids are Int64 on every platform" begin
+    using JuliaWorkspaces: InventoryItem, InventoryImport, InventoryExport,
+        InventoryInclude, InventoryModule, ItemRef, _ItemIdAllocator, _mint_ids!, CSTParser
+
+    # An id packs 46 hash bits with a 16-bit disambiguator, so it needs 62 bits.
+    # `Int` is `Int32` on 32-bit platforms and cannot hold that — every id slot
+    # must be explicitly `Int64` or those builds fail (and only there).
+    for T in (InventoryItem, InventoryImport, InventoryExport, InventoryInclude, InventoryModule)
+        @test fieldtype(T, :id) === Int64
+        @test fieldtype(T, :order) === Int   # a dense counter; genuinely machine-sized
+    end
+    @test fieldtype(ItemRef, :id) === Int64
+
+    cst = CSTParser.parse("f() = 1\n", true)
+    _, id = _mint_ids!(_ItemIdAllocator(), cst.args[1], String[])
+    @test id isa Int64
+    @test id > 0
+end
+
 @testitem "stable ids: allocator keeps ids unique when a slot is taken" begin
     using JuliaWorkspaces: _ItemIdAllocator, _mint_ids!, CSTParser
 
@@ -380,10 +399,9 @@ end
     before = probe_declared(rt, root_uri, ["Pkg"])
     @test Set(keys(before)) == Set(["f", "g"])
 
-    # Insert a `using` line above both declarations. This is the edit that used
-    # to renumber every later item and so change every ItemRef-carrying value
-    # in the root; the declaring ids must now be untouched and the consumer
-    # must not re-execute at all.
+    # Insert a `using` line above both declarations: it adds a name to nothing
+    # and shifts every later statement's position. The declaring ids must be
+    # untouched and the consumer must not re-execute at all.
     recv = CountReceiver()
     JuliaWorkspaces.update_file!(jw, TextFile(root_uri,
         SourceText("module Pkg\nusing Printf\n" * body * "end\n", "julia")))

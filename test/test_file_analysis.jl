@@ -724,9 +724,8 @@ end
     TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, ROOT, B), recv_b)
     @test get(recv_b.counts, "derived_file_analysis", 0) == 0
 
-    # D references `a`. Before stable ids, `a`'s ItemRef shifted and this cost
-    # one re-execution; now the outbound target is unchanged and the analysis
-    # backdates too.
+    # D references `a` — whose ItemRef the reorder leaves alone, so D's outbound
+    # target is unchanged and its analysis backdates too.
     recv_d = CountReceiver()
     fa_d1 = TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, ROOT, d), recv_d)
     @test get(recv_d.counts, "derived_file_analysis", 0) == 0
@@ -987,10 +986,8 @@ end
     @test get(recv.counts, "derived_module_names", 0) == 1
     @test get(recv.counts, "probe_names", 0) == 0
 
-    # The declaring ItemRefs are what used to churn here: a reorder swapped
-    # `a`'s and `b`'s positional ids, which is what forced the tree's value to
-    # change and its consumers to re-run. Content-based ids leave all three
-    # untouched — the reason the counts above can be zero.
+    # A reorder leaves all three declaring ItemRefs untouched — that is what lets
+    # the counts above be zero.
     after_declared = JuliaWorkspaces.derived_module_declared(rt, ROOT, ["MainPkg"])
     @test after_declared["a"] == before_declared["a"]
     @test after_declared["b"] == before_declared["b"]

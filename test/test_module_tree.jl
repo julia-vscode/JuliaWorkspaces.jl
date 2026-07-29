@@ -731,10 +731,9 @@ end
     before_declared = probe_declared(rt, root_uri, ["Pkg"])
     @test Set(keys(before_declared)) == Set(["f", "g"])
 
-    # Reorder f and g: a same-kind adjacent swap. Item ids are content-based, so
-    # neither name's id moves — `derived_module_declared`'s VALUE is unchanged
-    # too, and BOTH selectors' consumers must now stay untouched. Before stable
-    # ids this swapped the two ItemRefs and cost a `probe_declared` re-run.
+    # Reorder f and g: a same-kind adjacent swap. Ids key on content, not
+    # position, so neither name's id moves — `derived_module_declared`'s VALUE is
+    # unchanged too, and BOTH selectors' consumers must stay untouched.
     recv = CountReceiver()
     JuliaWorkspaces.update_file!(jw, TextFile(root_uri, SourceText("""
     module Pkg

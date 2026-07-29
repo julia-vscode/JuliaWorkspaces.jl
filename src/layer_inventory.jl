@@ -41,14 +41,14 @@ callable's `MethodArity` (argument-count shape) computed from the defining EXPR 
 plain data (so it backdates), used by the cross-file argument-count check for
 methods whose full set spans files.
 
-`order` and `id` are the two halves of what a single positional counter used to
-do; see [`_foreach_toplevel_item`](@ref). `order` is dense and monotone in source
-order and exists only so the module tree can recover Julia's textual-splice
-semantics; `id` is a stable identity and is what `ItemRef` carries.
+`order` is dense and monotone in source order, and exists so the module tree can
+recover Julia's textual-splice semantics; `id` identifies the declaring statement
+and is what `ItemRef` carries. Both are minted by
+[`_foreach_toplevel_item`](@ref).
 """
 @auto_hash_equals struct InventoryItem
     order::Int
-    id::Int
+    id::Int64
     name::String
     qualifier::Vector{String}
     kind::Symbol
@@ -78,7 +78,7 @@ imports); `alias` is the `as` name if present.
 """
 @auto_hash_equals struct InventoryImport
     order::Int
-    id::Int
+    id::Int64
     kind::Symbol
     path::Vector{String}
     symbols::Vector{ImportSymbol}
@@ -89,7 +89,7 @@ end
 "An `export` or `public` statement and the names it lists."
 @auto_hash_equals struct InventoryExport
     order::Int
-    id::Int
+    id::Int64
     kind::Symbol
     names::Vector{String}
     parent_module::Vector{String}
@@ -98,7 +98,7 @@ end
 "An `include(...)` call with its resolved target (or `nothing` if unresolvable)."
 @auto_hash_equals struct InventoryInclude
     order::Int
-    id::Int
+    id::Int64
     target::Union{Nothing,URI}
     parent_module::Vector{String}
 end
@@ -106,7 +106,7 @@ end
 "A `module`/`baremodule` declared in this file."
 @auto_hash_equals struct InventoryModule
     order::Int
-    id::Int
+    id::Int64
     name::String
     bare::Bool
     parent_module::Vector{String}
@@ -156,8 +156,8 @@ what `ItemRef` carries; both are minted once per statement, so every record a
 statement produces shares them (deliberately — see `_classify_assignment!`'s
 tuple-destructure arm).
 
-Doc-macro wrappers are transparent (the
-wrapped item is visited, with `offset` pointing at it, not the docstring).
+Doc-macro wrappers are transparent (the wrapped item is visited, with `offset`
+pointing at it, not the docstring).
 `if`/`elseif`/`else` and bare `begin...end` blocks are ALSO transparent (they
 introduce no scope — StaticLint's `introduces_scope`, scope.jl:78-107, has no
 arm for `:if`/`:block`, so definitions inside them bind at the enclosing
@@ -182,24 +182,30 @@ end
 # An identity key for one top-level statement: coarse kind, the name as written
 # (qualifier included), and the in-file module path. Statements sharing a key are
 # separated by a disambiguator, so this only has to be a good HINT — a coarse or
-# even wrong key costs id stability, never uniqueness. The degenerate case where
-# every statement keys the same is exactly the positional numbering this replaces.
+# even wrong key costs id stability, never uniqueness. If every statement keyed
+# the same, ids would degrade to dense positional numbering.
 const _IdKey = Tuple{Symbol,String,String}
 
+# An id is a 62-bit quantity, so every step that builds one is explicitly
+# `Int64`/`UInt64` rather than `Int`: on a 32-bit platform `Int === Int32`, where
+# `1 << 46` is undefined and the packed value would not fit. `hash` also returns
+# `UInt32` there, so it is widened before masking — that costs collision
+# resistance on 32-bit, which the assigned-id probe below absorbs.
 const _ID_HASH_BITS = 46
 const _ID_DIS_BITS = 16
-const _ID_HASH_MASK = (1 << _ID_HASH_BITS) - 1
-const _ID_DIS_MAX = (1 << _ID_DIS_BITS) - 1
+const _ID_HASH_MASK = (UInt64(1) << _ID_HASH_BITS) - UInt64(1)
+const _ID_DIS_MAX = Int64(1 << _ID_DIS_BITS) - Int64(1)
 
-# Per-file id allocation state. `order` is the dense visit counter; `buckets`
-# counts earlier statements per identity key; `assigned` keeps ids unique within
-# the file when a 46-bit hash collides or a bucket overflows its 16 bits.
+# Per-file id allocation state. `order` is the dense visit counter (a genuine
+# machine `Int`); `buckets` counts earlier statements per identity key;
+# `assigned` keeps ids unique within the file when a hash collides or a bucket
+# overflows its 16 bits.
 mutable struct _ItemIdAllocator
     order::Int
     buckets::Dict{_IdKey,Int}
-    assigned::Set{Int}
+    assigned::Set{Int64}
 end
-_ItemIdAllocator() = _ItemIdAllocator(0, Dict{_IdKey,Int}(), Set{Int}())
+_ItemIdAllocator() = _ItemIdAllocator(0, Dict{_IdKey,Int}(), Set{Int64}())
 
 # Mint the `(order, id)` pair for one statement. Called exactly once per visited
 # statement, so every record the classifier derives from it shares both.
@@ -210,9 +216,10 @@ function _mint_ids!(alloc::_ItemIdAllocator, x::CSTParser.EXPR, parent_module::V
     n = get(alloc.buckets, key, 0)
     alloc.buckets[key] = n + 1
 
-    id = ((Int(hash(key) & _ID_HASH_MASK)) << _ID_DIS_BITS) | min(n, _ID_DIS_MAX)
+    h = (hash(key) % UInt64) & _ID_HASH_MASK
+    id = (Int64(h) << _ID_DIS_BITS) | min(Int64(n), _ID_DIS_MAX)
     while id in alloc.assigned
-        id += 1
+        id += Int64(1)
     end
     push!(alloc.assigned, id)
 
@@ -882,7 +889,7 @@ request handlers to reattach locations, docstrings, and defining EXPRs at the
 last mile. Depending on this query from any layer-1/2/3 computation is a bug.
 """
 Salsa.@derived function derived_item_positions(rt, uri)
-    result = Dict{Int,@NamedTuple{expr::CSTParser.EXPR, offset::Int}}()
+    result = Dict{Int64,@NamedTuple{expr::CSTParser.EXPR, offset::Int}}()
 
     derived_has_content(rt, uri) || return result
     cst = derived_julia_legacy_syntax_tree(rt, uri)
