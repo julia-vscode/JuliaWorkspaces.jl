@@ -507,10 +507,10 @@ end
 # traversal order keeps the result deterministic.
 # A macro wrapping a definition is known not to rewrite its signature only if it
 # is one of StaticLint's signature-preserving Base macros AND the defining module
-# has not shadowed that name. The inventory records the name but cannot resolve it
-# (see docs/design/macro-annotation-arity.md); this is where it is judged. Macros
-# are keyed `@`-prefixed in the visibility index, so a workspace `macro inline(ex)`
-# or a `using MyPkg: @inline` shows up as "@inline".
+# has not shadowed that name. The inventory records the name but cannot resolve
+# it — resolution needs a `meta_dict`, which is downstream of the inventory — so
+# it is judged here. Macros are keyed `@`-prefixed in the visibility index, so a
+# workspace `macro inline(ex)` or a `using MyPkg: @inline` shows up as "@inline".
 _is_signature_preserving(rt, root, defining_path::Vector{String}, nm::String) =
     Symbol(nm) in StaticLint.SIGNATURE_PRESERVING_MACROS &&
     !haskey(derived_module_visible_names_idfree(rt, root, defining_path), nm)
