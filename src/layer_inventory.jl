@@ -570,6 +570,30 @@ end
 # deviation from macros.jl:55, not an oversight.
 _is_enum_macro(x::CSTParser.EXPR) = _macro_name_string(x.args[1]) == "@enum"
 
+# The macro name as written, qualifier included: `"@inline"`, `"Base.@inline"`,
+# `"Foo.@kwdef"`. Unlike `_macro_name_string` the qualifier is KEPT, because a
+# consumer has to tell Base's macro from another module's macro of the same name —
+# dropping it would let `Foo.@kwdef` pass for `Base.@kwdef`.
+function _macro_annotation_name(x)
+    nm = _macro_name_string(x)
+    nm === nothing && return nothing
+    q = x isa CSTParser.EXPR && CSTParser.is_getfield_w_quotenode(x) ?
+        _getfield_qualifier(x) : String[]
+    return isempty(q) ? nm : string(join(q, '.'), '.', nm)
+end
+
+# Split a possibly-qualified annotation into its module path and bare `@name`
+# ("Base.Iterators.@foo" → (["Base", "Iterators"], "@foo")).
+function _split_macro_annotation(nm::AbstractString)
+    parts = split(nm, '.')
+    return (String[String(p) for p in parts[1:end-1]], String(parts[end]))
+end
+
+# The bare `@name` of a possibly-qualified annotation ("Base.@kwdef" → "@kwdef").
+# Distinct from `layer_file_analysis.jl`'s `_bare_macro_name`, which strips the
+# leading `@` instead of the qualifier.
+_annotation_bare_name(nm::AbstractString) = last(_split_macro_annotation(nm))
+
 # The macro names directly wrapping a definition, innermost→outermost. Doc
 # wrappers are transparent: they cannot rewrite a signature. Only a direct chain
 # of macrocall parents counts — `@static if … end` puts an `if`/`block` between
@@ -583,7 +607,7 @@ function _macro_annotations(x::CSTParser.EXPR)
     p = CSTParser.parentof(x)
     while p isa CSTParser.EXPR && CSTParser.ismacrocall(p)
         if _doc_wrapped_item(p) === nothing
-            push!(names, something(_macro_name_string(p.args[1]), "?"))
+            push!(names, something(_macro_annotation_name(p.args[1]), "?"))
         end
         p = CSTParser.parentof(p)
     end
@@ -817,9 +841,19 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             kind = CSTParser.defines_abstract(x) ? :abstract : :primitive
             field_names = String[]
         end
-        arity = CSTParser.defines_struct(x) ?
-            MethodArity(StaticLint.struct_nargs(x; macro_permissive=false)..., _macro_annotations(x)) :
-            nothing
+        arity = nothing
+        if CSTParser.defines_struct(x)
+            annotations = _macro_annotations(x)
+            minargs, maxargs, kws, kwsplat = StaticLint.struct_nargs(x; macro_permissive=false)
+            # `@kwdef` also generates a keyword constructor accepting every field,
+            # so record the field names as its keywords. Keyed on the macro NAME —
+            # plain data, exactly like `_is_enum_macro` — and a consumer that finds
+            # the name shadowed discards the whole arity anyway.
+            if length(annotations) == 1 && _annotation_bare_name(annotations[1]) == "@kwdef"
+                kws = Symbol[Symbol(f) for f in field_names]
+            end
+            arity = MethodArity(minargs, maxargs, kws, kwsplat, annotations)
+        end
         push!(acc.items, InventoryItem(order, id,name, String[], kind, nothing, field_names, parent_module, arity))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;

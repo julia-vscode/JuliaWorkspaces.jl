@@ -1025,8 +1025,13 @@ end
     # Wrapped: the literal arity is still recorded; the wrapper is recorded
     # beside it, for the consumer to interpret.
     @test arity_of("@inline f(x) = 1\n", "f").macro_annotations == ["@inline"]
-    @test arity_of("Base.@inline f(x) = 1\n", "f").macro_annotations == ["@inline"]
     @test arity_of("@wrap f(x) = 1\n", "f").macro_annotations == ["@wrap"]
+    # The qualifier is KEPT: a consumer has to tell Base's macro from another
+    # module's macro of the same name.
+    @test arity_of("Base.@inline f(x) = 1\n", "f").macro_annotations == ["Base.@inline"]
+    @test arity_of("Foo.@inline f(x) = 1\n", "f").macro_annotations == ["Foo.@inline"]
+    @test arity_of("Base.Iterators.@foo f(x) = 1\n", "f").macro_annotations ==
+          ["Base.Iterators.@foo"]
     let a2 = arity_of("@wrap f(x, y) = 1\n", "f")
         @test (a2.minargs, a2.maxargs, a2.kwsplat) == (2, 2, false)
     end
@@ -1047,5 +1052,22 @@ end
     let s = arity_of("@kwdef struct S\n    a::Int\n    b::Int\nend\n", "S")
         @test (s.minargs, s.maxargs) == (2, 2)
         @test s.macro_annotations == ["@kwdef"]
+        # `@kwdef` also generates a keyword constructor, so the field names are
+        # recorded as its keywords — keyed on the macro NAME, which is plain data.
+        # A consumer that finds the name shadowed discards the whole arity.
+        @test s.kws == [:a, :b]
     end
+    let s = arity_of("Base.@kwdef struct S\n    a::Int = 1\nend\n", "S")
+        @test s.kws == [:a]                      # a defaulted field is still a keyword
+        @test s.macro_annotations == ["Base.@kwdef"]
+    end
+    # Recorded the same way whoever the `@kwdef` belongs to — the consumer decides
+    # whether to trust it, and discards the arity when it is not Base's.
+    let s = arity_of("Foo.@kwdef struct S\n    a::Int\nend\n", "S")
+        @test s.kws == [:a]
+        @test s.macro_annotations == ["Foo.@kwdef"]
+    end
+    # A struct with no `@kwdef` has no keyword constructor.
+    @test arity_of("struct S\n    a::Int\nend\n", "S").kws == Symbol[]
+    @test arity_of("@wrap struct S\n    a::Int\nend\n", "S").kws == Symbol[]
 end

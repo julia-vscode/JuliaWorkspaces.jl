@@ -1486,6 +1486,27 @@ end
     end
 end
 
+@testitem "every signature-preserving macro entry resolves in the store" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: SIGNATURE_PRESERVING_MACROS, macro_store_target
+
+    _, _, jw = parse_and_pass("f(x) = 1\n")
+    env = get_env(jw)
+
+    # Each entry is a module path plus the macro name, so a listed macro that does
+    # not exist where the entry claims is a typo — or a macro Julia has moved.
+    for path in SIGNATURE_PRESERVING_MACROS
+        @test length(path) >= 2
+        @test macro_store_target(path, env) !== nothing
+    end
+
+    # `@inline`/`@noinline` genuinely live in both modules; the rest are Base-only,
+    # which is why the owner cannot be factored out of the name list.
+    @test Symbol[:Base, Symbol("@inline")] in SIGNATURE_PRESERVING_MACROS
+    @test Symbol[:Core, Symbol("@inline")] in SIGNATURE_PRESERVING_MACROS
+    @test macro_store_target(Symbol[:Core, Symbol("@propagate_inbounds")], env) === nothing
+    @test macro_store_target(Symbol[:Base, Symbol("@propagate_inbounds")], env) !== nothing
+end
+
 @testitem "arity helpers can report the literal count under a macro" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: func_nargs, struct_nargs
 

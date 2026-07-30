@@ -179,39 +179,56 @@ function _mark_JuMP_binding(arg, meta_dict)
     end
 end
 
-function _points_to_Base_macro(x::EXPR, name, state)
-    CSTParser.is_getfield_w_quotenode(x) && return _points_to_Base_macro(x.args[2].args[1], name, state)
-    haskey(getsymbols(state)[:Base], name) || return false
-    targetmacro =  maybe_lookup(getsymbols(state)[:Base][name], state)
-    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x, state.meta_dict)) !== nothing &&
+"""
+    macro_store_target(path::Vector{Symbol}, env) -> store entry or nothing
+
+The entry the env store holds for the dotted `path` — a module path plus the name,
+e.g. `[:Base, Symbol("@inline")]` or `[:Base, :Experimental, Symbol("@foo")]` —
+with `VarRef`s followed, or `nothing` when any segment is unknown. The identity
+every "does this macrocall mean THAT macro" check compares against, including the
+ones working from a recorded name rather than an `EXPR`
+(`_annotation_macro_points_to`).
+"""
+function macro_store_target(path::Vector{Symbol}, env::ExternalEnv)
+    isempty(path) && return nothing
+    vr = SymbolServer.VarRef(
+        foldl(SymbolServer.VarRef, @view(path[1:end-1]); init=nothing), last(path))
+    return maybe_lookup(vr, env)
+end
+
+macro_store_target(path::Vector{Symbol}, state) = macro_store_target(path, state.env)
+
+"""
+    _points_to_macro(x::EXPR, path::Vector{Symbol}, env, meta_dict) -> Bool
+
+Whether the macro-name node `x` resolves to the macro at `path`
+(`[:Base, Symbol("@inline")]`). `_points_to_Base_macro` and
+`_points_to_arbitrary_macro` are this with the path spelled out for them.
+"""
+function _points_to_macro(x::EXPR, path::Vector{Symbol}, env::ExternalEnv, meta_dict)
+    CSTParser.is_getfield_w_quotenode(x) && return _points_to_macro(x.args[2].args[1], path, env, meta_dict)
+    targetmacro = macro_store_target(path, env)
+    targetmacro === nothing && return false
+    isidentifier(x) && Symbol(valofid(x)) == last(path) && (ref = refof(x, meta_dict)) !== nothing &&
     (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
 end
+
+_points_to_macro(x::EXPR, path::Vector{Symbol}, state) =
+    _points_to_macro(x, path, state.env, state.meta_dict)
+
+_points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, state) =
+    _points_to_macro(x, Symbol[module_name, name], state)
+
+_points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, env::ExternalEnv, meta_dict) =
+    _points_to_macro(x, Symbol[module_name, name], env, meta_dict)
+
+_points_to_Base_macro(x::EXPR, name, state) =
+    _points_to_macro(x, Symbol[:Base, Symbol(name)], state)
 
 # Variant usable in the check phase, where only the ExternalEnv + meta_dict are
 # available (no analysis `state`).
-function _points_to_Base_macro(x::EXPR, name, env::ExternalEnv, meta_dict)
-    CSTParser.is_getfield_w_quotenode(x) && return _points_to_Base_macro(x.args[2].args[1], name, env, meta_dict)
-    syms = getsymbols(env)
-    haskey(syms[:Base], name) || return false
-    targetmacro = maybe_lookup(syms[:Base][name], env)
-    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x, meta_dict)) !== nothing &&
-    (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
-end
-
-# `state` carries both the env and meta_dict; delegate to the env + meta_dict
-# variant, which is also usable in the check phase (where no `state` exists).
-_points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, state) =
-    _points_to_arbitrary_macro(x, module_name, name, state.env, state.meta_dict)
-
-function _points_to_arbitrary_macro(x::EXPR, module_name::Symbol, name::Symbol, env::ExternalEnv, meta_dict)
-    CSTParser.is_getfield_w_quotenode(x) && return _points_to_arbitrary_macro(x.args[2].args[1], module_name, name, env, meta_dict)
-    syms = getsymbols(env)
-    haskey(syms, module_name) || return false
-    haskey(syms[module_name], name) || return false
-    targetmacro = maybe_lookup(syms[module_name][name], env)
-    isidentifier(x) && Symbol(valofid(x)) == name && (ref = refof(x, meta_dict)) !== nothing &&
-    (ref == targetmacro || (ref isa Binding && ref.val == targetmacro))
-end
+_points_to_Base_macro(x::EXPR, name, env::ExternalEnv, meta_dict) =
+    _points_to_macro(x, Symbol[:Base, Symbol(name)], env, meta_dict)
 
 maybe_lookup(x, env::ExternalEnv) = x isa SymbolServer.VarRef ? SymbolServer._lookup(x, getsymbols(env), true) : x
 maybe_lookup(x, state::TraverseState) = maybe_lookup(x, state.env)

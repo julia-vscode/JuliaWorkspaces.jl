@@ -208,15 +208,22 @@ function struct_nargs(x::EXPR, env=nothing, meta_dict=nothing; macro_permissive=
     return minargs, maxargs, kws, kwsplat
 end
 
-const SIGNATURE_PRESERVING_MACROS = Symbol[
-    Symbol("@inline"),
-    Symbol("@noinline"),
-    Symbol("@propagate_inbounds"),
-    Symbol("@generated"),
-    Symbol("@assume_effects"),
-    Symbol("@constprop"),
-    Symbol("@pure"),
-    Symbol("@nospecializeinfer"),
+# Macros that leave the signature of what they wrap alone, each as a module path
+# plus the name: the owner is part of the identity, not a separate axis. `@inline`
+# and `@noinline` exist in both Base and Core as distinct store entries; the rest
+# live in Base alone, so a `(names × owners)` product would ask for macros that
+# do not exist.
+const SIGNATURE_PRESERVING_MACROS = Vector{Symbol}[
+    [:Base, Symbol("@inline")],
+    [:Core, Symbol("@inline")],
+    [:Base, Symbol("@noinline")],
+    [:Core, Symbol("@noinline")],
+    [:Base, Symbol("@propagate_inbounds")],
+    [:Base, Symbol("@generated")],
+    [:Base, Symbol("@assume_effects")],
+    [:Base, Symbol("@constprop")],
+    [:Base, Symbol("@pure")],
+    [:Base, Symbol("@nospecializeinfer")],
 ]
 
 function func_nargs(x::EXPR, env=nothing, meta_dict=nothing; macro_permissive=true)
@@ -229,7 +236,7 @@ function func_nargs(x::EXPR, env=nothing, meta_dict=nothing; macro_permissive=tr
     if macro_permissive && env !== nothing && meta_dict !== nothing && parentof(x) isa EXPR &&
             CSTParser.ismacrocall(parentof(x)) && !is_doc_macrocall(parentof(x))
         macroname = parentof(x).args[1]
-        any(n -> _points_to_Base_macro(macroname, n, env, meta_dict), SIGNATURE_PRESERVING_MACROS) ||
+        any(p -> _points_to_macro(macroname, p, env, meta_dict), SIGNATURE_PRESERVING_MACROS) ||
             return 0, typemax(Int), Symbol[], true
     end
 

@@ -505,23 +505,78 @@ end
 # `Vector` (not the old per-root `Set`): a single file analyzed once cannot
 # produce the cross-root duplicates the Set deduplicated, and the CST
 # traversal order keeps the result deterministic.
+"""
+    _annotation_macro_points_to(rt, root, env, defining_path, nm, owner=[:Base]) -> Bool
+
+Whether the macro an inventory annotation names is the one `owner` (a module path)
+provides, resolved through the module tree and the env store. The recorded-name
+counterpart of `StaticLint._points_to_macro`, which answers the same question from
+an `EXPR` with a resolved ref; both compare against
+`StaticLint.macro_store_target`.
+
+No `meta_dict` is involved, and none is needed: a macro's identity is a
+module-level fact — Julia forbids macro definitions in a local scope, and
+`using`/`import` bind module-wide whichever file they sit in — and an annotation's
+module path is the calling module's by construction, since both sides of
+`derived_method_arities` are keyed by it.
+
+A qualified spelling resolves its module and compares the entry against the
+owner's — `maybe_lookup` follows `VarRef`s, so `Foo.@inline` re-exporting Base's
+macro matches while `Foo`'s own macro of that name does not. A bare spelling
+resolves through the module's visible names; the fallback for a name nothing binds
+is the implicit `using Base`, so it can only land on Base's own macro, and only
+when no unresolvable wildcard `using` could be supplying it instead.
+"""
+function _annotation_macro_points_to(rt, root, env, defining_path::Vector{String},
+                                     nm::String, owner::Vector{Symbol}=Symbol[:Base])
+    qualifier, bare = _split_macro_annotation(nm)
+    sym = Symbol(bare)
+    target = StaticLint.macro_store_target(push!(copy(owner), sym), env)
+    target === nothing && return false
+    provides_target(mod::Vector{String}) = !isempty(mod) &&
+        StaticLint.macro_store_target(push!(Symbol[Symbol(m) for m in mod], sym), env) == target
+
+    isempty(qualifier) || return provides_target(qualifier)
+
+    face = get(derived_module_visible_names_idfree(rt, root, defining_path), bare, nothing)
+    # A name this module binds itself, or brings in from elsewhere: the target's
+    # only if that elsewhere provides the very same macro.
+    face === nothing || return provides_target(face.origin_module)
+    # Nothing binds it here, so it resolves through the implicit `using Base` —
+    # which can only supply Base's own, and only when no wildcard `using` we
+    # cannot see through could be supplying it instead.
+    return owner == Symbol[:Base] &&
+        !derived_module_unresolved_wildcard_using(rt, root, defining_path)
+end
+
 # A macro wrapping a definition is known not to rewrite its signature only if it
-# is one of StaticLint's signature-preserving Base macros AND the defining module
-# has not shadowed that name. The inventory records the name but cannot resolve
-# it — resolution needs a `meta_dict`, which is downstream of the inventory — so
-# it is judged here. Macros are keyed `@`-prefixed in the visibility index, so a
-# workspace `macro inline(ex)` or a `using MyPkg: @inline` shows up as "@inline".
-_is_signature_preserving(rt, root, defining_path::Vector{String}, nm::String) =
-    Symbol(nm) in StaticLint.SIGNATURE_PRESERVING_MACROS &&
-    !haskey(derived_module_visible_names_idfree(rt, root, defining_path), nm)
+# is one of StaticLint's signature-preserving Base macros.
+function _is_signature_preserving(rt, root, env, defining_path::Vector{String}, nm::String)
+    bare = Symbol(_annotation_bare_name(nm))
+    return any(StaticLint.SIGNATURE_PRESERVING_MACROS) do path
+        last(path) === bare &&
+            _annotation_macro_points_to(rt, root, env, defining_path, nm, path[1:end-1])
+    end
+end
+
+# `Base.@kwdef struct S; a; b; end` generates `S(a, b)` and `S(; a, b)`, so the
+# call shape is 0..nfields positional plus exactly the fields as keywords. A
+# single range cannot exclude the in-between positional counts (`S(1)` matches
+# neither generated constructor), which errs towards accepting a call.
+const _KWDEF_MACRO = "@kwdef"
 
 # Interpret an inventory-recorded arity: its literal counts stand only if every
-# macro wrapping the definition is signature-preserving, else the arity is
+# macro wrapping the definition is signature-preserving. Otherwise the arity is
 # unknowable and must accept any call — the same answer `check_call`'s own path
-# gives for that definition.
-function _effective_arity(rt, root, defining_path::Vector{String}, a::MethodArity)
+# gives — unless the macro rewrites the shape in a way we know.
+function _effective_arity(rt, root, env, defining_path::Vector{String}, a::MethodArity)
     isempty(a.macro_annotations) && return a
-    all(nm -> _is_signature_preserving(rt, root, defining_path, nm), a.macro_annotations) && return a
+    all(nm -> _is_signature_preserving(rt, root, env, defining_path, nm), a.macro_annotations) && return a
+    if length(a.macro_annotations) == 1 &&
+            _annotation_bare_name(only(a.macro_annotations)) == _KWDEF_MACRO &&
+            _annotation_macro_points_to(rt, root, env, defining_path, only(a.macro_annotations))
+        return MethodArity(0, a.maxargs, a.kws, false)
+    end
     return MethodArity(0, typemax(Int), Symbol[], true)
 end
 
@@ -529,7 +584,7 @@ end
 # function (the case `check_call` argument-count-checks against the full method
 # set), or `nothing` when the callee isn't such a function — then the render path
 # uses the local `describe_call_mismatch` instead.
-function _call_cross_file_arities(rt, root, path, call, meta_dict)
+function _call_cross_file_arities(rt, root, env, path, call, meta_dict)
     root === nothing && return nothing
     func_ref = StaticLint.refof_call_func(call, meta_dict)
     (func_ref isa StaticLint.Binding || func_ref isa StaticLint.TreeRef) || return nothing
@@ -543,7 +598,7 @@ function _call_cross_file_arities(rt, root, path, call, meta_dict)
     name === nothing && return nothing
     p = vcat(path, _in_file_module_names(call, meta_dict))
     haskey(derived_module_visible_names_idfree(rt, root, p), name) || return nothing
-    return [_effective_arity(rt, root, p, a) for a in derived_method_arities(rt, root, p, name)]
+    return [_effective_arity(rt, root, env, p, a) for a in derived_method_arities(rt, root, p, name)]
 end
 
 function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[])
@@ -594,7 +649,7 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
                 # For a tree-visible workspace callee, describe from the full
                 # cross-file arity set (the local candidates are incomplete);
                 # otherwise from the local candidates (store/local methods).
-                ar = _call_cross_file_arities(rt, root, path, err[2], meta_dict)
+                ar = _call_cross_file_arities(rt, root, env, path, err[2], meta_dict)
                 detail = ar !== nothing ?
                     StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar, tree_in_scope) :
                     StaticLint.describe_call_mismatch(err[2], env, meta_dict; tree_in_scope)
@@ -784,7 +839,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # such callees is deferred; see the cross-file-method-checks design doc.)
     tree_arities = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
-        [_effective_arity(rt, root, p, a) for a in derived_method_arities(rt, root, p, name)]
+        [_effective_arity(rt, root, env, p, a) for a in derived_method_arities(rt, root, p, name)]
     end
     # `tree_in_scope` widens the method-set lints' search past Base/Core to the
     # external/workspace modules actually in scope AT THE CALL SITE — mirrors

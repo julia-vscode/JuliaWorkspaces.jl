@@ -587,13 +587,68 @@ end
     ))
     @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw4.runtime, ROOT, B)))
 
-    # A macro-wrapped struct stays permissive (`@kwdef` turns fields into kwargs).
+    # Neither is a foreign module's macro that merely shares the name — the
+    # qualifier says outright that it is not Base's.
+    for qualified in ("module Foo\nmacro inline(ex)\n    ex\nend\nend\nFoo.@inline h(x) = x\n",
+                      "Unknown.@inline h(x) = x\n")
+        jwq = ws_with(Dict(ROOT => root_src, A => qualified, B => "g() = h(1, 2)\n"))
+        @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jwq.runtime, ROOT, B)))
+    end
+
+    # ... while the explicitly-Base spelling stays checked.
+    jwb = ws_with(Dict(
+        ROOT => root_src,
+        A => "Base.@inline h(x) = x\n",
+        B => "g() = h(1, 2)\n",
+    ))
+    @test length(mm(JuliaWorkspaces.derived_file_analysis(jwb.runtime, ROOT, B))) == 1
+
+    # A struct behind an unknown macro stays permissive: the macro may add or
+    # replace constructors. (`@kwdef` is the known exception — see the
+    # generated-shape testitem.)
     jw5 = ws_with(Dict(
         ROOT => root_src,
-        A => "Base.@kwdef struct S\n    a::Int\n    b::Int\nend\n",
+        A => "macro wrap(ex)\n    ex\nend\n@wrap struct S\n    a::Int\n    b::Int\nend\n",
         B => "g() = S(1, 2, 3)\n",
     ))
     @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw5.runtime, ROOT, B)))
+end
+
+@testitem "derived_file_analysis: a @kwdef struct is checked against its generated shape" setup=[FileAnalysisWS] begin
+    # `Base.@kwdef struct S; a; b; end` generates `S(a, b)` AND `S(; a, b)`, so the
+    # call shape is 0..nfields positional plus exactly the field names as keywords —
+    # not "anything", which is all a macro-wrapped struct could claim before.
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+    root_src = "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n"
+    kwdef_src = "Base.@kwdef struct S\n    a::Int\n    b::Int = 2\nend\n"
+
+    flagged(a_src, call) = mm(JuliaWorkspaces.derived_file_analysis(
+        ws_with(Dict(ROOT => root_src, A => a_src, B => "g() = $call\n")).runtime, ROOT, B))
+
+    # Too many positional arguments: neither generated constructor takes 3.
+    @test length(flagged(kwdef_src, "S(1, 2, 3)")) == 1
+    # The positional constructor.
+    @test isempty(flagged(kwdef_src, "S(1, 2)"))
+    # The keyword constructor, fully and partially applied.
+    @test isempty(flagged(kwdef_src, "S(a=1, b=2)"))
+    @test isempty(flagged(kwdef_src, "S(; a=1)"))
+    # A keyword that is not a field.
+    @test length(flagged(kwdef_src, "S(; nosuchfield=1)")) == 1
+
+    # The unqualified spelling needs an explicit import; it is still Base's macro.
+    imported = "using Base: @kwdef\n@kwdef struct S\n    a::Int\n    b::Int = 2\nend\n"
+    @test length(flagged(imported, "S(1, 2, 3)")) == 1
+    @test isempty(flagged(imported, "S(a=1, b=2)"))
+
+    # A workspace macro of the same name is NOT Base's, so nothing is knowable.
+    shadowed = "macro kwdef(ex)\n    ex\nend\n@kwdef struct S\n    a::Int\n    b::Int = 2\nend\n"
+    @test isempty(flagged(shadowed, "S(1, 2, 3)"))
+    @test isempty(flagged(shadowed, "S(; nosuchfield=1)"))
+
+    # Nor is another module's `@kwdef`, however it is spelled.
+    foreign = "module Foo\nmacro kwdef(ex)\n    ex\nend\nend\nFoo.@kwdef struct S\n    a::Int\n    b::Int = 2\nend\n"
+    @test isempty(flagged(foreign, "S(1, 2, 3)"))
+    @test isempty(flagged("Unknown.@kwdef struct S\n    a::Int\nend\n", "S(1, 2, 3)"))
 end
 
 @testitem "derived_file_analysis: a method-call error names the mismatch" setup=[FileAnalysisWS] begin
@@ -2222,4 +2277,95 @@ end
     xs = find_identifiers(cst, "y")
     @test length(xs) == 2
     @test all(x -> SL.hasbinding(x, fa.meta) || SL.hasref(x, fa.meta), xs)
+end
+
+@testitem "macro annotations resolve through the env store" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: _annotation_macro_points_to as _annotation_macro_is_base
+    using JuliaWorkspaces.SymbolServer: ModuleStore, VarRef, FunctionStore, MethodStore
+    using JuliaWorkspaces.StaticLint: ExternalEnv
+
+    jw = ws_with(Dict(ROOT => "module MainPkg\ninclude(\"a.jl\")\nend\n", A => "f(x) = x\n"))
+    rt = jw.runtime
+    base_env = JuliaWorkspaces.derived_stdlib_only_env(rt)
+
+    # A package whose `@inline` IS Base's (a re-export, stored as a `VarRef`) and
+    # whose `@noinline` is its own unrelated macro.
+    inline = Symbol("@inline")
+    noinline = Symbol("@noinline")
+    reexporter = ModuleStore(
+        VarRef(nothing, :Reexporter),
+        Dict{Symbol,Any}(
+            inline => VarRef(VarRef(nothing, :Base), inline),
+            noinline => FunctionStore(VarRef(VarRef(nothing, :Reexporter), noinline),
+                                      MethodStore[], "", VarRef(VarRef(nothing, :Reexporter), noinline)),
+        ),
+        "", Symbol[inline, noinline], Symbol[inline, noinline], Symbol[])
+    syms = copy(base_env.symbols)
+    syms[:Reexporter] = reexporter
+    env = ExternalEnv(syms, base_env.extended_methods, base_env.project_deps)
+    p = ["MainPkg"]
+
+    # A re-export resolves to Base's macro; the module's own macro does not.
+    @test _annotation_macro_is_base(rt, ROOT, env, p, "Reexporter.@inline")
+    @test !_annotation_macro_is_base(rt, ROOT, env, p, "Reexporter.@noinline")
+
+    # The explicit Base spelling, and a bare name resolving through implicit Base.
+    @test _annotation_macro_is_base(rt, ROOT, env, p, "Base.@inline")
+    @test _annotation_macro_is_base(rt, ROOT, env, p, "@inline")
+
+    # A qualifier we cannot resolve says nothing either way, so: not knowable.
+    @test !_annotation_macro_is_base(rt, ROOT, env, p, "Unknown.@inline")
+    # `Core.@inline` is a genuinely different macro from `Base.@inline` — so it is
+    # not Base's, and IS Core's. The module argument is what tells them apart.
+    @test !_annotation_macro_is_base(rt, ROOT, env, p, "Core.@inline")
+    @test _annotation_macro_is_base(rt, ROOT, env, p, "Core.@inline", Symbol[:Core])
+    @test !_annotation_macro_is_base(rt, ROOT, env, p, "Base.@inline", Symbol[:Core])
+    # A bare name is only ever the implicitly-available one, never another
+    # module's: nothing brings `Reexporter`'s macros into scope here.
+    @test !_annotation_macro_is_base(rt, ROOT, env, p, "@inline", Symbol[:Reexporter])
+    # A name Base does not have at all.
+    @test !_annotation_macro_is_base(rt, ROOT, env, p, "@wrap")
+end
+
+@testitem "Core's copies of the signature-preserving macros are recognised" setup=[FileAnalysisWS] begin
+    # `Core.@inline` is a different store entry from `Base.@inline` but just as
+    # signature-preserving, and both the cross-file and the local path must say so.
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "Core.@inline h(x) = x\n",
+        B => "g() = h(1, 2)\n",
+    ))
+    @test length(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B))) == 1
+
+    # The same definition and call in ONE file, which goes through check_call's own
+    # resolution rather than the inventory.
+    jw2 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "Core.@inline h(x) = x\ng() = h(1, 2)\n",
+    ))
+    @test length(mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B))) == 1
+end
+
+@testitem "derived_file_analysis: an unseeable wildcard using makes a bare macro opaque" setup=[FileAnalysisWS] begin
+    # A `using` we cannot resolve may export a macro shadowing Base's, so a bare
+    # `@inline` in that module is no longer provably Base's.
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+    root_src = "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n"
+
+    jw = ws_with(Dict(
+        ROOT => root_src,
+        A => "using NotAPackageWeKnow\n@inline h(x) = x\n",
+        B => "g() = h(1, 2)\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)))
+
+    # An explicit symbol list is not a blind spot: it cannot bring in `@inline`.
+    jw2 = ws_with(Dict(
+        ROOT => root_src,
+        A => "using NotAPackageWeKnow: something\n@inline h(x) = x\n",
+        B => "g() = h(1, 2)\n",
+    ))
+    @test length(mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B))) == 1
 end
