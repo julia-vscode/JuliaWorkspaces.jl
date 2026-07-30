@@ -810,16 +810,24 @@ function get_method(x::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeSto
 end
 get_method(x) = nothing
 
-# A doc wrapper: the implicit `"…" f(x) = 1` form (a `globalrefdoc` macrocall)
-# or an explicit `@doc` / `Mod.@doc` call. Unlike other macros it cannot rewrite
-# what it wraps, so arity checking must see through it.
+# The documentation macro in any of its spellings: the implicit `:globalrefdoc`
+# of `"…" f(x) = 1`, an explicit `@doc`, or a qualified `Mod.@doc`. The single
+# source of truth for the shape — the parent module's doc handling calls this too,
+# so the two cannot drift.
+is_doc_macro_name(x) = false
+function is_doc_macro_name(x::EXPR)
+    headof(x) === :globalrefdoc && return true
+    CSTParser.is_getfield_w_quotenode(x) &&
+        return is_doc_macro_name(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
+    return isidentifier(x) && valofid(x) == "@doc"
+end
+
+# A doc wrapper. Unlike other macros it cannot rewrite what it wraps, so arity
+# checking must see through it.
 function is_doc_macrocall(x::EXPR)
     CSTParser.ismacrocall(x) || return false
     (x.args === nothing || isempty(x.args)) && return false
-    name = x.args[1]
-    headof(name) === :globalrefdoc && return true
-    CSTParser.is_getfield_w_quotenode(name) && (name = CSTParser.unquotenode(CSTParser.rhs_getfield(name)))
-    return isidentifier(name) && valofid(name) == "@doc"
+    return is_doc_macro_name(x.args[1])
 end
 
 isdocumented(x::EXPR) = parentof(x) isa EXPR && is_doc_macrocall(parentof(x))

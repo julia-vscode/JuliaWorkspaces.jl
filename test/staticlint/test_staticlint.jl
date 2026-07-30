@@ -1486,6 +1486,24 @@ end
     end
 end
 
+@testitem "is_doc_macro_name covers every doc spelling" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: is_doc_macro_name, is_doc_macrocall
+    using JuliaWorkspaces: CSTParser
+
+    # One predicate for all three spellings: the arity checks read it through
+    # `is_doc_macrocall`, the hover and inventory layers call it directly.
+    for src in ("\"docs\"\nf(x) = 1\n", "@doc \"docs\" f(x) = 1\n", "Base.@doc \"docs\" f(x) = 1\n")
+        wrapper = CSTParser.parse(src, true).args[1]
+        @test is_doc_macrocall(wrapper)
+        @test is_doc_macro_name(wrapper.args[1])
+    end
+
+    other = CSTParser.parse("@inline f(x) = 1\n", true).args[1]
+    @test !is_doc_macrocall(other)
+    @test !is_doc_macro_name(other.args[1])
+    @test !is_doc_macro_name(nothing)
+end
+
 @testitem "struct_nargs: a field's docstring is not a field" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: struct_nargs
 

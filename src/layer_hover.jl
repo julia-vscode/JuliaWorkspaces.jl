@@ -265,21 +265,6 @@ function _maybe_get_doc_expr(x)
     return x
 end
 
-# Recognise the documentation macro in any of its spellings: the implicit
-# `:globalrefdoc`, an explicit `@doc`, or a module-qualified `Foo.@doc`.
-_is_doc_macro_name(x) = false
-function _is_doc_macro_name(x::CSTParser.EXPR)
-    if CSTParser.headof(x) === :globalrefdoc
-        return true
-    elseif CSTParser.isidentifier(x)
-        return CSTParser.valof(x) == "@doc"
-    elseif CSTParser.is_getfield_w_quotenode(x)
-        return _is_doc_macro_name(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
-    else
-        return false
-    end
-end
-
 # A string-macro name like `raw` / `html` (`@raw_str`-style).
 _is_string_macro_name(x) = false
 function _is_string_macro_name(x::CSTParser.EXPR)
@@ -335,7 +320,7 @@ _is_doc_expr(x) = false
 function _is_doc_expr(x::CSTParser.EXPR)
     return CSTParser.ismacrocall(x) &&
            length(x.args) == 4 &&
-           _is_doc_macro_name(x.args[1]) &&
+           StaticLint.is_doc_macro_name(x.args[1]) &&
            CSTParser.isstring(_get_doc_payload_expr(x))
 end
 
