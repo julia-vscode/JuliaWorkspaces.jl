@@ -8,6 +8,16 @@
 #   using TestItemRunner
 #   @run_package_tests filter=ti->occursin("cache-infra", ti.name)
 
+@testitem "cache-infra: the shell STORE_VERSION matches CACHE_FORMAT_VERSION" begin
+    using JuliaWorkspaces
+    # symbolcache_common.sh keeps a hand-maintained copy of the Julia constant;
+    # a bump that misses it points every script at the previous store version.
+    common = read(joinpath(@__DIR__, "..", "scripts", "symbolcache_common.sh"), String)
+    m = match(r"^STORE_VERSION=\"\$\{SYMBOLCACHE_STORE_VERSION:-(v\d+)\}\"$"m, common)
+    @test m !== nothing
+    @test m[1] == JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
+end
+
 # ===========================================================================
 # regen_symbolcache.sh tests
 # ===========================================================================
