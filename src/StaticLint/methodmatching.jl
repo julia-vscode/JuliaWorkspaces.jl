@@ -296,13 +296,15 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
         for i in 1:length(method.args[3].args)
             arg = method.args[3].args[i]
             if defines_function(arg)
-                # Hit an inner constructor so forget about the default one.
+                # Hit an inner constructor so forget about the default one. The
+                # call matches the struct if it matches ANY of them — they are
+                # alternative methods, not conjunctive requirements.
                 for arg in method.args[3].args
                     if defines_function(arg)
-                        !match_method(args, kws, arg, store, meta_dict) && return false
+                        match_method(args, kws, arg, store, meta_dict) && return true
                     end
                 end
-                return true
+                return false
             end
             push!(margs, arg_type(arg, true, meta_dict, store))
         end

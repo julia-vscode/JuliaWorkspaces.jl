@@ -1486,6 +1486,34 @@ end
     end
 end
 
+@testitem "match_method: a struct matches a call matching any inner constructor" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: match_method, call_arg_types, getsymbols
+
+    cst, meta_dict, jw = parse_and_pass("""
+    struct Multi
+        x::Int
+        Multi(x::Int) = new(x)
+        Multi(s::String) = new(length(s))
+    end
+    Multi(1)
+    Multi("a")
+    Multi(1, 2)
+    """)
+    env = get_env(jw)
+    structex = cst.args[1]
+    function struct_matches(call)
+        args, kws = call_arg_types(call, false, meta_dict, getsymbols(env))
+        match_method(args, kws, structex, getsymbols(env), meta_dict)
+    end
+
+    # Once a struct has inner constructors the default one is gone, so the call
+    # has to match *one* of them — not all of them.
+    @test struct_matches(cst.args[2])
+    @test struct_matches(cst.args[3])
+    # A call matching none of them still doesn't match the struct.
+    @test !struct_matches(cst.args[4])
+end
+
 @testitem "using statements imported submodule self" setup=[shared_static_lint] begin # e.g. `using StaticLint: StaticLint`
     using JuliaWorkspaces.StaticLint: hasref
 
