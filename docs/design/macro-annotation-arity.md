@@ -1,12 +1,16 @@
 # Spec: macro annotations in the inventory, resolved at the consumer
 
-Status: proposed. Supersedes the alternative of making `func_nargs`
-unconditionally permissive for macro-wrapped definitions whenever it has no
-resolution state — that removes the divergence in §1 but at the cost of the
-false negatives measured there, so it was reverted rather than shipped.
+Status: implemented (§4-§6, §8); §11 follow-ups still open. Built by
+`docs/design/macro-annotation-arity-plan.md`.
 
-§7 (the doc-wrapper defect) is independent of the rest and ships first, on its
-own. File/line anchors are as of `f710e98`.
+Supersedes the alternative of making `func_nargs` unconditionally permissive for
+macro-wrapped definitions whenever it has no resolution state — that removes the
+divergence in §1 but at the cost of the false negatives measured there, so it was
+reverted rather than shipped.
+
+§7 (the doc-wrapper defect) shipped first, on its own, and covers structs as well
+as functions — `struct_nargs` has its own macro-wrapped early return, so
+documented structs were affected too. File/line anchors are as of `f710e98`.
 
 ## 1. Problem
 
@@ -279,16 +283,18 @@ Each test is written first and must be observed failing for the stated reason.
 - `InventoryItem`/`MethodArity` are Salsa-cached structs: development needs
   `julia_restart` after the struct edit (Revise cannot redefine them).
 
-## 10. Open decisions
+## 10. Decisions, as built
 
-1. **Unnamed wrappers** (§5): sentinel `"?"` vs a separate boolean. Sentinel is
-   simpler and fails safe (never matches the preserving set); the boolean is
-   more explicit. Recommend the sentinel with a comment.
-2. **Explicit `@doc` form** in §7: same commit or follow-up. Recommend same
-   commit — it is one extra predicate.
-3. **Same-file full resolution** (§6 ceiling): build in v1 or leave as a
-   refinement. Recommend leaving it out; the tree-shadow check already covers
-   the case that matters.
+1. **Unnameable wrappers** (§5) record the sentinel `"?"`, via
+   `something(_macro_name_string(…), "?")`. No parsed source is known to produce
+   a macrocall whose name `_macro_name_string` rejects — `@(m) f(x) = 1` does not
+   parse as a macrocall at all, and `@$m f(x) = 1` yields the readable name
+   `"@$"` — so this is a fail-safe, not a live path, and is deliberately not
+   covered by a test.
+2. **Explicit `@doc` / `Mod.@doc`** is handled by `is_doc_macrocall`
+   (`checks.jl`), shipped with §7 alongside the implicit `globalrefdoc` form.
+3. **Same-file full resolution** (§6 ceiling) was not built. The name +
+   tree-shadow check covers the case that matters.
 
 ## 11. Out of scope (unlocked follow-ups)
 

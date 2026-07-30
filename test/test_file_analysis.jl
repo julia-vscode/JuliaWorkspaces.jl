@@ -547,6 +547,55 @@ end
     @test length(mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B))) == 1
 end
 
+@testitem "derived_file_analysis: a macro-wrapped definition's arity is judged by the macro" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+    root_src = "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n"
+
+    # An unknown macro may rewrite the signature, so the call cannot be judged —
+    # matching what check_call's own path does for the same definition.
+    jw = ws_with(Dict(
+        ROOT => root_src,
+        A => "macro wrap(ex)\n    ex\nend\n@wrap f(x) = x\n",
+        B => "g() = f(1, 2)\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)))
+
+    # `@inline` provably keeps the signature, so the arity is still checked.
+    jw2 = ws_with(Dict(
+        ROOT => root_src,
+        A => "@inline h(x) = x\n",
+        B => "g() = h(1, 2)\n",
+    ))
+    d2 = mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B))
+    @test length(d2) == 1
+    @test occursin("Expected 1 argument, got 2", d2[1])
+
+    # ... and a correct call to it is not flagged.
+    jw3 = ws_with(Dict(
+        ROOT => root_src,
+        A => "@inline h(x) = x\n",
+        B => "g() = h(1)\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw3.runtime, ROOT, B)))
+
+    # A workspace macro shadowing the name `@inline` makes it unknowable again:
+    # the name alone is not enough.
+    jw4 = ws_with(Dict(
+        ROOT => root_src,
+        A => "macro inline(ex)\n    ex\nend\n@inline h(x) = x\n",
+        B => "g() = h(1, 2)\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw4.runtime, ROOT, B)))
+
+    # A macro-wrapped struct stays permissive (`@kwdef` turns fields into kwargs).
+    jw5 = ws_with(Dict(
+        ROOT => root_src,
+        A => "Base.@kwdef struct S\n    a::Int\n    b::Int\nend\n",
+        B => "g() = S(1, 2, 3)\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw5.runtime, ROOT, B)))
+end
+
 @testitem "derived_file_analysis: a method-call error names the mismatch" setup=[FileAnalysisWS] begin
     # the flagged call renders a specific reason, not the bare
     # "Possible method call error." — here an arity mismatch on a store function.

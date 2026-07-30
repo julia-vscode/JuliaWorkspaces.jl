@@ -505,6 +505,26 @@ end
 # `Vector` (not the old per-root `Set`): a single file analyzed once cannot
 # produce the cross-root duplicates the Set deduplicated, and the CST
 # traversal order keeps the result deterministic.
+# A macro wrapping a definition is known not to rewrite its signature only if it
+# is one of StaticLint's signature-preserving Base macros AND the defining module
+# has not shadowed that name. The inventory records the name but cannot resolve it
+# (see docs/design/macro-annotation-arity.md); this is where it is judged. Macros
+# are keyed `@`-prefixed in the visibility index, so a workspace `macro inline(ex)`
+# or a `using MyPkg: @inline` shows up as "@inline".
+_is_signature_preserving(rt, root, defining_path::Vector{String}, nm::String) =
+    Symbol(nm) in StaticLint.SIGNATURE_PRESERVING_MACROS &&
+    !haskey(derived_module_visible_names_idfree(rt, root, defining_path), nm)
+
+# Interpret an inventory-recorded arity: its literal counts stand only if every
+# macro wrapping the definition is signature-preserving, else the arity is
+# unknowable and must accept any call — the same answer `check_call`'s own path
+# gives for that definition.
+function _effective_arity(rt, root, defining_path::Vector{String}, a::MethodArity)
+    isempty(a.macro_annotations) && return a
+    all(nm -> _is_signature_preserving(rt, root, defining_path, nm), a.macro_annotations) && return a
+    return MethodArity(0, typemax(Int), Symbol[], true)
+end
+
 # Cross-file arity set for a call whose callee is a tree-visible workspace
 # function (the case `check_call` argument-count-checks against the full method
 # set), or `nothing` when the callee isn't such a function — then the render path
@@ -523,7 +543,7 @@ function _call_cross_file_arities(rt, root, path, call, meta_dict)
     name === nothing && return nothing
     p = vcat(path, _in_file_module_names(call, meta_dict))
     haskey(derived_module_visible_names_idfree(rt, root, p), name) || return nothing
-    return derived_method_arities(rt, root, p, name)
+    return [_effective_arity(rt, root, p, a) for a in derived_method_arities(rt, root, p, name)]
 end
 
 function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[])
@@ -764,7 +784,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # such callees is deferred; see the cross-file-method-checks design doc.)
     tree_arities = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
-        derived_method_arities(rt, root, p, name)
+        [_effective_arity(rt, root, p, a) for a in derived_method_arities(rt, root, p, name)]
     end
     # `tree_in_scope` widens the method-set lints' search past Base/Core to the
     # external/workspace modules actually in scope AT THE CALL SITE — mirrors
