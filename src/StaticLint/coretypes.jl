@@ -20,8 +20,13 @@ const Array = SymbolServer.stdlibs[:Core][:Array]
 const Vararg = SymbolServer.FakeTypeName(Core.Vararg)
 
 iscoretype(x, name) = false
-iscoretype(x::SymbolServer.VarRef, name) = x isa SymbolServer.DataTypeStore && x.name.name == name && x.name isa SymbolServer.VarRef && x.name.parent.name == :Core
-iscoretype(x::SymbolServer.DataTypeStore, name) = x isa SymbolServer.DataTypeStore && x.name.name.name == name && x.name.name isa SymbolServer.VarRef && x.name.name.parent.name == :Core
+# The three shapes a store type name arrives in: a bare `VarRef`, the
+# `FakeTypeName` wrapping one (method signatures, field types) and the
+# `DataTypeStore` wrapping that.
+iscoretype(x::SymbolServer.VarRef, name) =
+    x.name == name && x.parent isa SymbolServer.VarRef && x.parent.name == :Core
+iscoretype(x::SymbolServer.FakeTypeName, name) = iscoretype(x.name, name)
+iscoretype(x::SymbolServer.DataTypeStore, name) = iscoretype(x.name, name)
 isdatatype(x) = iscoretype(x, :DataType)
 isfunction(x) = iscoretype(x, :Function)
 ismodule(x) = iscoretype(x, :Module)
