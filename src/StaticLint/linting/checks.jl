@@ -177,8 +177,11 @@ end
 
 # Call
 function struct_nargs(x::EXPR, env=nothing, meta_dict=nothing)
-    # struct defs wrapped in macros are likely to have some arbirtary additional constructors, so lets allow anything
-    parentof(x) isa EXPR && CSTParser.ismacrocall(parentof(x)) && return 0, typemax(Int), Symbol[], true
+    # struct defs wrapped in macros are likely to have some arbirtary additional
+    # constructors, so lets allow anything — except behind a doc wrapper, which
+    # adds no constructors (see `func_nargs`).
+    parentof(x) isa EXPR && CSTParser.ismacrocall(parentof(x)) &&
+        !is_doc_macrocall(parentof(x)) && return 0, typemax(Int), Symbol[], true
     minargs, maxargs, kws, kwsplat = 0, 0, Symbol[], false
     args = x.args[3]
     length(args.args) == 0 && return 0, typemax(Int), kws, kwsplat
@@ -218,8 +221,11 @@ const SIGNATURE_PRESERVING_MACROS = Symbol[
 
 function func_nargs(x::EXPR, env=nothing, meta_dict=nothing)
     # early return for macro-wrapped functions, unless we know the macro does
-    # not modify the signature (requires env + meta_dict to resolve the macro)
-    if env !== nothing && meta_dict !== nothing && parentof(x) isa EXPR && CSTParser.ismacrocall(parentof(x))
+    # not modify the signature (requires env + meta_dict to resolve the macro).
+    # A doc wrapper is exempt: it is a macrocall, but it cannot rewrite the
+    # signature it wraps, so a docstring must not stop the arity being checked.
+    if env !== nothing && meta_dict !== nothing && parentof(x) isa EXPR &&
+            CSTParser.ismacrocall(parentof(x)) && !is_doc_macrocall(parentof(x))
         macroname = parentof(x).args[1]
         any(n -> _points_to_Base_macro(macroname, n, env, meta_dict), SIGNATURE_PRESERVING_MACROS) ||
             return 0, typemax(Int), Symbol[], true
@@ -799,7 +805,19 @@ function get_method(x::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeSto
 end
 get_method(x) = nothing
 
-isdocumented(x::EXPR) = parentof(x) isa EXPR && CSTParser.ismacrocall(parentof(x)) && headof(parentof(x).args[1]) === :globalrefdoc
+# A doc wrapper: the implicit `"…" f(x) = 1` form (a `globalrefdoc` macrocall)
+# or an explicit `@doc` / `Mod.@doc` call. Unlike other macros it cannot rewrite
+# what it wraps, so arity checking must see through it.
+function is_doc_macrocall(x::EXPR)
+    CSTParser.ismacrocall(x) || return false
+    (x.args === nothing || isempty(x.args)) && return false
+    name = x.args[1]
+    headof(name) === :globalrefdoc && return true
+    CSTParser.is_getfield_w_quotenode(name) && (name = CSTParser.unquotenode(CSTParser.rhs_getfield(name)))
+    return isidentifier(name) && valofid(name) == "@doc"
+end
+
+isdocumented(x::EXPR) = parentof(x) isa EXPR && is_doc_macrocall(parentof(x))
 
 function check_loop_iter(x::EXPR, env::ExternalEnv, meta_dict)
     if headof(x) === :for
