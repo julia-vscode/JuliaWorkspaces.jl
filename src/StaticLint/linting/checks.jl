@@ -182,9 +182,23 @@ function struct_nargs(x::EXPR, env=nothing, meta_dict=nothing)
     minargs, maxargs, kws, kwsplat = 0, 0, Symbol[], false
     args = x.args[3]
     length(args.args) == 0 && return 0, typemax(Int), kws, kwsplat
-    inner_constructor = findfirst(a -> CSTParser.defines_function(a), args.args)
-    if inner_constructor !== nothing
-        return func_nargs(args.args[inner_constructor], env, meta_dict)
+    # Inner constructors are alternative methods, so the struct's arity is their
+    # union — keying on the first one alone false-flags calls to the others. A
+    # single range can't express a gap (arities 1 and 3 admit 2), which errs
+    # towards accepting a call, never towards a false positive.
+    inner_constructors = findall(a -> CSTParser.defines_function(a), args.args)
+    if !isempty(inner_constructors)
+        minargs, maxargs = typemax(Int), 0
+        for i in inner_constructors
+            imin, imax, ikws, ikwsplat = func_nargs(args.args[i], env, meta_dict)
+            minargs = min(minargs, imin)
+            maxargs = max(maxargs, imax)
+            for kw in ikws
+                kw in kws || push!(kws, kw)
+            end
+            kwsplat |= ikwsplat
+        end
+        return minargs, maxargs, kws, kwsplat
     else
         minargs = maxargs = length(args.args)
     end

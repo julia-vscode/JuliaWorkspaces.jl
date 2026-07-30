@@ -513,6 +513,40 @@ end
     @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw3.runtime, ROOT, B)))
 end
 
+@testitem "derived_file_analysis: every inner constructor counts towards a struct's arity" setup=[FileAnalysisWS] begin
+    # A struct's cross-file arity comes from the inventory (`struct_nargs`), which
+    # must cover ALL inner constructors — not just the first one, or calls to the
+    # others false-flag.
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => """
+        struct S
+            x::Int
+            S(x) = new(x)
+            S(x, y) = new(x + y)
+        end
+        """,
+        B => "f() = (S(1), S(1, 2))\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)))
+
+    # An arity no inner constructor accepts is still flagged.
+    jw2 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => """
+        struct S
+            x::Int
+            S(x) = new(x)
+            S(x, y) = new(x + y)
+        end
+        """,
+        B => "f() = S(1, 2, 3)\n",
+    ))
+    @test length(mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B))) == 1
+end
+
 @testitem "derived_file_analysis: a method-call error names the mismatch" setup=[FileAnalysisWS] begin
     # the flagged call renders a specific reason, not the bare
     # "Possible method call error." — here an arity mismatch on a store function.
