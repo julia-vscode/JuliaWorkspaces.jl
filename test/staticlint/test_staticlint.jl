@@ -1486,6 +1486,39 @@ end
     end
 end
 
+@testitem "arity helpers can report the literal count under a macro" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: func_nargs, struct_nargs
+
+    cst, meta_dict, jw = parse_and_pass("""
+    macro wrap(ex)
+        ex
+    end
+    @wrap f(x, y) = 1
+    @wrap struct S
+        a::Int
+        b::Int
+    end
+    """)
+    env = get_env(jw)
+    fdef = cst.args[2].args[3]        # the `f(x, y) = 1` inside the macrocall
+    sdef = cst.args[3].args[3]        # the `struct S … end` inside the macrocall
+
+    # Default: unknowable, because the macro may rewrite the signature.
+    @test func_nargs(fdef, env, meta_dict) == (0, typemax(Int), Symbol[], true)
+    @test struct_nargs(sdef, env, meta_dict) == (0, typemax(Int), Symbol[], true)
+
+    # Opted out: the literal shape as written.
+    @test func_nargs(fdef, env, meta_dict; macro_permissive=false) == (2, 2, Symbol[], false)
+    @test struct_nargs(sdef, env, meta_dict; macro_permissive=false) == (2, 2, Symbol[], false)
+
+    # An unwrapped definition is unaffected by the keyword.
+    cst2, meta_dict2, jw2 = parse_and_pass("g(x) = 1\n")
+    gdef = cst2.args[1]
+    @test func_nargs(gdef, get_env(jw2), meta_dict2) ==
+          func_nargs(gdef, get_env(jw2), meta_dict2; macro_permissive=false) ==
+          (1, 1, Symbol[], false)
+end
+
 @testitem "a docstring does not hide a wrong-arity call" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
 

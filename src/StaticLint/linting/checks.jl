@@ -176,11 +176,11 @@ function _typeof(x, state)
 end
 
 # Call
-function struct_nargs(x::EXPR, env=nothing, meta_dict=nothing)
+function struct_nargs(x::EXPR, env=nothing, meta_dict=nothing; macro_permissive=true)
     # struct defs wrapped in macros are likely to have some arbirtary additional
     # constructors, so lets allow anything — except behind a doc wrapper, which
-    # adds no constructors (see `func_nargs`).
-    parentof(x) isa EXPR && CSTParser.ismacrocall(parentof(x)) &&
+    # adds no constructors (see `func_nargs`), or when the caller opts out.
+    macro_permissive && parentof(x) isa EXPR && CSTParser.ismacrocall(parentof(x)) &&
         !is_doc_macrocall(parentof(x)) && return 0, typemax(Int), Symbol[], true
     minargs, maxargs, kws, kwsplat = 0, 0, Symbol[], false
     args = x.args[3]
@@ -193,7 +193,7 @@ function struct_nargs(x::EXPR, env=nothing, meta_dict=nothing)
     if !isempty(inner_constructors)
         minargs, maxargs = typemax(Int), 0
         for i in inner_constructors
-            imin, imax, ikws, ikwsplat = func_nargs(args.args[i], env, meta_dict)
+            imin, imax, ikws, ikwsplat = func_nargs(args.args[i], env, meta_dict; macro_permissive)
             minargs = min(minargs, imin)
             maxargs = max(maxargs, imax)
             for kw in ikws
@@ -219,12 +219,14 @@ const SIGNATURE_PRESERVING_MACROS = Symbol[
     Symbol("@nospecializeinfer"),
 ]
 
-function func_nargs(x::EXPR, env=nothing, meta_dict=nothing)
+function func_nargs(x::EXPR, env=nothing, meta_dict=nothing; macro_permissive=true)
     # early return for macro-wrapped functions, unless we know the macro does
     # not modify the signature (requires env + meta_dict to resolve the macro).
     # A doc wrapper is exempt: it is a macrocall, but it cannot rewrite the
     # signature it wraps, so a docstring must not stop the arity being checked.
-    if env !== nothing && meta_dict !== nothing && parentof(x) isa EXPR &&
+    # `macro_permissive=false` opts out entirely: the caller records the wrapping
+    # macro separately and interprets it itself (see the inventory).
+    if macro_permissive && env !== nothing && meta_dict !== nothing && parentof(x) isa EXPR &&
             CSTParser.ismacrocall(parentof(x)) && !is_doc_macrocall(parentof(x))
         macroname = parentof(x).args[1]
         any(n -> _points_to_Base_macro(macroname, n, env, meta_dict), SIGNATURE_PRESERVING_MACROS) ||
