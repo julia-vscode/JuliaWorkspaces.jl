@@ -38,6 +38,7 @@ Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
         "call", "iter", "nothingcomp", "constif", "lazy", "datadecl", "typeparam", "modname", "pirates", "useoffuncargs",
         "kwdefault", "literal", "break-continue", "constdecl",
         "missing-refs",
+        "unresolved-import",
         "format-config-errors",
     ]
 
