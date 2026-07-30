@@ -132,6 +132,18 @@ end
     end
 end
 
+@testitem "inventory: a field modifier does not hide the field" setup=[InventoryWS] begin
+    fields_of(src) = only(filter(i -> i.name == "S", inventory_of(src)[1].items)).field_names
+
+    # `@atomic` wraps the declaration in a macrocall whose last argument is the
+    # field, in both the bare and the defaulted spelling. Asking `_field_name` about
+    # the macrocall itself yielded nothing, so the field was missing entirely.
+    @test fields_of("mutable struct S\n    @atomic a::Int\n    b::Int\nend\n") == ["a", "b"]
+    @test fields_of("mutable struct S\n    @atomic a::Int = 1\nend\n") == ["a"]
+    # A macrocall that leaves no field declaration behind still contributes no name.
+    @test fields_of("struct S\n    @weird a, b\n    c::Int\nend\n") == ["c"]
+end
+
 @testitem "inventory extraction: kinds, names, signatures, fields" setup=[InventoryWS] begin
     inv, _ = inventory_of("""
     f(x) = x + 1

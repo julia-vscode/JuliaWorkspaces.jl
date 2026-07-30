@@ -766,6 +766,15 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             field_names = String[]
             for arg in x.args[3].args
                 CSTParser.defines_function(arg) && continue
+                # A field modifier wraps the declaration in a macrocall whose LAST
+                # argument is the field (`@atomic a::Int = 1`). Unwrapping is
+                # name-free on purpose: any such macro leaves a field behind, and a
+                # shape that isn't a field declaration yields no name anyway. Without
+                # this the field is missing from `field_names` entirely, and so from
+                # every consumer of it (completion, hover, field-access checking).
+                if CSTParser.ismacrocall(arg) && arg.args !== nothing && length(arg.args) > 1
+                    arg = last(arg.args)
+                end
                 if CSTParser.headof(arg) === :const
                     arg = arg.args[1]
                 end
