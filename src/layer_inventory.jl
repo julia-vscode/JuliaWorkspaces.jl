@@ -131,14 +131,15 @@ end
 const EMPTY_FILE_INVENTORY = FileInventory(
     InventoryItem[], InventoryImport[], InventoryExport[], InventoryInclude[], InventoryModule[])
 
-# Detect a doc-macro wrapper: a 4-arg :macrocall whose first arg is the
-# implicit `globalrefdoc` or an explicit `@doc` / `Mod.@doc`. The wrapped item
-# sits at args[4]. Mirrors layer_hover.jl's `_is_doc_expr` shape and
-# layer_navigation.jl:105-109's offset handling.
+# Detect a doc-macro wrapper: a 4-arg :macrocall whose first arg is a doc-macro
+# name (`StaticLint.is_doc_macro_name` — the implicit `globalrefdoc` or an
+# explicit `@doc` / `Mod.@doc`). The wrapped item sits at args[4]. Mirrors
+# layer_hover.jl's `_is_doc_expr` shape and layer_navigation.jl:105-109's offset
+# handling.
 function _doc_wrapped_item(x::CSTParser.EXPR)
     CSTParser.ismacrocall(x) || return nothing
     x.args !== nothing && length(x.args) == 4 || return nothing
-    _is_doc_macro_name(x.args[1]) || return nothing
+    StaticLint.is_doc_macro_name(x.args[1]) || return nothing
     return x.args[4]
 end
 
@@ -535,8 +536,8 @@ end
 _field_name(x) = _item_name(CSTParser.rem_decl(x))
 
 # The macro name as a plain string, handling the `Mod.@macro` qualified form.
-# Mirrors the structure of `layer_hover.jl`'s `_is_doc_macro_name`, returning
-# the name string instead of a boolean match.
+# Mirrors the structure of `StaticLint.is_doc_macro_name`, returning the name
+# string instead of a boolean match.
 _macro_name_string(x) = nothing
 function _macro_name_string(x::CSTParser.EXPR)
     if CSTParser.isidentifier(x)
@@ -766,6 +767,15 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             field_names = String[]
             for arg in x.args[3].args
                 CSTParser.defines_function(arg) && continue
+                # A field modifier wraps the declaration in a macrocall whose LAST
+                # argument is the field (`@atomic a::Int = 1`). Unwrapping is
+                # name-free on purpose: any such macro leaves a field behind, and a
+                # shape that isn't a field declaration yields no name anyway. Without
+                # this the field is missing from `field_names` entirely, and so from
+                # every consumer of it (completion, hover, field-access checking).
+                if CSTParser.ismacrocall(arg) && arg.args !== nothing && length(arg.args) > 1
+                    arg = last(arg.args)
+                end
                 if CSTParser.headof(arg) === :const
                     arg = arg.args[1]
                 end

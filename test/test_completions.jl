@@ -1126,6 +1126,36 @@ end
     @test fields_at(baseline, "\n    x.\n") == String[]
 end
 
+@testitem "Completions: getfield on a parametric store type" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    function fields_at(source, marker)
+        uri = URI("file:///compparam/test.jl")
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        index = findfirst(marker, source)[end]
+        sort([item.label for item in get_completions(jw, uri, index).items])
+    end
+
+    # `Dict` is cached from `Dict{K,V}`, which is not concrete — its field names
+    # must survive that anyway.
+    source = """
+    function foo(d::Dict)
+        d.
+    end
+    """
+    @test "keys" in fields_at(source, "\n    d.\n")
+
+    # A concrete store type for contrast.
+    source_concrete = """
+    function foo(v::VersionNumber)
+        v.
+    end
+    """
+    @test "major" in fields_at(source_concrete, "\n    v.\n")
+end
+
 @testitem "Completions: getfield type assertion narrows per branch" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
     using JuliaWorkspaces.URIs2: URI

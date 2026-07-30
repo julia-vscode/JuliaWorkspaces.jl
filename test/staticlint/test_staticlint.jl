@@ -1486,6 +1486,129 @@ end
     end
 end
 
+@testitem "is_doc_macro_name covers every doc spelling" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: is_doc_macro_name, is_doc_macrocall
+    using JuliaWorkspaces: CSTParser
+
+    # One predicate for all three spellings: the arity checks read it through
+    # `is_doc_macrocall`, the hover and inventory layers call it directly.
+    for src in ("\"docs\"\nf(x) = 1\n", "@doc \"docs\" f(x) = 1\n", "Base.@doc \"docs\" f(x) = 1\n")
+        wrapper = CSTParser.parse(src, true).args[1]
+        @test is_doc_macrocall(wrapper)
+        @test is_doc_macro_name(wrapper.args[1])
+    end
+
+    other = CSTParser.parse("@inline f(x) = 1\n", true).args[1]
+    @test !is_doc_macrocall(other)
+    @test !is_doc_macro_name(other.args[1])
+    @test !is_doc_macro_name(nothing)
+end
+
+@testitem "struct_nargs: a field's docstring is not a field" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: struct_nargs
+
+    # A docstring inside a struct body is a bare string child of the block, so
+    # counting every child made a documented field's struct demand one argument
+    # too many — `S(1)` was "Expected 2 arguments, got 1".
+    cst, meta_dict, jw = parse_and_pass("""
+    struct S
+        "the a field"
+        a::Int
+    end
+    struct T
+        a::Int
+    end
+    """)
+    @test struct_nargs(cst.args[1]) == struct_nargs(cst.args[2]) == (1, 1, Symbol[], false)
+
+    # A body holding nothing but a docstring has no fields, so it answers exactly
+    # like an empty body rather than demanding zero arguments.
+    cst2, _, _ = parse_and_pass("struct S\n    \"docs\"\nend\nstruct T\nend\n")
+    @test struct_nargs(cst2.args[1]) == struct_nargs(cst2.args[2]) == (0, typemax(Int), Symbol[], false)
+end
+
+@testitem "a docstring does not hide a wrong-arity call" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A doc wrapper is a macrocall, but it cannot rewrite the signature it wraps,
+    # so it must not make the definition's arity unknowable.
+    has_callargs(cst, meta_dict, jw) =
+        any(errorof(x, meta_dict) === IncorrectCallArgs for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    for def in ("\"docs\"\nf(x) = 1",              # implicit globalrefdoc
+                "@doc \"docs\" f(x) = 1",          # explicit @doc
+                "Base.@doc \"docs\" f(x) = 1")     # qualified @doc
+        let (cst, meta_dict, jw) = parse_and_pass(def * "\ng() = f(1, 2)\n")
+            @test has_callargs(cst, meta_dict, jw)
+        end
+        # ... and a correct call is still not flagged.
+        let (cst, meta_dict, jw) = parse_and_pass(def * "\ng() = f(1)\n")
+            @test !has_callargs(cst, meta_dict, jw)
+        end
+    end
+
+    # Same for a docstring'd struct, whose constructor arity comes from
+    # `struct_nargs` and its own macro-wrapped early return.
+    structdef = "\"docs\"\nstruct S\n    a::Int\nend"
+    let (cst, meta_dict, jw) = parse_and_pass(structdef * "\ng() = S(1, 2)\n")
+        @test has_callargs(cst, meta_dict, jw)
+    end
+    let (cst, meta_dict, jw) = parse_and_pass(structdef * "\ng() = S(1)\n")
+        @test !has_callargs(cst, meta_dict, jw)
+    end
+
+    # A genuinely signature-opaque macro still suppresses the check, for both
+    # functions and structs (`@kwdef` turns fields into keywords).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro wrap(ex)
+            ex
+        end
+        @wrap f(x) = 1
+        g() = f(1, 2)
+        """)
+        @test !has_callargs(cst, meta_dict, jw)
+    end
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro wrap(ex)
+            ex
+        end
+        @wrap struct S
+            a::Int
+        end
+        g() = S(1, 2)
+        """)
+        @test !has_callargs(cst, meta_dict, jw)
+    end
+end
+
+@testitem "match_method: a struct matches a call matching any inner constructor" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: match_method, call_arg_types, getsymbols
+
+    cst, meta_dict, jw = parse_and_pass("""
+    struct Multi
+        x::Int
+        Multi(x::Int) = new(x)
+        Multi(s::String) = new(length(s))
+    end
+    Multi(1)
+    Multi("a")
+    Multi(1, 2)
+    """)
+    env = get_env(jw)
+    structex = cst.args[1]
+    function struct_matches(call)
+        args, kws = call_arg_types(call, false, meta_dict, getsymbols(env))
+        match_method(args, kws, structex, getsymbols(env), meta_dict)
+    end
+
+    # Once a struct has inner constructors the default one is gone, so the call
+    # has to match *one* of them — not all of them.
+    @test struct_matches(cst.args[2])
+    @test struct_matches(cst.args[3])
+    # A call matching none of them still doesn't match the struct.
+    @test !struct_matches(cst.args[4])
+end
+
 @testitem "using statements imported submodule self" setup=[shared_static_lint] begin # e.g. `using StaticLint: StaticLint`
     using JuliaWorkspaces.StaticLint: hasref
 

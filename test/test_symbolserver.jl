@@ -489,6 +489,33 @@ end
     @test back.fieldnames == [:a, :b]
 end
 
+@testitem "SymbolServer: DataTypeStore keeps field names for parametric types" begin
+    using JuliaWorkspaces.SymbolServer: DataTypeStore
+    using JuliaWorkspaces.SymbolServer.CacheStore: write, read
+
+    # `unwrap_unionall(Dict)` is `Dict{K,V}`, which still carries free typevars
+    # and so is not concrete — but its field *names* are perfectly well defined.
+    d = DataTypeStore(Dict, :Dict, Base)
+    @test d.fieldnames == collect(fieldnames(Base.unwrap_unionall(Dict)))
+    @test length(d.types) == length(d.fieldnames)
+    io = IOBuffer(); write(io, d); seekstart(io)
+    @test read(io).fieldnames == d.fieldnames
+
+    struct ParametricBox{T}
+        payload::T
+        count::Int
+    end
+    d2 = DataTypeStore(ParametricBox, :ParametricBox, @__MODULE__)
+    @test d2.fieldnames == [:payload, :count]
+    @test length(d2.types) == 2
+
+    # Abstract types have no fields at all.
+    @test isempty(DataTypeStore(AbstractDict, :AbstractDict, Base).fieldnames)
+    # `Tuple`/`NamedTuple` have an indeterminate field count.
+    @test isempty(DataTypeStore(Tuple, :Tuple, Base).fieldnames)
+    @test isempty(DataTypeStore(NamedTuple, :NamedTuple, Base).fieldnames)
+end
+
 @testitem "SymbolServer: DataTypeStore handles value-parameter tuple types" begin
     using JuliaWorkspaces.SymbolServer: DataTypeStore
     using JuliaWorkspaces.SymbolServer.CacheStore: write, read
