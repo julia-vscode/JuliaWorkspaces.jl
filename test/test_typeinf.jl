@@ -146,6 +146,32 @@ end
     @test CoreTypes.isint(barscope.names["b"].type)
 end
 
+@testitem "CoreTypes predicates recognise every store name carrier" begin
+    using JuliaWorkspaces.StaticLint: CoreTypes
+    using JuliaWorkspaces.SymbolServer: FakeTypeName, VarRef, stdlibs
+
+    # A `DataTypeStore` — the shape that always worked.
+    @test CoreTypes.isint(stdlibs[:Core][Symbol(Int)])
+    @test !CoreTypes.isstring(stdlibs[:Core][Symbol(Int)])
+
+    # A `FakeTypeName` names a type just as well (store method signatures and
+    # field types carry these, not `DataTypeStore`s).
+    @test CoreTypes.isint(FakeTypeName(Int))
+    @test CoreTypes.isstring(FakeTypeName(String))
+    @test CoreTypes.isfloat(FakeTypeName(Float64))
+    @test !CoreTypes.isstring(FakeTypeName(Int))
+    @test !CoreTypes.isint(FakeTypeName(Base.PkgId))
+
+    # ... and so does a bare `VarRef`.
+    @test CoreTypes.isint(VarRef(VarRef(nothing, :Core), Symbol(Int)))
+    @test !CoreTypes.isint(VarRef(VarRef(nothing, :Base), Symbol(Int)))
+    @test !CoreTypes.isstring(VarRef(VarRef(nothing, :Core), Symbol(Int)))
+
+    # Unrelated values are still never a core type.
+    @test !CoreTypes.isint(nothing)
+    @test !CoreTypes.isint(42)
+end
+
 @testitem "destructuring a store datatype's fields" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: scopeof, CoreTypes
 
