@@ -196,14 +196,19 @@ function struct_nargs(x::EXPR, env=nothing, meta_dict=nothing)
             imin, imax, ikws, ikwsplat = func_nargs(args.args[i], env, meta_dict)
             minargs = min(minargs, imin)
             maxargs = max(maxargs, imax)
-            for kw in ikws
-                kw in kws || push!(kws, kw)
-            end
+            union!(kws, ikws)
             kwsplat |= ikwsplat
         end
         return minargs, maxargs, kws, kwsplat
     else
-        minargs = maxargs = length(args.args)
+        # Only real fields count towards the default constructor. A field's
+        # docstring is a bare string child of the body block, not a field — the
+        # inventory's own field-name loop skips it the same way, and counting it
+        # made a documented field reject the correct call.
+        nfields = count(a -> !CSTParser.isstringliteral(a), args.args)
+        # A body carrying no fields at all answers like an empty one.
+        nfields == 0 && return 0, typemax(Int), kws, kwsplat
+        minargs = maxargs = nfields
     end
     return minargs, maxargs, kws, kwsplat
 end

@@ -1486,6 +1486,29 @@ end
     end
 end
 
+@testitem "struct_nargs: a field's docstring is not a field" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: struct_nargs
+
+    # A docstring inside a struct body is a bare string child of the block, so
+    # counting every child made a documented field's struct demand one argument
+    # too many — `S(1)` was "Expected 2 arguments, got 1".
+    cst, meta_dict, jw = parse_and_pass("""
+    struct S
+        "the a field"
+        a::Int
+    end
+    struct T
+        a::Int
+    end
+    """)
+    @test struct_nargs(cst.args[1]) == struct_nargs(cst.args[2]) == (1, 1, Symbol[], false)
+
+    # A body holding nothing but a docstring has no fields, so it answers exactly
+    # like an empty body rather than demanding zero arguments.
+    cst2, _, _ = parse_and_pass("struct S\n    \"docs\"\nend\nstruct T\nend\n")
+    @test struct_nargs(cst2.args[1]) == struct_nargs(cst2.args[2]) == (0, typemax(Int), Symbol[], false)
+end
+
 @testitem "a docstring does not hide a wrong-arity call" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
 

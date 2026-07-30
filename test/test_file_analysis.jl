@@ -547,6 +547,21 @@ end
     @test length(mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B))) == 1
 end
 
+@testitem "derived_file_analysis: a field's docstring does not inflate a struct's arity" setup=[FileAnalysisWS] begin
+    # The docstring is a bare string child of the struct body, not a field, so a
+    # documented field must not make the struct demand an extra argument.
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+    root_src = "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n"
+    docfield = "struct S\n    \"the a field\"\n    a::Int\nend\n"
+
+    flagged(a_src, call) = mm(JuliaWorkspaces.derived_file_analysis(
+        ws_with(Dict(ROOT => root_src, A => a_src, B => "g() = $call\n")).runtime, ROOT, B))
+
+    @test isempty(flagged(docfield, "S(1)"))
+    # The real field count is still enforced.
+    @test length(flagged(docfield, "S(1, 2)")) == 1
+end
+
 @testitem "derived_file_analysis: a method-call error names the mismatch" setup=[FileAnalysisWS] begin
     # the flagged call renders a specific reason, not the bare
     # "Possible method call error." — here an arity mismatch on a store function.
