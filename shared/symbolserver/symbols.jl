@@ -104,7 +104,13 @@ function DataTypeStore(@nospecialize(t), symbol, parent_mod)
     else
         []
     end
-    fieldnames = has_fields ? collect(Base.fieldnames(ur_t)) : Symbol[]
+    # Field *names* stay well-defined when free typevars keep `ur_t` from being
+    # concrete (`Dict{K,V}`), so they must not be gated on `isconcretetype`.
+    # `name.names` is empty for abstract types, for tuples (whose `fieldnames`
+    # are indices, not names) and for indeterminate layouts (`NamedTuple`).
+    # Caches written before this keep their empty lists; that needs no format
+    # bump because every consumer gates on `isempty(fieldnames)`.
+    fieldnames = ur_t isa DataType ? Symbol[ur_t.name.names...] : Symbol[]
     DataTypeStore(FakeTypeName(ur_t), FakeTypeName(ur_t.super), parameters, types, fieldnames, MethodStore[], _doc(parent_mod, symbol))
 end
 
