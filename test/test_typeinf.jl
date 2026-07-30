@@ -146,6 +146,24 @@ end
     @test CoreTypes.isint(barscope.names["b"].type)
 end
 
+@testitem "destructuring a store datatype's fields" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof, CoreTypes
+
+    # Same as the workspace-struct case, but the RHS type comes from the symbol
+    # store (`DataTypeStore`), whose field types are `Fake*` values and so have
+    # to be resolved through the env before they can be a `Binding.type`.
+    cst, meta_dict = parse_and_pass("""
+    function bar(x)
+        (; major, patch) = VersionNumber(x)
+        major + patch
+    end
+    """)
+
+    barscope = scopeof(scopeof(cst, meta_dict).names["bar"].val, meta_dict)
+    @test CoreTypes.iscoretype(barscope.names["major"].type, :UInt32)
+    @test CoreTypes.iscoretype(barscope.names["patch"].type, :UInt32)
+end
+
 @testitem "element type is only inferred for scalar indexing (#449)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: scopeof, errorof, IncorrectCallArgs
 
