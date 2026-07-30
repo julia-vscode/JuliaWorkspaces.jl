@@ -1486,6 +1486,60 @@ end
     end
 end
 
+@testitem "a docstring does not hide a wrong-arity call" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A doc wrapper is a macrocall, but it cannot rewrite the signature it wraps,
+    # so it must not make the definition's arity unknowable.
+    has_callargs(cst, meta_dict, jw) =
+        any(errorof(x, meta_dict) === IncorrectCallArgs for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    for def in ("\"docs\"\nf(x) = 1",              # implicit globalrefdoc
+                "@doc \"docs\" f(x) = 1",          # explicit @doc
+                "Base.@doc \"docs\" f(x) = 1")     # qualified @doc
+        let (cst, meta_dict, jw) = parse_and_pass(def * "\ng() = f(1, 2)\n")
+            @test has_callargs(cst, meta_dict, jw)
+        end
+        # ... and a correct call is still not flagged.
+        let (cst, meta_dict, jw) = parse_and_pass(def * "\ng() = f(1)\n")
+            @test !has_callargs(cst, meta_dict, jw)
+        end
+    end
+
+    # Same for a docstring'd struct, whose constructor arity comes from
+    # `struct_nargs` and its own macro-wrapped early return.
+    structdef = "\"docs\"\nstruct S\n    a::Int\nend"
+    let (cst, meta_dict, jw) = parse_and_pass(structdef * "\ng() = S(1, 2)\n")
+        @test has_callargs(cst, meta_dict, jw)
+    end
+    let (cst, meta_dict, jw) = parse_and_pass(structdef * "\ng() = S(1)\n")
+        @test !has_callargs(cst, meta_dict, jw)
+    end
+
+    # A genuinely signature-opaque macro still suppresses the check, for both
+    # functions and structs (`@kwdef` turns fields into keywords).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro wrap(ex)
+            ex
+        end
+        @wrap f(x) = 1
+        g() = f(1, 2)
+        """)
+        @test !has_callargs(cst, meta_dict, jw)
+    end
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro wrap(ex)
+            ex
+        end
+        @wrap struct S
+            a::Int
+        end
+        g() = S(1, 2)
+        """)
+        @test !has_callargs(cst, meta_dict, jw)
+    end
+end
+
 @testitem "match_method: a struct matches a call matching any inner constructor" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: match_method, call_arg_types, getsymbols
 
