@@ -1003,3 +1003,49 @@ end
     # the qualified form — those stay opaque.
     @test !("ti_f" in names)
 end
+
+@testitem "inventory: macro annotations and literal arity" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+
+    function arity_of(source, name)
+        uri = URI("file:///annot/test.jl")
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        inv = JuliaWorkspaces.derived_file_inventory(jw.runtime, uri)
+        idx = findfirst(it -> it.name == name, inv.items)
+        idx === nothing ? nothing : inv.items[idx].arity
+    end
+
+    # Unwrapped: literal arity, no annotations.
+    a = arity_of("f(x) = 1\n", "f")
+    @test (a.minargs, a.maxargs, a.kwsplat) == (1, 1, false)
+    @test a.macro_annotations == String[]
+
+    # Wrapped: the literal arity is still recorded; the wrapper is recorded
+    # beside it, for the consumer to interpret.
+    @test arity_of("@inline f(x) = 1\n", "f").macro_annotations == ["@inline"]
+    @test arity_of("Base.@inline f(x) = 1\n", "f").macro_annotations == ["@inline"]
+    @test arity_of("@wrap f(x) = 1\n", "f").macro_annotations == ["@wrap"]
+    let a2 = arity_of("@wrap f(x, y) = 1\n", "f")
+        @test (a2.minargs, a2.maxargs, a2.kwsplat) == (2, 2, false)
+    end
+
+    # Nested wrappers, innermost first.
+    @test arity_of("@inline @propagate_inbounds f(x) = 1\n", "f").macro_annotations ==
+          ["@propagate_inbounds", "@inline"]
+
+    # A doc wrapper is transparent — it cannot rewrite a signature.
+    @test arity_of("\"docs\"\nf(x) = 1\n", "f").macro_annotations == String[]
+    @test arity_of("\"docs\"\n@inline f(x) = 1\n", "f").macro_annotations == ["@inline"]
+
+    # An oddly-spelled wrapper is recorded verbatim; it can never match a
+    # signature-preserving macro, so the consumer stays permissive.
+    @test arity_of("@\$m f(x) = 1\n", "f").macro_annotations == ["@\$"]
+
+    # Structs record their wrapper too, and keep their literal field arity.
+    let s = arity_of("@kwdef struct S\n    a::Int\n    b::Int\nend\n", "S")
+        @test (s.minargs, s.maxargs) == (2, 2)
+        @test s.macro_annotations == ["@kwdef"]
+    end
+end

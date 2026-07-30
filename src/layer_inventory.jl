@@ -17,13 +17,26 @@ constructor `MethodArity(func_nargs(x)...)`) and compared against a call's
 `call_nargs` by `StaticLint.compare_f_call`. Plain data, so it backdates when
 carried in the inventory for the cross-file argument-count check. Defined here
 (the parent module) and imported into StaticLint, mirroring `ItemRef`.
+
+`macro_annotations` names the macros wrapping the definition (innermost→outermost,
+`@`-prefixed). The recorded counts are LITERAL — whether a wrapping macro rewrote
+the signature is not decidable here, so a consumer holding `env`/`meta_dict`
+resolves these names and widens the arity itself (`layer_file_analysis.jl`'s
+`_effective_arity`).
 """
 @auto_hash_equals struct MethodArity
     minargs::Int
     maxargs::Int
     kws::Vector{Symbol}
     kwsplat::Bool
+    macro_annotations::Vector{String}
 end
+
+# Back-compat: store methods (`func_nargs(::MethodStore)`) and definitions with
+# no macro wrapper carry no annotations. Keeps every
+# `MethodArity(func_nargs(x)...)` splat working.
+MethodArity(minargs, maxargs, kws, kwsplat) =
+    MethodArity(minargs, maxargs, kws, kwsplat, String[])
 
 """
     InventoryItem
@@ -557,6 +570,26 @@ end
 # deviation from macros.jl:55, not an oversight.
 _is_enum_macro(x::CSTParser.EXPR) = _macro_name_string(x.args[1]) == "@enum"
 
+# The macro names directly wrapping a definition, innermost→outermost. Doc
+# wrappers are transparent: they cannot rewrite a signature. Only a direct chain
+# of macrocall parents counts — `@static if … end` puts an `if`/`block` between
+# the macrocall and the definition, and such a definition is not macro-wrapped
+# for arity purposes (matching `func_nargs`' own parent test). A name that cannot
+# be read statically records `"?"`, which matches no real macro and so always
+# forces the permissive answer downstream; no parsed source is known to produce
+# that shape, so it is a fail-safe rather than a live path.
+function _macro_annotations(x::CSTParser.EXPR)
+    names = String[]
+    p = CSTParser.parentof(x)
+    while p isa CSTParser.EXPR && CSTParser.ismacrocall(p)
+        if _doc_wrapped_item(p) === nothing
+            push!(names, something(_macro_name_string(p.args[1]), "?"))
+        end
+        p = CSTParser.parentof(p)
+    end
+    return names
+end
+
 # An `@enum` member/type-name argument may be wrapped in an explicit-value
 # assignment (`red = 1`) or a `::T` base-type declaration (only valid on the
 # type-name argument, `@enum Color::UInt8 ...`); mirrors
@@ -688,7 +721,7 @@ function _classify_assignment!(acc, x, order, id, parent_module, kind_override, 
         name = _symbol_name(CSTParser.get_name(x))
         if name !== nothing
             qualifier = _item_qualifier(CSTParser.get_name(x))
-            push!(acc.items, InventoryItem(order, id,name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
+            push!(acc.items, InventoryItem(order, id,name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x; macro_permissive=false)..., _macro_annotations(x)) : nothing)))
         end
     elseif CSTParser.iscurly(x.args[1])
         # Typealias: `Vector{T} = ...` — name comes from the curly's base
@@ -756,7 +789,7 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             name = "@" * name
         end
         qualifier = _item_qualifier(CSTParser.get_name(x))
-        push!(acc.items, InventoryItem(order, id,name, qualifier, kind, _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
+        push!(acc.items, InventoryItem(order, id,name, qualifier, kind, _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x; macro_permissive=false)..., _macro_annotations(x)) : nothing)))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
         name = _item_name(CSTParser.get_name(x))
@@ -784,7 +817,9 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             kind = CSTParser.defines_abstract(x) ? :abstract : :primitive
             field_names = String[]
         end
-        arity = CSTParser.defines_struct(x) ? MethodArity(StaticLint.struct_nargs(x)...) : nothing
+        arity = CSTParser.defines_struct(x) ?
+            MethodArity(StaticLint.struct_nargs(x; macro_permissive=false)..., _macro_annotations(x)) :
+            nothing
         push!(acc.items, InventoryItem(order, id,name, String[], kind, nothing, field_names, parent_module, arity))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;
