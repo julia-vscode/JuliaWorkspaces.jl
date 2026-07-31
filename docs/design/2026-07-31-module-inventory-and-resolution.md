@@ -653,13 +653,44 @@ This is invisible to a repo sweep: the swept repo has no non-literal `include`
 under any root's tree, and a sweep analyses fixed content, never a half-typed
 buffer. It has to be found by construction.
 
-Holes 2–4 are narrow. Hole 1 is the one to fix for correctness; **hole 5's
-mid-edit case is the one a user will actually see**, and the honest mitigation is
-not a completeness guard at all — it is to decline the type check for any name
-whose root contains a file that failed to parse, which the syntax layer already
-knows. Either way, this is the reason a consumer of these records must keep the
-"rule out only" discipline rather than ever treating a non-match as a positive
-claim.
+Holes 2–4 are narrow. Hole 1 is the one to fix for correctness; **hole 5's mid-edit
+case is the one a user will actually see** — and it was **accepted knowingly** when
+type matching shipped, for the reasons below.
+
+**Why hole 5's mid-edit case was accepted.** The fix is small and the machinery
+exists: emit the `:opaque_definitions` marker when the file's CST contains an
+`:errortoken`, and the whole-root kill switch, the completeness guard and the
+arity-index neutrality all work unchanged. What made it not worth shipping first is
+a property the `eval` marker does not share. **The `eval` marker is static; a
+parse-error marker toggles.** Today, editing one file recomputes the per-root index
+but leaves its value for other files' names equal, so those per-`(path, name)`
+projections backdate and no other file re-analyses — that early cutoff is the whole
+reason this layer is an index plus projections rather than a query per name. A
+whole-root kill changes *every* projection at once, so nothing backdates and every
+file in the root re-analyses. The cost lands at parse-validity *transitions* rather
+than per keystroke (empty→empty backdates fine), so it is roughly two whole-root
+re-analyses per definition typed — bounded, but paid by the whole root at exactly
+the moment the user is already waiting.
+
+Set against that, the diagnostic is transient and self-clearing, and StaticLint
+already emits transient noise while typing (half-finished identifiers are
+missing-reference errors). What distinguishes this one is only that it lands on a
+*different* file from the one being edited, which is harder to attribute.
+
+**If it is revisited, prefer the consumer-side gate over the marker:** decline when
+the *callee's defining file* has a parse error, which avoids the whole-root toggle
+entirely. It needs the records to carry the defining file — they carry only
+`defmod` today — and a dependency on other files' parse status, which is acceptable
+because `derived_julia_syntax_diagnostics` is a leaf over text rather than an
+analysis, so it does not reopen the cross-file channel the per-file design closed.
+The record merge is the natural moment, since it is already restructuring these
+records. Narrowing the marker instead does not help: scoping it to the module paths
+the broken file contributes to is sound, but most Julia packages are single-module,
+so it is still the whole package; and restricting it to top-level errortokens is
+unsound, because CSTParser's error recovery frequently swallows the rest of the file.
+
+Either way, this is the reason a consumer of these records must keep the "rule out
+only" discipline rather than ever treating a non-match as a positive claim.
 
 #### 17b. The argument side: one accepted false positive
 
