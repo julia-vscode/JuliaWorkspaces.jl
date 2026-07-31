@@ -1187,26 +1187,14 @@ Append to `test/test_macro_declared_names.jl`:
     @test _completion_kind_for_visible(:macro_declared) == CompletionKinds.Method
 end
 
-@testitem "macro-declared: generated names are not workspace symbols" setup=[MacroDeclWS] begin
-    using JuliaWorkspaces: get_workspace_symbols
-
-    jw, root = macro_ws("""
-    module T
-    using Salsa
-    Salsa.@declare_input foo(rt, x::Int)::V
-    end
-    """; with_salsa_package=true)
-
-    found = [s.name for s in get_workspace_symbols(jw, "set_foo!")]
-    # Three rows share one range; listing them would triple the outline. Listing
-    # generated names is a separate change.
-    @test isempty(found)
-end
 ```
+
+(The workspace-symbols test also already exists, added in Task 2's fix round
+alongside the skip. Do not duplicate it here.)
 
 - [ ] **Step 2: Run and confirm failure**
 
-Expected: the completion item FAILS (`:macro_declared` falls into the `else` and returns `CompletionKinds.Variable`); the symbols item FAILS with three results.
+Expected: FAIL — `:macro_declared` falls into `_completion_kind_for_visible`'s `else` and returns `CompletionKinds.Variable`.
 
 - [ ] **Step 3: Add the completion arm**
 
@@ -1217,16 +1205,13 @@ In `src/layer_completions.jl`, in `_completion_kind_for_visible`:
         return CompletionKinds.Method
 ```
 
-- [ ] **Step 4: Add the symbols skip**
+- [x] **Step 4: Add the symbols skip — ALREADY DONE IN TASK 2**
 
-In `src/layer_symbols.jl`, next to the existing `:opaque_macrocall` skip in the items loop:
-
-```julia
-            it.kind === :opaque_macrocall && continue
-            # A modelled macro's generated names: three rows share the declaring
-            # statement's range, so listing them triples the outline entry.
-            it.kind === :macro_declared && continue
-```
+This landed in Task 2's fix round: leaving it until now let unconfirmed rows
+surface as phantom workspace symbols, which Task 2's own inert-rows invariant
+forbids. `src/layer_symbols.jl` already skips `:macro_declared` beside
+`:opaque_macrocall`, with a test. Verify it is present and move on; do not
+re-implement it.
 
 - [ ] **Step 5: Add the hover arm**
 
