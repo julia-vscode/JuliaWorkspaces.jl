@@ -2288,3 +2288,51 @@ end
     # is no-opinion in the same way a workspace-declared parameter type is
     @test isempty(diags("f(x::Int) = x\n", "struct Own end\ng() = (o = Own(); f(o))\n"))
 end
+
+@testitem "derived_file_analysis: TYPE check withholds names whose method set is not fully recorded" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # An `import Base: show` + bare `show(...) = …` extends a STORE function: the
+    # rest of its methods are in the env, not the tree, so the records cannot rule
+    # any call out. The import may sit in ANY file of the module, not just the one
+    # being analysed (where alone the callee resolves to a store-valued Binding).
+    @test isempty(diags("import Base: show\nshow(io::IO, x::Float64) = 1\n", "g(io) = show(io, 1)\n"))
+    @test isempty(diags("show(io::IO, x::Float64) = 1\n", "import Base: show\ng(io) = show(io, 1)\n"))
+
+    # Methods minted by load-time `eval` are in no index at all — neither the
+    # arities nor the types — so the record set looks complete while missing them.
+    @test isempty(diags("f(x::Int) = x\nfor T in (Float32, Float64); @eval f(x::\$T) = 2x; end\n",
+                        "g() = f(1.0)\n"))
+    @test isempty(diags("f(x::Int) = x\neval(:(f(x::Float64) = 2x))\n", "g() = f(1.0)\n"))
+    @test isempty(diags("f(x::Int) = x\nCore.eval(@__MODULE__, :(f(x::Float64) = 2x))\n", "g() = f(1.0)\n"))
+    # a definition the walker DOES reach, but whose name is computed
+    @test isempty(diags("f(x::Int) = x\n@eval \$(:f)(x::Float64) = 2x\n", "g() = f(1.0)\n"))
+    # a modelled macro declares the name but records no typed method for it
+    @test isempty(diags("f(x::Int) = x\n@deprecate f(x::Float64) g(x)\n", "g() = f(1.0)\n"))
+
+    # None of the above may make the check inert. A top-level `@eval` definition IS
+    # walked and recorded, so it keeps being type-checked...
+    @test length(diags("f(x::Int) = x\n@eval f(x::Float64) = 2x\n", "g() = f(\"s\")\n")) == 1
+    # ...and a name-free definition binds no name, so it is not an opaque site.
+    @test length(diags("struct Foo end\n(::Foo)(x::Int) = 1\nf(x::Int) = x\n", "g() = f(\"s\")\n")) == 1
+end
+
+@testitem "inventory: a load-time eval site emits an inert opaque-definitions row" setup=[FileAnalysisWS] begin
+    kinds(src) = begin
+        jw = ws_with(Dict(A => src))
+        [it.kind for it in JuliaWorkspaces.derived_file_inventory(jw.runtime, A).items]
+    end
+
+    @test :opaque_definitions in kinds("for T in (Float64,); @eval f(x::\$T) = 1; end\n")
+    @test :opaque_definitions in kinds("eval(:(f(x::Int) = 1))\n")
+    @test :opaque_definitions in kinds("@eval \$(:f)(x::Int) = 1\n")
+    # A definition's BODY runs on call, not on load, and a walked+named `@eval`
+    # definition is recorded like any other — neither is an opaque site.
+    @test :opaque_definitions ∉ kinds("f(x) = eval(:(1 + 1))\n")
+    @test :opaque_definitions ∉ kinds("@eval f(x::Int) = 1\n")
+    @test :opaque_definitions ∉ kinds("f(x::Int) = 1\n")
+end

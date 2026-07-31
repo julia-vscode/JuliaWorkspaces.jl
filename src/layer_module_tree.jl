@@ -547,6 +547,7 @@ function _build_kind_index(rt, uri::URI)::Dict{Tuple{Int64,String},Symbol}
         # the real kind. `_declare!` already excludes this kind from
         # `declared`, so no key reaching this index may legitimately be one.
         item.kind === :macro_declared && continue
+        item.kind === :opaque_definitions && continue
         get!(idx, (item.id, item.name), item.kind)
     end
     return idx
@@ -914,24 +915,62 @@ Every `(module path, name) => records` entry of `root`'s tree in one node, by a
 single splice walk — the same fan-in rationale as
 [`derived_method_arities_index`](@ref): per-name nodes would each depend on every
 file in the root.
+
+Unlike the arity index, this one is only ever consumed to RULE A CALL OUT, so it
+withholds any entry whose method set it cannot vouch for — a partial record set
+would reject calls the missing methods accept:
+
+- a name `import`ed from a non-tree target (`import Base: show`) and then
+  extended bare: the rest of its methods live in the env, not in the tree;
+- a name a modelled macro mints (`@deprecate f(x::Float64) g(x)`), whose method
+  is declared but never recorded as a typed item;
+- every name in the root, when any file evaluates code as it loads
+  (`:opaque_definitions`) — an `eval` can define any name in any module, so
+  nothing narrower is sound.
 """
 Salsa.@derived function derived_method_param_types_index(rt, root)
     @debug "derived_method_param_types_index" root=root
 
     tree = derived_module_tree(rt, root)
     modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    import_targets = _external_import_targets(tree)
     result = Dict{Tuple{Vector{String},String},Vector{MethodParamTypes}}()
+    withheld = Set{Tuple{Vector{String},String}}()
+    opaque = false
 
-    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
+                                 kinds=_PARAM_TYPE_ITEM_KINDS) do F, item, loc
+        if item.kind === :opaque_definitions
+            opaque = true
+            return
+        elseif item.kind === :macro_declared
+            push!(withheld, (loc, item.name))
+            return
+        end
         (item.arity === nothing || item.param_types === nothing) && return
         resolved = isempty(item.qualifier) ? loc :
             _resolve_extension_qualifier(modpaths, loc, item.qualifier)
         (resolved === nothing || resolved ∉ modpaths) && return
+        if haskey(get(import_targets, loc, _NO_IMPORT_TARGETS), item.name)
+            push!(withheld, (resolved, item.name))
+            return
+        end
         push!(get!(() -> MethodParamTypes[], result, (resolved, item.name)),
               MethodParamTypes(loc, item.arity, item.param_types))
     end
+
+    opaque && return Dict{Tuple{Vector{String},String},Vector{MethodParamTypes}}()
+    for k in withheld
+        delete!(result, k)
+    end
     return result
 end
+
+const _NO_IMPORT_TARGETS = Dict{String,Vector{String}}()
+
+# The binding kinds, plus the two inert rows this index reads as "the method set
+# of this name (or of the whole root) is not fully recorded".
+const _PARAM_TYPE_ITEM_KINDS = (_BINDING_ITEM_KINDS..., :macro_declared, :opaque_definitions)
 
 const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
 

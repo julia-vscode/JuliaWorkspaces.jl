@@ -585,6 +585,26 @@ function _param_type_names(x::CSTParser.EXPR)
     return out
 end
 
+# Does this top-level statement evaluate code as the file LOADS — an
+# `eval(...)`/`Mod.eval(...)` call or an `@eval`/`Mod.@eval` macrocall? Such a
+# statement can define methods that no inventory item records. Nested function
+# and macro definitions are skipped: their bodies run when called, not at load.
+function _has_load_time_eval(x)
+    x isa CSTParser.EXPR || return false
+    if CSTParser.ismacrocall(x) && x.args !== nothing && !isempty(x.args)
+        _macro_name_string(x.args[1]) == "@eval" && return true
+    elseif CSTParser.iscall(x) && x.args !== nothing && !isempty(x.args)
+        p = _dotted_name_path(x.args[1])
+        p !== nothing && last(p) == "eval" && return true
+    end
+    x.args === nothing && return false
+    for a in x.args
+        (CSTParser.defines_function(a) || CSTParser.defines_macro(a)) && continue
+        _has_load_time_eval(a) && return true
+    end
+    return false
+end
+
 # --- Modelled macros that declare names their argument never spells ---------
 #
 # A macrocall is transparent to the walker, so a macro that mints extra names
@@ -919,8 +939,36 @@ function _emit_macro_declarations!(acc, x, order, id, parent_module)
     return
 end
 
+# A load-time `eval` the walker cannot see through: `for T in (...); @eval
+# f(x::$T) = 1; end` and `eval(:(f(x) = 1))` define methods that leave no item
+# behind (the walker never descends into a loop body, and a quoted definition is
+# not a definition node). One inert row per site marks the method inventory as
+# incomplete for consumers that must not judge a name on a partial method set.
+# A definition is exempt — a top-level `@eval f(x::T) = 1` IS walked, and its
+# method recorded, and a body's `eval` runs on call rather than on load.
+function _emit_opaque_definitions!(acc, x, order, id, parent_module)
+    if CSTParser.defines_function(x) || CSTParser.defines_macro(x)
+        # `@eval $(:f)(x::T) = 1`: the definition IS walked, but its name is
+        # computed, so no item names the method it adds. A name-free definition
+        # outside an `@eval` (`(::Foo)(x) = 1`) binds no name at all and needs no
+        # marker.
+        _symbol_name(CSTParser.get_name(x)) === nothing || return
+        p = CSTParser.parentof(x)
+        (p isa CSTParser.EXPR && CSTParser.ismacrocall(p) && p.args !== nothing &&
+            !isempty(p.args) && _macro_name_string(p.args[1]) == "@eval") || return
+    elseif CSTParser.defines_datatype(x) || CSTParser.defines_module(x)
+        return
+    elseif !_has_load_time_eval(x)
+        return
+    end
+    push!(acc.items, InventoryItem(order, id, "", String[], :opaque_definitions,
+        nothing, String[], parent_module))
+    return
+end
+
 function _classify_item!(acc, x, order, id, parent_module, offset, include_targets_by_offset, include_records)
     _emit_macro_declarations!(acc, x, order, id, parent_module)
+    _emit_opaque_definitions!(acc, x, order, id, parent_module)
     if CSTParser.defines_module(x)
         # name/bare per bindings.jl:90-92 and scope.jl:172-181
         name = CSTParser.isidentifier(x.args[2]) ? StaticLint.valofid(x.args[2]) : nothing

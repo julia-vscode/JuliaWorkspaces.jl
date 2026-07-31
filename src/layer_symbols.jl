@@ -305,6 +305,8 @@ function _get_workspace_symbols(runtime, query::String)
             # are also unconfirmed at this layer — nothing may treat them as
             # declarations until identity is confirmed.
             it.kind === :macro_declared && continue
+            # A load-time `eval` site: a nameless marker, not a symbol.
+            it.kind === :opaque_definitions && continue
             _symbol_matches_query(it.name, query) || continue
             entry = get(positions, it.id, nothing)
             entry === nothing && continue
