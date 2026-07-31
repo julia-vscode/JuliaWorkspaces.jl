@@ -446,3 +446,74 @@ end
     # The input's own signature must not be presented as this name's signature.
     @test !occursin("foo(rt, x::Int)", h)
 end
+
+@testitem "macro-declared: go-to-definition lands on the declaring macrocall" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: get_definitions, get_text_file
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    function use(rt)
+        set_foo!(rt, 1, 2)
+    end
+    end
+    """; with_salsa_package=true)
+
+    src = get_text_file(jw, root).content.content
+    off = first(findfirst("set_foo!(rt, 1, 2)", src))
+    defs = get_definitions(jw, root, off)
+    @test length(defs) == 1
+    @test defs[1].uri == root
+    # It lands on the declaring statement `foo(rt, x::Int)::V`, which starts on
+    # the same line as `Salsa.@declare_input` (1-based: module=1, using=2,
+    # declare_input=3).
+    @test defs[1].start.line == 3
+end
+
+@testitem "macro-declared: find-references matches on name, not just id" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: get_references, get_text_file
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    function use(rt)
+        set_foo!(rt, 1, 2)
+        set_foo!(rt, 3, 4)
+        delete_foo!(rt, 1)
+    end
+    end
+    """; with_salsa_package=true)
+
+    src = get_text_file(jw, root).content.content
+    off = first(findfirst("set_foo!(rt, 1, 2)", src))
+    refs = get_references(jw, root, off)
+    # All three names share one id, so an id-only join would return the
+    # `delete_foo!` site too. Only the two `set_foo!` uses may come back.
+    @test length(refs) == 2
+end
+
+@testitem "macro-declared: rename is refused" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: can_rename, get_text_file
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    function use(rt)
+        set_foo!(rt, 1, 2)
+    end
+    g(x) = x
+    end
+    """; with_salsa_package=true)
+
+    src = get_text_file(jw, root).content.content
+    # A generated name: refused, because the declaration site has no such token.
+    off = first(findfirst("set_foo!(rt, 1, 2)", src))
+    @test can_rename(jw, root, off) === nothing
+
+    # An ordinary declaration is still renameable.
+    off_g = first(findfirst("g(x) = x", src))
+    @test can_rename(jw, root, off_g) !== nothing
+end

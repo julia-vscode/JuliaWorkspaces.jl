@@ -688,11 +688,32 @@ function _can_rename(runtime, uri::URI, offset::Int)
     x = get_expr1(cst, offset)
     x isa CSTParser.EXPR || return nothing
 
+    # A name a modelled macro declares cannot be renamed: the declaring
+    # statement contains no token spelling it (e.g. `set_foo!` never appears
+    # in `@declare_input foo(rt, x)::V`), so there is nothing to rewrite there
+    # and a rename would leave the code broken. Renaming the whole family of
+    # generated names together is a separate change, out of scope here.
+    _is_macro_declared_target(runtime, root, uri, x) && return nothing
+
     loc = _get_file_loc(x, runtime)
     loc === nothing && return nothing
     _, x_start = loc
 
     return (start=_offset_to_position(runtime, uri, x_start), stop=_offset_to_position(runtime, uri, x_start + x.span))
+end
+
+# True when `x` resolves to a name a modelled macro declares (inventory kind
+# `:macro_declared`). All three generated names from one macrocall share the
+# same item id, so the lookup also matches on `x`'s own spelling.
+function _is_macro_declared_target(runtime, root::URI, uri::URI, x::CSTParser.EXPR)
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
+    tgt = _reference_target(runtime, root, uri, x, meta_dict)
+    (tgt === nothing || tgt[1] !== :tree) && return false
+    ref = tgt[2]
+    for it in derived_file_inventory(runtime, ref.file).items
+        it.id == ref.id && it.kind === :macro_declared && it.name == CSTParser.valof(x) && return true
+    end
+    return false
 end
 
 # ============================================================================
