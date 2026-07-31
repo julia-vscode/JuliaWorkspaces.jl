@@ -301,8 +301,15 @@ Working already, no change needed, verified:
 
 - **Go-to-definition** — `:macro_declared` falls out of `_DEF_METHOD_ITEM_KINDS`
   (`layer_references.jl:470`) into `_push_item_definition`, landing on argument 1.
-- **Find references** — correct via `_itemref_is_ambiguous` → `_tree_restrict_name`,
-  as described above.
+- **Find references** — needs a change after all. `_itemref_is_ambiguous` →
+  `_tree_restrict_name` supplies the name-matching join correctly, but
+  `each_reference`'s declaring-file path additionally requires an old-style
+  `StaticLint.Binding`, and a macro-declared name has none — nothing in
+  `Salsa.@declare_input foo(rt, x)::V` spells `set_foo!`. Without a fallback, uses
+  in the declaring file are silently dropped and the result is zero references.
+  The fix is to fall back to the same tree-walk the cross-file path uses when no
+  binding is found; it is reachable only for a name with no bound identifier at
+  its own declaration site, so every ordinary declaration keeps the existing path.
 - **Arity lint** — declines because `is_something_with_methods` is false for any
   `TreeRef` (`linting/checks.jl:371`), reached after `:macro_declared` falls out of
   the tree gate at `:410`. The `arity === nothing` guard in the arities index is
