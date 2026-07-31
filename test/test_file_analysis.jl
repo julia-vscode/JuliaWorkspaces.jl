@@ -2335,6 +2335,50 @@ end
     @test :opaque_definitions ∉ kinds("f(x) = eval(:(1 + 1))\n")
     @test :opaque_definitions ∉ kinds("@eval f(x::Int) = 1\n")
     @test :opaque_definitions ∉ kinds("f(x::Int) = 1\n")
+
+    # The NEGATIVE direction of the enclosing-eval walk. The walk is unbounded, so
+    # nothing but the absence of an eval stops it — these pin that ordinary
+    # wrappers do not become opaque sites. A regression here would disable the
+    # cross-file type check for the whole root while changing no diagnostic, so no
+    # sweep and no analysis test would notice.
+    @test :opaque_definitions ∉ kinds("begin\n    f(x::Int) = 1\nend\n")
+    @test :opaque_definitions ∉ kinds("if true\n    f(x::Int) = 1\nend\n")
+    @test :opaque_definitions ∉ kinds("@inline f(x::Int) = 1\n")
+    @test :opaque_definitions ∉ kinds("q = quote\n    f(x::Int) = 1\nend\n")
+    # a NAME-FREE definition inside a wrapper: reaches the computed-name branch,
+    # where only an enclosing eval may mark it
+    @test :opaque_definitions ∉ kinds("struct Foo end\nbegin\n    (::Foo)(x) = 1\nend\n")
+    @test :opaque_definitions ∉ kinds("struct Foo end\n(::Foo)(x) = 1\n")
+
+    # An `@eval` that targets a module it cannot prove is the enclosing one leaves
+    # that module's method set partial, so it marks...
+    @test :opaque_definitions in kinds("@eval OtherPkg g(y::Int) = y\n")
+    @test :opaque_definitions in kinds("module Inner\nend\n@eval Inner g(y::Int) = y\n")
+    @test :opaque_definitions in kinds("@eval Base.Iterators g(y::Int) = y\n")
+    @test :opaque_definitions in kinds("module Inner\nend\nCore.eval(Inner, :(g(y::Int) = y))\n")
+    # ...but a self-targeting `@eval` retargets nothing, and must not disable the
+    # check for the whole root.
+    @test :opaque_definitions ∉ kinds("module Inner\n    @eval Inner g(y::Int) = y\nend\n")
+    @test :opaque_definitions ∉ kinds("@eval \$(@__MODULE__) g(y::Int) = y\n")
+    @test :opaque_definitions ∉ kinds("module Inner\n    @eval \$(@__MODULE__) g(y::Int) = y\nend\n")
+    # a literal first argument is not the two-argument form at all
+    @test :opaque_definitions ∉ kinds("@eval \"doc\" f(x::Int) = 1\n")
+end
+
+@testitem "derived_file_analysis: a self-targeting eval leaves the TYPE check on" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # `@eval <the enclosing module> …` files its definition exactly where the walker
+    # already puts it, so it must not turn the root's type check off.
+    @test length(diags("module Inner\n    @eval Inner g(y::Int) = y\nend\nk(x::Int) = x\n",
+                       "h() = k(\"s\")\n")) == 1
+    @test length(diags("f(x::Int) = x\n@eval \$(@__MODULE__) g(y::Int) = y\n", "h() = f(\"s\")\n")) == 1
+    # an unprovable target still disables it, root-wide
+    @test isempty(diags("f(x::Int) = x\n@eval OtherPkg g(y::Int) = y\n", "h() = f(\"s\")\n"))
 end
 
 @testitem "inventory: the opaque-definitions marker never stands in for its statement's name" setup=[FileAnalysisWS] begin

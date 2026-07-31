@@ -625,14 +625,47 @@ function _enclosing_load_time_eval(x::CSTParser.EXPR)
     return nothing
 end
 
-# Does this load-time evaluation name the module to evaluate in (`@eval Mod expr`,
-# `Core.eval(Mod, expr)`)? Anything it defines lands in THAT module, so the item
-# the walker records at the enclosing module path is filed in the wrong place.
-function _eval_names_target_module(ev::CSTParser.EXPR)
+# Peel `$(…)` interpolation and bracket layers off an `@eval` target.
+function _unwrap_eval_target(x)
+    while x isa CSTParser.EXPR && x.args !== nothing && !isempty(x.args) &&
+            (CSTParser.isbracketed(x) ||
+             (CSTParser.isoperator(CSTParser.headof(x)) &&
+              CSTParser.valof(CSTParser.headof(x)) == "\$"))
+        x = x.args[1]
+    end
+    return x
+end
+
+# Is this `@eval`/`eval` target provably the module the walker is already filing
+# items under — `@__MODULE__`, or the innermost enclosing module's own name? Those
+# are the common self-targeting spellings and they retarget nothing.
+function _is_enclosing_module_expr(x, parent_module::Vector{String})
+    x = _unwrap_eval_target(x)
+    x isa CSTParser.EXPR || return false
+    if CSTParser.ismacrocall(x) && x.args !== nothing && !isempty(x.args)
+        return _macro_name_string(x.args[1]) == "@__MODULE__"
+    end
+    return CSTParser.isidentifier(x) && !isempty(parent_module) &&
+        StaticLint.valofid(x) == last(parent_module)
+end
+
+# Does this load-time evaluation define into a module OTHER than the one the walker
+# files items under (`@eval Mod expr`, `Core.eval(Mod, expr)`)? Then a definition
+# recorded at `parent_module` is misfiled and that module's method set is partial.
+# Two targets are harmless: one that provably IS the enclosing module, and a
+# literal — `@eval "doc" f(x) = 1` is not the two-argument form at all (Base's
+# `@eval` requires a module there), so nothing is retargeted.
+function _eval_targets_other_module(ev::CSTParser.EXPR, parent_module::Vector{String})
     ev.args === nothing && return false
-    # macrocall args: name, parameters placeholder, then the macro's arguments
-    CSTParser.ismacrocall(ev) && return length(ev.args) >= 4
-    return length(ev.args) >= 3   # call args: callee, module, expression
+    target = if CSTParser.ismacrocall(ev)
+        # macrocall args: name, parameters placeholder, then the macro's arguments
+        length(ev.args) >= 4 ? ev.args[3] : nothing
+    else
+        length(ev.args) >= 3 ? ev.args[2] : nothing   # callee, module, expression
+    end
+    target === nothing && return false
+    _is_enclosing_module_expr(target, parent_module) && return false
+    return !CSTParser.isliteral(_unwrap_eval_target(target))
 end
 
 # --- Modelled macros that declare names their argument never spells ---------
@@ -986,7 +1019,7 @@ function _emit_opaque_definitions!(acc, x, order, id, parent_module)
         # definition outside an eval (`(::Foo)(x) = 1`) binds no name.
         ev = _enclosing_load_time_eval(x)
         ev !== nothing && (_symbol_name(CSTParser.get_name(x)) === nothing ||
-                           _eval_names_target_module(ev))
+                           _eval_targets_other_module(ev, parent_module))
     elseif CSTParser.defines_datatype(x) || CSTParser.defines_module(x)
         false
     else
