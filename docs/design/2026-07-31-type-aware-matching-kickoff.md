@@ -30,7 +30,17 @@ shape difference §18 records: `_issubtype` is a predicate over a pair, while an
 index probe needs the ancestor chain *enumerated*, and that chain can leave the
 store and pass through workspace-declared types.
 
-## Do this first: the viability measurement
+## Do this first: the viability measurement — **DONE 2026-07-31**
+
+**Result: §17 proceeds as designed; no pre-gate needed.** New dependency edges per
+file came in at p50 0 / max 2 over 1056 (root, file) pairs of the julia-vscode repo,
+and the worst file's whole resolution step at ≈7 µs. The catch is that the answer
+depends on a shape the design had not pinned down: resolution must read the defining
+module's *whole* visible-names map, never a per-name Salsa node — keyed per name the
+same tail file costs 66 edges instead of 0. Numbers, method and the unmeasured legs
+(env-store fall-through, §18's ancestry) in
+`docs/perf/2026-07-31-type-resolution-budget.md`; harness at `docs/perf/typebudget.jl`.
+The rest of this section is the brief as written, kept for the reasoning.
 
 §17's one unbounded cost is that resolving a recorded type name means asking the
 *defining* module, so each per-file analysis gains dependency edges — one per type
@@ -61,8 +71,38 @@ call to a name with no workspace overload skip the machinery entirely.
 
 ## Likely decomposition
 
-Three specs, not one — this is materially bigger than the macro-names project, and
-it reaches into type inference, `check_call` and `subtypes.jl`:
+**Superseded 2026-07-31, after the measurement: slice vertically, not horizontally.**
+Record and Resolve have no observable behaviour, so neither can be validated except
+through Wire — three specs would mean reviewing two-thirds of a system against the
+criterion "the data looks right", which is the mode that made 6 of 7 last-run
+findings plan defects. The two decisions that justified staging (pre-gate? resolution
+shape?) are now both answered, so what remains between the layers is a function call,
+not a decision.
+
+Slice by type-expression shape instead, one plan, each slice end-to-end and
+shippable — of the repo's 17672 annotated parameters, 83.1% are bare identifiers,
+4.7% qualified, 11.1% parametric (`docs/perf/2026-07-31-type-resolution-budget.md`):
+
+1. **Bare *and* qualified identifiers** — 87.8% together. They resolve the same way:
+   a name lookup, with a module-path walk in front for the qualified form, so
+   splitting them buys nothing. Everything else records as explicit unknown, which
+   §17's first rule already makes permissive, so this ships end-to-end as a linter
+   that catches less and false-positives never — and is manually testable on its own.
+2. **Parametrics** — resolve the head, recurse the arguments, and do **not** descend
+   into value positions (`Val{:String}` must not record `String`). The real design
+   work, and the shape that needs machinery slice 1 does not.
+
+§18 stays separate: different cost profile, ancestry enumeration unmeasured.
+
+The env-store leg no longer needs its own decision point — **measured**: it adds zero
+dependency edges (`derived_file_analysis` already holds `env` as one edge), costs
+229 ns per name, and 53.8% of all names take it. It needs no warm store, since those
+names are Base/Core, which ships bundled. Slice 1 must therefore handle it from the
+start, including the `VarRef` → `FunctionStore.extends` → `DataTypeStore` hops that
+`x::String` requires.
+
+The original three-layer split is kept below for its reasoning about *where* the work
+reaches, which still holds:
 
 1. **Record** — a structured syntactic parameter type on `InventoryItem`, plus the
    per-root index and projections. Plain data only: no store values (they compare

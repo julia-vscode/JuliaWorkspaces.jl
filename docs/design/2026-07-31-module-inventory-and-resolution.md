@@ -530,6 +530,42 @@ proposed bound, so it wants a measured budget on the julia-vscode repo (the
 baseline and lsbench tooling exist) *before* type-aware matching is built, not a
 graph-shape argument.
 
+**Measured 2026-07-31 — the cost is affordable, and the measurement turned the
+resolution shape into a hard requirement.** Full numbers and method in
+`docs/perf/2026-07-31-type-resolution-budget.md`; over 1056 (root, file) pairs of
+the julia-vscode repo:
+
+- New dependency edges per file: **p50 0, p99 1, max 2** — only 47 of 1056 files
+  gain any edge at all. The whole resolution step for the worst file in the repo is
+  **≈7 µs**.
+- Distinct (defining module, type name) pairs per file: p50 5, p90 24, max 66.
+
+Those two rows differ by two orders of magnitude, and the difference *is* the
+design constraint: resolution reads the defining module's **whole**
+`derived_module_visible_names_idfree` map — a query the analysis already depends on,
+since the defining module of a cross-file callee is nearly always one it already
+asks about (in a single-module package it simply *is* the file's own splice path) —
+which leaves each type name an O(1) lookup in a value already in hand. So
+**per-name resolution must not become its own Salsa node**: keyed that way, the same
+workspace hands one CommonMark file 66 new edges instead of 0. That is the same
+lesson as `derived_method_arities_index` one layer up — fan in through one node per
+module, cut off at the projection.
+
+Consequently the `derived_external_extension_names`-style pre-gate is **not** a
+prerequisite, though it stays available if the type *comparison* proves costly.
+
+The **env-store leg is settled too**: 53.8% of recorded names resolve there (all
+Base/Core), at 229 ns each, and it likewise adds no edge — `derived_file_analysis`
+already holds `env` as a single edge to `derived_environment`, so store resolution
+reads inside a value already in hand. 45.3% resolve in the module map and 0.9% in
+neither, which is the permissive-unknown case. Note the store shapes: `x::String`
+resolves to a constructor `FunctionStore` and `x::AbstractString` to a `VarRef`, so
+reaching a `DataTypeStore` needs `maybe_lookup` + `get_eventual_datatype` — testing
+for `DataTypeStore` directly concludes that `String` is not a type.
+
+What remains unmeasured is §18's ancestor-chain enumeration, and the *comparison*
+cost once `_issubtype` is handed a workspace operand.
+
 **These records do not need §13.** An earlier draft called the per-module
 declarations node their natural home, on the strength of "coarser than per-name,
 finer than per-root". Neither half of that survives scrutiny. The coarseness
