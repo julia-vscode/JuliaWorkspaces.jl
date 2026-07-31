@@ -2221,3 +2221,70 @@ end
     # an unannotated parameter is no-opinion
     @test SL._isany(types[4])
 end
+
+@testitem "derived_file_analysis: cross-file positional TYPE check" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # wrong store type, right arity -> flagged
+    @test length(diags("f(x::Int) = x\n", "g() = f(\"s\")\n")) == 1
+    # right type -> silent
+    @test isempty(diags("f(x::Int) = x\n", "g() = f(1)\n"))
+    # subtyping must be honoured: Int <: Integer is a match, not a mismatch
+    @test isempty(diags("f(x::Integer) = x\n", "g() = f(1)\n"))
+    # a sibling overload accepting the type -> silent
+    @test isempty(diags("f(x::Int) = x\nf(x::String) = x\n", "g() = f(\"s\")\n"))
+    # unannotated parameter -> no opinion
+    @test isempty(diags("f(x) = x\n", "g() = f(\"s\")\n"))
+    # a WORKSPACE-declared parameter type is no-opinion in this slice
+    @test isempty(diags("struct Own end\nf(x::Own) = x\n", "g() = f(\"s\")\n"))
+    # parametric annotation -> unknown -> no opinion
+    @test isempty(diags("f(x::Vector{Int}) = x\n", "g() = f(\"s\")\n"))
+    # keyword arguments -> decline
+    @test isempty(diags("f(x::Int; k=1) = x\n", "g() = f(\"s\"; k=2)\n"))
+    # arity mismatch keeps its existing message, and is not doubled up
+    @test length(diags("f(x::Int) = x\n", "g() = f(1, 2)\n")) == 1
+end
+
+@testitem "derived_file_analysis: type check declines when the argument type is unknown" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "f(x::Int) = x\n",
+        B => "g(u) = f(u)\n",   # `u`'s type is unknown -> must not flag
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)))
+end
+
+@testitem "derived_file_analysis: TYPE check, qualified annotations and deep nesting" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # a QUALIFIED annotation resolves through the store just like a bare one
+    @test length(diags("f(x::Base.AbstractString) = x\n", "g() = f(1)\n")) == 1
+    @test isempty(diags("f(x::Base.AbstractString) = x\n", "g() = f(\"s\")\n"))
+
+    # a call nested several levels inside a function body (not at file top
+    # level) is checked — the traversal must carry the closure down
+    nested = "function g(v)\n    for i in v\n        if length(v) > 0\n            f(\"s\")\n        end\n    end\nend\n"
+    @test length(diags("f(x::Int) = x\n", nested)) == 1
+
+    # A sibling method whose positional alignment is unrecordable (a splat)
+    # would accept the call, but carries no type record — the name must go
+    # unchecked rather than be judged on the recorded methods alone.
+    @test isempty(diags("f(x::Int) = x\nf(args...) = 0\n", "g() = f(\"s\")\n"))
+    # same for an optional positional argument, whose recorded type count
+    # cannot align with a shorter call
+    @test isempty(diags("f(x::Int, y::Int = 2) = x\n", "g() = f(\"s\")\n"))
+
+    # a WORKSPACE-declared ARGUMENT type has no resolvable ancestry here, so it
+    # is no-opinion in the same way a workspace-declared parameter type is
+    @test isempty(diags("f(x::Int) = x\n", "struct Own end\ng() = (o = Own(); f(o))\n"))
+end

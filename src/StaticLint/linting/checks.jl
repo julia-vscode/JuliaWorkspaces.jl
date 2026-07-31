@@ -127,7 +127,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
     is_test_throws_macrocall(x, env, meta_dict) && return
 
     # Do checks
-    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
+    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope, tree_param_types)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
     opts.constif && check_if_conds(x, meta_dict)
@@ -144,7 +144,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
 
     if x.args !== nothing
         for i in 1:length(x.args)
-            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
+            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope, tree_param_types)
         end
     end
 end
@@ -386,7 +386,7 @@ function _is_local_callee_binding(b::Binding, meta_dict)
     return maybe_get_parent_fexpr(p, x -> CSTParser.defines_function(x) || CSTParser.defines_macro(x)) !== nothing
 end
 
-function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing)
+function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing, tree_param_types=nothing)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
@@ -415,9 +415,9 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                     # The local `func_ref` sees only THIS file's methods of a
                     # tree-visible name, but the tree knows all of them. Check the
                     # argument count against the full cross-file arity set
-                    # (`tree_arities`); a positional TYPE check of a cross-file
-                    # callee is deferred (needs sibling analyses). Splatted calls
-                    # have an unknowable arity — skip.
+                    # (`tree_arities`), then the positional types against the
+                    # resolved cross-file parameter types (`tree_param_types`).
+                    # Splatted calls have an unknowable arity — skip.
                     if tree_arities !== nothing && !call_has_splat(x)
                         arities = tree_arities(n, x)
                         # An unqualified import of a store function/type
@@ -433,7 +433,17 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                         if !isempty(arities) || store !== nothing
                             cc = call_nargs(x)
                             if any(a -> compare_f_call(a, cc), arities)
-                                # matches a workspace overload's arity
+                                # An arity match alone is not a match when the
+                                # cross-file parameter types rule every candidate
+                                # out. A callee that ALSO carries store methods
+                                # keeps its arity-only treatment: those methods'
+                                # parameter types are not in the tree records, so
+                                # judging the call on the records alone would
+                                # false-flag a valid store call.
+                                if store === nothing &&
+                                   !_tree_types_match(x, n, cc, arities, env, meta_dict, tree_param_types)
+                                    seterror!(x, IncorrectCallArgs, meta_dict)
+                                end
                             elseif store !== nothing
                                 # Match against the store's own methods; decline
                                 # (no flag) if we can't resolve a scope for them.
@@ -595,6 +605,40 @@ function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv,
         return false
     end
     return true # We shouldn't get here
+end
+
+# A type operand this comparison can reason about completely. A workspace-declared
+# type arrives as a local `Binding` (or a bare `EXPR`/`TreeRef`), whose ancestry
+# only partly resolves here — a supertype in a sibling file dead-ends at a
+# `TreeRef`, which no supertype walk continues through, so a genuine subtype
+# relation would read as a mismatch. The parameter side records such types as
+# `Any` for exactly this reason; the argument side has to decline the same way.
+_is_resolved_type(t) = !(t isa Binding || t isa EXPR || t isa TreeRef || t === nothing)
+
+# Does any cross-file method of `n` match the call on positional TYPES as well as
+# count? True (no opinion) whenever anything needed is unavailable — a resolved
+# type is only ever allowed to REMOVE a diagnostic, never to add one on a guess.
+function _tree_types_match(x, n, cc, arities, env::ExternalEnv, meta_dict, tree_param_types)
+    tree_param_types === nothing && return true
+    recs = tree_param_types(n, x)
+    isempty(recs) && return true
+    # The records cover only the methods whose positional alignment is knowable
+    # (no splat/`Vararg`, no struct constructor). If any method of the name is
+    # missing one, that method could be the call's target and nothing here can
+    # rule it out — judge the name as a whole or not at all.
+    length(recs) == length(arities) || return true
+    args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
+    isempty(kws) || return true                      # keywords: not modelled
+    all(_is_resolved_type, args) || return true
+    checked = false
+    for r in recs
+        compare_f_call(r.arity, cc) || continue
+        length(r.types) == length(args) || return true    # defaults/alignment: decline
+        checked = true
+        all(i -> _has_type_intersection(args[i], r.types[i], getsymbols(env), meta_dict),
+            1:length(args)) && return true
+    end
+    return !checked
 end
 
 # ── Detailed "possible method call error" messages ─────────────────────────
