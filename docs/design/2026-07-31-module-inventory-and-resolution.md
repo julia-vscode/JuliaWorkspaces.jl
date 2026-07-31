@@ -595,8 +595,7 @@ target, and the whole-root `:opaque_definitions` marker for a load-time `eval`.
 Both are *syntactic*, and these are the shapes they miss. They are listed together
 because a reader who finds one of them needs to know the others exist.
 
-**1. A method-generating macro that is not modelled — the one shape that still
-false-positives.** A non-`eval` macrocall is walked *transparently*
+**1. A method-generating macro that is not modelled.** A non-`eval` macrocall is walked *transparently*
 (`layer_inventory.jl`, `_walk_macrocall!`): its arguments are classified, its
 *expansion* is not. So a macro that mints a method leaves no trace in either
 index — and because both indices miss it equally, `length(recs) == length(arities)`
@@ -630,9 +629,37 @@ never matches the syntactic `eval`/`@eval` test, so no marker is emitted.
 inventory layer must not touch, so it marks. Coverage loss, not a false positive —
 deliberate.
 
-Holes 2–4 are narrow; hole 1 is the one to fix first, and it is the reason a
-future consumer of these records must keep the "rule out only" discipline rather
-than ever treating a non-match as a positive claim.
+**5. A file whose definitions the walker never sees — including a file being
+edited.** The completeness guard compares two index sizes, so it is defeated by
+anything that hides a definition from *both*. An un-modelled macro (hole 1) is one
+cause; a missing file is another, and it has three reachable shapes, each silent
+before type matching and flagged after:
+
+- an `include` the walker cannot resolve — `for fl in ("c.jl",) include(fl) end`,
+  `const fl = "c.jl"; include(fl)`, an interpolated path — leaves the included file
+  out of `derived_tree_files` entirely;
+- a syntax error earlier in a file swallowing a later definition;
+- **a file mid-edit.** A definition being typed (`f(x::Float`) is transiently
+  unparseable, so the method vanishes from both indices and a call in a *sibling*
+  file is flagged until the syntax completes.
+
+The third is the operationally important one, because adding an overload is exactly
+when a definition is transiently unparseable, and the diagnostic lands on a
+different file from the one being edited. The arity check is largely immune — a
+partially typed method usually keeps its argument count, and only a count mismatch
+flags — so the type path's transient exposure is materially larger.
+
+This is invisible to a repo sweep: the swept repo has no non-literal `include`
+under any root's tree, and a sweep analyses fixed content, never a half-typed
+buffer. It has to be found by construction.
+
+Holes 2–4 are narrow. Hole 1 is the one to fix for correctness; **hole 5's
+mid-edit case is the one a user will actually see**, and the honest mitigation is
+not a completeness guard at all — it is to decline the type check for any name
+whose root contains a file that failed to parse, which the syntax layer already
+knows. Either way, this is the reason a consumer of these records must keep the
+"rule out only" discipline rather than ever treating a non-match as a positive
+claim.
 
 #### 17b. The argument side: one accepted false positive
 
@@ -662,7 +689,11 @@ That is why it was acceptable to ship.
 It is not rare in principle, though: `x = nothing` → `if x !== nothing` → `f(x)`
 is a mainstream idiom, and only the conjunction (cross-file callee, store-resolved
 parameter type, a `nothing`-initialised local, a guard) makes it scarce. Treat one
-occurrence as a floor.
+occurrence as a floor — and note the floor rose after that measurement: recording
+dispatch-only `::T` parameters added ~720 typed method records, so this class now
+applies to a materially larger method population than the sweep that found one
+instance covered. Anonymous-parameter methods (`f(::String)`) were silent then and
+flag now.
 
 **The fix, scheduled ahead of the record merge:** infer a reassigned local's type
 from *all* its assignments — agreeing assignments give that type, disagreeing ones
