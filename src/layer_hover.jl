@@ -525,6 +525,17 @@ function _get_tree_ref_hover(tr::StaticLint.TreeRef, documentation::String, expr
         doc = item_documentation(rt, tr.item)
         doc !== nothing && (documentation = string(documentation, doc))
         return _module_ref_hover(documentation, tr.name)
+    elseif tr.kind === :macro_declared
+        # A name a modelled macro declares. There is no expansion to re-print and
+        # no recorded signature, and the defining EXPR is the DECLARING statement
+        # (`foo(rt, x::Int)::V`) — printing that as this name's signature would be
+        # a fabrication for `set_foo!`. Name, declaring macro, docstring; no
+        # signature.
+        documentation = string(documentation, "```julia\n", tr.name, "\n```\n")
+        spelling = _macro_declared_spelling(rt, tr.item)
+        spelling === nothing ||
+            (documentation = string(documentation, "declared by `", spelling, "`\n\n"))
+        return _tree_item_fallback_hover(tr.item, documentation, rt)
     elseif tr.kind in (:function, :macro, :struct, :mutable_struct, :abstract, :primitive, :enum)
         # A workspace function that EXTENDS a store-backed function (an `import
         # Base: relpath` + bare `relpath(...) = ...`) is tree-declared, so it
@@ -601,6 +612,19 @@ function _tree_item_fallback_hover(item::ItemRef, documentation::String, rt)
     doc = item_documentation(rt, item)
     doc === nothing && return documentation
     return string(documentation, doc)
+end
+
+# The macro that declares `item`'s name, as written at the call site
+# (`Salsa.@declare_input`), or `nothing` when `item` is not a macro-declared row.
+function _macro_declared_spelling(rt, item::Union{Nothing,ItemRef})
+    item === nothing && return nothing
+    for it in derived_file_inventory(rt, item.file).items
+        it.id == item.id && it.kind === :macro_declared || continue
+        s = it.declared_by
+        s === nothing && continue
+        return isempty(s.qualifier) ? s.name : string(join(s.qualifier, "."), ".", s.name)
+    end
+    return nothing
 end
 
 _get_hover(b::StaticLint.Binding, documentation::String, expr, env, meta_dict) =

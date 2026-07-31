@@ -417,3 +417,32 @@ end
     hints = StaticLint.collect_hints(cst, env, Dict{String,Any}(), fa.meta, :all)
     @test "set_foo!" in [CSTParser.valof(x) for (_, x) in hints]
 end
+
+@testitem "macro-declared: completion kind is a method, not a variable" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: _completion_kind_for_visible, CompletionKinds
+
+    @test _completion_kind_for_visible(:macro_declared) == CompletionKinds.Method
+end
+
+@testitem "macro-declared: hover names the declaring macro and no signature" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: get_hover_text, get_text_file
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    function use(rt)
+        set_foo!(rt, 1, 2)
+    end
+    end
+    """; with_salsa_package=true)
+
+    src = get_text_file(jw, root).content.content
+    off = first(findfirst("set_foo!", src))
+    h = get_hover_text(jw, root, off)
+    @test h !== nothing
+    @test occursin("set_foo!", h)
+    @test occursin("@declare_input", h)
+    # The input's own signature must not be presented as this name's signature.
+    @test !occursin("foo(rt, x::Int)", h)
+end

@@ -978,7 +978,7 @@ function _completion_kind_for_visible(kind::Symbol)
         return CompletionKinds.Module
     elseif kind in (:struct, :mutable_struct, :abstract, :primitive, :enum)
         return CompletionKinds.Struct
-    elseif kind in (:function, :macro)
+    elseif kind in (:function, :macro, :macro_declared)
         return CompletionKinds.Method
     else
         return CompletionKinds.Variable
