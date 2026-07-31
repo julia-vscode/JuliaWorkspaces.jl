@@ -1,0 +1,274 @@
+{
+  "label": "main-control",
+  "config": {
+    "julia.completionmode": "qualify",
+    "julia.inlayHints.static.enabled": true,
+    "julia.inlayHints.static.variableTypes.enabled": true,
+    "julia.inlayHints.static.parameterNames.enabled": "literals",
+    "julia.symbolCacheDownload": false,
+    "julia.symbolserverUpstream": "https://julia-symbolcache.org",
+    "julia.enableDynamicIndexing": false,
+    "julia.maxConcurrentIndexingProcesses": 4,
+    "julia.enableWorkspaceEnvironmentResolution": false
+  },
+  "wall_start": 1785515179.6535432,
+  "t_initialize_response": 70.82379827089608,
+  "t_initialized_sent": 70.82429000292905,
+  "startup_settled": true,
+  "t_settled": 124.85009379289113,
+  "t_first_publish": 116.5940156748984,
+  "t_last_publish_startup": 116.63853855594061,
+  "publish_count_startup": 2186,
+  "startup_probes": [
+    [
+      70.825,
+      45852.7
+    ],
+    [
+      117.178,
+      1.8
+    ],
+    [
+      117.68,
+      1.7
+    ],
+    [
+      118.182,
+      1.4
+    ],
+    [
+      118.683,
+      1.8
+    ],
+    [
+      119.185,
+      2.8
+    ],
+    [
+      119.689,
+      2.1
+    ],
+    [
+      120.191,
+      2.6
+    ],
+    [
+      120.694,
+      2.5
+    ],
+    [
+      121.197,
+      2.5
+    ],
+    [
+      121.699,
+      12.6
+    ],
+    [
+      122.212,
+      2.8
+    ],
+    [
+      122.715,
+      2.6
+    ],
+    [
+      123.218,
+      2.7
+    ],
+    [
+      123.721,
+      2.7
+    ],
+    [
+      124.224,
+      3.6
+    ],
+    [
+      124.728,
+      2.8
+    ]
+  ],
+  "progress_phases": [
+    {
+      "title": "Scanning workspace files...",
+      "begun": 73.43740452080965,
+      "ended": 116.6774643168319,
+      "endmsg": "Workspace loaded",
+      "n_reports": 2,
+      "last_report": "Analyzing workspace..."
+    }
+  ],
+  "runtime": {
+    "hover_first": 1333.82,
+    "hover": {
+      "n": 20,
+      "min": 0.57,
+      "p50": 0.64,
+      "p90": 0.77,
+      "max": 1.25
+    },
+    "documentSymbol": {
+      "n": 20,
+      "min": 1.02,
+      "p50": 1.07,
+      "p90": 1.13,
+      "max": 1.34
+    },
+    "definition": {
+      "n": 20,
+      "min": 0.38,
+      "p50": 0.48,
+      "p90": 0.61,
+      "max": 669.37
+    },
+    "completion": {
+      "n": 20,
+      "min": 0.64,
+      "p50": 0.67,
+      "p90": 0.74,
+      "max": 738.77
+    },
+    "workspace_symbol": {
+      "n": 10,
+      "min": 13.09,
+      "p50": 16.58,
+      "p90": 18.37,
+      "max": 822.52
+    },
+    "getModuleAt": {
+      "n": 20,
+      "min": 0.08,
+      "p50": 0.09,
+      "p90": 0.12,
+      "max": 195.32
+    },
+    "references_first": 1071.77,
+    "references": {
+      "n": 10,
+      "min": 2.61,
+      "p50": 2.64,
+      "p90": 2.85,
+      "max": 6.22
+    },
+    "didchange_publish_ms": [
+      852.06,
+      51.27,
+      79.07,
+      41.7,
+      45.2,
+      44.39,
+      43.51,
+      40.02,
+      47.62,
+      43.77,
+      51.35,
+      54.79,
+      55.49,
+      166.74,
+      41.84,
+      43.72,
+      43.99,
+      41.48,
+      44.33,
+      43.42
+    ],
+    "burst": {
+      "duration_s": 0.995,
+      "probes_ms": [
+        [
+          -0.0,
+          40.5
+        ],
+        [
+          0.241,
+          72.9
+        ],
+        [
+          0.514,
+          228.8
+        ],
+        [
+          0.943,
+          238.8
+        ],
+        [
+          1.383,
+          1.6
+        ],
+        [
+          1.584,
+          124.3
+        ],
+        [
+          1.909,
+          2.0
+        ],
+        [
+          2.111,
+          1.8
+        ],
+        [
+          2.313,
+          2.3
+        ],
+        [
+          2.516,
+          2.2
+        ],
+        [
+          2.719,
+          2.5
+        ],
+        [
+          2.921,
+          2.1
+        ],
+        [
+          3.124,
+          2.5
+        ],
+        [
+          3.327,
+          2.3
+        ],
+        [
+          3.529,
+          2.6
+        ],
+        [
+          3.732,
+          2.5
+        ],
+        [
+          3.935,
+          2.5
+        ],
+        [
+          4.138,
+          2.5
+        ],
+        [
+          4.341,
+          2.5
+        ],
+        [
+          4.543,
+          2.6
+        ],
+        [
+          4.746,
+          2.6
+        ],
+        [
+          4.949,
+          2.6
+        ]
+      ],
+      "publishes_during": 0
+    }
+  },
+  "ls_rss_mb": 2010.2,
+  "children_rss_mb": [],
+  "t_end": 144.41135411779396
+}
