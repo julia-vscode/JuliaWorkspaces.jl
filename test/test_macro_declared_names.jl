@@ -276,3 +276,40 @@ end
     @test haskey(vis, "f")
     @test !any(vn -> vn.kind === :macro_declared, values(vis))
 end
+
+@testitem "macro-declared: an exported name comes in through `using .Sub`" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    module Sub
+    using Salsa
+    Salsa.@declare_input foo(rt)::Int
+    export set_foo!
+    end
+    using .Sub
+    end
+    """; with_salsa_package=true)
+
+    vis = derived_module_visible_names(jw.runtime, root, ["T"])
+    @test haskey(vis, "set_foo!")
+    @test vis["set_foo!"].kind === :macro_declared
+    @test vis["set_foo!"].item !== nothing
+end
+
+@testitem "macro-declared: a colon-list member keeps its kind and item" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    module Sub
+    using Salsa
+    Salsa.@declare_input foo(rt)::Int
+    end
+    using .Sub: set_foo!
+    end
+    """; with_salsa_package=true)
+
+    vis = derived_module_visible_names(jw.runtime, root, ["T"])
+    @test haskey(vis, "set_foo!")
+    # Without the fix this binds as `:unknown` with no item, so hover and
+    # go-to-definition go dead even though the name resolves.
+    @test vis["set_foo!"].kind === :macro_declared
+    @test vis["set_foo!"].item !== nothing
+end

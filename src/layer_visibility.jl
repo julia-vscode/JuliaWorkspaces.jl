@@ -308,10 +308,16 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
             names = derived_module_names(rt, root, tp)
             exports = derived_module_exports(rt, root, tp).exports
             declared = derived_module_declared(rt, root, tp)
+            mdecl = derived_module_macro_declared_names(rt, root, tp)
             for name in exports
                 if haskey(names, name)
                     mt = names[name] === :module ? ImportTarget(:tree, vcat(tp, [name])) : nothing
                     push!(entries, (name, VisibleName(names[name], :using_tree, declared[name], tp), mt))
+                elseif haskey(mdecl, name)
+                    # Exported and confirmed macro-declared: not in `names`, since
+                    # a macro-declared name never enters the tree's `declared` map
+                    # by design (see `derived_module_macro_declared_names`).
+                    push!(entries, (name, VisibleName(:macro_declared, :using_tree, mdecl[name], tp), nothing))
                 else
                     # A re-export of a name the submodule brought in through its
                     # OWN imports (`using ..Prov; export bar`): exported but not
@@ -411,7 +417,11 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
             return (:module, _module_declared_at(rt, root, tp), tp, target)
         end
         names = derived_module_names(rt, root, tp)
-        haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
+        if !haskey(names, member_name)
+            ref = get(derived_module_macro_declared_names(rt, root, tp), member_name, nothing)
+            ref === nothing && return (:unknown, nothing, tp, nothing)
+            return (:macro_declared, ref, tp, nothing)
+        end
         mt = names[member_name] === :module ? ImportTarget(:tree, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_module_declared(rt, root, tp)[member_name], tp, mt)
     elseif target.sort === :workspace_package
@@ -424,7 +434,11 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
             return (:module, _module_declared_at(rt, entry, tp), tp, target)
         end
         names = derived_module_names(rt, entry, tp)
-        haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
+        if !haskey(names, member_name)
+            ref = get(derived_module_macro_declared_names(rt, entry, tp), member_name, nothing)
+            ref === nothing && return (:unknown, nothing, tp, nothing)
+            return (:macro_declared, ref, tp, nothing)
+        end
         mt = names[member_name] === :module ? ImportTarget(:workspace_package, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_module_declared(rt, entry, tp)[member_name], tp, mt)
     elseif target.sort === :external
