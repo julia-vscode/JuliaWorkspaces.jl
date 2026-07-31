@@ -141,11 +141,14 @@ constraint 1).
 
 **A name is not an identity.** `@declare_input` from another package declares
 nothing. `::Runtime` means Salsa's `Runtime` in one file and something else in
-another. A written qualifier helps but does not settle it, and the *bare*
-spelling is the one that matters in practice: `src/inputs.jl` writes bare
-`@declare_input` twelve times, with `using Salsa` sitting in a different file of
-the same module. Judging it needs the declaring **module's** imports — which are
-module-level, not file-level, and so unavailable where the names are recorded.
+another. A written qualifier narrows it but does not settle it: `src/inputs.jl`
+writes `Salsa.@declare_input` twelve times — all qualified — yet the qualifier
+`Salsa` is itself a name, resolved through `using Salsa` in
+`src/JuliaWorkspaces.jl`, a *different file of the same module*. So even the
+qualified form needs the declaring **module's** imports, which are module-level,
+not file-level, and so unavailable where the names are recorded. The bare form
+needs them too, and is the harder case, but it is not the case this repo
+actually exhibits.
 
 **Three invalidation constraints shape every possible answer.** They are
 properties of this engine, verified in the tree as of today:
