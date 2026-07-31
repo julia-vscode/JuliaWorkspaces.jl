@@ -1180,3 +1180,48 @@ end
     inv2 = derived_file_inventory(jw.runtime, u)
     @test isequal(inv1, inv2)
 end
+
+@testitem "inventory: a where-clause bound does not shadow a same-named parameter type" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///pt3/src/P.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module P
+    f(x::T, y::Real) where T<:Real = 4
+    end
+    """, "julia")))
+    items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
+
+    # `T`'s bound (`Real`) must not be collected as a type-variable name: `y`'s
+    # own, unrelated `Real` parameter only happens to share its spelling.
+    @test items["f"].param_types == [String[], ["Real"]]
+end
+
+@testitem "inventory: keyword args, defaulted positional args, and explicit Vararg" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///pt4/src/P.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module P
+    f(x::Int; y::String="a") = 1
+    g(x::Int, z::Int=2) = 2
+    h(x::Vararg{Int}) = 3
+    i(x::Vararg) = 4
+    end
+    """, "julia")))
+    items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
+
+    # a keyword arg lives in `:parameters` and must not disturb positional alignment
+    @test items["f"].param_types == [["Int"]]
+    # a defaulted POSITIONAL arg is still positional, not a keyword
+    @test items["g"].param_types == [["Int"], ["Int"]]
+    # explicit `::Vararg{T}` / bare `::Vararg` make alignment unknowable, like a splat
+    @test items["h"].param_types === nothing
+    @test items["i"].param_types === nothing
+end

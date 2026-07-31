@@ -497,6 +497,12 @@ end
 
 # The `where`-bound type variable names of a signature. Method-local: they name
 # nothing in the defining module, so a parameter annotated with one is unknown.
+# Collects ONLY the bound variable, never a subtype/supertype bound — a bound
+# sharing a spelling with an unrelated parameter's real type (`where T<:Real`
+# alongside a `y::Real` parameter) must not make that type unknown too. Any
+# where-clause shape not recognized below contributes nothing, which is safe:
+# under-collecting only means a tvar surfaces as an unresolvable name, handled
+# permissively downstream.
 function _where_var_names(sig::CSTParser.EXPR)
     tvars = Set{String}()
     s = sig
@@ -504,11 +510,22 @@ function _where_var_names(sig::CSTParser.EXPR)
         for i in 2:length(s.args)
             a = s.args[i]
             if CSTParser.isidentifier(a)
+                # bare `where T`
                 push!(tvars, CSTParser.str_value(a))
-            elseif a isa CSTParser.EXPR && a.args !== nothing
-                for c in a.args
-                    CSTParser.isidentifier(c) && push!(tvars, CSTParser.str_value(c))
-                end
+            elseif a isa CSTParser.EXPR && a.head isa CSTParser.EXPR &&
+                    CSTParser.isoperator(a.head) && CSTParser.valof(a.head) in ("<:", ">:") &&
+                    a.args !== nothing && length(a.args) == 2
+                # `where T<:Bound` / `where T>:Bound`: the variable is the
+                # left operand.
+                CSTParser.isidentifier(a.args[1]) && push!(tvars, CSTParser.str_value(a.args[1]))
+            elseif a isa CSTParser.EXPR && CSTParser.headof(a) === :comparison &&
+                    a.args !== nothing && length(a.args) == 5 &&
+                    CSTParser.headof(a.args[2]) === :OPERATOR && CSTParser.valof(a.args[2]) in ("<:", ">:") &&
+                    CSTParser.headof(a.args[4]) === :OPERATOR && CSTParser.valof(a.args[4]) in ("<:", ">:") &&
+                    CSTParser.isidentifier(a.args[3])
+                # `where Lo<:T<:Hi` / `where Lo>:T>:Hi`: the variable is the
+                # middle operand.
+                push!(tvars, CSTParser.str_value(a.args[3]))
             end
         end
         s = s.args[1]
