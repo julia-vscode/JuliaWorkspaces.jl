@@ -1,7 +1,7 @@
 @testsnippet MacroDeclWS begin
     using JuliaWorkspaces
     using JuliaWorkspaces: _macro_owner_confirmed, derived_macro_declared_names_index,
-        derived_module_macro_declared_names
+        derived_module_macro_declared_names, derived_module_visible_names
     using JuliaWorkspaces.URIs2: URI
 
     # A workspace with `root_src` as the root file, plus any extra files, plus
@@ -212,4 +212,67 @@ end
 
     @test isempty(derived_module_macro_declared_names(jw.runtime, root, ["T"]))
     @test haskey(derived_module_macro_declared_names(jw.runtime, root, ["T", "Inner"]), "set_foo!")
+end
+
+@testitem "macro-declared: confirmed names are visible in their module" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    end
+    """; with_salsa_package=true)
+
+    vis = derived_module_visible_names(jw.runtime, root, ["T"])
+    @test haskey(vis, "set_foo!")
+    @test vis["set_foo!"].kind === :macro_declared
+    @test vis["set_foo!"].origin === :declared
+    @test vis["set_foo!"].origin_module == ["T"]
+    @test vis["set_foo!"].item !== nothing
+end
+
+@testitem "macro-declared: a real declaration beats a macro-declared name" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    set_foo!(rt, x, v) = nothing
+    end
+    """; with_salsa_package=true)
+
+    vis = derived_module_visible_names(jw.runtime, root, ["T"])
+    # The hand-written method wins: it is real text.
+    @test vis["set_foo!"].kind === :function
+end
+
+@testitem "macro-declared: a macro-declared name beats a wildcard bring-in" setup=[MacroDeclWS] begin
+    prov = URI("file:///ws/Prov/src/Prov.jl")
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    using .Sub
+    Salsa.@declare_input foo(rt, x::Int)::V
+    module Sub
+    set_foo!() = 1
+    export set_foo!
+    end
+    end
+    """; with_salsa_package=true)
+
+    vis = derived_module_visible_names(jw.runtime, root, ["T"])
+    # Declaration tier (3) beats a wildcard `using` bring-in (tier 1).
+    @test vis["set_foo!"].kind === :macro_declared
+end
+
+@testitem "macro-declared: the union is a no-op without a modelled macrocall" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    f(x) = x
+    end
+    """; with_salsa_package=true)
+
+    @test isempty(derived_module_macro_declared_names(jw.runtime, root, ["T"]))
+    vis = derived_module_visible_names(jw.runtime, root, ["T"])
+    @test haskey(vis, "f")
+    @test !any(vn -> vn.kind === :macro_declared, values(vis))
 end

@@ -795,6 +795,21 @@ function _visible_names_impl_body(rt, root, path::Vector{String}, visited::Set{U
 
     result, _ = _visible_names_pass1(rt, root, path, visited)
 
+    # Confirmed macro-declared names (layer: `derived_module_macro_declared_names`)
+    # rank as DECLARATIONS: `origin = :declared` gives them `_tier` 3, so pass 2
+    # cannot displace them and a wildcard bring-in from pass 1 loses to them. A
+    # name the module really declares wins, because that one is written text.
+    #
+    # `origin = :declared` without a matching `derived_module_declared` entry is
+    # deliberate — see the spec. Consumers that branch on this origin must
+    # tolerate the name being absent from that dict.
+    let declared = derived_module_declared(rt, root, path)
+        for (name, ref) in derived_module_macro_declared_names(rt, root, path)
+            haskey(declared, name) && continue
+            result[name] = VisibleName(:macro_declared, :declared, ref, path)
+        end
+    end
+
     # Pass 2: the ledger re-attempt — see `_reattempt_unresolved`'s docstring
     # for why this stays a single bounded pass. Both statement forms are
     # re-attempted: whole-module bring-ins go through `_target_bring_ins`,
