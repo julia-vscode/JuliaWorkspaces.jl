@@ -72,6 +72,8 @@ Append to `test/test_inventory.jl`:
         ["bar", "set_bar!", "delete_bar!"]
     # No `::` return type: Salsa itself rejects this, so we derive nothing.
     @test _declare_input_names(arg1("@declare_input baz(rt)")) == String[]
+    # A `::` whose left side is not a call declares nothing either.
+    @test _declare_input_names(arg1("@declare_input foo::Int")) == String[]
 
     @test _deprecate_names(arg1("@deprecate f(x::Int) g(x)")) == ["f"]
     @test _deprecate_names(arg1("@deprecate old new")) == ["old"]
@@ -127,6 +129,9 @@ end
 function _declare_input_names(arg1::CSTParser.EXPR)
     CSTParser.isdeclaration(arg1) || return String[]
     (arg1.args !== nothing && length(arg1.args) >= 1) || return String[]
+    # The left side must be a CALL: `@declare_input x::Int` declares nothing,
+    # because Salsa requires the call form.
+    CSTParser.iscall(arg1.args[1]) || return String[]
     n = _symbol_name(CSTParser.get_name(arg1.args[1]))
     return n === nothing ? String[] : [n, "set_$(n)!", "delete_$(n)!"]
 end
