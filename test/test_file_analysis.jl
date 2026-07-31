@@ -2336,3 +2336,44 @@ end
     @test :opaque_definitions ∉ kinds("@eval f(x::Int) = 1\n")
     @test :opaque_definitions ∉ kinds("f(x::Int) = 1\n")
 end
+
+@testitem "inventory: the opaque-definitions marker never stands in for its statement's name" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: ItemRef, _inventory_item_name, _itemref_is_ambiguous
+
+    # The marker shares the id of the statement that carries the `eval`, so an
+    # id-only join must skip it or it wins over the real declaration.
+    for src in ("const y = eval(:(1 + 1))\n", "y = @eval 1 + 1\n")
+        jw = ws_with(Dict(A => src))
+        inv = JuliaWorkspaces.derived_file_inventory(jw.runtime, A)
+        @test :opaque_definitions in [it.kind for it in inv.items]
+        decl = only(it for it in inv.items if it.kind !== :opaque_definitions)
+        ref = ItemRef(A, decl.id)
+        @test _inventory_item_name(jw.runtime, ref) == "y"
+        @test !_itemref_is_ambiguous(jw.runtime, ref)
+    end
+end
+
+@testitem "derived_file_analysis: TYPE check declines through eval wrappers and eval'd module targets" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # A computed name inside a WRAPPED eval: the definition's parent is the `begin`
+    # block, not the `@eval`, so the marker must be found by walking up.
+    @test isempty(diags("f(x::Int) = x\n@eval begin\n    \$(:f)(x::Float64) = 2x\nend\n", "g() = f(1.0)\n"))
+    # and through a second wrapper layer
+    @test isempty(diags("f(x::Int) = x\n@eval begin\n    if true\n        \$(:f)(x::Float64) = 2x\n    end\nend\n",
+                        "g() = f(1.0)\n"))
+
+    # An `@eval <module> <named definition>` IS walked and named, but the item is
+    # recorded against the ENCLOSING module — so the named module's method set is
+    # partial and a call inside it must not be judged on it.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\nmodule Inner\ninclude(\"b.jl\")\nend\nend\n",
+        A => "module Inner\nf(x::Int) = x\nend\n@eval Inner f(x::Float64) = 2x\n",
+        B => "g() = f(1.0)\n",
+    ))
+    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)))
+end

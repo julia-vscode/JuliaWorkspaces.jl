@@ -953,6 +953,9 @@ _bare_macro_name(s::AbstractString) = startswith(s, "@") ? s[nextind(s, 1):end] 
 # (`@`-prefixed for macros). `nothing` when the id is absent (stale ref).
 function _inventory_item_name(rt, ref::ItemRef)
     for it in derived_file_inventory(rt, ref.file).items
+        # A nameless `:opaque_definitions` marker shares its statement's id
+        # (`const y = eval(…)`) and must never stand in for the declared name.
+        it.kind === :opaque_definitions && continue
         it.id == ref.id && return it.name
     end
     return nothing
@@ -967,6 +970,8 @@ end
 function _itemref_is_ambiguous(rt, ref::ItemRef)
     n = 0
     for it in derived_file_inventory(rt, ref.file).items
+        # The nameless marker declares nothing, so it never makes an id ambiguous.
+        it.kind === :opaque_definitions && continue
         it.id == ref.id || continue
         n += 1
         n > 1 && return true

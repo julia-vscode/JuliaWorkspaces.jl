@@ -585,24 +585,54 @@ function _param_type_names(x::CSTParser.EXPR)
     return out
 end
 
-# Does this top-level statement evaluate code as the file LOADS — an
-# `eval(...)`/`Mod.eval(...)` call or an `@eval`/`Mod.@eval` macrocall? Such a
-# statement can define methods that no inventory item records. Nested function
-# and macro definitions are skipped: their bodies run when called, not at load.
-function _has_load_time_eval(x)
+# Is `x` itself a load-time evaluation — an `eval(...)`/`Mod.eval(...)` call or an
+# `@eval`/`Mod.@eval` macrocall? Recognition is syntactic, so an aliased `eval`
+# (`const ev = eval; ev(:(f(x) = 1))`) is not caught; a known limitation.
+function _is_load_time_eval(x)
     x isa CSTParser.EXPR || return false
     if CSTParser.ismacrocall(x) && x.args !== nothing && !isempty(x.args)
-        _macro_name_string(x.args[1]) == "@eval" && return true
+        return _macro_name_string(x.args[1]) == "@eval"
     elseif CSTParser.iscall(x) && x.args !== nothing && !isempty(x.args)
         p = _dotted_name_path(x.args[1])
-        p !== nothing && last(p) == "eval" && return true
+        return p !== nothing && last(p) == "eval"
     end
+    return false
+end
+
+# Does this top-level statement evaluate code as the file LOADS? Such a statement
+# can define methods that no inventory item records. Nested function and macro
+# definitions are skipped: their bodies run when called, not at load.
+function _has_load_time_eval(x)
+    x isa CSTParser.EXPR || return false
+    _is_load_time_eval(x) && return true
     x.args === nothing && return false
     for a in x.args
         (CSTParser.defines_function(a) || CSTParser.defines_macro(a)) && continue
         _has_load_time_eval(a) && return true
     end
     return false
+end
+
+# The nearest enclosing load-time evaluation of `x`, or `nothing`. Walks the parent
+# chain rather than matching a fixed wrapper shape, so no `begin` block, `if`, or
+# further macro layer between the two can defeat it.
+function _enclosing_load_time_eval(x::CSTParser.EXPR)
+    p = CSTParser.parentof(x)
+    while p isa CSTParser.EXPR
+        _is_load_time_eval(p) && return p
+        p = CSTParser.parentof(p)
+    end
+    return nothing
+end
+
+# Does this load-time evaluation name the module to evaluate in (`@eval Mod expr`,
+# `Core.eval(Mod, expr)`)? Anything it defines lands in THAT module, so the item
+# the walker records at the enclosing module path is filed in the wrong place.
+function _eval_names_target_module(ev::CSTParser.EXPR)
+    ev.args === nothing && return false
+    # macrocall args: name, parameters placeholder, then the macro's arguments
+    CSTParser.ismacrocall(ev) && return length(ev.args) >= 4
+    return length(ev.args) >= 3   # call args: callee, module, expression
 end
 
 # --- Modelled macros that declare names their argument never spells ---------
@@ -947,20 +977,22 @@ end
 # A definition is exempt — a top-level `@eval f(x::T) = 1` IS walked, and its
 # method recorded, and a body's `eval` runs on call rather than on load.
 function _emit_opaque_definitions!(acc, x, order, id, parent_module)
-    if CSTParser.defines_function(x) || CSTParser.defines_macro(x)
-        # `@eval $(:f)(x::T) = 1`: the definition IS walked, but its name is
-        # computed, so no item names the method it adds. A name-free definition
-        # outside an `@eval` (`(::Foo)(x) = 1`) binds no name at all and needs no
-        # marker.
-        _symbol_name(CSTParser.get_name(x)) === nothing || return
-        p = CSTParser.parentof(x)
-        (p isa CSTParser.EXPR && CSTParser.ismacrocall(p) && p.args !== nothing &&
-            !isempty(p.args) && _macro_name_string(p.args[1]) == "@eval") || return
+    opaque = if CSTParser.defines_function(x) || CSTParser.defines_macro(x)
+        # A definition the walker reaches is normally recorded, so it needs no
+        # marker. Inside a load-time evaluation two things spoil that record: a
+        # computed name (`@eval $(:f)(x::T) = 1`) names no method at all, and a
+        # named target module (`@eval Mod f(x::T) = 1`) files the method under the
+        # ENCLOSING module, leaving `Mod`'s method set partial. A name-free
+        # definition outside an eval (`(::Foo)(x) = 1`) binds no name.
+        ev = _enclosing_load_time_eval(x)
+        ev !== nothing && (_symbol_name(CSTParser.get_name(x)) === nothing ||
+                           _eval_names_target_module(ev))
     elseif CSTParser.defines_datatype(x) || CSTParser.defines_module(x)
-        return
-    elseif !_has_load_time_eval(x)
-        return
+        false
+    else
+        _has_load_time_eval(x)
     end
+    opaque || return
     push!(acc.items, InventoryItem(order, id, "", String[], :opaque_definitions,
         nothing, String[], parent_module))
     return
