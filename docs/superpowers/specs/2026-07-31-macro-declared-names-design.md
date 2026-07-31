@@ -114,20 +114,24 @@ walker: 8/8 ids byte-identical across an insertion).
 
 ### Emission point
 
-The walker, `_walk_one!`. It is the single source of truth for ids, and the only
-place that still knows an argument's position within its macrocall — by the time
-`_classify_item!` sees `f(x::Int)`, the fact that it was argument 1 of
-`@deprecate` is gone, and both arguments have been minted ids.
+`_classify_item!`, with **no walker change at all**. CSTParser populates parent
+links at parse time, so the statement's position inside its macrocall survives:
+for `Salsa.@declare_input foo(rt, x)::Int`, `CSTParser.parentof` of the `::`
+statement is the macrocall, and `parent.args[3] === x` identifies it as argument 1
+(`args[1]` is the macro name, `args[2]` a zero-span placeholder). Verified on a
+freshly parsed CST.
 
-`_walk_one!`'s callback gains an optional macro context: `nothing`, or
-`(qualifier, macro_name, arg_index)`. `_classify_item!` emits one row per derived
-name when the context says "argument 1 of a table-matched macrocall". The spelling
-comes from helpers that already exist: `_macro_name_string(mc.args[1])` and
-`_getfield_qualifier(mc.args[1])`.
+So the arm is: take `p = CSTParser.parentof(x)`; require `CSTParser.ismacrocall(p)`
+and `p.args[3] === x`; read the spelling with the existing helpers
+`_macro_name_string(p.args[1])` and `_getfield_qualifier(p.args[1])`; look the bare
+macro name up in the table; emit one row per derived name, all carrying `x`'s own
+`order` and `id`.
 
-Two closures consume this callback, so both signatures move together:
-`_classify_item!` and `derived_item_positions` (`layer_inventory.jl:908`), whose
-5-argument contract is documented at `:149`.
+This keeps the 5-argument `_foreach_toplevel_item` callback contract intact, so
+`derived_item_positions` and the existing walker tests are untouched. The
+`p.args[3] === x` test is also what excludes argument 2 — `g(x)` in
+`@deprecate f(x::Int) g(x)` is walked and minted an id like any statement, and must
+record nothing.
 
 Matching here is **by bare macro name only**. Nothing at this layer judges
 identity, and nothing here reads the environment.
@@ -400,9 +404,9 @@ id shift.
 
 ## Files touched
 
-- `src/layer_inventory.jl` — rule table, `:macro_declared` kind, `declared_by` field
-  on `InventoryItem`, walker macro context, `_classify_item!` arm, and the
-  `derived_item_positions` callback signature.
+- `src/layer_inventory.jl` — rule table, name derivation, `:macro_declared` kind,
+  `declared_by` field on `InventoryItem`, and the `_classify_item!` arm. The walker
+  and the `_foreach_toplevel_item` callback contract are unchanged.
 - `src/layer_module_tree.jl` — kind-filter parameter on
   `_walk_spliced_binding_items!`; a `_build_kind_index` arm if the new kind needs one.
 - `src/layer_visibility.jl` — the two new queries, the union in
