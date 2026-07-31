@@ -313,3 +313,83 @@ end
     @test vis["set_foo!"].kind === :macro_declared
     @test vis["set_foo!"].item !== nothing
 end
+
+@testitem "macro-declared: uses of the generated names are not missing refs" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: StaticLint, CSTParser, derived_file_analysis,
+        derived_stdlib_only_env, derived_julia_legacy_syntax_tree
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    function use(rt)
+        foo(rt, 1)
+        set_foo!(rt, 1, 2)
+        delete_foo!(rt, 1)
+    end
+    end
+    """; with_salsa_package=true)
+
+    # Drive the per-file pass, not the whole-closure query: the
+    # macro-declared-names visibility union only ever feeds a `module_context`
+    # pass, and that per-file pass is also what production diagnostics
+    # actually use (`derived_new_static_lint_diagnostics` →
+    # `derived_file_analysis`). The whole-closure query
+    # (`derived_static_lint_meta_for_root`) never consults it.
+    fa = derived_file_analysis(jw.runtime, root, root)
+    cst = derived_julia_legacy_syntax_tree(jw.runtime, root)
+    env = derived_stdlib_only_env(jw.runtime)
+    hints = StaticLint.collect_hints(cst, env, Dict{String,Any}(), fa.meta, :all)
+    flagged = [CSTParser.valof(x) for (_, x) in hints]
+
+    @test "set_foo!" ∉ flagged
+    @test "delete_foo!" ∉ flagged
+    @test "foo" ∉ flagged
+    # And nothing new: `Salsa` itself is a workspace package here, so it resolves.
+    @test isempty(flagged)
+end
+
+@testitem "macro-declared: the declaration site is not reported as a bad call" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: StaticLint, derived_file_analysis,
+        derived_stdlib_only_env, derived_julia_legacy_syntax_tree
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    end
+    """; with_salsa_package=true)
+
+    fa = derived_file_analysis(jw.runtime, root, root)
+    cst = derived_julia_legacy_syntax_tree(jw.runtime, root)
+    env = derived_stdlib_only_env(jw.runtime)
+    hints = StaticLint.collect_hints(cst, env, Dict{String,Any}(), fa.meta, :all)
+
+    # `foo` at the declaration now RESOLVES (it did not before), and it is not a
+    # definition signature, so it reads as a call. It must not be flagged.
+    errs = [StaticLint.errorof(x, fa.meta) for (_, x) in hints]
+    @test !any(e -> e === StaticLint.IncorrectCallArgs, errs)
+end
+
+@testitem "macro-declared: an unconfirmed macro still flags its names" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: StaticLint, CSTParser, derived_file_analysis,
+        derived_stdlib_only_env, derived_julia_legacy_syntax_tree
+
+    # A LOCAL `@declare_input` (bare spelling) is confirmed foreign, so the
+    # generated names do not exist and their uses must be reported.
+    jw, root = macro_ws("""
+    module T
+    macro declare_input(ex) end
+    @declare_input foo(rt, x::Int)::V
+    function use(rt)
+        set_foo!(rt, 1, 2)
+    end
+    end
+    """)
+
+    fa = derived_file_analysis(jw.runtime, root, root)
+    cst = derived_julia_legacy_syntax_tree(jw.runtime, root)
+    env = derived_stdlib_only_env(jw.runtime)
+    hints = StaticLint.collect_hints(cst, env, Dict{String,Any}(), fa.meta, :all)
+    @test "set_foo!" in [CSTParser.valof(x) for (_, x) in hints]
+end
