@@ -88,6 +88,22 @@ shippable — of the repo's 17672 annotated parameters, 83.1% are bare identifie
    splitting them buys nothing. Everything else records as explicit unknown, which
    §17's first rule already makes permissive, so this ships end-to-end as a linter
    that catches less and false-positives never — and is manually testable on its own.
+1.4. **Infer a reassigned local's type from all its assignments** — agreeing
+   assignments give that type, disagreeing ones give `Any`. Scheduled *before* 1.5
+   because it fixes the one false positive slice 1 shipped with (§17b): `refof` is
+   flow-insensitive, so `x = nothing` → `if x !== nothing` → `f(x)` infers `Nothing`
+   at the call site and the store-resolved-argument guard cannot decline, since the
+   wrong type is well resolved. Strictly better than today at every size of the
+   assignment set. **Two costs:** `Binding` has no `prev`/`next`, so the assignments
+   are not enumerable without a chain field — and it lives in the Salsa-cached
+   `meta_dict`; and prefer `Any` over a union, since `_type_compare` has only a
+   right-side union method, so a `FakeUnion` argument type would open a *new* FP
+   class (any member that is a proper subtype of an abstract parameter). The
+   any-member rule belongs in `_has_type_intersection`, never in `_issubtype`, which
+   the `isa` check shares and which needs all-member semantics. Wants its own sweep:
+   it moves diagnostics repo-wide in both directions, and it improves `isa`, hover
+   and everything else reading `Binding.type`, not just this lint.
+
 1.5. **Merge the arity and type records into one signature record** — one walk, one
    per-root index, one closure. Added after slice 1's implementation showed that type
    matching is *not* strictly more powerful than arity matching: it runs only after an

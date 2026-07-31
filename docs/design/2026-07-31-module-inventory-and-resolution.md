@@ -634,6 +634,63 @@ Holes 2–4 are narrow; hole 1 is the one to fix first, and it is the reason a
 future consumer of these records must keep the "rule out only" discipline rather
 than ever treating a non-match as a positive claim.
 
+#### 17b. The argument side: one accepted false positive
+
+§17a is about the *method set*. The comparison has a second operand, and it has
+its own soundness hole — **accepted knowingly** when type matching shipped, so
+that a reader who hits it knows it is not a surprise.
+
+`refof` is flow-insensitive. For a local reassigned across sibling branches it
+resolves to the textually preceding assignment, so the inferred type can be one
+the value provably does not have at the call site. The store-resolved-argument
+guard cannot decline, because the wrong type is perfectly well resolved:
+
+```julia
+uuid = name = path = hash = id = nothing
+...
+elseif hash !== nothing
+    path = find_from_hash(name, uuid, hash)   # inferred ::Nothing, actually ::Base.SHA1
+```
+
+`find_from_hash(name::String, uuid::Base.UUID, hash::Base.SHA1)` then has no
+candidate and the call is flagged. Measured: this is the **only** rejection type
+matching makes across all 74 roots of the julia-vscode repo (3776 vs 3777
+diagnostics), and the whole-closure pass already emits the identical diagnostic —
+the per-file path was silent only because its partial-method-set gate declined.
+That is why it was acceptable to ship.
+
+It is not rare in principle, though: `x = nothing` → `if x !== nothing` → `f(x)`
+is a mainstream idiom, and only the conjunction (cross-file callee, store-resolved
+parameter type, a `nothing`-initialised local, a guard) makes it scarce. Treat one
+occurrence as a floor.
+
+**The fix, scheduled ahead of the record merge:** infer a reassigned local's type
+from *all* its assignments — agreeing assignments give that type, disagreeing ones
+give `Any`. That is strictly better than today at every arity of the assignment
+set, and it fixes `isa` checks, hover and everything else reading `Binding.type`,
+not just this lint. Two costs to know before starting:
+
+- **There is no way to enumerate the assignments today.** `Binding` carries
+  `name, val, type, refs, is_public, is_exported` and no `prev`/`next`. Each
+  assignment builds its own `Binding` and the scope map is overwritten as the
+  traversal proceeds, so `refof` yields whichever was current with no link to its
+  siblings. A chain field is cheap in principle, but `Binding` lives in
+  `meta_dict`, which *is* a Salsa-cached value — chained bindings retain their
+  predecessors and change that value's size and equality.
+- **Prefer `Any` over a union on disagreement.** A `FakeUnion` argument type looks
+  attractive and is more precise, but `_type_compare` is one-directional with only
+  a *right*-side union method (`subtypes.jl:37`, and `_super(::FakeUnion)` is
+  `Any`), so `_has_type_intersection(Union{Nothing,Int}, Integer)` currently
+  returns **false** — a new false-positive class covering every union member that
+  is a proper subtype of an abstract parameter. Making that work needs an
+  any-member rule, and it must live in `_has_type_intersection`, **not** as an
+  `_issubtype(a::FakeUnion, …)` method: real subtyping requires *all* members, and
+  `_issubtype` is shared with the `isa` check, which the any-member reading would
+  silently corrupt.
+
+Because it moves diagnostics repo-wide in both directions, it wants its own
+before/after sweep over all 74 roots rather than riding on someone else's.
+
 ### 18. The inverse direction: from a type to its methods
 
 §17's records are keyed callable → parameter types. Several features want the

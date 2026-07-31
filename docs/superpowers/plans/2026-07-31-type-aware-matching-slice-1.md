@@ -735,6 +735,22 @@ git commit -m "feat(lint): check cross-file positional argument types past the a
 
 ---
 
+# Slice 1.4 — infer a reassigned local's type from all its assignments
+
+**Runs before slice 1.5.** Fixes the single false positive slice 1 shipped with, and
+the only rejection type matching makes across all 74 roots of the julia-vscode repo.
+Full statement of the problem, the measurement, and both implementation costs is in
+`docs/design/2026-07-31-module-inventory-and-resolution.md` §17b — read that first;
+the two traps recorded there (`Binding` has no assignment chain and lives in the
+Salsa-cached `meta_dict`; a `FakeUnion` argument type opens a new FP class because
+`_type_compare` is right-side only) are what make this more than a one-liner.
+
+Acceptance: its own before/after sweep over all 74 roots via `docs/perf/typesweep.jl`,
+since it moves diagnostics in *both* directions — unlike slice 1, a drop here can be
+legitimate. The Revise `find_from_hash` site is the named regression test.
+
+---
+
 # Slice 1.5 — merge the arity and parameter-type records into one signature record
 
 **Not part of slice 1. Runs after Task 4 closes green, before slice 2's parametrics.** Write it as its own plan file when it starts; this section exists so the reasoning is not re-derived.
