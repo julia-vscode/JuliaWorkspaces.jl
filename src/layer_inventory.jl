@@ -503,6 +503,7 @@ end
 function _declare_input_names(arg1::CSTParser.EXPR)
     CSTParser.isdeclaration(arg1) || return String[]
     (arg1.args !== nothing && length(arg1.args) >= 1) || return String[]
+    CSTParser.iscall(arg1.args[1]) || return String[]
     n = _symbol_name(CSTParser.get_name(arg1.args[1]))
     return n === nothing ? String[] : [n, "set_$(n)!", "delete_$(n)!"]
 end

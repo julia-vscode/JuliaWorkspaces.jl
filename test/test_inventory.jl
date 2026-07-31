@@ -1029,6 +1029,9 @@ end
         ["bar", "set_bar!", "delete_bar!"]
     # No `::` return type: Salsa itself rejects this, so we derive nothing.
     @test _declare_input_names(arg1("@declare_input baz(rt)")) == String[]
+    # A `::` whose left side is not a call declares nothing: Salsa requires the
+    # call form, so `x::T` is not an input declaration.
+    @test _declare_input_names(arg1("@declare_input foo::Int")) == String[]
 
     @test _deprecate_names(arg1("@deprecate f(x::Int) g(x)")) == ["f"]
     @test _deprecate_names(arg1("@deprecate old new")) == ["old"]
