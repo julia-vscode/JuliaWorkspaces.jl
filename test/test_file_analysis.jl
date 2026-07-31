@@ -2192,3 +2192,32 @@ end
     @test length(xs) == 2
     @test all(x -> SL.hasbinding(x, fa.meta) || SL.hasref(x, fa.meta), xs)
 end
+
+@testitem "file analysis: recorded parameter types resolve to store datatypes" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: derived_method_param_types, derived_stdlib_only_env
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\nend\n",
+        A => "struct Own end\nf(x::Int, y::AbstractString, z::Own, w) = 1\n",
+    ))
+    rt = jw.runtime
+    env = derived_stdlib_only_env(rt)
+    recs = derived_method_param_types(rt, ROOT, ["MainPkg"], "f")
+    @test length(recs) == 1
+
+    res = JuliaWorkspaces._resolve_param_types(rt, ROOT, env, recs)
+    types = only(res).types
+    @test length(types) == 4
+    # NOTE: `CoreTypes.Any` is ITSELF a DataTypeStore, so `isa DataTypeStore` would
+    # pass even on a total resolution failure. Assert the identity, not the type.
+    # `Int` is a constructor FunctionStore in the store — reaching Core.Int64 proves
+    # the `FunctionStore.extends` hop ran.
+    @test string(types[1].name) == "Core.Int64"
+    # `AbstractString` is a VarRef in the store — this proves `maybe_lookup` ran.
+    @test string(types[2].name) == "Core.AbstractString"
+    @test !SL._isany(types[1]) && !SL._isany(types[2])
+    # a workspace-declared type is deliberately no-opinion in this slice
+    @test SL._isany(types[3])
+    # an unannotated parameter is no-opinion
+    @test SL._isany(types[4])
+end

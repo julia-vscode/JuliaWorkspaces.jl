@@ -651,6 +651,44 @@ end
 _store_extended_in_workspace(rt, root, env, func_ref) =
     !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
 
+# A recorded type name resolved to a value the type comparison accepts.
+# `CoreTypes.Any` means "no opinion" and can only ever remove a diagnostic.
+function _resolve_recorded_type(rt, root, env, defmod::Vector{String}, path::Vector{String})
+    isempty(path) && return StaticLint.CoreTypes.Any
+    head = path[1]
+    # A workspace-declared type: known, but comparing against it needs workspace
+    # ancestry, which the store's supertype walk cannot climb. No opinion.
+    haskey(derived_module_visible_names_idfree(rt, root, defmod), head) &&
+        return StaticLint.CoreTypes.Any
+    syms = StaticLint.getsymbols(env)
+    store = nothing
+    if length(path) > 1
+        store = _resolve_qualified_store(env, path[1:end-1], Symbol(path[end]))
+    else
+        for m in (:Base, :Core)
+            st = get(syms, m, nothing)
+            st isa SymbolServer.ModuleStore || continue
+            v = get(st.vals, Symbol(head), nothing)
+            v === nothing && continue
+            store = StaticLint.maybe_lookup(v, env)
+            break
+        end
+    end
+    store === nothing && return StaticLint.CoreTypes.Any
+    dt = StaticLint.get_eventual_datatype(store, env)
+    return dt isa SymbolServer.DataTypeStore ? dt : StaticLint.CoreTypes.Any
+end
+
+# Resolve a name's cross-file method records into comparison operands.
+function _resolve_param_types(rt, root, env, recs)
+    out = @NamedTuple{arity::MethodArity, types::Vector{Any}}[]
+    for r in recs
+        types = Any[_resolve_recorded_type(rt, root, env, r.defmod, p) for p in r.param_types]
+        push!(out, (arity=r.arity, types=types))
+    end
+    return out
+end
+
 """
     derived_file_analysis(rt, root::URI, file::URI) -> FileAnalysis
 
@@ -771,7 +809,14 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # hover/signatures/references' `_in_scope_syms_at`, but reuses the already-known
     # per-file `path` instead of re-deriving it from `x`'s URI.
     tree_in_scope = x -> _in_scope_module_syms(rt, root, vcat(path, _in_file_module_names(x, meta_dict)))
-    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
+    # Resolved cross-file parameter types, for the positional TYPE check. Plain
+    # data in, store values out; unknown resolves to `Any`, which can only
+    # remove a diagnostic.
+    tree_param_types = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        _resolve_param_types(rt, root, env, derived_method_param_types(rt, root, p, name))
+    end
+    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope, tree_param_types)
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file
