@@ -157,6 +157,12 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 delete!(env_to_use, "JULIA_DEPOT_PATH")
             end
 
+            # An inherited JULIA_LOAD_PATH (e.g. from a Pkg app shim) would
+            # replace the default load path in the child, so `@` no longer
+            # resolves and loading JuliaDynamicAnalysisProcess fails.
+            delete!(env_to_use, "JULIA_LOAD_PATH")
+            delete!(env_to_use, "JULIA_PROJECT")
+
             # Use the same binary as the current process: `julia` from PATH may
             # not resolve at all inside an editor-launched language server (which
             # is started with an explicit executable path), or may resolve to a
