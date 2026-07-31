@@ -411,6 +411,34 @@ B's tree) and the mutual dev-dependency case as separate cases.
    (68 files, 1751 spliced items, warm inventories) one full splice walk measured
    1.4 ms, median of 7, in a dev-env session on 2026-07-31.
 
+## Follow-ups
+
+Deferred, in the order I would do them.
+
+**Family-aware find-references.** References on `input_text_file` should also
+report uses of `set_input_text_file!` and `delete_input_text_file!`, and vice
+versa: one macrocall declares all three, so they are one logical entity, and a
+user asking "where is this input used" means the family. Today each name matches
+only its own spelling — `_itemref_is_ambiguous` makes `_tree_restrict_name`
+return the name, which is what stops the shared id from conflating them. The
+fix is to make that restriction family-aware rather than name-exact: from any
+member, recover the declaring row's whole derived-name set (the rule that
+produced them is in the table, and `declared_by` names it) and match on any of
+them.
+
+**Family rename**, which needs the same primitive. It is the reason rename is
+refused today rather than partially implemented: renaming one member leaves the
+others dangling. With the family known, renaming any member can rewrite the
+primary name at the macrocall plus every use of every derived spelling.
+
+**The `_is_macro_declared_target` precedence bug.** It matches any inventory row
+sharing the target's `(id, name)` without requiring the *target's own* kind to be
+`:macro_declared`, so where a real declaration shares an id with a same-named
+inert sibling (the invalid-but-parseable `@deprecate f(x) = 1` shape) rename is
+wrongly refused for the genuine function. Fix: require that no
+non-`:macro_declared` item shares that `(id, name)`, mirroring the precedence
+`_build_kind_index` now applies. Latent — no valid code reaches the shape.
+
 ## Risks
 
 The `origin = :declared` reuse is the subtlest risk: it buys correct precedence for
