@@ -620,9 +620,22 @@ end
 end
 
 @testitem "macro-declared: origin :declared consumers tolerate the missing declared entry" setup=[MacroDeclWS] begin
-    # These entries claim `origin = :declared` without a matching
-    # `derived_module_declared` entry, which is deliberate but load-bearing: any
-    # consumer that assumes the dict has the name would throw a KeyError.
+    # A macro-declared name is visible with `origin = :declared` even though it
+    # has no matching entry in `derived_module_declared` — that dict only ever
+    # holds real bindings (bindings.jl-shaped declarations), never names a
+    # macro invents. That's deliberate (see layer_visibility.jl:817), and the
+    # two origin-filtering consumers below tolerate it: neither indexes
+    # `derived_module_declared` on the strength of `origin`, so neither trips
+    # over the missing entry. (`derived_module_visible_names_idfree` never
+    # touches `derived_module_declared` at all — it only re-projects the
+    # already-resolved `VisibleName`; `_in_scope_module_syms` filters via
+    # `_IN_SCOPE_ORIGINS`, which excludes `:declared` outright.) No consumer in
+    # the tree currently indexes `derived_module_declared` keyed on `origin ===
+    # :declared` without also gating on `derived_module_names`/`haskey` first —
+    # searched `\.origin\b`, `derived_module_declared(` across `src/`; see the
+    # task report for the specific sites checked. So this test pins the
+    # visible-vs-declared asymmetry itself, not a guard against a live
+    # KeyError site.
     using JuliaWorkspaces: derived_module_declared, derived_module_visible_names_idfree,
         _in_scope_module_syms
 
@@ -642,28 +655,52 @@ end
 end
 
 @testitem "macro-declared: the id-free projection backdates across an id shift" setup=[MacroDeclWS] begin
-    using JuliaWorkspaces: derived_module_visible_names_idfree
+    # The id key is `(coarse kind, name AS WRITTEN, module path)` plus a
+    # positional disambiguator among statements sharing that key (see
+    # `_statement_id_key`/`_mint_ids!` in layer_inventory.jl). For a
+    # `@deprecate` macrocall the "name as written" is the FIRST argument's own
+    # call/identifier name, not the macro spelling — so two `@deprecate`s only
+    # collide when that first argument names the same thing, e.g. two
+    # `f`-overloads being deprecated. Different old-names (`oldb`/`olda`) never
+    # collide and would make this test pass vacuously regardless of whether the
+    # id-free projection actually strips the id.
+    using JuliaWorkspaces: derived_module_visible_names_idfree, derived_file_inventory
 
-    # Two `@deprecate` in one module share an id key, so inserting one shifts the
-    # other's id — but the ID-FREE projection must be unchanged, which is the
-    # whole point of that seam.
+    # The LAST-declared "f" item is the one that wins module-level dedup
+    # (splice-order rule); pick it by `order`, since `after_src` has two.
+    raw_id(src) = begin
+        jw, root = macro_ws(src)
+        items = [it for it in derived_file_inventory(jw.runtime, root).items
+                 if it.kind === :macro_declared && it.name == "f"]
+        last(sort(items; by=it -> it.order)).id
+    end
     idfree(src) = begin
         jw, root = macro_ws(src)
         derived_module_visible_names_idfree(jw.runtime, root, ["T"])
     end
 
-    a = idfree("""
+    before_src = """
     module T
-    @deprecate oldb newb
+    @deprecate f(x::Int) g(x)
     end
-    """)
-    b = idfree("""
+    """
+    # Inserting a second `f`-deprecation ABOVE the first bumps its bucket
+    # disambiguator (n: 0 -> 1), shifting its raw id — confirmed below — while
+    # also making it the last-in-splice-order declaration of "f".
+    after_src = """
     module T
-    @deprecate olda newa
-    @deprecate oldb newb
+    @deprecate f(x::Float64) h(x)
+    @deprecate f(x::Int) g(x)
     end
-    """)
+    """
 
-    @test haskey(a, "oldb") && haskey(b, "oldb")
-    @test isequal(a["oldb"], b["oldb"])
+    # Premise: the surviving `f(x::Int)` statement's raw id actually shifts.
+    @test raw_id(before_src) != raw_id(after_src)
+
+    a = idfree(before_src)
+    b = idfree(after_src)
+    @test haskey(a, "f") && haskey(b, "f")
+    # The id-free projection is unchanged across that shift — the whole point
+    # of that seam.
+    @test isequal(a["f"], b["f"])
 end
