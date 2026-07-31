@@ -517,3 +517,153 @@ end
     off_g = first(findfirst("g(x) = x", src))
     @test can_rename(jw, root, off_g) !== nothing
 end
+
+@testitem "macro-declared: the index does not read visibility" setup=[MacroDeclWS] begin
+    # If `derived_macro_declared_names_index` ever consulted visibility, this
+    # computation would re-enter an in-progress query. Salsa raises
+    # DependencyCycleException for that — but only under debug mode, so assert
+    # debug mode is on, or the failure mode becomes unbounded recursion instead
+    # (see layer_visibility.jl's note on the same hazard).
+    using JuliaWorkspaces: Salsa
+    @test Salsa.Debug.debug_enabled()
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    using .Sub
+    Salsa.@declare_input foo(rt, x::Int)::V
+    module Sub
+    bar() = 1
+    export bar
+    end
+    end
+    """; with_salsa_package=true)
+
+    vis = derived_module_visible_names(jw.runtime, root, ["T"])
+    @test haskey(vis, "set_foo!")
+    @test haskey(vis, "bar")
+end
+
+@testitem "macro-declared: ids survive an insertion above the declarations" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: derived_file_inventory
+
+    ids_for(src) = begin
+        jw, root = macro_ws(src; with_salsa_package=true)
+        Dict(it.name => it.id
+             for it in derived_file_inventory(jw.runtime, root).items
+             if it.kind === :macro_declared)
+    end
+
+    before = ids_for("""
+    module T
+    using Salsa
+    Salsa.@declare_input a(rt)::Int
+    Salsa.@declare_input b(rt)::Int
+    end
+    """)
+    after = ids_for("""
+    module T
+    using Salsa
+    Salsa.@declare_input z(rt)::Int
+    Salsa.@declare_input a(rt)::Int
+    Salsa.@declare_input b(rt)::Int
+    end
+    """)
+
+    # The id key includes the input's own name, so inserting one above the
+    # others leaves theirs untouched. Every derived value carrying these
+    # ItemRefs depends on this.
+    for n in ("a", "set_a!", "delete_a!", "b", "set_b!", "delete_b!")
+        @test before[n] == after[n]
+    end
+end
+
+@testitem "macro-declared: cross-root qualified access resolves" setup=[MacroDeclWS] begin
+    # `Pkg.set_foo!` from a consumer root — the shape the language server itself
+    # uses, and the one that goes through `qualified_module_target` →
+    # `_get_field(::TreeModuleContext)` → the ID-FREE visibility projection.
+    using JuliaWorkspaces: StaticLint, CSTParser, derived_file_analysis
+
+    consumer = URI("file:///ws/App/src/App.jl")
+    jw, _ = macro_ws("""
+    module Prov
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    export set_foo!
+    end
+    """; root_uri=URI("file:///ws/Prov/src/Prov.jl"), with_salsa_package=true)
+    add_file!(jw, TextFile(URI("file:///ws/Prov/Project.toml"), SourceText("""
+    name = "Prov"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0009"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/App/Project.toml"), SourceText("""
+    name = "App"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee000a"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(consumer, SourceText("""
+    module App
+    using Prov
+    f(rt) = Prov.set_foo!(rt, 1, 2)
+    end
+    """, "julia")))
+
+    fa = derived_file_analysis(jw.runtime, consumer, consumer)
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, consumer)
+    ids = CSTParser.EXPR[]
+    walk(x) = (CSTParser.headof(x) === :IDENTIFIER && push!(ids, x);
+               x.args === nothing || foreach(walk, x.args))
+    walk(cst)
+    target = only(filter(i -> CSTParser.valof(i) == "set_foo!", ids))
+    @test StaticLint.hasref(target, fa.meta)
+end
+
+@testitem "macro-declared: origin :declared consumers tolerate the missing declared entry" setup=[MacroDeclWS] begin
+    # These entries claim `origin = :declared` without a matching
+    # `derived_module_declared` entry, which is deliberate but load-bearing: any
+    # consumer that assumes the dict has the name would throw a KeyError.
+    using JuliaWorkspaces: derived_module_declared, derived_module_visible_names_idfree,
+        _in_scope_module_syms
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    end
+    """; with_salsa_package=true)
+
+    @test !haskey(derived_module_declared(jw.runtime, root, ["T"]), "set_foo!")
+    @test haskey(derived_module_visible_names(jw.runtime, root, ["T"]), "set_foo!")
+    # Exercise the two origin-filtering consumers; neither may throw, and a
+    # macro-declared entry must not be mistaken for a loaded module.
+    @test derived_module_visible_names_idfree(jw.runtime, root, ["T"]) isa Dict
+    @test :set_foo! ∉ _in_scope_module_syms(jw.runtime, root, ["T"])
+end
+
+@testitem "macro-declared: the id-free projection backdates across an id shift" setup=[MacroDeclWS] begin
+    using JuliaWorkspaces: derived_module_visible_names_idfree
+
+    # Two `@deprecate` in one module share an id key, so inserting one shifts the
+    # other's id — but the ID-FREE projection must be unchanged, which is the
+    # whole point of that seam.
+    idfree(src) = begin
+        jw, root = macro_ws(src)
+        derived_module_visible_names_idfree(jw.runtime, root, ["T"])
+    end
+
+    a = idfree("""
+    module T
+    @deprecate oldb newb
+    end
+    """)
+    b = idfree("""
+    module T
+    @deprecate olda newa
+    @deprecate oldb newb
+    end
+    """)
+
+    @test haskey(a, "oldb") && haskey(b, "oldb")
+    @test isequal(a["oldb"], b["oldb"])
+end
