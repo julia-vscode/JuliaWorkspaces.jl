@@ -88,6 +88,46 @@ end
         (qualifier=["Salsa"], name="@declare_input"))
 end
 
+@testitem "macro-declared: a colon list that doesn't name the module binds no qualifier" setup=[MacroDeclWS] begin
+    # `using Salsa: bar` binds only `bar` in real Julia, never `Salsa` itself
+    # — so a qualified `Salsa.@declare_input` can't be confirmed through it.
+    jw, root = macro_ws("""
+    module T
+    using Salsa: bar
+    Salsa.@declare_input foo(rt, x::Int)::V
+    end
+    """; with_salsa_package=true)
+
+    @test !_macro_owner_confirmed(jw.runtime, root, ["T"],
+        (qualifier=["Salsa"], name="@declare_input"))
+end
+
+@testitem "macro-declared: a colon list naming the module itself binds it" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    using Salsa: Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    end
+    """; with_salsa_package=true)
+
+    @test _macro_owner_confirmed(jw.runtime, root, ["T"],
+        (qualifier=["Salsa"], name="@declare_input"))
+end
+
+@testitem "macro-declared: an aliased whole-module import binds the alias, not the original name" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    import Salsa as S
+    S.@declare_input foo(rt, x::Int)::V
+    end
+    """; with_salsa_package=true)
+
+    @test _macro_owner_confirmed(jw.runtime, root, ["T"],
+        (qualifier=["S"], name="@declare_input"))
+    @test !_macro_owner_confirmed(jw.runtime, root, ["T"],
+        (qualifier=["Salsa"], name="@declare_input"))
+end
+
 @testitem "macro-declared: owner confirmation via the environment store" setup=[MacroDeclWS] begin
     # Base is always in the baked stdlib stores, so this exercises the store
     # branch with no workspace package involved.
