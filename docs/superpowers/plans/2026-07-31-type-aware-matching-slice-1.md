@@ -69,6 +69,7 @@ Add to `test/test_inventory.jl`:
     g(a, b::String) = 2
     h(v::Vector{Int}) = 3
     k(x::T) where T<:Real = 4
+    kk(x::T, y::Real) where T<:Real = 4
     m(x::Int, ys...) = 5
     n(p::NamedTuple{(:w,),Tuple{String}}) = 6
     end
@@ -83,6 +84,9 @@ Add to `test/test_inventory.jl`:
     @test items["h"].param_types == [String[]]
     # a where-bound type variable is method-local, never a resolvable name
     @test items["k"].param_types == [String[]]
+    # ...but the BOUND's name is not a type variable: a sibling parameter
+    # annotated with it must still be recorded (Task 1 review, Finding 1)
+    @test items["kk"].param_types == [String[], ["Real"]]
     # a positional splat makes alignment unknowable -> no record at all
     @test items["m"].param_types === nothing
     # value positions must not be harvested as type names
@@ -144,24 +148,17 @@ Add the extractor near the arity helpers:
 ```julia
 # The `where`-bound type variable names of a signature. Method-local: they name
 # nothing in the defining module, so a parameter annotated with one is unknown.
-function _where_var_names(sig::CSTParser.EXPR)
-    tvars = Set{String}()
-    s = sig
-    while s isa CSTParser.EXPR && CSTParser.iswhere(s)
-        for i in 2:length(s.args)
-            a = s.args[i]
-            if CSTParser.isidentifier(a)
-                push!(tvars, CSTParser.str_value(a))
-            elseif a isa CSTParser.EXPR && a.args !== nothing
-                for c in a.args
-                    CSTParser.isidentifier(c) && push!(tvars, CSTParser.str_value(c))
-                end
-            end
-        end
-        s = s.args[1]
-    end
-    return tvars
-end
+#
+# CORRECTED after Task 1's review. Collect ONLY the variable, never the bound:
+# an earlier version swept in the bound's name too, so `where T<:Real` put both
+# `T` and `Real` into the set and a sibling `y::Real` was silently discarded as
+# if it were a type variable. Shapes to handle: `where T`, `where T<:B` /
+# `where T>:B` (variable is the left operand), `where Lo<:T<:Hi` (variable is
+# the middle operand), and `where {T, S<:X}`. Anything unclassifiable
+# contributes nothing — over-collecting loses real records, while
+# under-collecting only yields a name that fails to resolve, which the consumer
+# already treats permissively. Determine the exact CST layouts empirically
+# rather than assuming them.
 
 # A dotted access chain as a name path (`Base.Iterators.Zip` →
 # ["Base","Iterators","Zip"]), or `nothing` for any other shape.
@@ -730,7 +727,7 @@ git commit -m "feat(lint): check cross-file positional argument types past the a
 **Known risks.**
 - `check_call` is shared with the whole-closure path; Task 4 step 4 runs `test_staticlint.jl` as the regression gate.
 - Adding a field to `InventoryItem` touches every construction site; Task 1 keeps three back-compat constructors and runs the full inventory file.
-- `isidentifier_vararg` is a new name in `layer_inventory.jl`; if a `Vararg` predicate already exists there, use it instead of adding a second. (`StaticLint.bounded_vararg_N` exists and is related but answers a different question — the bound, not the shape.)
+- ~~`isidentifier_vararg` is a new name~~ — **resolved in Task 1**: `StaticLint.is_explicit_vararg_decl` already exists and is logically identical, so no new helper was added. It takes the *declaration*, not the type expression. (`StaticLint.bounded_vararg_N` is related but answers a different question — the bound, not the shape.)
 - **`CoreTypes.Any` is itself a `SymbolServer.DataTypeStore`.** Any assertion of the form `resolved isa DataTypeStore` passes on total resolution failure and is therefore worthless. Assert `!_isany(...)` plus the resolved name (`"Core.Int64"`, `"Core.AbstractString"` — note `Int` resolves to `Core.Int64`, not `"Int"`).
 
 **Verified against the code while writing this plan** (do not re-derive): every CSTParser and StaticLint name used above exists; `CSTParser.get_sig` retains the `where` wrapper, so `_where_var_names` must run on `get_sig(x)` *before* `rem_wheres_decls`; `_isany(CoreTypes.Any)` is `true`, making it the correct permissive operand; `_resolve_qualified_store(env, qualifier::Vector{String}, name_sym::Symbol)` already exists in `layer_file_analysis.jl`.
