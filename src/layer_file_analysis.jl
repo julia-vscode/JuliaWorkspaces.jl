@@ -559,14 +559,20 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
         elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
             push!(diagnostics, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
         elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) === StaticLint.UnresolvedImport
-            name = CSTParser.str_value(err[2])
-            cause = name in declared_deps ?
-                "`$name` is a declared dependency but its symbols could not be indexed." :
-                "Failed to resolve `$name`."
-            consequence = StaticLint.is_in_wildcard_import(err[2]) ?
-                "Missing-reference checks are disabled in this scope and all nested scopes." :
-                "Anything imported through this statement is assumed to exist and will not be checked."
-            push!(diagnostics, Diagnostic(rng, :warning, "$cause $consequence", nothing, Symbol[], "StaticLint.jl"))
+            # `unresolved-import = false` suppresses this diagnostic. The branch
+            # must still match (not be folded into the guard) so the
+            # UnresolvedImport LintCode doesn't fall through to the generic
+            # LintCodes handler below, which would re-emit "Failed to resolve import.".
+            if get(lint_config, "unresolved-import", true)
+                name = CSTParser.str_value(err[2])
+                cause = name in declared_deps ?
+                    "`$name` is a declared dependency but its symbols could not be indexed." :
+                    "Failed to resolve `$name`."
+                consequence = StaticLint.is_in_wildcard_import(err[2]) ?
+                    "Missing-reference checks are disabled in this scope and all nested scopes." :
+                    "Anything imported through this statement is assumed to exist and will not be checked."
+                push!(diagnostics, Diagnostic(rng, :warning, "$cause $consequence", nothing, Symbol[], "StaticLint.jl"))
+            end
         elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
             code = StaticLint.errorof(err[2], meta_dict)
             description = get(StaticLint.LintCodeDescriptions, code, "")
