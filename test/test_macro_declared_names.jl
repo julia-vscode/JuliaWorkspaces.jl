@@ -1,6 +1,7 @@
 @testsnippet MacroDeclWS begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: _macro_owner_confirmed
+    using JuliaWorkspaces: _macro_owner_confirmed, derived_macro_declared_names_index,
+        derived_module_macro_declared_names
     using JuliaWorkspaces.URIs2: URI
 
     # A workspace with `root_src` as the root file, plus any extra files, plus
@@ -143,4 +144,72 @@ end
         (qualifier=String[], name="@deprecate"))
     @test _macro_owner_confirmed(jw.runtime, root, ["T"],
         (qualifier=["Base"], name="@deprecate"))
+end
+
+@testitem "macro-declared: the index records confirmed names only" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    end
+    """; with_salsa_package=true)
+
+    idx = derived_macro_declared_names_index(jw.runtime, root)
+    @test sort([n for ((p, n), _) in idx if p == ["T"]]) ==
+        ["delete_foo!", "foo", "set_foo!"]
+
+    names = derived_module_macro_declared_names(jw.runtime, root, ["T"])
+    @test sort(collect(keys(names))) == ["delete_foo!", "foo", "set_foo!"]
+    # All three point at the one declaring statement.
+    @test length(unique(values(names))) == 1
+    @test names["foo"].file == root
+
+    @test isempty(derived_module_macro_declared_names(jw.runtime, root, ["T", "Nope"]))
+end
+
+@testitem "macro-declared: an unconfirmed macrocall records nothing" setup=[MacroDeclWS] begin
+    # No Salsa package in the workspace and no project, so the owner cannot be
+    # confirmed by either branch.
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    end
+    """)
+
+    @test isempty(derived_macro_declared_names_index(jw.runtime, root))
+    @test isempty(derived_module_macro_declared_names(jw.runtime, root, ["T"]))
+end
+
+@testitem "macro-declared: a duplicate name resolves last-in-splice-order" setup=[MacroDeclWS] begin
+    inc = URI("file:///t/src/inc.jl")
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt)::Int
+    include("inc.jl")
+    end
+    """; extra=Dict(inc => """
+    Salsa.@declare_input foo(rt)::Int
+    """), with_salsa_package=true)
+
+    names = derived_module_macro_declared_names(jw.runtime, root, ["T"])
+    # The included file is spliced after the root's own statement, so its
+    # declaration wins — the same rule `_declare!` applies.
+    @test names["set_foo!"].file == inc
+end
+
+@testitem "macro-declared: names land in the module that declares them" setup=[MacroDeclWS] begin
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    module Inner
+    using Salsa
+    Salsa.@declare_input foo(rt)::Int
+    end
+    end
+    """; with_salsa_package=true)
+
+    @test isempty(derived_module_macro_declared_names(jw.runtime, root, ["T"]))
+    @test haskey(derived_module_macro_declared_names(jw.runtime, root, ["T", "Inner"]), "set_foo!")
 end

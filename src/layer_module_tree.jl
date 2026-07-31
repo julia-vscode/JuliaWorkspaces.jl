@@ -753,12 +753,13 @@ end
 # of the macro, not a method of it. The keep-predicate and payload live in
 # `emit`; shared by the method-item and external-extension projections.
 function _walk_spliced_binding_items!(emit, rt, F::URI, P::Vector{String},
-                                      name::Union{Nothing,String}, visited::Set{URI})
+                                      name::Union{Nothing,String}, visited::Set{URI};
+                                      kinds=_BINDING_ITEM_KINDS)
     inv = derived_file_inventory(rt, F)
 
     events = Tuple{Int,Symbol,Any}[]
     for item in inv.items
-        if (name === nothing || item.name == name) && item.kind in _BINDING_ITEM_KINDS
+        if (name === nothing || item.name == name) && item.kind in kinds
             push!(events, (item.order, :item, item))
         end
     end
@@ -776,7 +777,7 @@ function _walk_spliced_binding_items!(emit, rt, F::URI, P::Vector{String},
             inc.target in visited && continue
             derived_has_content(rt, inc.target) || continue
             push!(visited, inc.target)
-            _walk_spliced_binding_items!(emit, rt, inc.target, vcat(P, inc.parent_module), name, visited)
+            _walk_spliced_binding_items!(emit, rt, inc.target, vcat(P, inc.parent_module), name, visited; kinds)
         end
     end
     return

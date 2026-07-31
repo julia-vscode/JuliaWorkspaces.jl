@@ -179,6 +179,56 @@ function _macro_owner_confirmed(rt, root::URI, path::Vector{String}, spelling::M
     end
 end
 
+"""
+    derived_macro_declared_names_index(rt, root) -> Dict{Tuple{Vector{String},String},ItemRef}
+
+Every `(module path, name) => declaring item` a CONFIRMED modelled macro declares
+anywhere in `root`'s tree. One splice walk over `:macro_declared` inventory rows,
+in the same DFS order the module tree uses, so a duplicate name resolves
+last-in-splice-order-wins exactly like `_declare!`.
+
+Funnelled through one per-root node for the same reason as
+[`derived_method_arities_index`](@ref): the walk reads every file in the root, so a
+per-name node would depend on every file. Identity is confirmed once per distinct
+`(module path, spelling)`, not once per macrocall.
+
+Reads the module tree and the environment; never visibility, which would close the
+cycle this whole layering exists to keep open.
+"""
+Salsa.@derived function derived_macro_declared_names_index(rt, root)
+    @debug "derived_macro_declared_names_index" root=root
+
+    result = Dict{Tuple{Vector{String},String},ItemRef}()
+    confirmed = Dict{Tuple{Vector{String},MacroSpelling},Bool}()
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
+                                 kinds=(:macro_declared,)) do F, item, loc
+        spelling = item.declared_by
+        spelling === nothing && return
+        ok = get!(() -> _macro_owner_confirmed(rt, root, loc, spelling), confirmed, (loc, spelling))
+        ok || return
+        result[(loc, item.name)] = ItemRef(F, item.id)
+    end
+    return result
+end
+
+"""
+    derived_module_macro_declared_names(rt, root, path) -> Dict{String,ItemRef}
+
+The confirmed macro-declared names of one module: a thin projection of
+[`derived_macro_declared_names_index`](@ref), so each module backdates
+independently. Empty for a module with no confirmed modelled macrocall, which is
+almost every module.
+"""
+Salsa.@derived function derived_module_macro_declared_names(rt, root, path)
+    @debug "derived_module_macro_declared_names" root=root path=path
+
+    result = Dict{String,ItemRef}()
+    for ((p, n), ref) in derived_macro_declared_names_index(rt, root)
+        p == path && (result[n] = ref)
+    end
+    return result
+end
+
 # --- internal helpers: tree/env plumbing ------------------------------------
 
 # The module's own `declared_at` (where `path` itself was declared as a
