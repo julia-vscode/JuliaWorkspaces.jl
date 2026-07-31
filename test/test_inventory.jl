@@ -1044,3 +1044,67 @@ end
     @test _macro_declaration_rule("@nope") === nothing
     @test length(MACRO_DECLARATION_RULES) == 2
 end
+
+@testitem "macro-declared: inventory rows for a modelled macrocall" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, _BINDING_ITEM_KINDS, derived_module_tree,
+        module_node
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///t/src/T.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    @deprecate oldf newf
+    end
+    """, "julia")))
+
+    items = derived_file_inventory(jw.runtime, u).items
+    md = [it for it in items if it.kind === :macro_declared]
+
+    @test [it.name for it in md] ==
+        ["foo", "set_foo!", "delete_foo!", "oldf"]
+
+    # All three @declare_input names share the first argument's id and order.
+    @test length(unique(it.id for it in md[1:3])) == 1
+    @test length(unique(it.order for it in md[1:3])) == 1
+    @test md[4].id != md[1].id
+
+    # The spelling is recorded as written, qualifier included.
+    @test md[1].declared_by == (qualifier=["Salsa"], name="@declare_input")
+    @test md[4].declared_by == (qualifier=String[], name="@deprecate")
+
+    # Inert: no shape, and outside the binding kinds, so nothing can treat
+    # these as declarations before identity is confirmed.
+    @test all(it -> it.arity === nothing && it.signature === nothing, md)
+    @test :macro_declared ∉ _BINDING_ITEM_KINDS
+
+    # The module tree must not see them.
+    node = module_node(derived_module_tree(jw.runtime, u), ["T"])
+    @test !haskey(node.declared, "set_foo!")
+    @test !haskey(node.declared, "oldf")
+
+    # Ordinary items still carry no spelling.
+    ordinary = [it for it in items if it.kind !== :macro_declared]
+    @test all(it -> it.declared_by === nothing, ordinary)
+end
+
+@testitem "macro-declared: only the first macro argument declares names" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///t/src/S.jl")
+    jw = JuliaWorkspace()
+    # `newf` is argument 2 and must contribute nothing; an unmodelled macro
+    # contributes nothing at all.
+    add_file!(jw, TextFile(u, SourceText("""
+    @deprecate oldf newf
+    @some_other_macro alpha beta
+    """, "julia")))
+
+    md = [it for it in derived_file_inventory(jw.runtime, u).items if it.kind === :macro_declared]
+    @test [it.name for it in md] == ["oldf"]
+end
