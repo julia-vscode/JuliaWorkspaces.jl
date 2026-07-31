@@ -300,6 +300,11 @@ function _get_workspace_symbols(runtime, query::String)
             # (`@testitem`/`@testset`/…); the old bindingof walk collected no
             # binding for those, so they are not workspace symbols.
             it.kind === :opaque_macrocall && continue
+            # A modelled macro's generated names: three rows share the declaring
+            # statement's range, so listing them triples the outline entry. They
+            # are also unconfirmed at this layer — nothing may treat them as
+            # declarations until identity is confirmed.
+            it.kind === :macro_declared && continue
             _symbol_matches_query(it.name, query) || continue
             entry = get(positions, it.id, nothing)
             entry === nothing && continue

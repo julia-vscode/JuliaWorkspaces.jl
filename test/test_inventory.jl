@@ -1108,3 +1108,25 @@ end
     md = [it for it in derived_file_inventory(jw.runtime, u).items if it.kind === :macro_declared]
     @test [it.name for it in md] == ["oldf"]
 end
+
+@testitem "macro-declared: generated names are not workspace symbols" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_workspace_symbols
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///t/src/U.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    ordinary_fn(x) = x
+    end
+    """, "julia")))
+
+    # The macro-generated name must not surface as a workspace symbol: nothing
+    # has confirmed the macro's identity yet, so it stays inert.
+    @test isempty(get_workspace_symbols(jw, "set_foo!"))
+
+    # Not vacuous: an ordinary declaration in the same file IS found.
+    @test any(r -> r.name == "ordinary_fn", get_workspace_symbols(jw, "ordinary_fn"))
+end
