@@ -1490,3 +1490,68 @@ end
     # A workspace-local function is not an external extension.
     @test !("f" in derived_external_extension_names(jw.runtime, root))
 end
+
+@testitem "derived_method_param_types: aggregates across files with the defining module" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_param_types, TextFile, SourceText, MethodArity
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///mp/src/M.jl")
+    a = URI("file:///mp/src/a.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("module M\ninclude(\"a.jl\")\nf(x::Int) = 1\nend\n", "julia")))
+    add_file!(jw, TextFile(a, SourceText("f(x::String, y::Bool) = 2\nBase.sin(x::Int, y::Int) = 3\n", "julia")))
+
+    recs = derived_method_param_types(jw.runtime, root, ["M"], "f")
+    @test length(recs) == 2
+    @test Set(r.param_types for r in recs) == Set([[["Int"]], [["String"], ["Bool"]]])
+    @test all(r -> r.defmod == ["M"], recs)
+    @test Set(r.arity.minargs for r in recs) == Set([1, 2])
+
+    # a `Base.` extension keys under Base but its types resolve in M
+    braw = derived_method_param_types(jw.runtime, root, ["Base"], "sin")
+    @test isempty(braw)   # Base is not a module of this tree
+end
+
+@testitem "derived_method_param_types: qualified extension records the defining module" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_param_types, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///mp2/src/M.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("""
+    module M
+    struct T end
+    module Inner
+    M.g(x::Int) = 1
+    end
+    g(x::T) = 2
+    end
+    """, "julia")))
+
+    recs = derived_method_param_types(jw.runtime, root, ["M"], "g")
+    @test length(recs) == 2
+    inner = only(filter(r -> r.param_types == [["Int"]], recs))
+    @test inner.defmod == ["M", "Inner"]      # where the TEXT is, not where the name lands
+    outer = only(filter(r -> r.param_types == [["T"]], recs))
+    @test outer.defmod == ["M"]
+end
+
+@testitem "derived_method_param_types_index: body-only edit backdates" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_param_types_index, TextFile, SourceText, update_file!
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///mp3/src/M.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("module M\nf(x::Int) = 1\nend\n", "julia")))
+    i1 = derived_method_param_types_index(jw.runtime, root)
+    update_file!(jw, TextFile(root, SourceText("module M\nf(x::Int) = 12345\nend\n", "julia")))
+    i2 = derived_method_param_types_index(jw.runtime, root)
+    @test isequal(i1, i2)
+
+    # a signature change must NOT backdate
+    update_file!(jw, TextFile(root, SourceText("module M\nf(x::String) = 1\nend\n", "julia")))
+    @test !isequal(i1, derived_method_param_types_index(jw.runtime, root))
+end

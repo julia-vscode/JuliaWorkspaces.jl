@@ -878,6 +878,61 @@ Salsa.@derived function derived_method_arities_index(rt, root)
     return result
 end
 
+"""
+    MethodParamTypes
+
+One method's recorded parameter types, with the module its text sits in.
+`defmod` is where the recorded names resolve — for `Base.foo(x::MyType)` written
+in `M` that is `M`, not `Base`. Plain data, so it backdates.
+"""
+@auto_hash_equals struct MethodParamTypes
+    defmod::Vector{String}
+    arity::MethodArity
+    param_types::Vector{Vector{String}}
+end
+
+"""
+    derived_method_param_types(rt, root, path::Vector{String}, name::String) -> Vector{MethodParamTypes}
+
+The recorded parameter types of every method of `name` at module `path` — the
+same selection as [`derived_method_arities`](@ref), minus methods with no usable
+record. A `get` into the per-root index, so it backdates for an untouched name
+when the index changes elsewhere.
+"""
+Salsa.@derived function derived_method_param_types(rt, root, path, name)
+    @debug "derived_method_param_types" root=root path=path name=name
+
+    return get(derived_method_param_types_index(rt, root), (path, name), _NO_PARAM_TYPES)
+end
+
+const _NO_PARAM_TYPES = MethodParamTypes[]
+
+"""
+    derived_method_param_types_index(rt, root) -> Dict{Tuple{Vector{String},String},Vector{MethodParamTypes}}
+
+Every `(module path, name) => records` entry of `root`'s tree in one node, by a
+single splice walk — the same fan-in rationale as
+[`derived_method_arities_index`](@ref): per-name nodes would each depend on every
+file in the root.
+"""
+Salsa.@derived function derived_method_param_types_index(rt, root)
+    @debug "derived_method_param_types_index" root=root
+
+    tree = derived_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    result = Dict{Tuple{Vector{String},String},Vector{MethodParamTypes}}()
+
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
+        (item.arity === nothing || item.param_types === nothing) && return
+        resolved = isempty(item.qualifier) ? loc :
+            _resolve_extension_qualifier(modpaths, loc, item.qualifier)
+        (resolved === nothing || resolved ∉ modpaths) && return
+        push!(get!(() -> MethodParamTypes[], result, (resolved, item.name)),
+              MethodParamTypes(loc, item.arity, item.param_types))
+    end
+    return result
+end
+
 const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
 
 # Names imported for UNQUALIFIED extension: `import Base: relpath` (or an import
