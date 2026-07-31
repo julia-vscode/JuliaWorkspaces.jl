@@ -479,6 +479,54 @@ function _symbol_name(x)
     return x isa CSTParser.EXPR && CSTParser.isoperator(x) ? CSTParser.valof(x) : nothing
 end
 
+# --- Modelled macros that declare names their argument never spells ---------
+#
+# A macrocall is transparent to the walker, so a macro that mints extra names
+# leaves no trace of them anywhere. Each rule maps a macro to the names its
+# FIRST argument implies. `derive` returns an empty vector when the argument is
+# not the shape the macro requires — the only error path at this layer.
+#
+# `owner` is where the macro must come from. Nothing here checks that; it is the
+# input to the confirmation step in layer_visibility.jl. Keeping both halves in
+# one table is deliberate: the walker needs the names, confirmation needs the
+# paths, and two tables would drift.
+const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
+
+struct MacroDeclarationRule
+    owner::Vector{String}
+    macro_name::String
+    derive::Function
+end
+
+# `@declare_input foo(rt, x::Int)::V` declares `foo`, `set_foo!`, `delete_foo!`
+# (Salsa's declare_input_macro.jl builds the latter two by string interpolation).
+function _declare_input_names(arg1::CSTParser.EXPR)
+    CSTParser.isdeclaration(arg1) || return String[]
+    (arg1.args !== nothing && length(arg1.args) >= 1) || return String[]
+    n = _symbol_name(CSTParser.get_name(arg1.args[1]))
+    return n === nothing ? String[] : [n, "set_$(n)!", "delete_$(n)!"]
+end
+
+# `@deprecate f(x::Int) g(x)` and `@deprecate old new` both declare the first
+# argument's name. `get_name` unwraps a `where` and a getfield; `_symbol_name`
+# additionally covers operator names.
+function _deprecate_names(arg1::CSTParser.EXPR)
+    n = _symbol_name(CSTParser.get_name(arg1))
+    return n === nothing ? String[] : [n]
+end
+
+const MACRO_DECLARATION_RULES = MacroDeclarationRule[
+    MacroDeclarationRule(["Salsa"], "@declare_input", _declare_input_names),
+    MacroDeclarationRule(["Base"], "@deprecate", _deprecate_names),
+]
+
+function _macro_declaration_rule(macro_name::AbstractString)
+    for r in MACRO_DECLARATION_RULES
+        r.macro_name == macro_name && return r
+    end
+    return nothing
+end
+
 # Split a getfield chain `A.B.c` (parsed as nested binary "." operators, each
 # level's rhs a `quotenode`-wrapped identifier; see `is_getfield_w_quotenode`)
 # into its leading qualifier path `["A", "B"]`, peeling one level at a time —

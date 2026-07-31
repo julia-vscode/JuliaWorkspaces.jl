@@ -1015,3 +1015,29 @@ end
     # the qualified form — those stay opaque.
     @test !("ti_f" in names)
 end
+
+@testitem "macro-declared: name derivation for the modelled macros" begin
+    using JuliaWorkspaces: CSTParser, _declare_input_names, _deprecate_names,
+        _macro_declaration_rule, MACRO_DECLARATION_RULES
+
+    # The first argument of the macrocall, which is `args[3]`.
+    arg1(src) = CSTParser.parse(src, true).args[1].args[3]
+
+    @test _declare_input_names(arg1("@declare_input foo(rt, x::Int)::V")) ==
+        ["foo", "set_foo!", "delete_foo!"]
+    @test _declare_input_names(arg1("Salsa.@declare_input bar(rt)::Int")) ==
+        ["bar", "set_bar!", "delete_bar!"]
+    # No `::` return type: Salsa itself rejects this, so we derive nothing.
+    @test _declare_input_names(arg1("@declare_input baz(rt)")) == String[]
+
+    @test _deprecate_names(arg1("@deprecate f(x::Int) g(x)")) == ["f"]
+    @test _deprecate_names(arg1("@deprecate old new")) == ["old"]
+    @test _deprecate_names(arg1("@deprecate f(x::T) where T g(x)")) == ["f"]
+    @test _deprecate_names(arg1("Base.@deprecate (+)(a, b) plus(a, b)")) == ["+"]
+
+    r = _macro_declaration_rule("@declare_input")
+    @test r !== nothing && r.owner == ["Salsa"]
+    @test _macro_declaration_rule("@deprecate").owner == ["Base"]
+    @test _macro_declaration_rule("@nope") === nothing
+    @test length(MACRO_DECLARATION_RULES) == 2
+end
