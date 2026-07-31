@@ -586,6 +586,54 @@ through the id-free `derived_module_visible_names_idfree` of the *defining*
 module. §13 would buy one fewer traversal (§5) and one home for per-item data
 instead of a second index beside arities — tidiness, not a prerequisite.
 
+#### 17a. Known holes in the "is this method set complete?" guard
+
+Type matching may only ever *rule a call out*, so it is sound only while the
+recorded method set of a name is complete. Two mechanisms enforce that: the
+per-name withhold for a modelled macro's name or an unqualified external-import
+target, and the whole-root `:opaque_definitions` marker for a load-time `eval`.
+Both are *syntactic*, and these are the shapes they miss. They are listed together
+because a reader who finds one of them needs to know the others exist.
+
+**1. A method-generating macro that is not modelled — the one shape that still
+false-positives.** A non-`eval` macrocall is walked *transparently*
+(`layer_inventory.jl`, `_walk_macrocall!`): its arguments are classified, its
+*expansion* is not. So a macro that mints a method leaves no trace in either
+index — and because both indices miss it equally, `length(recs) == length(arities)`
+still holds and the call is judged on a partial method set:
+
+```julia
+# a.jl                              # b.jl
+f(x::Int) = x                       g() = f(1.0)   # FALSE POSITIVE
+@my_overloads f Float64             # expands to f(x::Float64) = …
+```
+
+There is no cheap sound fix at this layer. Treating every top-level macrocall as
+opaque would fire on every `Salsa.@derived` in this package and disable the
+feature repo-wide, which trades a rare false positive for total coverage loss. The
+two modelled macros (`Salsa.@declare_input`, `Base.@deprecate`) both withhold
+correctly; anything else that generates methods is exposure. Modelling a macro, or
+narrowing the marker to the module a macro can define into, is the only real fix.
+
+**2. `@eval Mod $body` emits no marker at all, whatever the target.** The marker's
+definition branch keys on a *definition item*, and that shape produces none — the
+macrocall's third argument is an interpolation, not a `function`/`=` node. The
+`quote` and `:(…)` spellings are genuinely harmless (evaluating a quote defines
+nothing), but `@eval $(@__MODULE__) $body` with a spliced definition is a real
+residual hole, at the same level as 3 below.
+
+**3. An aliased `eval` is not recognised.** `const ev = eval; ev(:(f(x::Int) = 1))`
+never matches the syntactic `eval`/`@eval` test, so no marker is emitted.
+
+**4. A dotted self-reference marks anyway.** `@eval MainPkg.Inner …` written
+*inside* `Inner` cannot be proven local without the module tree, which the
+inventory layer must not touch, so it marks. Coverage loss, not a false positive —
+deliberate.
+
+Holes 2–4 are narrow; hole 1 is the one to fix first, and it is the reason a
+future consumer of these records must keep the "rule out only" discipline rather
+than ever treating a non-match as a positive claim.
+
 ### 18. The inverse direction: from a type to its methods
 
 §17's records are keyed callable → parameter types. Several features want the

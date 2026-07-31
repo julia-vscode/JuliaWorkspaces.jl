@@ -777,3 +777,7 @@ Add one test per class in the "Why" list above, asserting the arity diagnostic s
 ## Do not rely on the sweep alone
 
 Every false positive found during Task 4 was found by constructing a fixture; none by the diagnostic sweep, because this package contains no unqualified Base extension, no `for … @eval` and no `@deprecate`. Over-triggering — the failure that disables the feature root-wide — is invisible to the sweep *by construction*, since it only ever removes diagnostics. Re-run the sweep against a metaprogramming-heavy package as well, and treat a *drop* in diagnostics as suspicious rather than as good news.
+
+## The holes slice 1 leaves open
+
+The complete list of shapes in which the "is this method set complete?" guard is unsound or over-conservative lives in §17a of `docs/design/2026-07-31-module-inventory-and-resolution.md` — an un-modelled method-generating macro (the one remaining false-positive shape), `@eval Mod $body`, an aliased `eval`, and a dotted self-reference. Slice 1.5 collapses withholding mechanisms; it must not collapse away a mechanism §17a still relies on, and if it narrows the marker it should retire the corresponding entry there.

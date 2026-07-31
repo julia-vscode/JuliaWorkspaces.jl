@@ -1009,6 +1009,10 @@ end
 # incomplete for consumers that must not judge a name on a partial method set.
 # A definition is exempt — a top-level `@eval f(x::T) = 1` IS walked, and its
 # method recorded, and a body's `eval` runs on call rather than on load.
+#
+# What this marker does NOT catch — a method-generating macro, `@eval Mod $body`,
+# an aliased `eval`, a dotted self-reference — is listed in §17a of
+# docs/design/2026-07-31-module-inventory-and-resolution.md.
 function _emit_opaque_definitions!(acc, x, order, id, parent_module)
     opaque = if CSTParser.defines_function(x) || CSTParser.defines_macro(x)
         # A definition the walker reaches is normally recorded, so it needs no
