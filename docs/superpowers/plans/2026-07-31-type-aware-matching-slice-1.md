@@ -732,3 +732,48 @@ git commit -m "feat(lint): check cross-file positional argument types past the a
 
 **Verified against the code while writing this plan** (do not re-derive): every CSTParser and StaticLint name used above exists; `CSTParser.get_sig` retains the `where` wrapper, so `_where_var_names` must run on `get_sig(x)` *before* `rem_wheres_decls`; `_isany(CoreTypes.Any)` is `true`, making it the correct permissive operand; `_resolve_qualified_store(env, qualifier::Vector{String}, name_sym::Symbol)` already exists in `layer_file_analysis.jl`.
 - Restart the Julia session after Task 1 and Task 2 — both change struct definitions, which Revise cannot patch.
+
+---
+
+# Slice 1.5 — merge the arity and parameter-type records into one signature record
+
+**Not part of slice 1. Runs after Task 4 closes green, before slice 2's parametrics.** Write it as its own plan file when it starts; this section exists so the reasoning is not re-derived.
+
+## Why
+
+Type matching is **not** strictly more powerful than arity matching as slice 1 leaves it, so the arity index cannot simply be deleted. The type check is a *refinement*: it runs only after an arity already matched and can only tighten that outcome. Five classes where arity fires and the type path cannot:
+
+1. **Unknown types** — `f(x, y)` called `f(1)`. Every recorded type is `Any`, and `_has_type_intersection` returns true against `Any` on either side, so there is nothing to see. The comparison is per-position and only runs when counts already align.
+2. **Splats** — `f(x, ys...)` records `param_types === nothing` by design, since positional alignment is unknowable; guard (b) then declines the whole name. `MethodArity` models it as `maxargs = typemax(Int)`.
+3. **Optional positionals** — `f(x::Int, y::Int=2)` called `f(1,2,3)`. The record cannot say which parameters are optional, so the type path declines (pinned by a test as a deliberate loss).
+4. **Keyword arguments** — declined outright in slice 1; `MethodArity` carries `kws` and `kwsplat`.
+5. **The whole-root `eval` kill switch** — blanks the param-types index while leaving the arity index untouched.
+
+The suite already records the cleanest evidence: the assertion that `f(x::Int)` called `f(1, 2)` yields exactly one diagnostic **passes pre-feature**. That diagnostic comes from the arity path; drop the index and it becomes zero.
+
+What *is* redundant is the plumbing, not the check. Two Salsa indices run the same splice walk over the same items for the same triggers. Measured: the arity index recomputes in **1.3–3.1 ms** on a declaration-changing edit (`docs/perf/2026-07-31-type-resolution-budget.md`), and the param-types index is a second pass over identical data. Merging is also the prerequisite for slice 2, since `match_method`'s existing `MethodStore` overload — which compares `length(args) == nsig` *and* the per-slot types in one pass — is what actually subsumes arity checking, and Vararg/optional positions are exactly what parametrics and keywords will need modelled.
+
+## The shape
+
+One record per method carrying both the count shape and the per-position types; one walk; one per-root index; one `(path, name)` projection; one closure into `check_call`. `check_call`'s two branches collapse into a single "does any candidate match on count *and* types" question, with the count answer still available on its own.
+
+## The constraint that makes or breaks it
+
+**One record, but two independently gated opinions.** Every withholding mechanism slice 1 added blanks the *type* opinion while deliberately leaving the *count* opinion intact:
+
+- the `:opaque_definitions` marker empties the param-types index for the whole root; the arity index is untouched;
+- the external-import gate withholds param-type records for names that are unqualified external-import targets, whereas the arity check handles that case *differently* — it re-checks against the store's own methods rather than declining;
+- guard (b) declines the whole name when any method lacks a type record;
+- guard (c) declines when any argument type is unresolved.
+
+Collapse these into a single withhold-the-record decision and every one of them silently deletes arity coverage — on exactly the metaprogramming-heavy roots where the marker fires. The merged record must let a caller ask "what are the count shapes?" and get an answer even when the type opinion is withheld. Model withholding per-opinion, never per-record.
+
+## Acceptance gate
+
+It is a pure consolidation, so the gate is strong and cheap: **the diagnostic set over this package must be byte-identical before and after** — not merely the same count, the same per-file messages — and every existing test must pass unchanged. Any diagnostic that moves means an opinion was lost or gained, which is the whole risk.
+
+Add one test per class in the "Why" list above, asserting the arity diagnostic still fires with the type opinion withheld. The `:opaque_definitions` case is the highest-value one: put an `eval` in the root and confirm a cross-file *count* error is still flagged.
+
+## Do not rely on the sweep alone
+
+Every false positive found during Task 4 was found by constructing a fixture; none by the diagnostic sweep, because this package contains no unqualified Base extension, no `for … @eval` and no `@deprecate`. Over-triggering — the failure that disables the feature root-wide — is invisible to the sweep *by construction*, since it only ever removes diagnostics. Re-run the sweep against a metaprogramming-heavy package as well, and treat a *drop* in diagnostics as suspicious rather than as good news.

@@ -88,9 +88,23 @@ shippable — of the repo's 17672 annotated parameters, 83.1% are bare identifie
    splitting them buys nothing. Everything else records as explicit unknown, which
    §17's first rule already makes permissive, so this ships end-to-end as a linter
    that catches less and false-positives never — and is manually testable on its own.
+1.5. **Merge the arity and type records into one signature record** — one walk, one
+   per-root index, one closure. Added after slice 1's implementation showed that type
+   matching is *not* strictly more powerful than arity matching: it runs only after an
+   arity matched, and all-`Any` types match everything, so a pure count error is
+   invisible to it. The redundancy is in the plumbing (two Salsa indices, same walk,
+   same triggers, 1.3–3.1 ms each on a declaration-changing edit), not in the check.
+   **The trap:** every withholding mechanism slice 1 added blanks the *type* opinion
+   while deliberately leaving the *count* opinion intact, so the merged record must
+   carry two independently gated opinions — collapse them and the `eval` marker
+   silently deletes arity coverage. Gate: byte-identical diagnostics over this
+   package. Full reasoning in the slice-1 plan's trailing section.
+
 2. **Parametrics** — resolve the head, recurse the arguments, and do **not** descend
    into value positions (`Val{:String}` must not record `String`). The real design
-   work, and the shape that needs machinery slice 1 does not.
+   work, and the shape that needs machinery slice 1 does not. Wants 1.5 first, since
+   `match_method`'s `MethodStore` overload — count and types compared in one pass — is
+   the model, and Vararg/optional positions are what parametrics need modelled.
 
 §18 stays separate: different cost profile, ancestry enumeration unmeasured.
 
