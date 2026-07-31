@@ -350,8 +350,19 @@ end
 end
 
 @testitem "macro-declared: the declaration site is not reported as a bad call" setup=[MacroDeclWS] begin
-    using JuliaWorkspaces: StaticLint, derived_file_analysis,
+    using JuliaWorkspaces: StaticLint, CSTParser, derived_file_analysis,
         derived_stdlib_only_env, derived_julia_legacy_syntax_tree
+
+    function find_identifiers(x, value::String, hits=CSTParser.EXPR[])
+        if StaticLint.headof(x) === :IDENTIFIER && CSTParser.valof(x) == value
+            push!(hits, x)
+        elseif x.args !== nothing
+            for a in x.args
+                find_identifiers(a, value, hits)
+            end
+        end
+        return hits
+    end
 
     jw, root = macro_ws("""
     module T
@@ -364,6 +375,19 @@ end
     cst = derived_julia_legacy_syntax_tree(jw.runtime, root)
     env = derived_stdlib_only_env(jw.runtime)
     hints = StaticLint.collect_hints(cst, env, Dict{String,Any}(), fa.meta, :all)
+
+    # Two halves, because the second alone cannot fail: `:macro_declared` sits
+    # outside check_call's kind gate (`func_ref.kind in (:function, :macro,
+    # :struct, :mutable_struct)`), so no IncorrectCallArgs fires whether or
+    # not the ref resolves at all — a pre-feature `nothing` ref also declines.
+    # The first half pins the actual mechanism that keeps this site safe: the
+    # declaration's own `foo` resolves to a TreeRef of kind :macro_declared.
+    # If that kind were ever widened to :function, THIS assertion is what
+    # would catch it before the arity check started firing.
+    foo_callee = only(find_identifiers(cst, "foo"))
+    ref = StaticLint.refof(foo_callee, fa.meta)
+    @test ref isa StaticLint.TreeRef
+    @test ref.kind === :macro_declared
 
     # `foo` at the declaration now RESOLVES (it did not before), and it is not a
     # definition signature, so it reads as a call. It must not be flagged.
