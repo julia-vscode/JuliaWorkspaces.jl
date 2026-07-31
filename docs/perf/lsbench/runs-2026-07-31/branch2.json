@@ -1,0 +1,254 @@
+{
+  "label": "macro-declared-branch-warm",
+  "config": {
+    "julia.completionmode": "qualify",
+    "julia.inlayHints.static.enabled": true,
+    "julia.inlayHints.static.variableTypes.enabled": true,
+    "julia.inlayHints.static.parameterNames.enabled": "literals",
+    "julia.symbolCacheDownload": false,
+    "julia.symbolserverUpstream": "https://julia-symbolcache.org",
+    "julia.enableDynamicIndexing": false,
+    "julia.maxConcurrentIndexingProcesses": 4,
+    "julia.enableWorkspaceEnvironmentResolution": false
+  },
+  "wall_start": 1785515011.4486387,
+  "t_initialize_response": 7.955714393872768,
+  "t_initialized_sent": 7.956183735979721,
+  "startup_settled": true,
+  "t_settled": 78.01155854901299,
+  "t_first_publish": 69.89534958498552,
+  "t_last_publish_startup": 69.9650006480515,
+  "publish_count_startup": 2187,
+  "startup_probes": [
+    [
+      7.957,
+      62047.2
+    ],
+    [
+      70.504,
+      2.1
+    ],
+    [
+      71.007,
+      7.8
+    ],
+    [
+      71.515,
+      10.6
+    ],
+    [
+      72.026,
+      3.0
+    ],
+    [
+      72.529,
+      2.2
+    ],
+    [
+      73.032,
+      2.3
+    ],
+    [
+      73.535,
+      3.2
+    ],
+    [
+      74.038,
+      3.3
+    ],
+    [
+      74.542,
+      3.1
+    ],
+    [
+      75.046,
+      1.9
+    ],
+    [
+      75.548,
+      2.5
+    ],
+    [
+      76.051,
+      3.2
+    ],
+    [
+      76.554,
+      3.5
+    ],
+    [
+      77.058,
+      3.5
+    ],
+    [
+      77.562,
+      3.3
+    ]
+  ],
+  "progress_phases": [
+    {
+      "title": "Scanning workspace files...",
+      "begun": 11.83244072785601,
+      "ended": 70.00420094793662,
+      "endmsg": "Workspace loaded",
+      "n_reports": 2,
+      "last_report": "Analyzing workspace..."
+    }
+  ],
+  "runtime": {
+    "hover_first": 1450.36,
+    "hover": {
+      "n": 20,
+      "min": 0.68,
+      "p50": 0.74,
+      "p90": 0.88,
+      "max": 2.3
+    },
+    "documentSymbol": {
+      "n": 20,
+      "min": 1.05,
+      "p50": 1.1,
+      "p90": 1.2,
+      "max": 1.63
+    },
+    "definition": {
+      "n": 20,
+      "min": 0.51,
+      "p50": 0.58,
+      "p90": 0.71,
+      "max": 716.89
+    },
+    "completion": {
+      "n": 20,
+      "min": 0.87,
+      "p50": 0.98,
+      "p90": 1.52,
+      "max": 608.66
+    },
+    "workspace_symbol": {
+      "n": 10,
+      "min": 15.36,
+      "p50": 21.03,
+      "p90": 405.86,
+      "max": 833.7
+    },
+    "getModuleAt": {
+      "n": 20,
+      "min": 0.06,
+      "p50": 0.08,
+      "p90": 0.21,
+      "max": 203.78
+    },
+    "references_first": 1026.14,
+    "references": {
+      "n": 10,
+      "min": 2.49,
+      "p50": 2.58,
+      "p90": 3.99,
+      "max": 9.91
+    },
+    "didchange_publish_ms": [
+      990.8,
+      82.29,
+      201.24,
+      72.65,
+      58.99,
+      57.0,
+      68.55,
+      63.69,
+      93.37,
+      75.2,
+      64.06,
+      58.11,
+      412.64,
+      50.66,
+      50.87,
+      51.65,
+      58.12,
+      57.11,
+      69.49,
+      65.03
+    ],
+    "burst": {
+      "duration_s": 0.996,
+      "probes_ms": [
+        [
+          -0.0,
+          76.1
+        ],
+        [
+          0.276,
+          271.1
+        ],
+        [
+          0.748,
+          808.6
+        ],
+        [
+          1.757,
+          74.1
+        ],
+        [
+          2.031,
+          2.3
+        ],
+        [
+          2.234,
+          182.4
+        ],
+        [
+          2.617,
+          2.1
+        ],
+        [
+          2.819,
+          2.3
+        ],
+        [
+          3.022,
+          1.6
+        ],
+        [
+          3.224,
+          2.2
+        ],
+        [
+          3.426,
+          1.6
+        ],
+        [
+          3.628,
+          2.2
+        ],
+        [
+          3.831,
+          2.2
+        ],
+        [
+          4.033,
+          2.2
+        ],
+        [
+          4.236,
+          2.3
+        ],
+        [
+          4.44,
+          2.1
+        ],
+        [
+          4.642,
+          2.6
+        ],
+        [
+          4.845,
+          4.1
+        ]
+      ],
+      "publishes_during": 0
+    }
+  },
+  "ls_rss_mb": 2085.0,
+  "children_rss_mb": [],
+  "t_end": 98.86874964297749
+}
