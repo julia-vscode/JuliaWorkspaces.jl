@@ -487,13 +487,14 @@ const MissingPackage = @NamedTuple{name::String, uuid::UUID, version::String, gi
 """
     _get_missing_packages(project_path, store_path) -> Vector{MissingPackage}
 
-Parse the Manifest.toml at `project_path` and return a list of regular and stdlib
+Parse the manifest at `project_path` and return a list of regular and stdlib
 packages whose .jstore cache files do not yet exist on disk. Deved packages are
 skipped entirely (they have no git_tree_sha1 and are handled by StaticLint).
 """
 function _get_missing_packages(project_path::String, store_path::String)
-    manifest_path = joinpath(project_path, "Manifest.toml")
-    isfile(manifest_path) || return MissingPackage[]
+    manifest_candidates = SymbolServer.get_manifest_candidates(project_path)
+    isempty(manifest_candidates) && return MissingPackage[]
+    manifest_path = first(manifest_candidates)
 
     manifest_content = try
         Pkg.TOML.parsefile(manifest_path)
