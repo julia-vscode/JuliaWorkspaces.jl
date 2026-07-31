@@ -377,6 +377,16 @@ it. `_walk_spliced_binding_items!` already mirrors that order, so the machinery
 exists; but **order equivalence against today's `ModuleNode.declared`, over real
 trees, is the acceptance gate**, not an afterthought.
 
+**It also keeps looking load-bearing and keeps turning out not to be.** Twice now
+a piece of work was filed as blocked on this node and then shipped without it: the
+macro-declared names, once visibility unioned a separate node in beside `declared`
+(§3, §14); and §17's type records, whose cutoff argument is answered at the
+projection rather than the key (§17). What remains is the §5 motivation —
+consolidating four traversals of the same data — which is real but is a refactor
+with no user-visible change, so it earns its place on its own schedule rather than
+by gating other work. Treat any future claim that something is blocked on §13 with
+suspicion until the specific query it cannot otherwise get is named.
+
 ### 14. Where macro identity gets judged
 
 There are three outcomes to distinguish, not two proofs to choose between. The
@@ -520,14 +530,25 @@ proposed bound, so it wants a measured budget on the julia-vscode repo (the
 baseline and lsbench tooling exist) *before* type-aware matching is built, not a
 graph-shape argument.
 
-A per-module declarations node is the natural home for these records — but be
-honest about why. "Coarser than per-name, finer than per-root" does not hold for
-the dominant shape: in a single-module package,
+**These records do not need §13.** An earlier draft called the per-module
+declarations node their natural home, on the strength of "coarser than per-name,
+finer than per-root". Neither half of that survives scrutiny. The coarseness
+argument does not hold for the dominant shape: in a single-module package,
 `derived_module_declarations(root, ["Pkg"])` depends on every file spliced into
 that module, which is every file in the root — exactly the root-level dependency
-set. The early-cutoff win comes from **splitting the value** (declarations apart
-from structure, so an edit that changes one backdates the other), not from the
-key. Multi-module roots do get the finer keying; most packages will not.
+set. And the fineness argument is answered a layer lower than the key:
+`derived_method_arities(root, path, name)` is a `get` into the per-root index, so
+when the index's value changes the projection re-runs, returns the same value for
+an untouched name, and *its* consumers backdate. Early cutoff lives at the
+projection, not at the node's key.
+
+So the shape §17 wants is the one the arity path already uses, and it needs
+nothing new structurally: a syntactic type record per parameter on
+`InventoryItem` (which already carries `signature` and `arity`), a per-root
+signature index, per-`(path, name)` projections for cutoff, and resolution
+through the id-free `derived_module_visible_names_idfree` of the *defining*
+module. §13 would buy one fewer traversal (§5) and one home for per-item data
+instead of a second index beside arities — tidiness, not a prerequisite.
 
 ### 18. The inverse direction: from a type to its methods
 
@@ -614,17 +635,25 @@ the same profile as the arities index.
 3. **One round or a loop** (§15). *Settled by §3's edge analysis: one round, no
    loop — the judgement node reads no `declared`, so nothing can close the cycle.*
 4. **Does visibility move to the declarations node**, or does `declared` stay its
-   input? The former is the point of the exercise; the latter is the smaller diff.
-   *Leaning: move it. Leaving `declared` in place means keeping the declaring
-   inside the DFS and paying §13's order-equivalence cost twice.*
+   input? **SUPERSEDED.** Visibility now *unions* a separate module-keyed node in
+   beside `declared` (§14, shipped), which is neither option: `declared` stays the
+   input it always was, and the new names arrive alongside it. The question only
+   returns if §13 is built for §5's sake, and then it is a refactor decision rather
+   than a design one.
 5. **Where macro-identity constants live.** Today's are in StaticLint
    (`SIGNATURE_PRESERVING_MACROS`), but the inventory needs the same names for its
-   name-only half, and layer 1 is included before StaticLint. *The parked branch
-   already points at the answer: bare names in layer 1, StaticLint's module-path
-   table keyed off them.*
+   name-only half, and layer 1 is included before StaticLint. **DECIDED, the other
+   way.** What shipped is ONE table in layer 1 carrying both the macro names and
+   their owner *paths* — the walker reads the names, the confirmation node reads the
+   paths — rather than bare names in layer 1 with StaticLint keying a module-path
+   table off them. One table cannot drift against itself; two can. It does mean a
+   second macro table lives alongside StaticLint's `SIGNATURE_PRESERVING_MACROS`,
+   deliberately, because unifying them would put a layer-1 dependency on StaticLint.
 6. **Per-def vs per-module keying for signatures** (§11), now that content-hashed
-   item ids exist. *Leaning: per-module — but for the value-split reason, not the
-   keying one (§17).*
+   item ids exist. **ANSWERED by §17's correction:** neither. Records live per item
+   in the per-file inventory; a per-root index funnels them; per-`(path, name)`
+   projections give the cutoff. That is the arity path's existing shape, and it makes
+   the keying question moot.
 
 ### 20. Status
 
@@ -647,21 +676,44 @@ reach visibility. What changes is the home, not the mechanism. A stash on that
 branch holds the hover fallback for a method whose defining node is a macrocall —
 independent of where identity gets resolved, so it survives whatever §13 becomes.
 
+**Built, on `sp/module-inventory-design`.** The macro-declared names, end to end:
+a two-entry rule table in layer 1 (`Salsa.@declare_input`, `Base.@deprecate`);
+inert `:macro_declared` inventory rows outside `_BINDING_ITEM_KINDS`; the
+confirmation predicate with both strong proofs (env store for a registry owner,
+the owner package's own tree for a workspace one); a per-root index with a
+per-module projection; and visibility unioning the confirmed names in beside
+`declared` (§3, §14, §15, §16). Missing-reference suppression, hover, completions,
+go-to-definition and find-references all work; rename is deliberately refused.
+Confirmed with 26 commits, ten reviewed tasks and a whole-branch review. §13 was
+NOT needed, which is the finding §13 and §17 are now annotated with.
+
+Three gaps between this document and what shipped, worth knowing:
+
+- §15 asks that a macro which never resolves become a *recorded* outcome rather
+  than silence, following §8. It did not. The unknown case records nothing and
+  emits nothing, relying on the pre-existing failed-wildcard-`using` suppression
+  to stay quiet. A deliberate v1 simplification, still owed.
+- §16 argues a generated method's signature must be **recorded**, since there is
+  no expansion to re-print. v1 records no signature at all and hover deliberately
+  prints none, rather than re-printing the input's own signature as the generated
+  name's.
+- Find-references needed a change §16 did not anticipate: `each_reference`'s
+  declaring-file path requires a `StaticLint.Binding`, which a macro-declared name
+  never has, so same-file uses were dropped entirely until a fallback was added.
+
 **Not built, and not blocked on anything.** The **`@testitem` injection on the
 per-file path** (§1): `self_package_name` plus
 `StaticLint.workspace_package_context`; no meta merging, no per-module inventory,
-no macro identity.
+no macro identity. Also the arity/signature half of the macro work — v1 recorded
+names only, so `set_foo!(rt)` still gets no argument-count check.
 
-**Not built, blocked only on §14's node.** All three `@declare_input` names. Note
-what the union design (§3, §14) buys here: the names enter visibility beside
-`declared`, not through it, so this does **not** wait on §13. The work is one
-module-keyed node that confirms identity and returns names, plus visibility
-unioning it in.
+**Not built, and NOT blocked on §13** (corrected — see §17). Cross-file
+type-aware method matching (§2, §17) and the inverse type-to-methods index (§18).
+§17 wants its dependency-edge cost measured before it is built; §18 depends on
+§17's records.
 
-**Not built, blocked on §13.** The per-module inventory itself — now motivated by
-§5's four re-derivations and §17's signature records rather than by macro names —
-and cross-file type-aware method matching, which additionally wants §17's cost
-measured first.
+**Not built, motivated only by §5.** The per-module inventory itself. Twice it has
+been filed as a prerequisite and twice the work shipped without it.
 
 **Separate, and not part of this.** Completions throw inside any `@testitem`
 body: `_get_tls_arglist` (`src/layer_completions.jl`) handles only `:file` and
