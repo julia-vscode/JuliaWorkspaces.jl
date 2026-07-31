@@ -66,6 +66,104 @@ Salsa.@derived function derived_module_self_and_parents(rt, root, path)
     return chain
 end
 
+# --- Macro identity confirmation --------------------------------------------
+#
+# A `:macro_declared` inventory row is a claim conditional on the wrapping macro
+# really being the one we model. Confirming it is two checks: does the spelling
+# point at the owner (structural, from classified imports), and does the owner
+# actually provide that macro (the environment store for a registry owner, the
+# owner package's own tree for a workspace one).
+#
+# This lives here, not in the module tree, because it reads `env`: the tree must
+# stay env-free. Reading the TREE from here is fine — no tree consumes this — but
+# reading VISIBILITY from here would close the resolution cycle. Do not.
+
+# `Base` and `Core` are in scope in every module without an import.
+const _IMPLICIT_MACRO_OWNERS = (["Base"], ["Core"])
+
+# The import of `path`'s own module that could bring `spelling` in, or `nothing`.
+# Only this module's imports count: Julia does not inherit an enclosing module's
+# `using`, and `_visible_names_pass1` reads `path`'s imports alone for the same
+# reason.
+function _macro_owner_import(rt, root::URI, path::Vector{String},
+                             spelling::MacroSpelling, owner::Vector{String})
+    for ri in derived_module_imports(rt, root, path)
+        ri.target.path == owner || continue
+        if isempty(spelling.qualifier)
+            # A bare `@declare_input` needs the name brought in: a wildcard
+            # `using Salsa`, or a colon-list naming the macro.
+            if isempty(ri.symbols)
+                ri.kind === :using && return ri
+            else
+                any(s -> s.name == spelling.name, ri.symbols) && return ri
+            end
+        else
+            # A qualified `Salsa.@declare_input` needs the QUALIFIER bound to the
+            # owner module — by `using`/`import Salsa`, or under an `as` alias.
+            bound = ri.alias !== nothing ? ri.alias :
+                (isempty(ri.target.path) ? nothing : last(ri.target.path))
+            bound == spelling.qualifier[1] && return ri
+        end
+    end
+    return nothing
+end
+
+# Does the environment's store for `owner` provide `macro_name`?
+function _env_provides_macro(rt, root::URI, owner::Vector{String}, macro_name::String)
+    project_uri = derived_project_uri_for_root(rt, root)
+    env = project_uri === nothing ? derived_stdlib_only_env(rt) : derived_environment(rt, project_uri)
+    store = get(env.symbols, Symbol(owner[1]), nothing)
+    store isa SymbolServer.ModuleStore || return false
+    for seg in owner[2:end]
+        store = get(store.vals, Symbol(seg), nothing)
+        store isa SymbolServer.ModuleStore || return false
+    end
+    return haskey(store.vals, Symbol(macro_name))
+end
+
+# Does the workspace package `owner` declare `macro_name` in its own tree?
+# `derived_module_names` rather than `derived_module_declared`: it is id-free, so
+# an item-id shift in the owner package does not invalidate us, and it carries
+# kinds, so we can require an actual macro.
+function _workspace_package_provides_macro(rt, owner::Vector{String}, macro_name::String)
+    roots = derived_workspace_package_roots(rt)
+    entry = get(roots, owner[1], nothing)
+    entry === nothing && return false
+    return get(derived_module_names(rt, entry, owner), macro_name, nothing) === :macro
+end
+
+function _macro_owner_confirmed(rt, root::URI, path::Vector{String}, spelling::MacroSpelling)
+    rule = _macro_declaration_rule(spelling.name)
+    rule === nothing && return false
+    owner = rule.owner
+
+    # A local macro of the same name shadows a BARE use — but not a qualified
+    # one, which names its module explicitly.
+    if isempty(spelling.qualifier) &&
+            haskey(derived_module_declared(rt, root, path), spelling.name)
+        return false
+    end
+
+    if owner in _IMPLICIT_MACRO_OWNERS
+        # No import needed; a qualifier, if written, must still be the owner.
+        isempty(spelling.qualifier) || spelling.qualifier == owner || return false
+        return _env_provides_macro(rt, root, owner, spelling.name)
+    end
+
+    ri = _macro_owner_import(rt, root, path, spelling, owner)
+    ri === nothing && return false
+
+    if ri.target.sort === :workspace_package
+        return _workspace_package_provides_macro(rt, owner, spelling.name)
+    elseif ri.target.sort === :external
+        return _env_provides_macro(rt, root, owner, spelling.name)
+    else
+        # `:tree` is a same-named submodule of THIS root, `:unresolved` is a
+        # target we could not place. Neither is the owner.
+        return false
+    end
+end
+
 # --- internal helpers: tree/env plumbing ------------------------------------
 
 # The module's own `declared_at` (where `path` itself was declared as a
