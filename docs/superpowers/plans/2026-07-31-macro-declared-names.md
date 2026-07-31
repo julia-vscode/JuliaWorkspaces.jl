@@ -1060,6 +1060,17 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 This is the point of the whole change. It also pins the one regression the change could introduce: the declaration site's own identifier goes from unresolved-and-exempt to resolved, and must not start being reported as a bad call.
 
+**Drive the PER-FILE pass, not the whole-closure one.** These tests take their
+meta from `derived_file_analysis(rt, root, uri)`, never from
+`derived_static_lint_meta_for_root`. Only the per-file pass
+(`semantic_pass(...; module_context=...)`) resolves through the visibility layer,
+so only it sees the union this feature adds — and it is also the live path:
+`derived_diagnostics` → `derived_new_static_lint_diagnostics` →
+`derived_file_analysis(...).diagnostics` (`layer_file_analysis.jl:834`). The
+whole-closure query is reached only by the old per-root diagnostics
+(`layer_static_lint.jl:192`) and will report the generated names as missing no
+matter how correct the feature is.
+
 **Files:**
 - Test only: `test/test_macro_declared_names.jl`
 
