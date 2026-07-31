@@ -1225,3 +1225,39 @@ end
     @test items["h"].param_types === nothing
     @test items["i"].param_types === nothing
 end
+
+@testitem "inventory: dispatch-only (unary `::T`) parameters record their type" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///pt5/src/P.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module P
+    f(::Int) = 1
+    g(::Int, y::String) = 2
+    q(x::Int, ::String) = 3
+    h(::Base.AbstractString) = 4
+    k(::Vector{Int}) = 5
+    w(::T) where T<:Real = 6
+    v(x, ::Vararg{Int}) = 7
+    z(::Vararg) = 8
+    end
+    """, "julia")))
+    items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
+
+    # an anonymous parameter still occupies exactly one positional slot
+    @test items["f"].param_types == [["Int"]]
+    # mixed anonymous/named: alignment must be preserved in both directions
+    @test items["g"].param_types == [["Int"], ["String"]]
+    @test items["q"].param_types == [["Int"], ["String"]]
+    # qualified, same as the named form
+    @test items["h"].param_types == [["Base", "AbstractString"]]
+    # parametric and where-bound stay unknown, same as the named form
+    @test items["k"].param_types == [String[]]
+    @test items["w"].param_types == [String[]]
+    # an anonymous Vararg is still variadic -> alignment unknowable
+    @test items["v"].param_types === nothing
+    @test items["z"].param_types === nothing
+end

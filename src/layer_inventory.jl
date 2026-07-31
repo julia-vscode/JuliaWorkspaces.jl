@@ -549,6 +549,29 @@ function _dotted_name_path(x::CSTParser.EXPR)
     return nothing
 end
 
+# Does this parameter TYPE expression name `Vararg` (`Vararg`, `Vararg{T,N}`,
+# `Base.Vararg{T}`)? Such a parameter consumes an unknown number of positional
+# slots, so the whole record's alignment is unknowable, exactly like a splat.
+function _is_vararg_type_expr(t)
+    t isa CSTParser.EXPR || return false
+    if CSTParser.iscurly(t) && t.args !== nothing && !isempty(t.args)
+        t = t.args[1]
+    end
+    p = _dotted_name_path(t)
+    return p !== nothing && last(p) == "Vararg"
+end
+
+# The annotated type of one positional parameter, or `nothing` if unannotated.
+# Both `x::T` (binary `::`) and the anonymous, dispatch-only `::T` (unary `::`)
+# annotate exactly one slot, so both are recordable and alignment-preserving.
+function _param_type_expr(decl::CSTParser.EXPR)
+    (decl.args !== nothing && !isempty(decl.args)) || return nothing
+    CSTParser.isdeclaration(decl) && length(decl.args) >= 2 && return decl.args[2]
+    CSTParser.isunarysyntax(decl) && CSTParser.headof(decl) isa CSTParser.EXPR &&
+        CSTParser.valof(CSTParser.headof(decl)) == "::" && return decl.args[1]
+    return nothing
+end
+
 # One recorded type per positional parameter of a method-defining EXPR, or
 # `nothing` when the positional alignment is unknowable. Only bare and qualified
 # names are recorded; every other shape (parametric, `where`-bound, a literal)
@@ -571,15 +594,14 @@ function _param_type_names(x::CSTParser.EXPR)
         decl = CSTParser.iskwarg(arg) && arg.args !== nothing && length(arg.args) >= 1 &&
                    arg.args[1] isa CSTParser.EXPR ? arg.args[1] : arg
         CSTParser.issplat(decl) && return nothing
-        if CSTParser.isdeclaration(decl) && length(decl.args) >= 2
-            # `x::Vararg`/`x::Vararg{T,N}` in positional position — same
-            # alignment problem as a splat.
-            StaticLint.is_explicit_vararg_decl(decl) && return nothing
-            t = decl.args[2]
+        t = _param_type_expr(decl)
+        # a positional `::Vararg{T,N}`, named or anonymous, is variadic
+        _is_vararg_type_expr(t) && return nothing
+        if t === nothing
+            push!(out, String[])
+        else
             p = _dotted_name_path(t)
             push!(out, p === nothing || (length(p) == 1 && p[1] in tvars) ? String[] : p)
-        else
-            push!(out, String[])
         end
     end
     return out
