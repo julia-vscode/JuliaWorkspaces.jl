@@ -1130,3 +1130,53 @@ end
     # Not vacuous: an ordinary declaration in the same file IS found.
     @test any(r -> r.name == "ordinary_fn", get_workspace_symbols(jw, "ordinary_fn"))
 end
+
+@testitem "inventory: records bare and qualified parameter types" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///pt/src/P.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module P
+    f(x::Int, y::CSTParser.EXPR) = 1
+    g(a, b::String) = 2
+    h(v::Vector{Int}) = 3
+    k(x::T) where T<:Real = 4
+    m(x::Int, ys...) = 5
+    n(p::NamedTuple{(:w,),Tuple{String}}) = 6
+    end
+    """, "julia")))
+    items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
+
+    # bare + qualified, positionally aligned
+    @test items["f"].param_types == [["Int"], ["CSTParser", "EXPR"]]
+    # unannotated parameter records as unknown, not as absent
+    @test items["g"].param_types == [String[], ["String"]]
+    # parametric: unknown in this slice (the head is NOT recorded alone)
+    @test items["h"].param_types == [String[]]
+    # a where-bound type variable is method-local, never a resolvable name
+    @test items["k"].param_types == [String[]]
+    # a positional splat makes alignment unknowable -> no record at all
+    @test items["m"].param_types === nothing
+    # value positions must not be harvested as type names
+    @test items["n"].param_types == [String[]]
+end
+
+@testitem "inventory: param_types is nothing for non-methods and backdates on body edits" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, update_file!
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///pt2/src/P.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("module P\nconst C = 1\nf(x::Int) = 1\nend\n", "julia")))
+    inv1 = derived_file_inventory(jw.runtime, u)
+    @test Dict(it.name => it for it in inv1.items)["C"].param_types === nothing
+
+    # a body-only edit must leave the inventory `isequal` so Salsa backdates
+    update_file!(jw, TextFile(u, SourceText("module P\nconst C = 1\nf(x::Int) = 99\nend\n", "julia")))
+    inv2 = derived_file_inventory(jw.runtime, u)
+    @test isequal(inv1, inv2)
+end

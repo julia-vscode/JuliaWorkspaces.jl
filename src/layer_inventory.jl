@@ -62,14 +62,22 @@ const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
     # written at the call site. Identity is confirmed later, in
     # layer_visibility.jl, which needs the spelling to know what to confirm.
     declared_by::Union{Nothing,MacroSpelling}
+    # One entry per positional parameter, in source order, for a real method;
+    # `nothing` when alignment is unknowable (a positional splat) or the item is
+    # not a method. An empty inner vector means that parameter's type is unknown.
+    # Names are as written (`["CSTParser","EXPR"]`) and resolved by the consumer
+    # against the module the method's TEXT sits in.
+    param_types::Union{Nothing,Vector{Vector{String}}}
 end
 
 # Back-compat constructors: non-callable items (assignments, consts, enums, …)
 # carry no arity, and only `:macro_declared` rows carry a spelling.
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing, nothing)
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing, nothing)
+InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by) =
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, nothing)
 
 "An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
 `alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
@@ -487,6 +495,79 @@ function _symbol_name(x)
     return x isa CSTParser.EXPR && CSTParser.isoperator(x) ? CSTParser.valof(x) : nothing
 end
 
+# The `where`-bound type variable names of a signature. Method-local: they name
+# nothing in the defining module, so a parameter annotated with one is unknown.
+function _where_var_names(sig::CSTParser.EXPR)
+    tvars = Set{String}()
+    s = sig
+    while s isa CSTParser.EXPR && CSTParser.iswhere(s)
+        for i in 2:length(s.args)
+            a = s.args[i]
+            if CSTParser.isidentifier(a)
+                push!(tvars, CSTParser.str_value(a))
+            elseif a isa CSTParser.EXPR && a.args !== nothing
+                for c in a.args
+                    CSTParser.isidentifier(c) && push!(tvars, CSTParser.str_value(c))
+                end
+            end
+        end
+        s = s.args[1]
+    end
+    return tvars
+end
+
+# A dotted access chain as a name path (`Base.Iterators.Zip` →
+# ["Base","Iterators","Zip"]), or `nothing` for any other shape.
+function _dotted_name_path(x::CSTParser.EXPR)
+    if CSTParser.isidentifier(x)
+        return [CSTParser.str_value(x)]
+    elseif CSTParser.is_getfield_w_quotenode(x)
+        lhs = _dotted_name_path(x.args[1])
+        lhs === nothing && return nothing
+        q = x.args[2]
+        (q isa CSTParser.EXPR && q.args !== nothing && length(q.args) >= 1 &&
+            CSTParser.isidentifier(q.args[1])) || return nothing
+        return vcat(lhs, CSTParser.str_value(q.args[1]))
+    end
+    return nothing
+end
+
+# One recorded type per positional parameter of a method-defining EXPR, or
+# `nothing` when the positional alignment is unknowable. Only bare and qualified
+# names are recorded; every other shape (parametric, `where`-bound, a literal)
+# records as unknown, which the consumer treats permissively.
+function _param_type_names(x::CSTParser.EXPR)
+    sig = CSTParser.get_sig(x)
+    sig isa CSTParser.EXPR || return nothing
+    tvars = _where_var_names(sig)
+    sig = CSTParser.rem_wheres_decls(sig)
+    (sig isa CSTParser.EXPR && sig.args !== nothing) || return nothing
+
+    out = Vector{Vector{String}}()
+    for i in 2:length(sig.args)
+        arg = sig.args[i]
+        arg isa CSTParser.EXPR || return nothing
+        # keywords live in `:parameters` and are not positional
+        CSTParser.headof(arg) === :parameters && continue
+        # a positional splat/Vararg makes the alignment unknowable
+        CSTParser.issplat(arg) && return nothing
+        decl = CSTParser.iskwarg(arg) && arg.args !== nothing && length(arg.args) >= 1 &&
+                   arg.args[1] isa CSTParser.EXPR ? arg.args[1] : arg
+        CSTParser.issplat(decl) && return nothing
+        if CSTParser.isdeclaration(decl) && length(decl.args) >= 2
+            # `x::Vararg`/`x::Vararg{T,N}` in positional position — same
+            # alignment problem as a splat.
+            StaticLint.is_explicit_vararg_decl(decl) && return nothing
+            t = decl.args[2]
+            p = _dotted_name_path(t)
+            push!(out, p === nothing || (length(p) == 1 && p[1] in tvars) ? String[] : p)
+        else
+            push!(out, String[])
+        end
+    end
+    return out
+end
+
 # --- Modelled macros that declare names their argument never spells ---------
 #
 # A macrocall is transparent to the walker, so a macro that mints extra names
@@ -744,7 +825,11 @@ function _classify_assignment!(acc, x, order, id, parent_module, kind_override, 
         name = _symbol_name(CSTParser.get_name(x))
         if name !== nothing
             qualifier = _item_qualifier(CSTParser.get_name(x))
-            push!(acc.items, InventoryItem(order, id,name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
+            is_method = StaticLint._is_real_method(x)
+            push!(acc.items, InventoryItem(order, id, name, qualifier, something(kind_override, :function),
+                _render_sig(x), String[], parent_module,
+                (is_method ? MethodArity(StaticLint.func_nargs(x)...) : nothing), nothing,
+                (is_method ? _param_type_names(x) : nothing)))
         end
     elseif CSTParser.iscurly(x.args[1])
         # Typealias: `Vector{T} = ...` — name comes from the curly's base
@@ -839,7 +924,11 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             name = "@" * name
         end
         qualifier = _item_qualifier(CSTParser.get_name(x))
-        push!(acc.items, InventoryItem(order, id,name, qualifier, kind, _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
+        is_method = StaticLint._is_real_method(x)
+        push!(acc.items, InventoryItem(order, id, name, qualifier, kind,
+            _render_sig(x), String[], parent_module,
+            (is_method ? MethodArity(StaticLint.func_nargs(x)...) : nothing), nothing,
+            (is_method ? _param_type_names(x) : nothing)))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
         name = _item_name(CSTParser.get_name(x))
