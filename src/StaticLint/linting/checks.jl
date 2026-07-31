@@ -440,6 +440,11 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                                 # parameter types are not in the tree records, so
                                 # judging the call on the records alone would
                                 # false-flag a valid store call.
+                                # Not the same gate as the type index's withholding
+                                # of imported-and-extended names: that one keys on
+                                # the import, this one on a store-valued `.val`,
+                                # which a `const Foo = Base.Dict` alias also has
+                                # without any import to withhold on.
                                 if store === nothing &&
                                    !_tree_types_match(x, n, cc, arities, env, meta_dict, tree_param_types)
                                     seterror!(x, IncorrectCallArgs, meta_dict)

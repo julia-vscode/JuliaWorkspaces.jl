@@ -927,6 +927,11 @@ would reject calls the missing methods accept:
 - every name in the root, when any file evaluates code as it loads
   (`:opaque_definitions`) — an `eval` can define any name in any module, so
   nothing narrower is sound.
+
+The first of those overlaps `check_call`'s own store-valued-callee gate without
+subsuming it: this index withholds on the IMPORT, while `check_call` declines on
+a store-valued `Binding.val`, which a `const Foo = Base.Dict` alias also has with
+no import for this index to see.
 """
 Salsa.@derived function derived_method_param_types_index(rt, root)
     @debug "derived_method_param_types_index" root=root

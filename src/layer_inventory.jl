@@ -683,6 +683,10 @@ function _eval_targets_other_module(ev::CSTParser.EXPR, parent_module::Vector{St
         # macrocall args: name, parameters placeholder, then the macro's arguments
         length(ev.args) >= 4 ? ev.args[3] : nothing
     else
+        # Deliberately defensive: only the macrocall arm is reachable today — the
+        # walker classifies no definition inside a call argument, and
+        # `Core.eval(Mod, :(…))` marks through `_has_load_time_eval` instead. A
+        # shape that did reach here without this arm would skip the marker.
         length(ev.args) >= 3 ? ev.args[2] : nothing   # callee, module, expression
     end
     target === nothing && return false

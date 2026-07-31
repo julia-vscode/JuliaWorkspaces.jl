@@ -653,6 +653,11 @@ _store_extended_in_workspace(rt, root, env, func_ref) =
 
 # A recorded type name resolved to a value the type comparison accepts.
 # `CoreTypes.Any` means "no opinion" and can only ever remove a diagnostic.
+# The bare-name leg looks the head up in Base's and Core's FULL `vals`, so a name a
+# dependency exports can collide with an unexported Base name of the same spelling
+# whenever the env fails to bind that dependency's names (the stdlib-only fallback
+# binds only the module name); when the env does resolve the dependency, its
+# exported names are visible here and the annotation yields `Any` instead.
 function _resolve_recorded_type(rt, root, env, defmod::Vector{String}, path::Vector{String})
     isempty(path) && return StaticLint.CoreTypes.Any
     head = path[1]
