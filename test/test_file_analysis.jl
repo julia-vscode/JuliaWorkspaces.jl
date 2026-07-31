@@ -2289,6 +2289,25 @@ end
     @test isempty(diags("f(x::Int) = x\n", "struct Own end\ng() = (o = Own(); f(o))\n"))
 end
 
+@testitem "derived_file_analysis: a qualified extension's types resolve in the DEFINING module" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # `MainPkg.f(x::Regex)` written in `Inner` keys under ["MainPkg"], but its
+    # annotation must resolve where the TEXT is. `MainPkg` declares a `Regex` of
+    # its own, so resolving at the KEY path would find a workspace name and hold
+    # no opinion; resolving in `Inner`, which cannot see it, reaches `Base.Regex`
+    # and rules the call out.
+    @test length(diags("struct Regex end\nf(x::Int) = 1\nmodule Inner\nMainPkg.f(x::Regex) = 2\nend\n",
+                       "g() = f(\"s\")\n")) == 1
+    # The control for exactly that: the same two methods, the same call, with the
+    # `Regex` annotation written where `Regex` IS a workspace name -> no opinion.
+    @test isempty(diags("struct Regex end\nf(x::Int) = 1\nf(x::Regex) = 2\n", "g() = f(\"s\")\n"))
+end
+
 @testitem "derived_file_analysis: TYPE check withholds names whose method set is not fully recorded" setup=[FileAnalysisWS] begin
     mm(fa) = [d.message for d in fa.diagnostics
               if occursin("No method matching", d.message) || occursin("method call error", d.message)]

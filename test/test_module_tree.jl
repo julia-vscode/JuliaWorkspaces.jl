@@ -1538,6 +1538,40 @@ end
     @test outer.defmod == ["M"]
 end
 
+@testitem "derived_method_param_types_index: the eval marker leaves the ARITY index intact" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_param_types_index, derived_method_arities_index,
+        TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///mp4/src/M.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("""
+    module M
+    f(x::Int) = 1
+    g(x::Int, y::Int) = 2
+    for T in (Float64,)
+        @eval h(x::\$T) = 3
+    end
+    end
+    """, "julia")))
+
+    # An `eval` withholds the whole root's TYPE opinion...
+    @test isempty(derived_method_param_types_index(jw.runtime, root))
+    # ...and must leave the arity index untouched: the arity check keeps working
+    # on exactly the methods it always saw.
+    ar = derived_method_arities_index(jw.runtime, root)
+    @test !isempty(ar)
+    @test haskey(ar, (["M"], "f"))
+    @test haskey(ar, (["M"], "g"))
+
+    # Without the eval, the type index carries the same two names.
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(root, SourceText("module M\nf(x::Int) = 1\ng(x::Int, y::Int) = 2\nend\n", "julia")))
+    @test Set(keys(derived_method_param_types_index(jw2.runtime, root))) ==
+        Set([(["M"], "f"), (["M"], "g")])
+end
+
 @testitem "derived_method_param_types_index: body-only edit backdates" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_method_param_types_index, TextFile, SourceText, update_file!
