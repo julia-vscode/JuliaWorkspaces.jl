@@ -635,6 +635,12 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
     x = get_expr1(cst, offset)
     x === nothing && return results
 
+    # Same refusal as `_can_rename`: a client without `prepareSupport` skips
+    # straight to rename without calling prepareRename first, so this path
+    # must refuse a macro-declared target on its own rather than relying on
+    # `_can_rename` having been called.
+    _is_macro_declared_target(runtime, root, uri, x) && return results
+
     # A macro's definition uses the bare name (`add_2`) while every invocation
     # carries a leading `@` (`@add_2`). The client may send the new name with or
     # without the `@`; normalize to the bare form and re-add the `@` only for the
@@ -710,8 +716,9 @@ function _is_macro_declared_target(runtime, root::URI, uri::URI, x::CSTParser.EX
     tgt = _reference_target(runtime, root, uri, x, meta_dict)
     (tgt === nothing || tgt[1] !== :tree) && return false
     ref = tgt[2]
+    sv = CSTParser.str_value(x)
     for it in derived_file_inventory(runtime, ref.file).items
-        it.id == ref.id && it.kind === :macro_declared && it.name == CSTParser.valof(x) && return true
+        it.id == ref.id && it.kind === :macro_declared && _bare_macro_name(it.name) == _bare_macro_name(sv) && return true
     end
     return false
 end

@@ -245,7 +245,6 @@ end
 end
 
 @testitem "macro-declared: a macro-declared name beats a wildcard bring-in" setup=[MacroDeclWS] begin
-    prov = URI("file:///ws/Prov/src/Prov.jl")
     jw, root = macro_ws("""
     module T
     using Salsa
@@ -703,4 +702,106 @@ end
     # The id-free projection is unchanged across that shift — the whole point
     # of that seam.
     @test isequal(a["f"], b["f"])
+end
+
+@testitem "macro-declared: an inert row does not out-vote a real declaration" setup=[MacroDeclWS] begin
+    # `_emit_macro_declarations!` runs at the top of `_classify_item!`, so a
+    # single statement that ALSO derives macro-declared names shares its id
+    # with the inert row it produces. `@deprecate f(x) = 1` is not a valid
+    # `@deprecate` call (its first argument is a full function definition,
+    # not `old`/`new`), but the derivation still extracts "f" from it, and the
+    # statement itself is classified a second time as a genuine function.
+    # `_build_kind_index` must report the real kind, not the inert one.
+    using JuliaWorkspaces: derived_module_names, derived_file_inventory
+
+    jw, root = macro_ws("""
+    module T
+    @deprecate f(x) = 1
+    end
+    """)
+
+    # Premise: the statement really does produce both an inert row and a real
+    # item sharing one id.
+    items = [it for it in derived_file_inventory(jw.runtime, root).items if it.name == "f"]
+    @test length(items) == 2
+    @test length(unique(it.id for it in items)) == 1
+    @test Set(it.kind for it in items) == Set([:macro_declared, :function])
+
+    @test derived_module_names(jw.runtime, root, ["T"])["f"] === :function
+end
+
+@testitem "macro-declared: get_rename_edits refuses a macro-declared name" setup=[MacroDeclWS] begin
+    # `_can_rename` refuses a macro-declared target, but `_get_rename_edits`
+    # is a separate mutation-producing entry point and must refuse
+    # independently: a client without `prepareSupport` calls it directly,
+    # skipping prepareRename.
+    using JuliaWorkspaces: get_rename_edits, get_text_file
+
+    jw, root = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    function use(rt)
+        set_foo!(rt, 1, 2)
+    end
+    g(x) = x
+    end
+    """; with_salsa_package=true)
+
+    src = get_text_file(jw, root).content.content
+
+    off = first(findfirst("set_foo!(rt, 1, 2)", src))
+    @test isempty(get_rename_edits(jw, root, off, "bar!"))
+
+    # Not vacuous: an ordinary function in the same file still produces edits.
+    off_g = first(findfirst("g(x) = x", src))
+    @test !isempty(get_rename_edits(jw, root, off_g, "h"))
+end
+
+@testitem "macro-declared: the cycle invariant holds across a mutual dev-dependency" setup=[MacroDeclWS] begin
+    # Two workspace packages that each `using` the other, one owning the
+    # modelled macro. The index reads only the owner's tree and no tree
+    # consumes any index, so A→B and B→A both terminate (design doc,
+    # "Confirmation" §2) — but cycle detection is debug-gated, so an actual
+    # cycle would hang here rather than raise, per the same note as the
+    # same-root/cross-root cycle tests above. Assert debug mode first.
+    using JuliaWorkspaces: Salsa
+    @test Salsa.Debug.debug_enabled()
+
+    jw, root = macro_ws("""
+    module P
+    using Salsa
+    using Q
+    Salsa.@declare_input foo(rt, x::Int)::V
+    export set_foo!
+    end
+    """; root_uri=URI("file:///ws/P/src/P.jl"), with_salsa_package=true)
+
+    add_file!(jw, TextFile(URI("file:///ws/P/Project.toml"), SourceText("""
+    name = "P"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"
+    version = "0.1.0"
+    """, "toml")))
+
+    q_root = URI("file:///ws/Q/src/Q.jl")
+    add_file!(jw, TextFile(URI("file:///ws/Q/Project.toml"), SourceText("""
+    name = "Q"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(q_root, SourceText("""
+    module Q
+    using P
+    bar() = 1
+    export bar
+    end
+    """, "julia")))
+
+    vis_p = derived_module_visible_names(jw.runtime, root, ["P"])
+    @test haskey(vis_p, "set_foo!")
+    @test haskey(vis_p, "bar")
+
+    vis_q = derived_module_visible_names(jw.runtime, q_root, ["Q"])
+    @test haskey(vis_q, "set_foo!")
+    @test haskey(vis_q, "bar")
 end

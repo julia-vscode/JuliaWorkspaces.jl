@@ -539,6 +539,14 @@ function _build_kind_index(rt, uri::URI)::Dict{Tuple{Int64,String},Symbol}
         idx[(m.id, m.name)] = :module
     end
     for item in inv.items
+        # An inert `:macro_declared` row must never determine a declared
+        # name's kind: it shares its id with a real item exactly when the
+        # macro's argument ALSO parses as a genuine declaration (e.g. an
+        # invalid `@deprecate f(x) = 1`), and `_emit_macro_declarations!`
+        # runs first, so a first-wins `get!` would let the inert row win over
+        # the real kind. `_declare!` already excludes this kind from
+        # `declared`, so no key reaching this index may legitimately be one.
+        item.kind === :macro_declared && continue
         get!(idx, (item.id, item.name), item.kind)
     end
     return idx
