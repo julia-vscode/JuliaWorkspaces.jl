@@ -233,10 +233,12 @@ the index.
 
 Driven by the target that check 1 matched, not by the table's path:
 
-- **`:external` target** (registry or stdlib owner) — look the owner up in
-  `env.symbols` and check it provides the macro name, following re-export chains.
-  This is the `Base.@deprecate` path; stdlib stores are baked in, so it is always
-  available.
+- **`:external` target** (registry or stdlib owner) — walk `env.symbols` down the
+  owner's module path, then a flat `haskey(store.vals, macro_name)` on the final
+  `ModuleStore`. No re-export chain is walked explicitly; a re-exported macro
+  still succeeds because `ModuleStore.vals` carries a `VarRef` for it, so
+  `haskey` finds it anyway. This is the `Base.@deprecate` path; stdlib stores are
+  baked in, so it is always available.
 - **`:workspace_package` or `:tree` target** — the owner is a workspace package, so
   it is absent from `env.symbols` (`derived_environment` adds deved packages to
   `project_deps` only, `layer_environment.jl:176-184`). Ask its own tree instead:
@@ -342,6 +344,17 @@ Working already, no change needed, verified:
 Every failure records nothing, which can only leave today's behaviour in place: a
 derivation that finds no identifier, a macrocall with no arguments, an unresolvable
 owner, an owner whose root is not in the workspace.
+
+- A modelled macro used INSIDE its own owner module is never confirmed. Bare use
+  is rejected by the local-shadow check: the owner's own `macro declare_input`
+  reads as a foreign shadow of itself. Qualified use is rejected because a
+  module's self-binding is not an import, and `_macro_owner_import` inspects
+  imports only. Degradation-only, and irrelevant for `Base.@deprecate` (a
+  module never IS `Base`).
+- `@deprecate Base.foo bar` derives `["foo"]` with an empty qualifier, so `foo`
+  becomes visible in the CURRENT module rather than in `Base`, suppressing a
+  legitimate missing-reference diagnostic for a bare `foo` there. A rare shape,
+  accepted.
 
 ## Testing
 
