@@ -264,23 +264,55 @@ list is their only record.
   instance; the argument is structural.** If run: on two or three marker-fired roots,
   apply a type-only, a count-changing and a body-only edit, re-collect the whole
   root's diagnostics, and require they equal a from-cold rebuild of the edited state.
-- **Four measured refinements to slice 1**, independent of each other:
-  - *Narrow the `eval` marker to evals that could actually define a method.* 7 of the
-    24 marker rows repo-wide cannot define one, yet each disables type checking for
-    its whole root. Buys back **three** roots (CommonMark, Runic, Tokenize);
-    JuliaDynamicAnalysisProcess and TestItemServer carry a genuine `for … @eval <def>`
-    and stay disabled. Per-root figures in
-    `docs/perf/2026-07-31-slice-1-sweep-results.md`.
-  - *Guard (c): treat an unresolved argument as `Any` per index* instead of declining
-    the whole call. Equally false-positive-safe, and it keeps the true positives where
-    a *different*, resolved argument is a definite mismatch. Add the
-    `Own <: MyAbs <: Integer` fixture in the same change.
-  - *Move resolution below the cheap gates in `_tree_types_match`.* Roughly 719 of
-    4156 invocations resolve and discard. Mechanical reorder.
-  - *The mid-edit false positive (§17a hole 5), if it proves annoying in practice.*
-    Prefer the consumer-side gate — decline when the *callee's defining file* failed
-    to parse — over the marker, which would toggle the whole-root index. Needs the
-    records to carry the defining file, which the 1.5 merge declined to add.
+- **The mid-edit false positive (§17a hole 5), if it proves annoying in practice.**
+  Prefer the consumer-side gate — decline when the *callee's defining file* failed
+  to parse — over the marker, which would toggle the whole-root index. Needs the
+  records to carry the defining file, which the 1.5 merge declined to add.
+
+### Closed by measurement — do not re-queue
+
+Three of the four "cheap refinements to slice 1" were sized on 2026-08-01 and two of
+them died. The counts they were queued on were real; the value behind the counts
+was not.
+
+- **Guard (c) — shipped** (`f4c95c7`). An unresolved argument now declines its own
+  slot instead of the whole call. The old guard declined 3607 of 34814 call sites
+  (10.4%). **Zero movement** over the 74 roots and the corpus-wide rejection count is
+  unchanged, so it is strictly more powerful and empirically inert here.
+
+- **Moving resolution below the cheap gates — not worth doing.** The count was right
+  (695 of 28700 resolutions are discarded, plus 1360 spent on calls with keywords),
+  but in *time* the entire argument-resolution cost across a whole-repo **cold build**
+  is 14.4 ms, of which the reorder would save **1.38 ms** — 0.01% of a 13.5 s build.
+  Not worth a pre-pass that has to reproduce the loop's early-return semantics exactly.
+
+- **Narrowing the `eval` marker — buys nothing, and would expose false positives.**
+  Measured the upper bound by disabling the marker entirely, which is strictly more
+  than any narrowing can achieve. The three roots it was supposed to buy back light
+  up (CommonMark 0 → 678 known parameter operands, Runic 0 → 631, Tokenize 0 → 57, so
+  the machinery does turn on) and produce **zero** diagnostics. Every diagnostic the
+  marker masks is in a root that keeps its marker anyway, and all of them are false
+  positives — see below. Revisit only after slice 1.4.
+
+### What the `eval` marker turns out to be masking
+
+Four distinct diagnostics appear when the marker is disabled, none of them
+`eval`-related. They are worth more than the marker work was:
+
+- `find_from_hash(::Any, ::Any, ::Nothing)` — §17b. `uuid = name = path = hash =
+  nothing`, `hash` reassigned, call guarded by `hash !== nothing`. **Slice 1.4.**
+- `lookup_expr(::Any, ::Any, ::GlobalRef)` — §17b again, the `isa` variant: the call
+  sits under `elseif isa(node, Expr)` and `refof` is flow-insensitive. **Slice 1.4.**
+- `DFS!(::Any, ::Array{T,1}, ::DataType)` — **a new class.** `update_domtree!(…,
+  domtree::GenericDomTree{IsPostDom}, …) where {IsPostDom}` passes `IsPostDom` as an
+  argument, and `infer_type` types every `where`-bound variable `DataType`
+  (`type_inf.jl`, the `iswhere(parentof(...))` arm). A Julia type parameter can be a
+  *value* (`GenericDomTree{true}`), so `DataType` is unsound on the argument side.
+  `Any` is the permissive answer. Argument-side, like everything else that binds now.
+- `_binary_heap_pop!(…)` — unexamined. Its message is multi-line and its tail reads
+  "… is a Function.", which suggests `Ordering` resolves to a function rather than the
+  abstract type. Note for whoever looks: a multi-line message breaks `typesweep.jl`'s
+  TSV into continuation rows.
 
 ### The remaining feature work
 
