@@ -111,7 +111,8 @@ extension of an already-existing name elsewhere). `signature` is a normalized
 callable's `MethodArity` (argument-count shape) computed from the defining EXPR —
 plain data (so it backdates), used by the cross-file argument-count check for
 methods whose full set spans files. `method_sig` is the structured signature of
-a real method, from which the arity is derivable ([`_arity_of`](@ref)).
+a real method or a struct's constructor, from which the arity is derivable
+([`_arity_of`](@ref)).
 
 `order` is dense and monotone in source order, and exists so the module tree can
 recover Julia's textual-splice semantics; `id` identifies the declaring statement
@@ -140,10 +141,11 @@ const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
     # Names are as written (`["CSTParser","EXPR"]`) and resolved by the consumer
     # against the module the method's TEXT sits in.
     param_types::Union{Nothing,Vector{Vector{String}}}
-    # The structured signature of a real method — parameters with names, types
-    # as written, roles, keywords and method-local type variables. `nothing` for
-    # anything that is not a method. Distinct from `signature::String`, which is
-    # the re-printed source text.
+    # The structured signature of a real method or a struct's constructor —
+    # parameters with names, types as written, roles, keywords and method-local
+    # type variables. `nothing` for anything that is not callable. A struct's
+    # parameters carry no type opinion. Distinct from `signature::String`, which
+    # is the re-printed source text.
     method_sig::Union{Nothing,MethodSignature}
 end
 
@@ -719,12 +721,16 @@ function _param_type_record(t)
 end
 
 # The recorded type of one parameter node, looking past a splat wrapper so
-# `xs::Int...` records `Int`.
+# `xs::Int...` records `Int`. A splat's annotation is an ELEMENT type, so a
+# `Vararg{...}` written there is not one and records as unknown — otherwise
+# `xs::Vararg{Int,3}...` would read back a bound `func_nargs` never sees (it
+# asks `bounded_vararg_N` about the unsplatted arg, which declines).
 function _sig_param_type(arg)
     arg isa CSTParser.EXPR || return ParamType()
     if CSTParser.issplat(arg) && arg.args !== nothing && !isempty(arg.args)
         arg = arg.args[1]
         arg isa CSTParser.EXPR || return ParamType()
+        StaticLint.is_explicit_vararg_decl(arg) && return ParamType()
     end
     return _param_type_record(_param_type_expr(arg))
 end
@@ -832,6 +838,106 @@ function _method_signature(x::CSTParser.EXPR)
         end
     end
     return MethodSignature(params, kwargs, kwsplat, tvars, false)
+end
+
+"An anonymous parameter of the given role, with no type opinion."
+_bare_param(role::Symbol) = SigParam("", ParamType(), role)
+
+# A parameter list that derives exactly `minargs..maxargs`: the required count as
+# positionals, the rest as optionals — or a trailing vararg when unbounded. Used
+# where the shape is only known as a COUNT RANGE, so the individual parameters
+# are synthetic and carry neither name nor type.
+function _params_for_range(minargs::Int, maxargs::Int)
+    params = SigParam[_bare_param(:positional) for _ in 1:max(minargs, 0)]
+    if maxargs == typemax(Int)
+        push!(params, _bare_param(:vararg))
+    else
+        for _ in 1:max(maxargs - minargs, 0)
+            push!(params, _bare_param(:optional))
+        end
+    end
+    return params
+end
+
+# A shape that accepts any count but claims no keyword splat — an empty struct
+# body. `shape_unknown` is the wrong lever here: it also asserts a keyword splat.
+_any_count_signature(tvars) = MethodSignature([_bare_param(:vararg)], SigParam[], false, tvars, false)
+
+"""
+    _struct_signature(x::CSTParser.EXPR) -> MethodSignature
+
+The structured signature of a struct's constructor, mirroring
+`StaticLint.struct_nargs` arm for arm so [`_arity_of`](@ref) reproduces its
+counts: a macro-wrapped struct may gain arbitrary constructors and so is
+`shape_unknown`; inner constructors make the arity the union of their ranges;
+otherwise each field is one positional parameter.
+
+Field types are deliberately withheld — a struct constructor carries no type
+opinion, and giving it one would change what the argument-type check says.
+"""
+function _struct_signature(x::CSTParser.EXPR)
+    tvars = _struct_type_vars(x)
+    # Unlike a method, this arm is purely syntactic: no env is needed to tell
+    # that the macro may have added constructors.
+    p = CSTParser.parentof(x)
+    if p isa CSTParser.EXPR && CSTParser.ismacrocall(p) && !StaticLint.is_doc_macrocall(p)
+        return MethodSignature(SigParam[], SigParam[], false, tvars, true)
+    end
+
+    body = (x.args !== nothing && length(x.args) >= 3) ? x.args[3] : nothing
+    (body isa CSTParser.EXPR && body.args !== nothing && !isempty(body.args)) ||
+        return _any_count_signature(tvars)
+
+    inner = findall(a -> CSTParser.defines_function(a), body.args)
+    if !isempty(inner)
+        # Inner constructors are alternative methods: the arity is their union,
+        # which a single range can only over-accept, never over-reject.
+        minargs, maxargs = typemax(Int), 0
+        kws, kwsplat = Symbol[], false
+        for i in inner
+            imin, imax, ikws, ikwsplat = StaticLint.func_nargs(body.args[i])
+            minargs = min(minargs, imin)
+            maxargs = max(maxargs, imax)
+            union!(kws, ikws)
+            kwsplat |= ikwsplat
+        end
+        return MethodSignature(_params_for_range(minargs, maxargs),
+                               SigParam[SigParam(String(k), ParamType(), :keyword) for k in kws],
+                               kwsplat, tvars, false)
+    end
+
+    # Only real fields count towards the default constructor; a field's
+    # docstring is a bare string child of the body block, not a field.
+    params = SigParam[]
+    for a in body.args
+        CSTParser.isstringliteral(a) && continue
+        push!(params, SigParam(something(_struct_field_name(a), ""), ParamType(), :positional))
+    end
+    # A body carrying no fields at all answers like an empty one.
+    isempty(params) && return _any_count_signature(tvars)
+    return MethodSignature(params, SigParam[], false, tvars, false)
+end
+
+# A struct's own type parameters, as `where`-style variables: `struct Foo{T<:Real}
+# <: Bar` yields `T<:Real`. The declaration's supertype clause is stripped first.
+function _struct_type_vars(x::CSTParser.EXPR)
+    out = SigTypeVar[]
+    (x.args !== nothing && length(x.args) >= 2) || return out
+    sig = x.args[2]
+    sig isa CSTParser.EXPR || return out
+    if sig.head isa CSTParser.EXPR && CSTParser.isoperator(sig.head) &&
+            CSTParser.valof(sig.head) == "<:" && sig.args !== nothing && length(sig.args) == 2
+        sig = sig.args[1]
+    end
+    (sig isa CSTParser.EXPR && CSTParser.iscurly(sig) && sig.args !== nothing) || return out
+    seen = Set{String}()
+    for i in 2:length(sig.args)
+        name, upper = _where_var_and_upper(sig.args[i])
+        (name === nothing || name in seen) && continue
+        push!(seen, name)
+        push!(out, SigTypeVar(name, upper))
+    end
+    return out
 end
 
 # The literal `N` of a bounded `Vararg{T,N}`, or `nothing`. Mirrors
@@ -1065,6 +1171,33 @@ end
 # `name` (bare) and `name::T` (declared). `rem_decl` is CSTParser's own
 # declaration-unwrapping helper (interface.jl:135), so this needn't reimplement it.
 _field_name(x) = _item_name(CSTParser.rem_decl(x))
+
+# The name one struct-body entry binds, or `nothing`.
+#
+# A field modifier wraps the declaration in a macrocall whose LAST argument is
+# the field (`@atomic a::Int = 1`). Unwrapping is name-free on purpose: any such
+# macro leaves a field behind, and a shape that isn't a field declaration yields
+# no name anyway. Without this the field is missing from `field_names` entirely,
+# and so from every consumer of it (completion, hover, field-access checking).
+#
+# The kwdef-style default is unwrapped unconditionally: recording a defaulted
+# field's name is correct regardless of whether the struct is actually
+# `@kwdef`-decorated, and the inventory must not depend on macro-resolution state
+# to tell — a deliberate deviation from bindings.jl:110's `kwdef &&` guard.
+function _struct_field_name(arg)
+    arg isa CSTParser.EXPR || return nothing
+    if CSTParser.ismacrocall(arg) && arg.args !== nothing && length(arg.args) > 1
+        arg = last(arg.args)
+        arg isa CSTParser.EXPR || return nothing
+    end
+    if CSTParser.headof(arg) === :const && arg.args !== nothing && !isempty(arg.args)
+        arg = arg.args[1]
+    end
+    if CSTParser.isassignment(arg) && arg.args !== nothing && !isempty(arg.args)
+        arg = arg.args[1]
+    end
+    return _field_name(arg)
+end
 
 # The macro name as a plain string, handling the `Mod.@macro` qualified form.
 # Mirrors the structure of `StaticLint.is_doc_macro_name`, returning the name
@@ -1369,35 +1502,18 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             field_names = String[]
             for arg in x.args[3].args
                 CSTParser.defines_function(arg) && continue
-                # A field modifier wraps the declaration in a macrocall whose LAST
-                # argument is the field (`@atomic a::Int = 1`). Unwrapping is
-                # name-free on purpose: any such macro leaves a field behind, and a
-                # shape that isn't a field declaration yields no name anyway. Without
-                # this the field is missing from `field_names` entirely, and so from
-                # every consumer of it (completion, hover, field-access checking).
-                if CSTParser.ismacrocall(arg) && arg.args !== nothing && length(arg.args) > 1
-                    arg = last(arg.args)
-                end
-                if CSTParser.headof(arg) === :const
-                    arg = arg.args[1]
-                end
-                # Unconditional kwdef-style unwrap: recording a defaulted
-                # field's name is correct regardless of whether the struct is
-                # actually `@kwdef`-decorated, and the inventory must not
-                # depend on macro-resolution state to tell — a deliberate
-                # deviation from bindings.jl:110's `kwdef &&` guard.
-                if CSTParser.isassignment(arg)
-                    arg = arg.args[1]
-                end
-                fname = _field_name(arg)
+                fname = _struct_field_name(arg)
                 fname === nothing || push!(field_names, fname)
             end
         else
             kind = CSTParser.defines_abstract(x) ? :abstract : :primitive
             field_names = String[]
         end
-        arity = CSTParser.defines_struct(x) ? MethodArity(StaticLint.struct_nargs(x)...) : nothing
-        push!(acc.items, InventoryItem(order, id,name, String[], kind, nothing, field_names, parent_module, arity))
+        is_struct = CSTParser.defines_struct(x)
+        arity = is_struct ? MethodArity(StaticLint.struct_nargs(x)...) : nothing
+        push!(acc.items, InventoryItem(order, id, name, String[], kind, nothing, field_names,
+            parent_module, arity, nothing, nothing,
+            (is_struct ? _struct_signature(x) : nothing)))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;
         # curly lhs → :assignment (typealias); plain identifier lhs → :assignment

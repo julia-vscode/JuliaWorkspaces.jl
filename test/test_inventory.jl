@@ -1330,12 +1330,19 @@ end
     # recognized as one at all (mirrors `func_nargs`).
     @test arity("f(x::Vararg{Int}) = 1") == MethodArity(0, inf, Symbol[], false)
     @test arity("f(x::Base.Vararg{Int}) = 1") == MethodArity(1, 1, Symbol[], false)
+    # A splat carrying a BOUNDED `Vararg` is unbounded: `func_nargs` reads the
+    # bound only from an unsplatted declaration, so the derived count must not
+    # read it back out of the recorded type either.
+    @test arity("f(xs::Vararg{Int,3}...) = 1") == MethodArity(0, inf, Symbol[], false)
+    @test arity("f(x, xs::Vararg{Int,3}...) = 1") == MethodArity(1, inf, Symbol[], false)
 
     for src in ("f(::Int) = 1", "f(x, ys...) = 1", "f(x::Vararg{Int,3}) = 1",
                 "f(x::Int=1; k::String=\"a\", kw...) = 1", "f(x::T, y::Real) where T<:Real = 1",
                 "f(x::T) where T>:Int = 1", "f(x::Vector{T}) where T = 1", "Base.:+(a, b) = 1",
                 "function f(@nospecialize(x), y) end", "f(x::Vararg{Int}) = 1",
-                "f(x::Base.Vararg{Int}) = 1", "f(x, ::Vararg{Int}) = 1")
+                "f(x::Base.Vararg{Int}) = 1", "f(x, ::Vararg{Int}) = 1",
+                "f(xs::Vararg{Int,3}...) = 1", "f(x, xs::Vararg{Int,3}...) = 1",
+                "f(xs::Vararg{Int}...) = 1", "f(xs::Vararg{Int,N}...) where N = 1")
         a, o = both(src)
         @test a == o
     end
@@ -1429,8 +1436,11 @@ end
     items = Dict(it.name => it for it in inv1.items)
 
     @test items["C"].method_sig === nothing
-    # Structs are Task 2's job; they carry no record yet.
-    @test items["S"].method_sig === nothing
+    # A struct carries its constructor's shape: one parameter per field, with
+    # the type opinion withheld.
+    @test items["S"].method_sig !== nothing
+    @test items["S"].method_sig.params == [SigParam("a", ParamType(), :positional)]
+    @test _arity_of(items["S"].method_sig) == items["S"].arity
     @test items["f"].method_sig !== nothing
     @test items["f"].method_sig.params ==
         [SigParam("x", ParamType(["Int"]), :positional), SigParam("ys", ParamType(), :vararg)]
@@ -1447,4 +1457,199 @@ end
     end
     """, "julia")))
     @test isequal(inv1, derived_file_inventory(jw.runtime, u))
+end
+
+@testitem "signature record: derived struct arity equals struct_nargs over this package's own source" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: _struct_signature, _arity_of, MethodArity
+    using JuliaWorkspaces: CSTParser, StaticLint
+
+    # Every struct anywhere in a file, not just the top-level ones, so structs
+    # nested in quotes or macro bodies are covered too.
+    function each_struct!(out, x)
+        x isa CSTParser.EXPR || return out
+        CSTParser.defines_struct(x) && push!(out, x)
+        x.args === nothing && return out
+        for a in x.args
+            each_struct!(out, a)
+        end
+        return out
+    end
+
+    srcdir = joinpath(pkgdir(JuliaWorkspaces), "src")
+    nstructs = Ref(0)
+    mismatches = String[]
+    for (dir, _, names) in walkdir(srcdir), n in names
+        endswith(n, ".jl") || continue
+        path = joinpath(dir, n)
+        cst = CSTParser.parse(read(path, String), true)
+        for d in each_struct!(CSTParser.EXPR[], cst)
+            nstructs[] += 1
+            expected = MethodArity(StaticLint.struct_nargs(d)...)
+            got = _arity_of(_struct_signature(d))
+            got == expected && continue
+            text = try
+                first(string(CSTParser.to_codeobject(d)), 200)
+            catch
+                "<unrenderable>"
+            end
+            push!(mismatches, string(relpath(path, srcdir), ": ", text,
+                                     "\n      struct_nargs -> ", expected,
+                                     "\n      _arity_of    -> ", got))
+        end
+    end
+
+    # Guard against a vacuous pass (a broken walk finding nothing to compare).
+    @test nstructs[] > 100
+    isempty(mismatches) || println("\n", length(mismatches), " struct arity mismatches:\n",
+                                   join(mismatches, "\n"))
+    @test isempty(mismatches)
+end
+
+@testitem "signature record: struct signatures on hand-written shapes" begin
+    using JuliaWorkspaces: _struct_signature, _arity_of, _is_unknown_type
+    using JuliaWorkspaces: MethodArity, SigParam, SigTypeVar, ParamType
+    using JuliaWorkspaces: CSTParser, StaticLint
+
+    function structof(src)
+        cst = CSTParser.parse(src, true)
+        out = CSTParser.EXPR[]
+        walk(x) = begin
+            x isa CSTParser.EXPR || return
+            CSTParser.defines_struct(x) && push!(out, x)
+            x.args === nothing && return
+            foreach(walk, x.args)
+        end
+        walk(cst)
+        return first(out)
+    end
+    sigof(src) = _struct_signature(structof(src))
+    arity(src) = _arity_of(sigof(src))
+    oracle(src) = MethodArity(StaticLint.struct_nargs(structof(src))...)
+
+    inf = typemax(Int)
+    unknown = ParamType()
+
+    plain = "struct S; a::Int; b; end"
+    macro_wrapped = "@foo struct S; a::Int; end"
+    kwdef = "Base.@kwdef struct S; a::Int = 1; end"
+    documented = "\"doc\" struct S; a::Int; end"
+    doc_field = "struct S; \"field doc\"; a::Int; end"
+    empty_body = "struct S end"
+    doc_only_body = "struct S; \"nothing but a docstring\"; end"
+    inner_same = "struct S; x; S(a) = new(a); end"
+    inner_differing = "struct S; x; S(a, b) = new(); S(a, b, c, d) = new(); end"
+    inner_splat = "struct S; x; S(a...) = new(); end"
+    inner_kws = "struct S; x; S(a; k=1) = new(); S(a, b; j=2, kw...) = new(); end"
+    parametric = "struct Foo{T} <: Bar; x::T; end"
+    parametric_bounded = "struct Foo{T<:Real, S} <: Bar{T}; x::T; y::S; end"
+    const_field = "mutable struct S; const a::Int; b; end"
+    atomic_field = "mutable struct S; @atomic a::Int; end"
+
+    all_shapes = [plain, macro_wrapped, kwdef, documented, doc_field, empty_body,
+                  doc_only_body, inner_same, inner_differing, inner_splat, inner_kws,
+                  parametric, parametric_bounded, const_field, atomic_field]
+
+    # The gate: the derived arity reproduces `struct_nargs` for every shape.
+    for src in all_shapes
+        @test arity(src) == oracle(src)
+    end
+
+    # Arm 3: one parameter per field, named, with the type opinion withheld.
+    @test arity(plain) == MethodArity(2, 2, Symbol[], false)
+    @test sigof(plain).params ==
+        [SigParam("a", unknown, :positional), SigParam("b", unknown, :positional)]
+    @test !sigof(plain).shape_unknown
+    @test all(p -> _is_unknown_type(p.type), sigof(plain).params)
+    @test isempty(sigof(plain).kwargs)
+
+    # A field's docstring is not a field.
+    @test arity(doc_field) == MethodArity(1, 1, Symbol[], false)
+    @test sigof(doc_field).params == [SigParam("a", unknown, :positional)]
+
+    @test sigof(const_field).params ==
+        [SigParam("a", unknown, :positional), SigParam("b", unknown, :positional)]
+    @test sigof(atomic_field).params == [SigParam("a", unknown, :positional)]
+
+    # Arm 1: a macro-wrapped struct may gain arbitrary constructors, so its
+    # shape is unknown — unlike a method, this needs no environment to tell.
+    @test sigof(macro_wrapped).shape_unknown
+    @test arity(macro_wrapped) == MethodArity(0, inf, Symbol[], true)
+    @test sigof(kwdef).shape_unknown
+    @test arity(kwdef) == MethodArity(0, inf, Symbol[], true)
+    # A doc wrapper adds no constructors, so it is not that macro.
+    @test !sigof(documented).shape_unknown
+    @test arity(documented) == MethodArity(1, 1, Symbol[], false)
+
+    # An empty body answers permissively but claims no keyword splat, which is
+    # why it is a vararg parameter and not `shape_unknown`.
+    for src in (empty_body, doc_only_body)
+        @test !sigof(src).shape_unknown
+        @test sigof(src).params == [SigParam("", unknown, :vararg)]
+        @test arity(src) == MethodArity(0, inf, Symbol[], false)
+    end
+
+    # Arm 2: the union of the inner constructors' ranges.
+    @test arity(inner_same) == MethodArity(1, 1, Symbol[], false)
+    @test sigof(inner_same).params == [SigParam("", unknown, :positional)]
+    @test arity(inner_differing) == MethodArity(2, 4, Symbol[], false)
+    @test sigof(inner_differing).params ==
+        [SigParam("", unknown, :positional), SigParam("", unknown, :positional),
+         SigParam("", unknown, :optional), SigParam("", unknown, :optional)]
+    @test arity(inner_splat) == MethodArity(0, inf, Symbol[], false)
+    @test sigof(inner_splat).params == [SigParam("", unknown, :vararg)]
+    @test arity(inner_kws) == MethodArity(1, 2, [:k, :j], true)
+    @test sigof(inner_kws).kwargs ==
+        [SigParam("k", unknown, :keyword), SigParam("j", unknown, :keyword)]
+    @test sigof(inner_kws).kwsplat
+    # The field itself is not a parameter once inner constructors exist.
+    @test length(sigof(inner_same).params) == 1
+
+    # The struct's own type parameters become the record's type variables.
+    @test sigof(parametric).where_vars == [SigTypeVar("T", unknown)]
+    @test sigof(parametric).params == [SigParam("x", unknown, :positional)]
+    @test sigof(parametric_bounded).where_vars ==
+        [SigTypeVar("T", ParamType(["Real"])), SigTypeVar("S", unknown)]
+    @test sigof(macro_wrapped).where_vars == SigTypeVar[]
+end
+
+@testitem "signature record: every arity-carrying inventory item derives its arity" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, _arity_of
+    using JuliaWorkspaces.URIs2: URI, filepath2uri
+
+    # End to end over the real inventory, which is what the cross-file
+    # argument-count check consumes: no arity-carrying item may be missing its
+    # signature record, and none may disagree with it.
+    srcdir = joinpath(pkgdir(JuliaWorkspaces), "src")
+    jw = JuliaWorkspace()
+    uris = URI[]
+    for (dir, _, names) in walkdir(srcdir), n in names
+        endswith(n, ".jl") || continue
+        path = joinpath(dir, n)
+        u = filepath2uri(path)
+        add_file!(jw, TextFile(u, SourceText(read(path, String), "julia")))
+        push!(uris, u)
+    end
+
+    nitems = Ref(0)
+    bad = String[]
+    for u in uris
+        for it in derived_file_inventory(jw.runtime, u).items
+            it.arity === nothing && continue
+            nitems[] += 1
+            if it.method_sig === nothing
+                push!(bad, string(basename(string(u)), ": ", it.name, " (", it.kind, ") has no method_sig"))
+            elseif _arity_of(it.method_sig) != it.arity
+                push!(bad, string(basename(string(u)), ": ", it.name, " (", it.kind, ")",
+                                  "\n      item.arity -> ", it.arity,
+                                  "\n      _arity_of  -> ", _arity_of(it.method_sig)))
+            end
+        end
+    end
+
+    @test nitems[] > 1000
+    isempty(bad) || println("\n", length(bad), " items whose arity is not derived:\n",
+                            join(bad, "\n"))
+    @test isempty(bad)
 end
