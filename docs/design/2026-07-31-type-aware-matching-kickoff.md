@@ -271,16 +271,20 @@ list is their only record.
     to parse — over the marker, which would toggle the whole-root index. Needs the
     records to carry the defining file, which the 1.5 merge declined to add.
 
-### The actual feature work, when the above settles
+### The remaining feature work
 
-- **Slice 2 — parametrics**, the remaining 11.1% of annotated parameters, plus
-  `where`-bound substitution (same machinery; the record already carries the bounds).
-  Materially cheaper than originally scoped: because 1.5 records types *as written*
-  rather than as a resolvability verdict, this is a resolver change, not a schema one.
-- **§18 — the inverse type→methods index.** Still unmeasured, and the one piece whose
-  cost profile is genuinely unknown: it needs the supertype chain *enumerated* rather
-  than a pair predicate, and that chain can leave the store and pass through
-  workspace-declared types.
+- **§18 — the inverse type→methods index.** The last unbuilt piece of the original
+  design, and the only one whose cost profile is still unknown: it needs the
+  supertype chain *enumerated* rather than a pair predicate, and that chain can leave
+  the store and pass through workspace-declared types. Unmeasured — and the §17
+  measurement is the precedent for doing that before designing.
+
+- **The argument side is now the binding constraint.** Slice 2 measured that only
+  ~10–11% of argument slots at compared sites carry a known type, so further work on
+  *parameter* types has little left to buy. Slice 1.4 (deferred above) is the first
+  step on the other side; whether more is worth it is itself a measurement question,
+  and the resolved-parameter/both-sides-known counters added to `typesweep.jl` are
+  the instrument for asking it.
 
 ## Carried-over cautions
 
