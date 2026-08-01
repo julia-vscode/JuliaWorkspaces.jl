@@ -1300,6 +1300,48 @@ end
     @test !judgeable(items["z"])
 end
 
+@testitem "inventory: withholding a record's types cannot change its judgeability" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText,
+        MethodSignatureRecord, _sig_is_judgeable, _blank_types
+    using JuliaWorkspaces.URIs2: URI
+
+    # Withholding costs a record its TYPE opinion and nothing else. Judgeability is
+    # an alignment question, so it must answer the same either way — including for
+    # the anonymous/dotted `Vararg` shapes, whose alignment signal would otherwise
+    # be read off the very type field blanking erases.
+    u = URI("file:///pt6/src/P.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module P
+    a(x::Int, y::String) = 1
+    b(x, ::Vararg{Int}) = 2
+    c(x, ::Base.Vararg) = 3
+    d(x::Vararg{Int}) = 4
+    e(x::Int, ys...) = 5
+    g(xs::Vararg{Int,3}) = 6
+    h(x::T) where T<:Real = 7
+    i(x::Int; k::String="a") = 8
+    struct S
+        f1::Int
+    end
+    end
+    """, "julia")))
+    items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
+    rec(it, sig) = MethodSignatureRecord(String[], it.kind, sig)
+    for it in values(items)
+        it.method_sig === nothing && continue
+        @test _sig_is_judgeable(rec(it, it.method_sig)) ==
+            _sig_is_judgeable(rec(it, _blank_types(it.method_sig)))
+    end
+
+    # Not vacuous: both sides of the invariant occur here.
+    @test _sig_is_judgeable(rec(items["a"], _blank_types(items["a"].method_sig)))
+    for n in ("b", "c", "d", "e", "g", "S")
+        @test !_sig_is_judgeable(rec(items[n], _blank_types(items[n].method_sig)))
+    end
+end
+
 @testitem "signature record: derived arity equals func_nargs over this package's own source" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: _method_signature, _arity_of, _render_sig, MethodArity
@@ -1696,9 +1738,12 @@ end
         for it in derived_file_inventory(jw.runtime, u).items
             entry = get(pos, it.id, nothing)
             if entry === nothing
-                # An item the position map cannot reach is invisible to this
-                # oracle, so a site that forgot BOTH the record and the position
-                # entry would pass unnoticed. Count them and require none.
+                # An item the position map cannot reach carries no EXPR to build
+                # the oracle from, so its record can only be counted, not checked.
+                # Require none: a record nothing verifies is a hole in this guard.
+                # A site that forgot BOTH the record and the position entry stays
+                # invisible either way — without an EXPR there is nothing to
+                # detect it with.
                 it.method_sig === nothing || (unjoined[] += 1)
                 continue
             end

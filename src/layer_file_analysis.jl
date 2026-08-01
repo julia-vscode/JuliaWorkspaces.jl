@@ -706,15 +706,15 @@ end
 # Does this record's parameter list align one-to-one with a call's positional
 # arguments, so that its types may judge a call at all? A variadic parameter
 # consumes an unknown number of slots (so does a `Vararg`-named annotation the
-# count side does not read as one), a struct carries no type opinion, and an
-# unreadable shape carries no parameter list — its empty `params` means "unknown",
-# not "none".
+# count side does not read as one, which the parameter flags in `names_vararg`),
+# a struct carries no type opinion, and an unreadable shape carries no parameter
+# list — its empty `params` means "unknown", not "none". Reads no type, so a
+# record answers the same blanked as unblanked.
 function _sig_is_judgeable(r::MethodSignatureRecord)
     r.kind in _UNTYPED_SIG_KINDS && return false
     r.sig.shape_unknown && return false
     for p in r.sig.params
-        p.role === :vararg && return false
-        (!isempty(p.type.path) && last(p.type.path) == "Vararg") && return false
+        (p.role === :vararg || p.names_vararg) && return false
     end
     return true
 end

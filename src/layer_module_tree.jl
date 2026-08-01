@@ -968,10 +968,10 @@ end
 # method set of this name (or of the whole root) is not fully recorded".
 const _SIGNATURE_ITEM_KINDS = (_BINDING_ITEM_KINDS..., :macro_declared, :opaque_definitions)
 
-# A record with its type opinion withheld: every parameter keeps its name, role
-# and position, and loses its type. The arity it derives is unchanged — which is
-# why a bounded `Vararg{T,N}` keeps its skeleton with the element blanked: that
-# `N` is a count, not a type.
+# A record with its type opinion withheld: every parameter keeps its name, role,
+# position and alignment flag, and loses its type. The arity it derives is
+# unchanged — which is why a bounded `Vararg{T,N}` keeps its skeleton with the
+# element blanked: that `N` is a count, not a type.
 function _blank_types(sig::MethodSignature)
     return MethodSignature(
         SigParam[_blank_param(p) for p in sig.params],
@@ -981,12 +981,14 @@ function _blank_types(sig::MethodSignature)
         sig.shape_unknown)
 end
 
+# `names_vararg` is carried through unchanged: it is an alignment signal, not a
+# type opinion, and re-deriving it from the blanked type would lose it.
 function _blank_param(p::SigParam)
     if p.role === :vararg && _bounded_vararg_n(p.type) !== nothing
         skeleton = ParamType(p.type.path, ParamType[ParamType(), p.type.args[2]], "")
-        return SigParam(p.name, skeleton, p.role)
+        return SigParam(p.name, skeleton, p.role, p.names_vararg)
     end
-    return SigParam(p.name, ParamType(), p.role)
+    return SigParam(p.name, ParamType(), p.role, p.names_vararg)
 end
 
 const _NO_IMPORT_TARGETS = Dict{String,Vector{String}}()
