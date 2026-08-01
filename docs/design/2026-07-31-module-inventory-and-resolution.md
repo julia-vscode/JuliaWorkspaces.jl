@@ -598,8 +598,8 @@ because a reader who finds one of them needs to know the others exist.
 **1. A method-generating macro that is not modelled.** A non-`eval` macrocall is walked *transparently*
 (`layer_inventory.jl`, `_walk_macrocall!`): its arguments are classified, its
 *expansion* is not. So a macro that mints a method leaves no trace in either
-index — and because both indices miss it equally, `length(recs) == length(arities)`
-still holds and the call is judged on a partial method set:
+index — and because the record set misses it exactly as the count set does, the
+completeness guard still passes and the call is judged on a partial method set:
 
 ```julia
 # a.jl                              # b.jl
@@ -630,8 +630,10 @@ inventory layer must not touch, so it marks. Coverage loss, not a false positive
 deliberate.
 
 **5. A file whose definitions the walker never sees — including a file being
-edited.** The completeness guard compares two index sizes, so it is defeated by
-anything that hides a definition from *both*. An un-modelled macro (hole 1) is one
+edited.** The completeness guard cannot see a definition that was never recorded, so
+it is defeated by anything that hides one. (Since the signature-record merge there is
+a single index rather than two, which makes this simpler, not safer: a hidden
+definition is simply absent.) An un-modelled macro (hole 1) is one
 cause; a missing file is another, and it has three reachable shapes, each silent
 before type matching and flagged after:
 

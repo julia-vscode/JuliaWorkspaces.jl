@@ -65,7 +65,7 @@ type of that name. Slice 1 avoided this by filtering at record time. Upper bound
 | `src/layer_inventory.jl` | `SigParam`/`SigTypeVar`/`MethodSignature`/`ParamType`; extraction for methods (Task 1) and structs (Task 2); the `signature` field. |
 | `src/layer_module_tree.jl` | The merged per-root index; the full-signature projection and the derived arity projection (Task 3). |
 | `src/layer_file_analysis.jl` | Resolution reads the new record (Task 4). |
-| `src/StaticLint/linting/checks.jl` | Consumers cut over; the `length(recs) == length(arities)` guard is deleted (Task 4). |
+| `src/StaticLint/linting/checks.jl` | Consumers cut over; the `length(recs) == length(arities)` guard is **replaced** by `all(r -> r.judgeable, recs)` (Task 4) — the replacement is the load-bearing part. |
 | `test/test_inventory.jl`, `test/test_module_tree.jl`, `test/test_file_analysis.jl` | Per-layer tests. |
 
 ---

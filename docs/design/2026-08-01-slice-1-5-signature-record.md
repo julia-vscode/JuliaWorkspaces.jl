@@ -75,9 +75,9 @@ having a structured source, and the dispatch-only `::T` case staying representab
 
 ## The trap: merging the storage must not merge the granularity
 
-The naive merge — one index, one projection — **loses early cutoff**. Today a
-type-only edit (`f(x::Int)` → `f(x::String)`) leaves `derived_method_arities_index`
-equal, so it backdates and no arity consumer re-runs. Collapse the two projections
+The naive merge — one index, one projection — **loses early cutoff**. Before the
+merge, a type-only edit (`f(x::Int)` → `f(x::String)`) left the then-separate arity
+index equal, so it backdated and no arity consumer re-ran. Collapse the two projections
 into one and that edit invalidates the count opinion too.
 
 So: **one index, two projections.**
