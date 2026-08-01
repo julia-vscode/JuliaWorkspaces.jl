@@ -26,6 +26,77 @@ carried in the inventory for the cross-file argument-count check. Defined here
 end
 
 """
+    ParamType
+
+A type annotation *as written*, not as a resolvability verdict: a dotted name
+path (`Base.AbstractString` → `["Base","AbstractString"]`), optionally with type
+arguments (`Vector{Int}` → path `["Vector"]`, args `[Int]`), or a literal value
+(`Vararg{T,3}`'s `3`, `Val{:x}`'s `:x`), or unknown. A value never has a path, so
+a value position can never be mistaken for a type name. Anything else — a
+`where`-bound type, a tuple, an interpolation — records as unknown.
+
+Only integer literals and quoted symbols are recorded as values; every other
+literal records as unknown, so `value` is never ambiguous between spellings that
+a count consumer must distinguish (`Vararg{T,3}` vs `Vararg{T,"3"}`).
+"""
+@auto_hash_equals struct ParamType
+    path::Vector{String}
+    args::Vector{ParamType}
+    value::String
+end
+
+ParamType() = ParamType(String[], ParamType[], "")
+ParamType(path::Vector{String}) = ParamType(path, ParamType[], "")
+
+"Is this type unknown — neither a name, nor a name with arguments, nor a value?"
+_is_unknown_type(t::ParamType) = isempty(t.path) && isempty(t.args) && isempty(t.value)
+
+"""
+    SigParam
+
+One parameter of a signature: its bound `name` (`""` for a dispatch-only `::T`),
+its `type` as written, and its `role` — `:positional`, `:optional` (has a
+default), `:keyword`, or `:vararg`.
+"""
+@auto_hash_equals struct SigParam
+    name::String
+    type::ParamType
+    role::Symbol
+end
+
+"""
+    SigTypeVar
+
+A method-local type variable and its *upper* bound. `where T` and `where T>:B`
+carry an unknown bound — a lower bound licenses nothing — while `T<:B` carries
+`B` and `Lo<:T<:Hi` carries `Hi`. Named `SigTypeVar` to avoid colliding with
+`Core.TypeVar`.
+"""
+@auto_hash_equals struct SigTypeVar
+    name::String
+    upper::ParamType
+end
+
+"""
+    MethodSignature
+
+The structured shape of a callable: its positional parameters in source order
+(`:positional`, `:optional` and `:vararg` roles), its keywords, whether it
+accepts a keyword splat, its method-local type variables, and `shape_unknown`
+for a definition whose real signature cannot be read (a macro-wrapped struct,
+say) and which must therefore answer permissively.
+
+Plain data throughout. [`_arity_of`](@ref) derives the `MethodArity` from it.
+"""
+@auto_hash_equals struct MethodSignature
+    params::Vector{SigParam}
+    kwargs::Vector{SigParam}
+    kwsplat::Bool
+    where_vars::Vector{SigTypeVar}
+    shape_unknown::Bool
+end
+
+"""
     InventoryItem
 
 One top-level (module-level) item of a file. `parent_module` is the module
@@ -39,7 +110,8 @@ extension of an already-existing name elsewhere). `signature` is a normalized
 `field_names` is populated for structs. `arity`, when non-`nothing`, is the
 callable's `MethodArity` (argument-count shape) computed from the defining EXPR —
 plain data (so it backdates), used by the cross-file argument-count check for
-methods whose full set spans files.
+methods whose full set spans files. `method_sig` is the structured signature of
+a real method, from which the arity is derivable ([`_arity_of`](@ref)).
 
 `order` is dense and monotone in source order, and exists so the module tree can
 recover Julia's textual-splice semantics; `id` identifies the declaring statement
@@ -68,16 +140,23 @@ const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
     # Names are as written (`["CSTParser","EXPR"]`) and resolved by the consumer
     # against the module the method's TEXT sits in.
     param_types::Union{Nothing,Vector{Vector{String}}}
+    # The structured signature of a real method — parameters with names, types
+    # as written, roles, keywords and method-local type variables. `nothing` for
+    # anything that is not a method. Distinct from `signature::String`, which is
+    # the re-printed source text.
+    method_sig::Union{Nothing,MethodSignature}
 end
 
 # Back-compat constructors: non-callable items (assignments, consts, enums, …)
 # carry no arity, and only `:macro_declared` rows carry a spelling.
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing, nothing, nothing)
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing, nothing, nothing)
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, nothing, nothing)
+InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, param_types) =
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, param_types, nothing)
 
 "An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
 `alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
@@ -607,6 +686,196 @@ function _param_type_names(x::CSTParser.EXPR)
     return out
 end
 
+# One type-annotation expression as a `ParamType`. Records the type AS WRITTEN;
+# nothing here judges whether a name is resolvable.
+function _param_type_record(t)
+    t isa CSTParser.EXPR || return ParamType()
+    while CSTParser.isbracketed(t)
+        t = CSTParser.rem_invis(t)
+        t isa CSTParser.EXPR || return ParamType()
+    end
+    h = CSTParser.headof(t)
+    # A quoted symbol is a VALUE, not a type: descending into `Val{:String}` or
+    # `NamedTuple{(:w,),Tuple{String}}` would record a bogus type name, and one
+    # that collides with a real type is worse than bogus.
+    if h === :quotenode || h === :quote
+        q = (t.args !== nothing && length(t.args) == 1) ? t.args[1] : nothing
+        (q isa CSTParser.EXPR && CSTParser.isidentifier(q)) || return ParamType()
+        return ParamType(String[], ParamType[], ":" * CSTParser.str_value(q))
+    end
+    # Only integer literals become values; see `ParamType`.
+    if h === :INTEGER
+        v = CSTParser.valof(t)
+        return v isa AbstractString && !isempty(v) ? ParamType(String[], ParamType[], v) : ParamType()
+    end
+    p = _dotted_name_path(t)
+    p !== nothing && return ParamType(p)
+    if CSTParser.iscurly(t) && t.args !== nothing && !isempty(t.args)
+        base = _dotted_name_path(t.args[1])
+        base === nothing && return ParamType()
+        return ParamType(base, ParamType[_param_type_record(a) for a in t.args[2:end]], "")
+    end
+    return ParamType()
+end
+
+# The recorded type of one parameter node, looking past a splat wrapper so
+# `xs::Int...` records `Int`.
+function _sig_param_type(arg)
+    arg isa CSTParser.EXPR || return ParamType()
+    if CSTParser.issplat(arg) && arg.args !== nothing && !isempty(arg.args)
+        arg = arg.args[1]
+        arg isa CSTParser.EXPR || return ParamType()
+    end
+    return _param_type_record(_param_type_expr(arg))
+end
+
+# The name a parameter binds, or "" when it binds none (a dispatch-only `::T`, a
+# destructured tuple). `get_arg_name` strips the default, splat, `where`, `::`,
+# `<:` and `{}` layers, exactly as `func_nargs` does when naming keywords.
+function _sig_param_name(arg)
+    arg isa CSTParser.EXPR || return ""
+    n = CSTParser.get_arg_name(arg)
+    (n isa CSTParser.EXPR && CSTParser.isidentifier(n)) || return ""
+    return something(CSTParser.str_value(n), "")
+end
+
+# One `where`-clause entry as (variable name, upper bound). Recognizes the same
+# shapes as `_where_var_names`; a lower bound (`T>:B`) licenses nothing and so
+# records as unknown.
+function _where_var_and_upper(a)
+    a isa CSTParser.EXPR || return nothing, ParamType()
+    if CSTParser.isidentifier(a)
+        return CSTParser.str_value(a), ParamType()
+    elseif a.head isa CSTParser.EXPR && CSTParser.isoperator(a.head) &&
+            CSTParser.valof(a.head) in ("<:", ">:") && a.args !== nothing && length(a.args) == 2
+        CSTParser.isidentifier(a.args[1]) || return nothing, ParamType()
+        upper = CSTParser.valof(a.head) == "<:" ? _param_type_record(a.args[2]) : ParamType()
+        return CSTParser.str_value(a.args[1]), upper
+    elseif CSTParser.headof(a) === :comparison && a.args !== nothing && length(a.args) == 5 &&
+            CSTParser.headof(a.args[2]) === :OPERATOR && CSTParser.valof(a.args[2]) in ("<:", ">:") &&
+            CSTParser.headof(a.args[4]) === :OPERATOR && CSTParser.valof(a.args[4]) in ("<:", ">:") &&
+            CSTParser.isidentifier(a.args[3])
+        # `Lo<:T<:Hi`: only the ascending chain has a readable upper bound.
+        upper = (CSTParser.valof(a.args[2]) == "<:" && CSTParser.valof(a.args[4]) == "<:") ?
+            _param_type_record(a.args[5]) : ParamType()
+        return CSTParser.str_value(a.args[3]), upper
+    end
+    return nothing, ParamType()
+end
+
+# The method-local type variables of a signature, outermost `where` first.
+function _where_type_vars(sig::CSTParser.EXPR)
+    out = SigTypeVar[]
+    seen = Set{String}()
+    s = sig
+    while s isa CSTParser.EXPR && CSTParser.iswhere(s)
+        for i in 2:length(s.args)
+            name, upper = _where_var_and_upper(s.args[i])
+            (name === nothing || name in seen) && continue
+            push!(seen, name)
+            push!(out, SigTypeVar(name, upper))
+        end
+        s = s.args[1]
+    end
+    return out
+end
+
+"""
+    _method_signature(x::CSTParser.EXPR) -> Union{Nothing,MethodSignature}
+
+The structured signature of a method-defining EXPR, or `nothing` when it has no
+readable signature. Role assignment mirrors `StaticLint.func_nargs`'s traversal
+decision for decision, so [`_arity_of`](@ref) reproduces its counts — including
+its blind spot for an anonymous `::Vararg{T}`, which a unary `::` makes
+indistinguishable from an ordinary annotated parameter.
+
+`shape_unknown` is never set here: `func_nargs`'s permissive early return for a
+macro-wrapped definition needs an environment to resolve the macro, and this
+layer has none, so a macro-wrapped method is read exactly as written.
+"""
+function _method_signature(x::CSTParser.EXPR)
+    raw = CSTParser.get_sig(x)
+    raw isa CSTParser.EXPR || return nothing
+    # `get_sig` retains the `where` wrapper; read the clauses before stripping.
+    tvars = _where_type_vars(raw)
+    sig = CSTParser.rem_wheres_decls(raw)
+    sig isa CSTParser.EXPR || return nothing
+
+    params = SigParam[]
+    kwargs = SigParam[]
+    kwsplat = false
+    if sig.args !== nothing
+        for i in 2:length(sig.args)
+            arg = StaticLint.unwrap_nospecialize(sig.args[i])
+            if CSTParser.isparameters(arg)
+                for a in something(arg.args, CSTParser.EXPR[])
+                    if CSTParser.iskwarg(a)
+                        inner = (a.args !== nothing && !isempty(a.args)) ? a.args[1] : nothing
+                        push!(kwargs, SigParam(_sig_param_name(inner), _sig_param_type(inner), :keyword))
+                    elseif CSTParser.isidentifier(a) || CSTParser.isdeclaration(a)
+                        push!(kwargs, SigParam(_sig_param_name(a), _sig_param_type(a), :keyword))
+                    elseif CSTParser.issplat(a)
+                        kwsplat = true
+                        push!(kwargs, SigParam(_sig_param_name(a), _sig_param_type(a), :vararg))
+                    end
+                    # any other shape names no keyword, as in `func_nargs`
+                end
+            elseif CSTParser.iskwarg(arg)
+                inner = (arg.args !== nothing && !isempty(arg.args)) ? arg.args[1] : nothing
+                role = (inner isa CSTParser.EXPR && CSTParser.issplat(inner)) ? :vararg : :optional
+                push!(params, SigParam(_sig_param_name(inner), _sig_param_type(inner), role))
+            elseif CSTParser.issplat(arg) || StaticLint.is_explicit_vararg_decl(arg)
+                push!(params, SigParam(_sig_param_name(arg), _sig_param_type(arg), :vararg))
+            else
+                push!(params, SigParam(_sig_param_name(arg), _sig_param_type(arg), :positional))
+            end
+        end
+    end
+    return MethodSignature(params, kwargs, kwsplat, tvars, false)
+end
+
+# The literal `N` of a bounded `Vararg{T,N}`, or `nothing`. Mirrors
+# `StaticLint.bounded_vararg_N`: a bare `Vararg` head, exactly two arguments, and
+# an integer-literal `N`.
+function _bounded_vararg_n(t::ParamType)
+    (length(t.path) == 1 && t.path[1] == "Vararg") || return nothing
+    length(t.args) == 2 || return nothing
+    n = t.args[2]
+    (isempty(n.path) && isempty(n.args)) || return nothing
+    return tryparse(Int, n.value)
+end
+
+"""
+    _arity_of(sig::MethodSignature) -> MethodArity
+
+The argument-count shape implied by a signature record. Equal to
+`MethodArity(StaticLint.func_nargs(x)...)` for every `x` the record was built
+from; a record whose shape is unknown answers permissively, as `func_nargs` does
+when it cannot read the signature at all.
+"""
+function _arity_of(sig::MethodSignature)
+    sig.shape_unknown && return MethodArity(0, typemax(Int), Symbol[], true)
+    minargs, maxargs = 0, 0
+    for p in sig.params
+        if p.role === :vararg
+            n = _bounded_vararg_n(p.type)
+            if n === nothing
+                maxargs = typemax(Int)
+            else
+                minargs += n
+                maxargs !== typemax(Int) && (maxargs += n)
+            end
+        elseif p.role === :optional
+            maxargs !== typemax(Int) && (maxargs += 1)
+        else
+            minargs += 1
+            maxargs !== typemax(Int) && (maxargs += 1)
+        end
+    end
+    kws = Symbol[Symbol(k.name) for k in sig.kwargs if k.role === :keyword]
+    return MethodArity(minargs, maxargs, kws, sig.kwsplat)
+end
+
 # Is `x` itself a load-time evaluation — an `eval(...)`/`Mod.eval(...)` call or an
 # `@eval`/`Mod.@eval` macrocall? Recognition is syntactic, so an aliased `eval`
 # (`const ev = eval; ev(:(f(x) = 1))`) is not caught; a known limitation.
@@ -955,7 +1224,8 @@ function _classify_assignment!(acc, x, order, id, parent_module, kind_override, 
             push!(acc.items, InventoryItem(order, id, name, qualifier, something(kind_override, :function),
                 _render_sig(x), String[], parent_module,
                 (is_method ? MethodArity(StaticLint.func_nargs(x)...) : nothing), nothing,
-                (is_method ? _param_type_names(x) : nothing)))
+                (is_method ? _param_type_names(x) : nothing),
+                (is_method ? _method_signature(x) : nothing)))
         end
     elseif CSTParser.iscurly(x.args[1])
         # Typealias: `Vector{T} = ...` — name comes from the curly's base
@@ -1088,7 +1358,8 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
         push!(acc.items, InventoryItem(order, id, name, qualifier, kind,
             _render_sig(x), String[], parent_module,
             (is_method ? MethodArity(StaticLint.func_nargs(x)...) : nothing), nothing,
-            (is_method ? _param_type_names(x) : nothing)))
+            (is_method ? _param_type_names(x) : nothing),
+            (is_method ? _method_signature(x) : nothing)))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
         name = _item_name(CSTParser.get_name(x))

@@ -1261,3 +1261,190 @@ end
     @test items["v"].param_types === nothing
     @test items["z"].param_types === nothing
 end
+
+@testitem "signature record: derived arity equals func_nargs over this package's own source" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: _method_signature, _arity_of, _render_sig, MethodArity
+    using JuliaWorkspaces: CSTParser, StaticLint
+
+    # Every callable definition anywhere in a file, not just the top-level ones,
+    # so nested closures and quoted definitions are covered too.
+    function each_def!(out, x)
+        x isa CSTParser.EXPR || return out
+        (CSTParser.defines_function(x) || CSTParser.defines_macro(x)) && push!(out, x)
+        x.args === nothing && return out
+        for a in x.args
+            each_def!(out, a)
+        end
+        return out
+    end
+
+    srcdir = joinpath(pkgdir(JuliaWorkspaces), "src")
+    ndefs = Ref(0)
+    mismatches = String[]
+    for (dir, _, names) in walkdir(srcdir), n in names
+        endswith(n, ".jl") || continue
+        path = joinpath(dir, n)
+        cst = CSTParser.parse(read(path, String), true)
+        for d in each_def!(CSTParser.EXPR[], cst)
+            StaticLint._is_real_method(d) || continue
+            ndefs[] += 1
+            expected = MethodArity(StaticLint.func_nargs(d)...)
+            sig = _method_signature(d)
+            got = sig === nothing ? nothing : _arity_of(sig)
+            got == expected && continue
+            push!(mismatches, string(relpath(path, srcdir), ": ", something(_render_sig(d), "<unrenderable>"),
+                                     "\n      func_nargs -> ", expected,
+                                     "\n      _arity_of  -> ", got))
+        end
+    end
+
+    # Guard against a vacuous pass (a broken walk finding nothing to compare).
+    @test ndefs[] > 1000
+    isempty(mismatches) || println("\n", length(mismatches), " arity mismatches:\n",
+                                   join(mismatches, "\n"))
+    @test isempty(mismatches)
+end
+
+@testitem "signature record: derived arity on hand-written shapes" begin
+    using JuliaWorkspaces: _method_signature, _arity_of, MethodArity
+    using JuliaWorkspaces: CSTParser, StaticLint
+
+    defof(src) = CSTParser.parse(src, true).args[1]
+    arity(src) = _arity_of(_method_signature(defof(src)))
+    oracle(src) = MethodArity(StaticLint.func_nargs(defof(src))...)
+    both(src) = (arity(src), oracle(src))
+
+    inf = typemax(Int)
+
+    @test arity("f(::Int) = 1") == MethodArity(1, 1, Symbol[], false)
+    @test arity("f(x, ys...) = 1") == MethodArity(1, inf, Symbol[], false)
+    @test arity("f(x::Vararg{Int,3}) = 1") == MethodArity(3, 3, Symbol[], false)
+    @test arity("f(x::Int=1; k::String=\"a\", kw...) = 1") == MethodArity(0, 1, [:k], true)
+    @test arity("f(x::T, y::Real) where T<:Real = 1") == MethodArity(2, 2, Symbol[], false)
+    @test arity("f(x::T) where T>:Int = 1") == MethodArity(1, 1, Symbol[], false)
+    @test arity("f(x::Vector{T}) where T = 1") == MethodArity(1, 1, Symbol[], false)
+    @test arity("Base.:+(a, b) = 1") == MethodArity(2, 2, Symbol[], false)
+    @test arity("function f(@nospecialize(x), y) end") == MethodArity(2, 2, Symbol[], false)
+    # A bare, unbounded `Vararg` is unbounded; a dotted `Base.Vararg` is not
+    # recognized as one at all (mirrors `func_nargs`).
+    @test arity("f(x::Vararg{Int}) = 1") == MethodArity(0, inf, Symbol[], false)
+    @test arity("f(x::Base.Vararg{Int}) = 1") == MethodArity(1, 1, Symbol[], false)
+
+    for src in ("f(::Int) = 1", "f(x, ys...) = 1", "f(x::Vararg{Int,3}) = 1",
+                "f(x::Int=1; k::String=\"a\", kw...) = 1", "f(x::T, y::Real) where T<:Real = 1",
+                "f(x::T) where T>:Int = 1", "f(x::Vector{T}) where T = 1", "Base.:+(a, b) = 1",
+                "function f(@nospecialize(x), y) end", "f(x::Vararg{Int}) = 1",
+                "f(x::Base.Vararg{Int}) = 1", "f(x, ::Vararg{Int}) = 1")
+        a, o = both(src)
+        @test a == o
+    end
+
+    # A macro-wrapped definition: `func_nargs`'s permissive early return needs an
+    # env to resolve the macro, and the inventory has none, so the counts stay
+    # exact. `shape_unknown` is what makes the derived arity permissive, and it
+    # is set by callers that CAN tell (see below).
+    wrapped = CSTParser.parse("@inline f(x, y) = 1", true).args[1].args[3]
+    @test StaticLint._is_real_method(wrapped)
+    @test _arity_of(_method_signature(wrapped)) == MethodArity(StaticLint.func_nargs(wrapped)...)
+    @test _arity_of(_method_signature(wrapped)) == MethodArity(2, 2, Symbol[], false)
+end
+
+@testitem "signature record: shape_unknown makes the derived arity permissive" begin
+    using JuliaWorkspaces: MethodSignature, SigParam, SigTypeVar, ParamType, MethodArity, _arity_of
+
+    params = [SigParam("x", ParamType(["Int"]), :positional)]
+    known = MethodSignature(params, SigParam[], false, SigTypeVar[], false)
+    unknown = MethodSignature(params, SigParam[], false, SigTypeVar[], true)
+
+    @test _arity_of(known) == MethodArity(1, 1, Symbol[], false)
+    @test _arity_of(unknown) == MethodArity(0, typemax(Int), Symbol[], true)
+end
+
+@testitem "signature record: parameter roles, names and types as written" begin
+    using JuliaWorkspaces: _method_signature, _is_unknown_type, SigParam, SigTypeVar, ParamType
+    using JuliaWorkspaces: CSTParser
+
+    sigof(src) = _method_signature(CSTParser.parse(src, true).args[1])
+    unknown = ParamType()
+
+    s = sigof("f(x::Int, ::Base.AbstractString, y::Vector{T}=T[], zs...; k::String=\"a\", kw...) where T<:Real = 1")
+    @test s.params == [
+        SigParam("x", ParamType(["Int"]), :positional),
+        SigParam("", ParamType(["Base", "AbstractString"]), :positional),
+        SigParam("y", ParamType(["Vector"], [ParamType(["T"])], ""), :optional),
+        SigParam("zs", unknown, :vararg),
+    ]
+    @test s.kwargs == [SigParam("k", ParamType(["String"]), :keyword),
+                       SigParam("kw", unknown, :vararg)]
+    @test s.kwsplat
+    @test s.where_vars == [SigTypeVar("T", ParamType(["Real"]))]
+    @test !s.shape_unknown
+
+    # A `where`-bound variable is recorded as written; the record does not
+    # collapse it to unknown, the `where_vars` list is what identifies it.
+    @test sigof("f(x::T) where T = 1").params == [SigParam("x", ParamType(["T"]), :positional)]
+
+    # Upper bounds only: `T>:B` licenses nothing, a chain's upper is the top.
+    @test _is_unknown_type(sigof("f(x::T) where T = 1").where_vars[1].upper)
+    @test sigof("f(x::T) where T = 1").where_vars == [SigTypeVar("T", unknown)]
+    @test sigof("f(x::T) where T>:Int = 1").where_vars == [SigTypeVar("T", unknown)]
+    @test sigof("f(x::T) where Int<:T<:Real = 1").where_vars == [SigTypeVar("T", ParamType(["Real"]))]
+    @test sigof("f(x::T, y::S) where {T, S<:Real} = 1").where_vars ==
+        [SigTypeVar("T", unknown), SigTypeVar("S", ParamType(["Real"]))]
+
+    # A value position is never harvested as a type name (`Val{:String}` must
+    # not record `String`), but it is still recorded as a value.
+    v = sigof("f(x::Val{:String}) = 1").params[1].type
+    @test v.path == ["Val"]
+    @test v.args == [ParamType(String[], ParamType[], ":String")]
+    @test isempty(v.args[1].path)
+
+    # A bounded `Vararg{T,N}` keeps its literal N, which is what the derived
+    # count reads back.
+    @test sigof("f(x::Vararg{Int,3}) = 1").params ==
+        [SigParam("x", ParamType(["Vararg"], [ParamType(["Int"]), ParamType(String[], ParamType[], "3")], ""), :vararg)]
+
+    @test sigof("const x = 1") === nothing
+end
+
+@testitem "signature record: InventoryItem carries it, and it backdates" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, update_file!
+    using JuliaWorkspaces: SigParam, SigTypeVar, ParamType, MethodArity, _arity_of
+    using JuliaWorkspaces.URIs2: URI
+
+    u = URI("file:///sr/src/P.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module P
+    const C = 1
+    f(x::Int, ys...) = 1
+    struct S
+        a::Int
+    end
+    end
+    """, "julia")))
+    inv1 = derived_file_inventory(jw.runtime, u)
+    items = Dict(it.name => it for it in inv1.items)
+
+    @test items["C"].method_sig === nothing
+    # Structs are Task 2's job; they carry no record yet.
+    @test items["S"].method_sig === nothing
+    @test items["f"].method_sig !== nothing
+    @test items["f"].method_sig.params ==
+        [SigParam("x", ParamType(["Int"]), :positional), SigParam("ys", ParamType(), :vararg)]
+    @test _arity_of(items["f"].method_sig) == items["f"].arity
+
+    # A body-only edit must leave the inventory `isequal` so Salsa backdates.
+    update_file!(jw, TextFile(u, SourceText("""
+    module P
+    const C = 1
+    f(x::Int, ys...) = 99
+    struct S
+        a::Int
+    end
+    end
+    """, "julia")))
+    @test isequal(inv1, derived_file_inventory(jw.runtime, u))
+end
