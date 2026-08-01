@@ -1177,6 +1177,46 @@ end
     @test paths(items["n"]) == [["NamedTuple"]]
 end
 
+@testitem "inventory: an inner `where` records the head it wraps" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, _recorded_type_head
+    using JuliaWorkspaces.URIs2: URI
+
+    paths(it) = begin
+        tv = it.method_sig.where_vars
+        [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
+    end
+
+    u = URI("file:///ptwhere/src/P.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(u, SourceText("""
+    module P
+    f(x::Vector{T} where T) = 1
+    g(x::Vector{T} where T<:Integer) = 2
+    h(x::(T where T)) = 3
+    k(x::Union{T,Nothing} where T) = 4
+    m(x::Vector{T}) where T = 5
+    end
+    """, "julia")))
+    items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
+
+    # `Vector{T} where T` IS `Vector`; the wrapper hides no name the head leg
+    # cannot read.
+    @test paths(items["f"]) == [["Vector"]]
+    # a bound narrows the arguments, which the head leg drops anyway
+    @test paths(items["g"]) == [["Vector"]]
+    # the variable itself is not a name in the defining module: unwrapping must
+    # not let a same-named global stand in for it
+    @test paths(items["h"]) == [String[]]
+    @test paths(items["k"])[1] == ["Union"]
+    # the wrapper's own variable is unknown wherever it appears, so a union
+    # keeps `Nothing` and records `T` as no-opinion rather than as a name
+    @test items["k"].method_sig.params[1].type.args ==
+        [JuliaWorkspaces.ParamType(), JuliaWorkspaces.ParamType(["Nothing"])]
+    # unchanged: a METHOD-level `where` already read the head
+    @test paths(items["m"]) == [["Vector"]]
+end
+
 @testitem "inventory: method_sig is nothing for non-methods and backdates on body edits" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, update_file!

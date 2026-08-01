@@ -606,13 +606,36 @@ function _param_type_expr(decl::CSTParser.EXPR)
     return nothing
 end
 
+# The names one `where` clause binds, or `nothing` if any entry names none — an
+# unreadable clause must not leave a variable un-blanked below.
+function _where_clause_names(w::CSTParser.EXPR)
+    w.args === nothing && return nothing
+    out = String[]
+    for i in 2:length(w.args)
+        n, _ = _where_var_and_upper(w.args[i])
+        n === nothing && return nothing
+        push!(out, n)
+    end
+    return out
+end
+
 # One type-annotation expression as a `ParamType`. Records the type AS WRITTEN;
-# nothing here judges whether a name is resolvable.
-function _param_type_record(t)
+# nothing here judges whether a name is resolvable. `bound` names the type
+# variables an enclosing annotation-level `where` binds: they are method-local,
+# so a path naming one records as unknown rather than as a resolvable name.
+function _param_type_record(t, bound::Vector{String}=String[])
     t isa CSTParser.EXPR || return ParamType()
     while CSTParser.isbracketed(t)
         t = CSTParser.rem_invis(t)
         t isa CSTParser.EXPR || return ParamType()
+    end
+    # `Vector{T} where T` IS `Vector`, so record what the clause wraps. The
+    # clause's variables come along as `bound`; `x::(T where T)` therefore keeps
+    # recording unknown instead of reaching for a global named `T`.
+    if CSTParser.iswhere(t) && t.args !== nothing && !isempty(t.args)
+        names = _where_clause_names(t)
+        names === nothing && return ParamType()
+        return _param_type_record(t.args[1], vcat(bound, names))
     end
     h = CSTParser.headof(t)
     # A quoted symbol is a VALUE, not a type: descending into `Val{:String}` or
@@ -628,12 +651,13 @@ function _param_type_record(t)
         v = CSTParser.valof(t)
         return v isa AbstractString && !isempty(v) ? ParamType(String[], ParamType[], v) : ParamType()
     end
+    _is_bound_var(p) = length(p) == 1 && p[1] in bound
     p = _dotted_name_path(t)
-    p !== nothing && return ParamType(p)
+    p !== nothing && return _is_bound_var(p) ? ParamType() : ParamType(p)
     if CSTParser.iscurly(t) && t.args !== nothing && !isempty(t.args)
         base = _dotted_name_path(t.args[1])
-        base === nothing && return ParamType()
-        return ParamType(base, ParamType[_param_type_record(a) for a in t.args[2:end]], "")
+        (base === nothing || _is_bound_var(base)) && return ParamType()
+        return ParamType(base, ParamType[_param_type_record(a, bound) for a in t.args[2:end]], "")
     end
     return ParamType()
 end

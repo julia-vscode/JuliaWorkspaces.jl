@@ -2263,8 +2263,9 @@ end
     @test string(SL._basename(types[4])) == "Core.Array"
     # a union with an unresolvable member IS `Any` -- never a union carrying one
     @test SL._isany(types[5])
-    # an inner `where` in the annotation records as unknown, so no opinion
-    @test SL._isany(types[6])
+    # an inner `where` wraps a head like any other parametric: `Vector{T} where T`
+    # IS `Vector`, and a bound would only narrow arguments that are dropped anyway
+    @test string(SL._basename(types[6])) == "Core.Array"
 
     gtypes = only(JuliaWorkspaces._resolve_param_types(
         rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "g"))).types
@@ -2804,4 +2805,34 @@ end
     # pinned here so the residual asymmetry is a known state.
     @test length(cross_diags("f(x::T) where Int<:T<:Real = x\n", "g() = f(\"s\")\n")) == 1
     @test isempty(local_diags("function outer()\n    f(x::T) where Int<:T<:Real = x\n    f(\"s\")\nend\n"))
+end
+
+@testitem "file analysis: an inner `where` in an annotation reads as its head" setup=[FileAnalysisWS] begin
+    # `x::Vector{T} where T` is `x::Vector` — same type, and both paths say so.
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+
+    local_diags(src) = mm(JuliaWorkspaces.derived_file_analysis(
+        ws_with(Dict(ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n", B => src)).runtime, ROOT, B))
+    cross_diags(def, call) = mm(JuliaWorkspaces.derived_file_analysis(
+        ws_with(Dict(ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+                     A => def, B => call)).runtime, ROOT, B))
+
+    # a String is not a Vector, and the wrapper does not hide that
+    @test length(cross_diags("f(x::Vector{T} where T) = x\n", "g() = f(\"s\")\n")) == 1
+    @test length(local_diags("function outer()\n    f(x::Vector{T} where T) = x\n    f(\"s\")\nend\n")) == 1
+    # the unwrapped spelling is the reference: the two must not disagree
+    @test length(cross_diags("f(x::Vector) = x\n", "g() = f(\"s\")\n")) == 1
+    # and a vector argument still matches
+    @test isempty(cross_diags("f(x::Vector{T} where T) = x\n", "g() = f([1, 2])\n"))
+    @test isempty(local_diags("function outer()\n    f(x::Vector{T} where T) = x\n    f([1, 2])\nend\n"))
+
+    # a bare `T where T` names no type: unwrapping must not resolve the variable
+    # against a same-named global, which would rule out everything but it
+    @test isempty(cross_diags("struct T end\nf(x::(S where S)) = x\n", "g() = f(\"s\")\n"))
+
+    # NOT correct, only permissive: the bound narrows the type arguments, which
+    # both sides drop, so a `Vector{String}` reaching `Vector{T} where T<:Integer`
+    # is not ruled out. Encodes the behaviour a parameter-aware comparison owes.
+    @test_broken length(cross_diags("f(x::Vector{T} where T<:Integer) = x\n", "g() = f([\"a\"])\n")) == 1
 end
