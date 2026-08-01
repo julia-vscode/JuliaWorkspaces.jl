@@ -124,9 +124,9 @@ Two honest options:
    rendering will not be byte-identical to `to_codeobject` in every case, so the
    hover output changes in ways a test must pin.
 
-Recommend (1) for the merge itself and (2) as a follow-up, so that a rendering
+**DECIDED: (1).** The string field stays through the merge, so a rendering
 regression cannot be confused with a matching regression while the acceptance gate
-is running.
+is running. Deriving it is a follow-up.
 
 ## Acceptance
 
@@ -145,17 +145,33 @@ doing this at all.
 
 ## Open questions
 
-- **Structs.** The struct site records `MethodArity(struct_nargs(x)...)` for the
-  implicit constructor. A faithful signature would want field names and types,
-  which is a genuine improvement (it is the one callable whose parameters are
-  currently invisible) but widens the change. Decide before starting.
-- **Where-clause bounds.** Slice 1 records the *bound's* names as resolvable and the
-  variables as unknown. The record above keeps `where_vars` separately, which is
-  more honest, but the resolver must then treat a parameter typed by a variable as
-  unknown rather than relying on the recorder to have filtered it.
+- **Structs — DECIDED: in scope.** Fields become parameters and the struct's type
+  parameters become `where_vars`, but the type opinion stays *withheld* through the
+  merge so no diagnostic moves; enabling it is a follow-up with its own sweep.
+  `struct_nargs` has three arms the record must reproduce exactly — macro-wrapped is
+  fully permissive, inner constructors collapse to the *union* of their ranges (a
+  single range cannot express a gap, which errs toward acceptance), and otherwise
+  the field count skipping field docstrings.
+- **Where-clause bounds — RESOLVED, see the plan.** `where_vars` carries name →
+  *upper bound*, not bare names, and it is a correctness requirement rather than
+  metadata: with a faithful record `x::T` is the name path `["T"]`, so a resolver
+  that cannot tell `T` is method-local will look it up in the defining module and
+  may genuinely find a type of that name. Bounds: `where T` → unknown; `T<:B` → `B`;
+  `Lo<:T<:Hi` → `Hi`; **`T>:B` → unknown**, since a lower bound licenses nothing;
+  `where {T, S<:X}` → both. Substituting the upper bound over-approximates, which is
+  the safe direction for a rule-out check, but it *widens coverage* and so is a
+  follow-up rather than part of the merge. A struct's type parameters are the same
+  thing and unify under one resolver rule.
 - **`ExternalExtension`** carries the string signature through
   `derived_external_extension_names`. If the string is derived rather than stored,
   that NamedTuple changes shape too.
+
+## Status
+
+Planned in `docs/superpowers/plans/2026-08-01-slice-1-5-signature-record.md` —
+four tasks, with the coverage widenings (struct types, `where`-bound substitution,
+per-inner-constructor signatures, derived string signature) split out as follow-ups
+so the merge itself keeps an identical-diagnostics gate.
 
 ## Sequencing
 
