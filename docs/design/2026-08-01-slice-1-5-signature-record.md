@@ -34,11 +34,17 @@ Plain data throughout, per the layer-1 firewall. Sketch, not final:
     role::Symbol                 # :positional | :optional | :keyword | :vararg
 end
 
+@auto_hash_equals struct TypeVar
+    name::String
+    upper::ParamType             # unknown when there is no usable upper bound
+end
+
 @auto_hash_equals struct MethodSignature
     params::Vector{SigParam}     # positional and optional, in source order
     kwargs::Vector{SigParam}
     kwsplat::Bool
-    where_vars::Vector{String}   # method-local names; not resolvable
+    where_vars::Vector{TypeVar}  # method-local; see the open-questions entry
+    shape_unknown::Bool          # macro-wrapped: arity must answer permissively
 end
 ```
 
