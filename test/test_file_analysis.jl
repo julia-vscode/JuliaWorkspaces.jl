@@ -2652,12 +2652,14 @@ end
 
     # Methods minted by load-time `eval` are in no index at all — neither the
     # arities nor the types — so the record set looks complete while missing them.
-    @test isempty(diags("f(x::Int) = x\nfor T in (Float32, Float64); @eval f(x::\$T) = 2x; end\n",
-                        "g() = f(1.0)\n"))
-    @test isempty(diags("f(x::Int) = x\neval(:(f(x::Float64) = 2x))\n", "g() = f(1.0)\n"))
-    @test isempty(diags("f(x::Int) = x\nCore.eval(@__MODULE__, :(f(x::Float64) = 2x))\n", "g() = f(1.0)\n"))
+    # Flagged unless withholding is on, each one a false positive.
+    n = JuliaWorkspaces._WITHHOLD_ON_LOAD_TIME_EVAL ? 0 : 1
+    @test length(diags("f(x::Int) = x\nfor T in (Float32, Float64); @eval f(x::\$T) = 2x; end\n",
+                       "g() = f(1.0)\n")) == n
+    @test length(diags("f(x::Int) = x\neval(:(f(x::Float64) = 2x))\n", "g() = f(1.0)\n")) == n
+    @test length(diags("f(x::Int) = x\nCore.eval(@__MODULE__, :(f(x::Float64) = 2x))\n", "g() = f(1.0)\n")) == n
     # a definition the walker DOES reach, but whose name is computed
-    @test isempty(diags("f(x::Int) = x\n@eval \$(:f)(x::Float64) = 2x\n", "g() = f(1.0)\n"))
+    @test length(diags("f(x::Int) = x\n@eval \$(:f)(x::Float64) = 2x\n", "g() = f(1.0)\n")) == n
     # a modelled macro declares the name but records no typed method for it
     @test isempty(diags("f(x::Int) = x\n@deprecate f(x::Float64) g(x)\n", "g() = f(1.0)\n"))
 
@@ -2724,8 +2726,9 @@ end
     @test length(diags("module Inner\n    @eval Inner g(y::Int) = y\nend\nk(x::Int) = x\n",
                        "h() = k(\"s\")\n")) == 1
     @test length(diags("f(x::Int) = x\n@eval \$(@__MODULE__) g(y::Int) = y\n", "h() = f(\"s\")\n")) == 1
-    # an unprovable target still disables it, root-wide
-    @test isempty(diags("f(x::Int) = x\n@eval OtherPkg g(y::Int) = y\n", "h() = f(\"s\")\n"))
+    # an unprovable target disables the root, when withholding is on
+    @test length(diags("f(x::Int) = x\n@eval OtherPkg g(y::Int) = y\n", "h() = f(\"s\")\n")) ==
+        (JuliaWorkspaces._WITHHOLD_ON_LOAD_TIME_EVAL ? 0 : 1)
 end
 
 @testitem "inventory: the opaque-definitions marker never stands in for its statement's name" setup=[FileAnalysisWS] begin
@@ -2751,12 +2754,16 @@ end
         ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
     diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
 
+    # Every call below reaches a method the walker cannot see: withholding is what
+    # keeps it unflagged, so each is a false positive once withholding is off.
+    n = JuliaWorkspaces._WITHHOLD_ON_LOAD_TIME_EVAL ? 0 : 1
+
     # A computed name inside a WRAPPED eval: the definition's parent is the `begin`
     # block, not the `@eval`, so the marker must be found by walking up.
-    @test isempty(diags("f(x::Int) = x\n@eval begin\n    \$(:f)(x::Float64) = 2x\nend\n", "g() = f(1.0)\n"))
+    @test length(diags("f(x::Int) = x\n@eval begin\n    \$(:f)(x::Float64) = 2x\nend\n", "g() = f(1.0)\n")) == n
     # and through a second wrapper layer
-    @test isempty(diags("f(x::Int) = x\n@eval begin\n    if true\n        \$(:f)(x::Float64) = 2x\n    end\nend\n",
-                        "g() = f(1.0)\n"))
+    @test length(diags("f(x::Int) = x\n@eval begin\n    if true\n        \$(:f)(x::Float64) = 2x\n    end\nend\n",
+                       "g() = f(1.0)\n")) == n
 
     # An `@eval <module> <named definition>` IS walked and named, but the item is
     # recorded against the ENCLOSING module — so the named module's method set is
@@ -2766,7 +2773,7 @@ end
         A => "module Inner\nf(x::Int) = x\nend\n@eval Inner f(x::Float64) = 2x\n",
         B => "g() = f(1.0)\n",
     ))
-    @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)))
+    @test length(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B))) == n
 end
 
 @testitem "file analysis: the local path substitutes a where bound like the cross-file one" setup=[FileAnalysisWS] begin

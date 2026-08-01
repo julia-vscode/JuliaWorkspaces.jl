@@ -1684,12 +1684,18 @@ end
     # its count-bearing skeleton with the ELEMENT type blanked; nothing else does.
     blanked(t) = _is_unknown_type(t) ||
         (t.path == ["Vararg"] && length(t.args) == 2 && _is_unknown_type(t.args[1]))
-    for recs in values(idx), r in recs
-        @test all(p -> blanked(p.type), r.sig.params)
-        @test all(p -> blanked(p.type), r.sig.kwargs)
-        @test all(v -> _is_unknown_type(v.upper), r.sig.where_vars)
+    ftype() = only(derived_method_signatures(jw.runtime, root, ["M"], "f")).sig.params[1].type
+    if JuliaWorkspaces._WITHHOLD_ON_LOAD_TIME_EVAL
+        for recs in values(idx), r in recs
+            @test all(p -> blanked(p.type), r.sig.params)
+            @test all(p -> blanked(p.type), r.sig.kwargs)
+            @test all(v -> _is_unknown_type(v.upper), r.sig.where_vars)
+        end
+        @test _is_unknown_type(ftype())
+    else
+        # withholding off: the eval leaves the types alone
+        @test ftype().path == ["Int"]
     end
-    @test _is_unknown_type(only(derived_method_signatures(jw.runtime, root, ["M"], "f")).sig.params[1].type)
 
     # without the eval, the same names carry their types
     jw2 = JuliaWorkspace()

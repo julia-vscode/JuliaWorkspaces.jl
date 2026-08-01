@@ -955,7 +955,7 @@ Salsa.@derived function derived_method_signatures_index(rt, root)
               MethodSignatureRecord(loc, item.kind, item.method_sig))
     end
 
-    for k in (opaque ? collect(keys(result)) : withheld)
+    for k in (opaque && _WITHHOLD_ON_LOAD_TIME_EVAL ? collect(keys(result)) : withheld)
         recs = get(result, k, nothing)
         recs === nothing && continue
         result[k] = MethodSignatureRecord[MethodSignatureRecord(r.defmod, r.kind, _blank_types(r.sig))
@@ -963,6 +963,11 @@ Salsa.@derived function derived_method_signatures_index(rt, root)
     end
     return result
 end
+
+# Does a load-time `eval` anywhere in a root withhold that root's type opinions?
+# Off: the withholding costs more coverage than the false positives it prevents.
+# The marker rows are emitted and read either way.
+const _WITHHOLD_ON_LOAD_TIME_EVAL = false
 
 # The binding kinds, plus the two inert rows the signature walk reads as "the
 # method set of this name (or of the whole root) is not fully recorded".

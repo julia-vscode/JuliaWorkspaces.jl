@@ -286,13 +286,16 @@ was not.
   is 14.4 ms, of which the reorder would save **1.38 ms** — 0.01% of a 13.5 s build.
   Not worth a pre-pass that has to reproduce the loop's early-return semantics exactly.
 
-- **Narrowing the `eval` marker — buys nothing, and would expose false positives.**
-  Measured the upper bound by disabling the marker entirely, which is strictly more
-  than any narrowing can achieve. The three roots it was supposed to buy back light
-  up (CommonMark 0 → 678 known parameter operands, Runic 0 → 631, Tokenize 0 → 57, so
-  the machinery does turn on) and produce **zero** diagnostics. Every diagnostic the
-  marker masks is in a root that keeps its marker anyway, and all of them are false
-  positives — see below. Revisit only after slice 1.4.
+- **Narrowing the `eval` marker — moot: the withholding is switched OFF entirely.**
+  Narrowing was measured first and buys nothing. Disabling the marker is strictly
+  more than any narrowing achieves, and the three roots narrowing targeted light up
+  (CommonMark 0 → 678 known parameter operands, Runic 0 → 631, Tokenize 0 → 57, so
+  the machinery does turn on) while producing **zero** diagnostics.
+
+  So the switch was thrown instead: `_WITHHOLD_ON_LOAD_TIME_EVAL = false` in
+  `layer_module_tree.jl`. **This deliberately ships 4 false positives** (below) in
+  4 roots, none of them `eval`-related. One const restores the old behaviour, and
+  the tests assert both settings. Slice 1.4 removes two of the four.
 
 ### What the `eval` marker turns out to be masking
 
