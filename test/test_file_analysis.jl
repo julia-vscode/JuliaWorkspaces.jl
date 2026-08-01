@@ -2285,6 +2285,8 @@ end
         f(a::T, b::S, c::U, d::Union{T,Nothing}, e::W) where {T<:Real, S, U>:Int, W<:Own} = 1
         g(a::T, b::S) where {T, S<:T} = 2
         h(a::T, b::V) where {T<:Base.AbstractString, V<:Union{Int,Nothing}} = 3
+        k(a::T) where Int<:T<:Real = 4
+        m(a::T) where Real>:T>:Int = 5
         """,
     ))
     rt = jw.runtime
@@ -2329,6 +2331,119 @@ end
     # a union BOUND keeps its members
     @test htypes[2] isa SS.FakeUnion
     @test hits(dt(:Core, :Int64), htypes[2]) && !hits(dt(:Core, :String), htypes[2])
+
+    ktypes = only(JuliaWorkspaces._resolve_param_types(
+        rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "k"))).types
+    # a two-sided `Lo<:T<:Hi` takes the UPPER bound; the lower one licenses nothing
+    @test string(SL._basename(ktypes[1])) == "Core.Real"
+    @test !SL._isany(ktypes[1])
+
+    mtypes = only(JuliaWorkspaces._resolve_param_types(
+        rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "m"))).types
+    # `Real>:T>:Int` means the same as `Int<:T<:Real`, but the descending spelling
+    # is not read: a known permissive miss, pinned so a change to it is visible.
+    @test SL._isany(mtypes[1])
+end
+
+@testitem "file analysis: a bound never rules out an argument that really is a subtype" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: derived_method_signatures, derived_stdlib_only_env
+
+    # The rule-out check is only sound if `_has_type_intersection` agrees with real
+    # subtyping wherever real subtyping holds. Julia's own `<:` decides which pairs
+    # must intersect, so the expectations cannot drift from the language, and both
+    # operands are resolved through the store by the shipping resolver: the
+    # argument side as a plain annotation, the bound side through a `where` clause.
+    # The failure mode being guarded is a `_super` walk that dead-ends before it
+    # reaches the bound, so the deep ancestries are in here on purpose.
+    concrete = [
+        ("Int8", Int8), ("Int32", Int32), ("Int64", Int64), ("UInt8", UInt8),
+        ("Float32", Float32), ("Float64", Float64), ("Bool", Bool), ("Char", Char),
+        ("String", String), ("SubString{String}", SubString{String}),
+        ("Symbol", Symbol), ("Nothing", Nothing),
+        ("Dict{Symbol,Int}", Dict{Symbol,Int}), ("Set{Int}", Set{Int}),
+        ("Vector{Int}", Vector{Int}), ("Matrix{Float64}", Matrix{Float64}),
+        ("UnitRange{Int}", UnitRange{Int}), ("StepRange{Int,Int}", StepRange{Int,Int}),
+        ("ArgumentError", ArgumentError), ("BoundsError", BoundsError),
+        ("Base.ComposedFunction", Base.ComposedFunction),
+        ("Tuple{Int,String}", Tuple{Int,String}),
+        ("Rational{Int}", Rational{Int}), ("Complex{Float64}", Complex{Float64}),
+    ]
+    bounds = [
+        ("Real", Real), ("Signed", Signed), ("Unsigned", Unsigned), ("Integer", Integer),
+        ("AbstractFloat", AbstractFloat), ("Number", Number),
+        ("AbstractString", AbstractString), ("AbstractChar", AbstractChar),
+        ("AbstractDict", AbstractDict), ("AbstractSet", AbstractSet),
+        ("AbstractArray", AbstractArray), ("DenseArray", DenseArray),
+        ("AbstractRange", AbstractRange), ("Exception", Exception),
+        ("Function", Function), ("Tuple", Tuple),
+    ]
+
+    src = IOBuffer()
+    for (i, (ann, _)) in enumerate(concrete)
+        println(src, "c$(i)(x::$(ann)) = 1")
+    end
+    for (i, (b, _)) in enumerate(bounds)
+        println(src, "b$(i)(x::T) where T<:$(b) = 1")
+    end
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\nend\n",
+        A => String(take!(src)),
+    ))
+    rt = jw.runtime
+    env = derived_stdlib_only_env(rt)
+    syms = SL.getsymbols(env)
+    md = Dict{UInt64,SL.Meta}()
+    resolve1(nm) = only(only(JuliaWorkspaces._resolve_param_types(
+        rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], nm))).types)
+
+    cres = [resolve1("c$i") for i in eachindex(concrete)]
+    bres = [resolve1("b$i") for i in eachindex(bounds)]
+    # Nothing below is vacuous through `Any`: every operand carries a real name.
+    # (`CoreTypes.Any` is itself a `DataTypeStore`, so `isa` would prove nothing.)
+    @test all(!SL._isany, cres)
+    @test all(!SL._isany, bres)
+
+    function tally()
+        checked = 0        # pairs where `<:` holds and the check must stay silent
+        ruled_out = 0      # pairs where `<:` fails and the check correctly rules out
+        false_ruleouts = String[]
+        for (i, (cn, ct)) in enumerate(concrete), (j, (bn, bt)) in enumerate(bounds)
+            intersects = SL._has_type_intersection(cres[i], bres[j], syms, md)
+            if ct <: bt
+                checked += 1
+                intersects || push!(false_ruleouts, "$cn <: $bn")
+            elseif !intersects
+                ruled_out += 1
+            end
+        end
+        return checked, ruled_out, false_ruleouts
+    end
+    checked, ruled_out, false_ruleouts = tally()
+
+    @test isempty(false_ruleouts)
+    # Floors, so an enumeration that silently stops producing pairs fails loudly
+    # instead of passing on nothing. Observed: 45 subtype pairs, 339 rule-outs.
+    @test checked >= 40
+    # ...and the negative direction, which a resolver answering `Any` for
+    # everything would fail while still passing the property above.
+    @test ruled_out >= 300
+
+    # The deep ancestries, named, so a regression says which walk broke.
+    pair(cn, bn) = SL._has_type_intersection(
+        cres[findfirst(p -> p[1] == cn, concrete)],
+        bres[findfirst(p -> p[1] == bn, bounds)], syms, md)
+    @test pair("Int8", "Signed")
+    @test pair("Int8", "Number")
+    @test pair("SubString{String}", "AbstractString")
+    @test pair("Dict{Symbol,Int}", "AbstractDict")
+    @test pair("ArgumentError", "Exception")
+    @test pair("UnitRange{Int}", "AbstractRange")
+    @test pair("Base.ComposedFunction", "Function")
+    @test pair("Tuple{Int,String}", "Tuple")
+    @test !pair("String", "Real")
+    @test !pair("Nothing", "Number")
+    @test !pair("Vector{Int}", "Tuple")
 end
 
 @testitem "derived_file_analysis: TYPE check on where-bound type variables" setup=[FileAnalysisWS] begin

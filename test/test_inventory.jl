@@ -1166,7 +1166,8 @@ end
     @test paths(items["g"]) == [String[], ["String"]]
     # parametric: the HEAD is what resolves, its arguments are dropped
     @test paths(items["h"]) == [["Vector"]]
-    # a where-bound type variable is method-local, never a resolvable name
+    # a where-bound type variable yields no name path of its own; the bound is
+    # read from `where_vars`, which this function does not consult
     @test paths(items["k"]) == [String[]]
     # a positional splat makes alignment unknowable -> the record cannot judge
     @test !judgeable(items["m"])
