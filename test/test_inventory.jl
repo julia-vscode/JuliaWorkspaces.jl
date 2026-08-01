@@ -1653,3 +1653,56 @@ end
                             join(bad, "\n"))
     @test isempty(bad)
 end
+
+@testitem "signature record: a struct's synthesised parameter list is bounded" begin
+    using JuliaWorkspaces: _struct_signature, _arity_of, MethodArity, SigParam, ParamType
+    using JuliaWorkspaces: CSTParser, StaticLint
+
+    function structof(src)
+        cst = CSTParser.parse(src, true)
+        out = CSTParser.EXPR[]
+        walk(x) = begin
+            x isa CSTParser.EXPR || return
+            CSTParser.defines_struct(x) && push!(out, x)
+            x.args === nothing && return
+            foreach(walk, x.args)
+        end
+        walk(cst)
+        return first(out)
+    end
+    sigof(src) = _struct_signature(structof(src))
+    oracle(src) = MethodArity(StaticLint.struct_nargs(structof(src))...)
+    inf = typemax(Int)
+
+    # A literal `Vararg{T,N}` bound in an inner constructor sets the range, so the
+    # spelled-out synthesis would be N entries long inside a cached value.
+    spread(n) = "struct S; x; S() = new(); S(a::Vararg{Int,$n}) = new(); end"
+    required(n) = "struct S; x; S(a::Vararg{Int,$n}) = new(); end"
+
+    # Just under the threshold: still the exact range, and still small.
+    under = sigof(spread(254))
+    @test _arity_of(under) == MethodArity(0, 254, Symbol[], false)
+    @test _arity_of(under) == oracle(spread(254))
+    @test length(under.params) == 254
+    @test Base.summarysize(under) < 100_000
+
+    # Just over it: the range degrades to unbounded, which accepts strictly more.
+    over = sigof(spread(255))
+    @test _arity_of(over) == MethodArity(0, inf, Symbol[], false)
+    @test over.params == [SigParam("", ParamType(), :vararg)]
+
+    # Likewise when the REQUIRED count alone is too large to spell out.
+    many = sigof(required(2000))
+    @test _arity_of(many) == MethodArity(0, inf, Symbol[], false)
+    @test many.params == [SigParam("", ParamType(), :vararg)]
+
+    # The clamp is memory, so pin memory: a record that used to cost tens of
+    # megabytes is now a handful of bytes.
+    for src in (spread(255), required(2000), spread(200_000), required(200_000))
+        s = sigof(src)
+        @test Base.summarysize(s) < 5_000
+        # Never narrower than what `struct_nargs` admits: only ever more permissive.
+        o, d = oracle(src), _arity_of(sigof(src))
+        @test d.minargs <= o.minargs && d.maxargs >= o.maxargs
+    end
+end

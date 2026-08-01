@@ -86,6 +86,12 @@ accepts a keyword splat, its method-local type variables, and `shape_unknown`
 for a definition whose real signature cannot be read (a macro-wrapped struct,
 say) and which must therefore answer permissively.
 
+`params` is in source order for a method and for a struct whose fields are its
+constructor's arguments. For a struct carrying inner constructors it is instead
+a COUNT-SHAPED synthesis of their combined range: nameless, typeless entries
+whose length is unrelated to the field count. Only read them for arity — a
+consumer that renders them (hover, signature help) must exclude that case.
+
 Plain data throughout. [`_arity_of`](@ref) derives the `MethodArity` from it.
 """
 @auto_hash_equals struct MethodSignature
@@ -144,8 +150,10 @@ const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
     # The structured signature of a real method or a struct's constructor —
     # parameters with names, types as written, roles, keywords and method-local
     # type variables. `nothing` for anything that is not callable. A struct's
-    # parameters carry no type opinion. Distinct from `signature::String`, which
-    # is the re-printed source text.
+    # parameters carry no type opinion, and a struct with inner constructors has
+    # count-shaped ones: no names, no types, and a length unrelated to the field
+    # count, so only their arity is meaningful. Distinct from `signature::String`,
+    # which is the re-printed source text.
     method_sig::Union{Nothing,MethodSignature}
 end
 
@@ -843,13 +851,22 @@ end
 "An anonymous parameter of the given role, with no type opinion."
 _bare_param(role::Symbol) = SigParam("", ParamType(), role)
 
+# The widest range the synthesis below spells out one entry at a time. A literal
+# `Vararg{T,N}` bound would otherwise size a cached record by N — `Vararg{Int,2000000}`
+# costs 203 MB and half a second for one struct. 255 is far above any genuine
+# signature, and exceeding it degrades to a range that only ever accepts MORE, so
+# the clamp can remove a diagnostic but never add one.
+const _MAX_SYNTH_ARITIES = 255
+
 # A parameter list that derives exactly `minargs..maxargs`: the required count as
 # positionals, the rest as optionals — or a trailing vararg when unbounded. Used
 # where the shape is only known as a COUNT RANGE, so the individual parameters
 # are synthetic and carry neither name nor type.
 function _params_for_range(minargs::Int, maxargs::Int)
+    # Too many required arguments to spell out: accept any count.
+    minargs > _MAX_SYNTH_ARITIES && return SigParam[_bare_param(:vararg)]
     params = SigParam[_bare_param(:positional) for _ in 1:max(minargs, 0)]
-    if maxargs == typemax(Int)
+    if maxargs == typemax(Int) || maxargs - minargs + 1 > _MAX_SYNTH_ARITIES
         push!(params, _bare_param(:vararg))
     else
         for _ in 1:max(maxargs - minargs, 0)
