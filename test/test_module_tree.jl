@@ -1589,3 +1589,236 @@ end
     update_file!(jw, TextFile(root, SourceText("module M\nf(x::String) = 1\nend\n", "julia")))
     @test !isequal(i1, derived_method_param_types_index(jw.runtime, root))
 end
+
+@testitem "derived_method_signatures: the arity projection reproduces the arity index" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+        derived_method_signatures, derived_method_signatures_index,
+        _arity_of, MethodArity, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///ms/src/A.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("""
+    module A
+    import Base: relpath
+    struct S
+        x::Int
+        y
+    end
+    f(x) = 1
+    f(x::Int, y::String) = 2
+    f(x, y=1; k=2, kw...) = 3
+    f(xs::Vararg{Int,3}) = 4
+    relpath(x::Int) = "overload"
+    Base.length(x::S) = 0
+    module Inner
+    g(x) = 1
+    end
+    A.Inner.g(x, y) = 2
+    include("more.jl")
+    end
+    """, "julia")))
+    add_file!(jw, TextFile(URI("file:///ms/src/more.jl"), SourceText("f(x, y, z) = 5\n", "julia")))
+
+    old = derived_method_arities_index(jw.runtime, root)
+    idx = derived_method_signatures_index(jw.runtime, root)
+    @test Set(keys(idx)) == Set(keys(old))
+    for ((path, name), v) in old
+        @test derived_method_arities(jw.runtime, root, path, name) == v
+        @test MethodArity[_arity_of(r.sig) for r in idx[(path, name)]] == v
+    end
+
+    # the spread: several methods of one name (one spliced from an include), a
+    # struct, a qualified extension, a bare extension of an imported name.
+    @test length(derived_method_arities(jw.runtime, root, ["A"], "f")) == 5
+    @test derived_method_arities(jw.runtime, root, ["A"], "S") == [MethodArity(2, 2, Symbol[], false)]
+    @test length(derived_method_signatures(jw.runtime, root, ["A", "Inner"], "g")) == 2
+    @test length(derived_method_arities(jw.runtime, root, ["A"], "relpath")) == 1
+    @test MethodArity(3, 3, Symbol[], false) in derived_method_arities(jw.runtime, root, ["A"], "f")
+    @test !haskey(idx, (["Base"], "length"))
+
+    @test isempty(derived_method_arities(jw.runtime, root, ["A"], "nosuchname"))
+    @test isempty(derived_method_arities(jw.runtime, root, ["Nope"], "f"))
+    @test isempty(derived_method_signatures(jw.runtime, root, ["A"], "nosuchname"))
+end
+
+@testitem "derived_method_signatures: a type-only edit backdates the arity projection only" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_arities, derived_method_signatures,
+        derived_method_signatures_index, TextFile, SourceText, update_file!
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///ms2/src/M.jl")
+    src(ty, body) = "module M\nf(x::$ty) = $body\nend\n"
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText(src("Int", "1"), "julia")))
+
+    a1 = derived_method_arities(jw.runtime, root, ["M"], "f")
+    s1 = derived_method_signatures(jw.runtime, root, ["M"], "f")
+    i1 = derived_method_signatures_index(jw.runtime, root)
+    @test !isempty(a1) && !isempty(s1)
+
+    # a body-only edit leaves both projections equal
+    update_file!(jw, TextFile(root, SourceText(src("Int", "12345"), "julia")))
+    @test isequal(a1, derived_method_arities(jw.runtime, root, ["M"], "f"))
+    @test isequal(s1, derived_method_signatures(jw.runtime, root, ["M"], "f"))
+    @test isequal(i1, derived_method_signatures_index(jw.runtime, root))
+
+    # a type-only edit moves the signatures but must leave the COUNT opinion equal
+    update_file!(jw, TextFile(root, SourceText(src("String", "12345"), "julia")))
+    @test isequal(a1, derived_method_arities(jw.runtime, root, ["M"], "f"))
+    @test !isequal(s1, derived_method_signatures(jw.runtime, root, ["M"], "f"))
+    @test !isequal(i1, derived_method_signatures_index(jw.runtime, root))
+
+    # a count-changing edit moves both
+    update_file!(jw, TextFile(root, SourceText("module M\nf(x::String, y) = 12345\nend\n", "julia")))
+    @test !isequal(a1, derived_method_arities(jw.runtime, root, ["M"], "f"))
+end
+
+@testitem "derived_method_signatures_index: the eval marker blanks types, never counts" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+        derived_method_signatures, derived_method_signatures_index,
+        _arity_of, _is_unknown_type, MethodArity, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///ms3/src/M.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("""
+    module M
+    f(x::Int) = 1
+    g(x::Int, y::Int) = 2
+    h(xs::Vararg{Int,3}) = 3
+    for T in (Float64,)
+        @eval k(x::\$T) = 4
+    end
+    end
+    """, "julia")))
+
+    idx = derived_method_signatures_index(jw.runtime, root)
+    @test !isempty(idx)
+    @test haskey(idx, (["M"], "f")) && haskey(idx, (["M"], "g"))
+
+    # the count opinion is untouched, name by name and index-wide
+    old = derived_method_arities_index(jw.runtime, root)
+    @test Set(keys(idx)) == Set(keys(old))
+    for ((path, name), v) in old
+        @test derived_method_arities(jw.runtime, root, path, name) == v
+    end
+    # ...including a bounded `Vararg`, whose count lives inside its type
+    @test derived_method_arities(jw.runtime, root, ["M"], "h") == [MethodArity(3, 3, Symbol[], false)]
+
+    # ...while every record's type opinion is gone. A bounded `Vararg{T,N}` keeps
+    # its count-bearing skeleton with the ELEMENT type blanked; nothing else does.
+    blanked(t) = _is_unknown_type(t) ||
+        (t.path == ["Vararg"] && length(t.args) == 2 && _is_unknown_type(t.args[1]))
+    for recs in values(idx), r in recs
+        @test all(p -> blanked(p.type), r.sig.params)
+        @test all(p -> blanked(p.type), r.sig.kwargs)
+        @test all(v -> _is_unknown_type(v.upper), r.sig.where_vars)
+    end
+    @test _is_unknown_type(only(derived_method_signatures(jw.runtime, root, ["M"], "f")).sig.params[1].type)
+
+    # without the eval, the same names carry their types
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(root, SourceText("module M\nf(x::Int) = 1\nend\n", "julia")))
+    @test only(derived_method_signatures(jw2.runtime, root, ["M"], "f")).sig.params[1].type.path == ["Int"]
+end
+
+@testitem "derived_method_signatures_index: the import and macro-declared withholds blank types only" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+        derived_method_signatures, _is_unknown_type, MethodArity, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///ms4/src/M.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("""
+    module M
+    import Base: relpath
+    relpath(x::Int) = 1
+    Base.@deprecate d(x::Int) e(x)
+    d(x::String, y::Bool) = 2
+    kept(x::Int) = 3
+    end
+    """, "julia")))
+
+    # the bare extension of an imported name: one record, count intact, types gone
+    rp = derived_method_signatures(jw.runtime, root, ["M"], "relpath")
+    @test length(rp) == 1
+    @test all(p -> _is_unknown_type(p.type), only(rp).sig.params)
+    @test derived_method_arities(jw.runtime, root, ["M"], "relpath") == [MethodArity(1, 1, Symbol[], false)]
+
+    # the macro-declared withhold: same, on the name the macro declares
+    dd = derived_method_signatures(jw.runtime, root, ["M"], "d")
+    @test length(dd) == 1
+    @test all(p -> _is_unknown_type(p.type), only(dd).sig.params)
+    @test derived_method_arities(jw.runtime, root, ["M"], "d") == [MethodArity(2, 2, Symbol[], false)]
+
+    # a name neither withhold touches keeps its types
+    @test only(derived_method_signatures(jw.runtime, root, ["M"], "kept")).sig.params[1].type.path == ["Int"]
+
+    # and no withhold moves the count opinion anywhere in the root
+    for ((path, name), v) in derived_method_arities_index(jw.runtime, root)
+        @test derived_method_arities(jw.runtime, root, path, name) == v
+    end
+end
+
+@testitem "derived_method_signatures: defmod is where the text sits" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_signatures, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    root = URI("file:///ms5/src/M.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("""
+    module M
+    struct T end
+    module Inner
+    M.g(x::Int) = 1
+    end
+    g(x::T) = 2
+    end
+    """, "julia")))
+
+    recs = derived_method_signatures(jw.runtime, root, ["M"], "g")
+    @test length(recs) == 2
+    inner = only(filter(r -> r.sig.params[1].type.path == ["Int"], recs))
+    @test inner.defmod == ["M", "Inner"]      # where the TEXT is, not where the name lands
+    outer = only(filter(r -> r.sig.params[1].type.path == ["T"], recs))
+    @test outer.defmod == ["M"]
+end
+
+@testitem "derived_method_signatures_index: derived arities match the arity index over this package's own source" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+        derived_method_signatures_index, _arity_of, MethodArity, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI, filepath2uri
+
+    srcdir = joinpath(pkgdir(JuliaWorkspaces), "src")
+    jw = JuliaWorkspace()
+    for (dir, _, names) in walkdir(srcdir), n in names
+        endswith(n, ".jl") || continue
+        path = joinpath(dir, n)
+        add_file!(jw, TextFile(filepath2uri(path), SourceText(read(path, String), "julia")))
+    end
+    root = filepath2uri(joinpath(srcdir, "JuliaWorkspaces.jl"))
+
+    old = derived_method_arities_index(jw.runtime, root)
+    idx = derived_method_signatures_index(jw.runtime, root)
+    @test length(old) > 500
+    @test Set(keys(idx)) == Set(keys(old))
+
+    bad = String[]
+    for ((path, name), v) in old
+        derived = MethodArity[_arity_of(r.sig) for r in get(idx, (path, name), [])]
+        derived == v || push!(bad, string(join(path, "."), ".", name,
+                                          "\n      index   -> ", v,
+                                          "\n      derived -> ", derived))
+        derived_method_arities(jw.runtime, root, path, name) == v ||
+            push!(bad, string(join(path, "."), ".", name, ": projection disagrees with the index"))
+    end
+    isempty(bad) || println("\n", length(bad), " names whose derived arity moved:\n", join(bad, "\n"))
+    @test isempty(bad)
+end

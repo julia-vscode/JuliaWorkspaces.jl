@@ -838,11 +838,19 @@ items with no arity — non-callables). Plain data (integers/symbols), so it
 backdates; a thin projection of `derived_module_tree` + the per-file inventories
 with NO dependency on any file's analysis. Lets the per-file method-call lint
 check a call's argument count against the callee's FULL cross-file method set.
+
+Derived from [`derived_method_signatures`](@ref) rather than stored, and kept
+SEPARATE from it on purpose: the count opinion must not move when only a type
+does, so a type-only edit (`f(x::Int)` → `f(x::String)`) leaves this node's value
+equal and its consumers backdate. Withholding never reaches it — a withheld
+record keeps its parameter count.
 """
 Salsa.@derived function derived_method_arities(rt, root, path, name)
     @debug "derived_method_arities" root=root path=path name=name
 
-    return get(derived_method_arities_index(rt, root), (path, name), _NO_ARITIES)
+    recs = derived_method_signatures(rt, root, path, name)
+    isempty(recs) && return _NO_ARITIES
+    return MethodArity[_arity_of(r.sig) for r in recs]
 end
 
 const _NO_ARITIES = MethodArity[]
@@ -852,7 +860,9 @@ const _NO_ARITIES = MethodArity[]
 
 Every `(module path, name) => arities` entry of `root`'s tree in one node: the
 same selection [`derived_method_arities`](@ref) exposes per name, computed by a
-single splice walk.
+single splice walk. Superseded by [`derived_method_signatures_index`](@ref),
+which derives the same answer; retained while `InventoryItem.arity` still exists
+to cross-check it.
 
 The walk reads the inventory of *every* file in the root, so computing it per
 name made each of the (many thousands of) per-name nodes depend on every file —
@@ -877,6 +887,132 @@ Salsa.@derived function derived_method_arities_index(rt, root)
         push!(get!(() -> MethodArity[], result, (resolved, item.name)), item.arity)
     end
     return result
+end
+
+"""
+    MethodSignatureRecord
+
+One method's structured signature, with the module its text sits in. `defmod` is
+where the recorded type names resolve — for `Base.foo(x::MyType)` written in `M`
+that is `M`, not `Base`. Plain data, so it backdates.
+"""
+@auto_hash_equals struct MethodSignatureRecord
+    defmod::Vector{String}
+    sig::MethodSignature
+end
+
+"""
+    derived_method_signatures(rt, root, path::Vector{String}, name::String) -> Vector{MethodSignatureRecord}
+
+The structured signature of every method of `name` at module `path` — the same
+selection as [`derived_method_items`](@ref), minus items that are not callable.
+A `get` into the per-root index, so it backdates for an untouched name when the
+index changes elsewhere.
+
+Types are the parameter's OWN opinion and may be withheld (blanked to unknown);
+counts never are. Read the count shape through [`derived_method_arities`](@ref),
+which is a separate node so that it backdates across a type-only edit.
+"""
+Salsa.@derived function derived_method_signatures(rt, root, path, name)
+    @debug "derived_method_signatures" root=root path=path name=name
+
+    return get(derived_method_signatures_index(rt, root), (path, name), _NO_SIGNATURES)
+end
+
+const _NO_SIGNATURES = MethodSignatureRecord[]
+
+"""
+    derived_method_signatures_index(rt, root) -> Dict{Tuple{Vector{String},String},Vector{MethodSignatureRecord}}
+
+Every `(module path, name) => records` entry of `root`'s tree in one node, by a
+single splice walk. Per-name nodes would each depend on every file in the root —
+the dominant term in the size of the dependency graph — so both projections
+funnel through this one node and are O(1) lookups into it.
+
+The type opinion is only ever consumed to RULE A CALL OUT, so it is withheld for
+any name whose method set the walk cannot vouch for — a partial record set would
+reject calls the missing methods accept:
+
+- a name `import`ed from a non-tree target (`import Base: show`) and then
+  extended bare: the rest of its methods live in the env, not in the tree;
+- a name a modelled macro mints (`@deprecate f(x::Float64) g(x)`), whose method
+  is declared but never recorded as a typed item;
+- every name in the root, when any file evaluates code as it loads
+  (`:opaque_definitions`) — an `eval` can define any name in any module, so
+  nothing narrower is sound.
+
+The first of those overlaps `check_call`'s own store-valued-callee gate without
+subsuming it: this index withholds on the IMPORT, while `check_call` declines on
+a store-valued `Binding.val`, which a `const Foo = Base.Dict` alias also has with
+no import for this index to see.
+
+**Withholding BLANKS a record's types; it never drops the record.** The count
+opinion therefore survives every mechanism above — as it always has, the arity
+answer being deliberately unguarded against `eval`-created methods — and a
+resolver declines on its own once every type is unknown.
+"""
+Salsa.@derived function derived_method_signatures_index(rt, root)
+    @debug "derived_method_signatures_index" root=root
+
+    tree = derived_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    import_targets = _external_import_targets(tree)
+    result = Dict{Tuple{Vector{String},String},Vector{MethodSignatureRecord}}()
+    withheld = Set{Tuple{Vector{String},String}}()
+    opaque = false
+
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
+                                 kinds=_SIGNATURE_ITEM_KINDS) do F, item, loc
+        if item.kind === :opaque_definitions
+            opaque = true
+            return
+        elseif item.kind === :macro_declared
+            push!(withheld, (loc, item.name))
+            return
+        end
+        item.method_sig === nothing && return
+        resolved = isempty(item.qualifier) ? loc :
+            _resolve_extension_qualifier(modpaths, loc, item.qualifier)
+        (resolved === nothing || resolved ∉ modpaths) && return
+        if haskey(get(import_targets, loc, _NO_IMPORT_TARGETS), item.name)
+            push!(withheld, (resolved, item.name))
+        end
+        push!(get!(() -> MethodSignatureRecord[], result, (resolved, item.name)),
+              MethodSignatureRecord(loc, item.method_sig))
+    end
+
+    for k in (opaque ? collect(keys(result)) : withheld)
+        recs = get(result, k, nothing)
+        recs === nothing && continue
+        result[k] = MethodSignatureRecord[MethodSignatureRecord(r.defmod, _blank_types(r.sig))
+                                          for r in recs]
+    end
+    return result
+end
+
+# The binding kinds, plus the two inert rows the signature walk reads as "the
+# method set of this name (or of the whole root) is not fully recorded".
+const _SIGNATURE_ITEM_KINDS = (_BINDING_ITEM_KINDS..., :macro_declared, :opaque_definitions)
+
+# A record with its type opinion withheld: every parameter keeps its name, role
+# and position, and loses its type. The arity it derives is unchanged — which is
+# why a bounded `Vararg{T,N}` keeps its skeleton with the element blanked: that
+# `N` is a count, not a type.
+function _blank_types(sig::MethodSignature)
+    return MethodSignature(
+        SigParam[_blank_param(p) for p in sig.params],
+        SigParam[_blank_param(p) for p in sig.kwargs],
+        sig.kwsplat,
+        SigTypeVar[SigTypeVar(v.name, ParamType()) for v in sig.where_vars],
+        sig.shape_unknown)
+end
+
+function _blank_param(p::SigParam)
+    if p.role === :vararg && _bounded_vararg_n(p.type) !== nothing
+        skeleton = ParamType(p.type.path, ParamType[ParamType(), p.type.args[2]], "")
+        return SigParam(p.name, skeleton, p.role)
+    end
+    return SigParam(p.name, ParamType(), p.role)
 end
 
 """
@@ -973,9 +1109,7 @@ end
 
 const _NO_IMPORT_TARGETS = Dict{String,Vector{String}}()
 
-# The binding kinds, plus the two inert rows this index reads as "the method set
-# of this name (or of the whole root) is not fully recorded".
-const _PARAM_TYPE_ITEM_KINDS = (_BINDING_ITEM_KINDS..., :macro_declared, :opaque_definitions)
+const _PARAM_TYPE_ITEM_KINDS = _SIGNATURE_ITEM_KINDS
 
 const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
 
