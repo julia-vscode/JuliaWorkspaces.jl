@@ -2767,3 +2767,41 @@ end
     ))
     @test isempty(mm(JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)))
 end
+
+@testitem "file analysis: the local path substitutes a where bound like the cross-file one" setup=[FileAnalysisWS] begin
+    # A method's own file and a sibling's must judge the same signature the same way.
+    # A closure callee stays on the LOCAL path (it bypasses the tree-visible gate),
+    # so this pins the two against each other rather than against a fixed answer.
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+
+    local_diags(src) = mm(JuliaWorkspaces.derived_file_analysis(
+        ws_with(Dict(ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n", B => src)).runtime, ROOT, B))
+    cross_diags(def, call) = mm(JuliaWorkspaces.derived_file_analysis(
+        ws_with(Dict(ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+                     A => def, B => call)).runtime, ROOT, B))
+
+    # `T<:Real` rules out a String on BOTH paths
+    @test length(local_diags("function outer()\n    f(x::T) where T<:Real = x\n    f(\"s\")\nend\n")) == 1
+    @test length(cross_diags("f(x::T) where T<:Real = x\n", "g() = f(\"s\")\n")) == 1
+
+    # and accepts an Int on both
+    @test isempty(local_diags("function outer()\n    f(x::T) where T<:Real = x\n    f(1)\nend\n"))
+    @test isempty(cross_diags("f(x::T) where T<:Real = x\n", "g() = f(1)\n"))
+
+    # an unbounded typevar rules out nothing, on both
+    @test isempty(local_diags("function outer()\n    f(x::T) where T = x\n    f(\"s\")\nend\n"))
+    @test isempty(cross_diags("f(x::T) where T = x\n", "g() = f(\"s\")\n"))
+
+    # a LOWER bound licenses nothing, on both
+    @test isempty(local_diags("function outer()\n    f(x::T) where T>:Int = x\n    f(\"s\")\nend\n"))
+    @test isempty(cross_diags("f(x::T) where T>:Int = x\n", "g() = f(\"s\")\n"))
+
+    # `Lo<:T<:Hi` reads the ascending chain's upper bound cross-file. It stays
+    # silent locally for a reason upstream of the substitution: `mark_binding!`
+    # binds no name for the middle identifier of a `:comparison` chain, so the
+    # local path has no typevar binding to read a bound from. Permissive, and
+    # pinned here so the residual asymmetry is a known state.
+    @test length(cross_diags("f(x::T) where Int<:T<:Real = x\n", "g() = f(\"s\")\n")) == 1
+    @test isempty(local_diags("function outer()\n    f(x::T) where Int<:T<:Real = x\n    f(\"s\")\nend\n"))
+end
