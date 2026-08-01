@@ -2318,8 +2318,13 @@ end
     # The count opinion on the same name is untouched: 3 arguments match neither
     # the 2-field constructor nor the 1-argument outer one.
     @test length(diags(point, "g() = Point(1, 2, 3)\n")) == 1
-    # A macro-wrapped struct answers permissively on counts and must not be read
-    # as a zero-parameter method either.
+    # A macro-wrapped struct answers permissively on counts. NOTE this assertion
+    # does NOT pin the `shape_unknown` arm of the gate: the kind gate alone already
+    # decides it, and a `shape_unknown` record could not drive a flag on its own
+    # anyway (empty `params`, arity `(0, typemax)` — so it either mismatches the
+    # count or returns at the parameter-count check). That arm is insurance for the
+    # day a METHOD can be `shape_unknown`; only `_method_signature` gaining the flag
+    # would make it observable.
     @test isempty(diags("Base.@kwdef struct Opt\n    a::Int = 1\nend\nOpt(s::String) = Opt()\n",
                         "g() = Opt(1.0)\n"))
 end

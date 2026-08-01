@@ -1664,6 +1664,8 @@ end
     # count `func_nargs`/`struct_nargs` gives for the same EXPR. This is the only
     # guard on the coverage the per-root index filters by `method_sig === nothing`
     # — a construction site that forgets the record drops arity coverage silently.
+    # Both directions are asserted: the reverse (a record on something the oracle
+    # does not call callable) would ADD index entries, and so arity opinions.
     #
     # `_classify_item!` recurses into a `const`/`global` wrapper with the STATEMENT's
     # id, so the oracle has to unwrap the same layer to reach the definition.
@@ -1687,13 +1689,19 @@ end
         push!(uris, u)
     end
 
-    nmethods, nstructs = Ref(0), Ref(0)
+    nmethods, nstructs, unjoined = Ref(0), Ref(0), Ref(0)
     bad = String[]
     for u in uris
         pos = derived_item_positions(jw.runtime, u)
         for it in derived_file_inventory(jw.runtime, u).items
             entry = get(pos, it.id, nothing)
-            entry === nothing && continue
+            if entry === nothing
+                # An item the position map cannot reach is invisible to this
+                # oracle, so a site that forgot BOTH the record and the position
+                # entry would pass unnoticed. Count them and require none.
+                it.method_sig === nothing || (unjoined[] += 1)
+                continue
+            end
             x = unwrap_wrapper(entry.expr)
             expected = if it.kind in (:struct, :mutable_struct) && CSTParser.defines_struct(x)
                 nstructs[] += 1
@@ -1702,6 +1710,12 @@ end
                 nmethods[] += 1
                 MethodArity(StaticLint.func_nargs(x)...)
             else
+                # The reverse direction: nothing the oracle declines to call a
+                # callable may carry a record, or the index gains an arity opinion
+                # for a name that has no method.
+                it.method_sig === nothing ||
+                    push!(bad, string(basename(string(u)), ": ", it.name, " (", it.kind,
+                                      ") carries a method_sig but is not a callable declaration"))
                 continue
             end
             if it.method_sig === nothing
@@ -1715,9 +1729,11 @@ end
     end
 
     # Guard against a vacuous pass (a broken join finding nothing to compare).
-    @test nmethods[] > 1000
-    @test nstructs[] > 100
-    isempty(bad) || println("\n", length(bad), " items whose record is missing or wrong:\n",
+    # Floors sit just under the real counts, so a partially-broken join fails.
+    @test nmethods[] > 1200
+    @test nstructs[] > 110
+    @test unjoined[] == 0
+    isempty(bad) || println("\n", length(bad), " items whose record is missing, extra or wrong:\n",
                             join(bad, "\n"))
     @test isempty(bad)
 end

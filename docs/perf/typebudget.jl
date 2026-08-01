@@ -431,7 +431,7 @@ function shape_census(rt, roots)
         for f in JW.derived_tree_files(rt, u)
             pos = JW.derived_item_positions(rt, f)
             for it in JW.derived_file_inventory(rt, f).items
-                it.arity === nothing && continue
+                it.method_sig === nothing && continue
                 e = get(pos, it.id, nothing)
                 e === nothing && continue
                 for s in classify_shapes(e.expr)
