@@ -152,22 +152,27 @@ Slice 1 landed in `217f325..2689292`, slice 1.5 in `91868da..3e0010a`. Several i
 below were found during those review loops and exist nowhere in the code, so this
 list is their only record.
 
-### Next up
+### Done
 
-- **`func_nargs` does not recognise an anonymous `::Vararg{T}`.** `f(x, ::Vararg{Int})`
-  yields `(2,2)` instead of `(1, typemax)`, where the named `f(x, y::Vararg{Int})` is
-  correct. Reproduced as an **arity** false positive on both the cross-file tree path
-  ("Expected 2 arguments, got 3") and the local `sig_match_any` path, so it ships
-  today, independent of type matching. Zero instances in the julia-vscode repo. Root
-  cause: `is_explicit_vararg_decl` and the inline test at
-  `StaticLint/linting/checks.jl:263` both require `isdeclaration`, which a unary `::`
-  is not.
+- **`func_nargs` and every `Vararg` spelling** — fixed in `8c68003`. A unary `::T`
+  carries one argument, not two, so `isdeclaration` is false for it and every
+  `Vararg` test missed the anonymous spelling, counting `f(x, ::Vararg{Int})` as two
+  ordinary positionals. A *second* cause turned up while fixing it: the dotted
+  `::Base.Vararg` was missed too, because the check required a bare identifier and a
+  dotted name is a getfield. Both produced arity false positives on the cross-file
+  and local paths.
 
-  Note the blast radius is wider than it looks: `_arity_of` was built to *mirror*
-  `func_nargs` exactly, bugs included, and `SigParam.names_vararg` exists precisely to
-  mark the parameters this bug makes invisible. Fixing `func_nargs` means fixing both
-  sides together, and it changes arity behaviour repo-wide — so it wants its own
-  both-direction sweep, where movement is expected rather than a failure.
+  `func_nargs` had `is_explicit_vararg_decl`'s logic duplicated inline — which is
+  precisely how one could be fixed without the other — and now calls it.
+  `SigParam.names_vararg` is gone: it existed only to mark parameters the count side
+  failed to see as variadic, and with the roles correct the role alone carries
+  alignment and survives blanking. Judgeability is unchanged (the `role === :vararg`
+  disjunct already declined exactly those records), so the only behavioural movement
+  is the corrected arity.
+
+  **No sweep was run**: this repo contains zero instances of either shape, so a
+  sweep would report no movement and could not confirm the fix helps anything real.
+  The unit tests are the evidence. A wider corpus would be the place to look.
 
 ### Accepted, no action
 
