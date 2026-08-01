@@ -146,6 +146,58 @@ reaches, which still holds:
    yields a false *positive*, the one outcome a linter must not produce, so the
    permissive direction has to be the default at every step.
 
+## Follow-up queue — status as of 2026-07-31, after slice 1 shipped
+
+Slice 1 landed in `217f325..2689292`. Everything below is deferred work, in the
+order I would take it. Several of these were found during slice 1's review loop and
+exist nowhere in the code, so this list is their only record.
+
+**Planned, not started.**
+
+- **Slice 1.4 — reassigned locals infer to `Any` when assignments disagree.** Fixes
+  the one false positive slice 1 shipped with (§17b). Plan written and committed:
+  `docs/superpowers/plans/2026-07-31-slice-1-4-reassigned-local-types.md`. Ready to
+  execute as-is.
+- **Slice 1.5 — merge the arity and parameter-type records into one signature
+  record.** Designed, not planned in task form; the trailing section of
+  `docs/superpowers/plans/2026-07-31-type-aware-matching-slice-1.md` has the shape,
+  the two-independently-gated-opinions constraint, and the acceptance gate.
+
+**Bugs found during slice 1, not caused by it.**
+
+- **`func_nargs` does not recognise an anonymous `::Vararg{T}`.** `f(x, ::Vararg{Int})`
+  yields `(2,2)` instead of `(1, typemax)`, where the named `f(x, y::Vararg{Int})` is
+  correct. Reproduced as an **arity** false positive on both the cross-file tree path
+  ("Expected 2 arguments, got 3") and the local `sig_match_any` path, so it ships
+  today, independent of type matching. Zero instances in the julia-vscode repo. Root
+  cause: `is_explicit_vararg_decl` and the inline test at
+  `StaticLint/linting/checks.jl:263` both require `isdeclaration`, which a unary `::`
+  is not. Wants its own sweep, since it changes arity behaviour repo-wide.
+
+**Refinements to slice 1, all measured and all optional.**
+
+- **Narrow the `eval` marker to evals that could actually define a method.** 7 of the
+  24 marker rows repo-wide are `Core.eval(@__MODULE__, :(global x::T))`,
+  `eval(Meta.parse("public …"))` and a re-export block — none can define a method, yet
+  each disables type checking for its whole root. Buys back **three** roots
+  (CommonMark, Runic, Tokenize); JuliaDynamicAnalysisProcess and TestItemServer also
+  carry a genuine `for … @eval <def>` and would stay disabled. Per-root figures in
+  `docs/perf/2026-07-31-slice-1-sweep-results.md`.
+- **Guard (c): treat an unresolved argument as `Any` per index** instead of declining
+  the whole call. Equally false-positive-safe — `_isany` short-circuits — and it keeps
+  the true positives where a *different*, resolved argument is a definite mismatch.
+  Add the `Own <: MyAbs <: Integer` fixture in the same change, since that is where
+  the false positive it guards against would return.
+- **Move resolution below the cheap gates in `_tree_types_match`.** `tree_param_types`
+  currently resolves before the keyword and resolved-argument checks, so ~719 of 4156
+  invocations resolve and discard, and each reached site takes a dependency on the
+  defining module's visible names. Mechanical reorder; natural to do during 1.5.
+- **The mid-edit false positive (§17a hole 5), if it proves annoying in practice.**
+  Prefer the consumer-side gate — decline when the *callee's defining file* failed to
+  parse — over the marker, which would toggle the whole-root index and cost two
+  full re-analyses per definition typed. Needs the records to carry the defining file,
+  so 1.5 is the natural moment.
+
 ## Carried-over cautions
 
 - The plan's own sample code is where defects hide — six of seven findings in the
