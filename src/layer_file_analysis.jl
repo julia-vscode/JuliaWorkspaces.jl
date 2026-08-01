@@ -691,7 +691,16 @@ end
 const _UNTYPED_SIG_KINDS = (:struct, :mutable_struct)
 
 const _UNKNOWN_TYPE_PATH = String[]
-const _NO_TVARS = String[]
+
+# The upper bound recorded for a method-local type variable of this name, or
+# `nothing` when the name is not one. An UNBOUNDED variable answers with an
+# unknown `ParamType`, which is not `nothing`: the two cases differ.
+function _tvar_upper(tvars, name::String)
+    for v in tvars
+        v.name == name && return v.upper
+    end
+    return nothing
+end
 
 # The dotted name a parameter's type resolves through — its own name, or the HEAD
 # of a parametric, whose arguments are deliberately dropped (`Vector{Int}` and
@@ -699,10 +708,10 @@ const _NO_TVARS = String[]
 # `_resolve_type_expr` does; comparing type arguments is nobody's job here).
 # `nothing` when it names no type: an unknown, a value — a value never carries a
 # path, so `Val{:String}` cannot yield `String` — or a method-local type variable,
-# where substituting a `where` bound would widen what the check rules out.
+# which `_resolve_param_type` substitutes instead.
 function _recorded_type_head(t::ParamType, tvars)
     (isempty(t.path) || !isempty(t.value)) && return nothing
-    (length(t.path) == 1 && t.path[1] in tvars) && return nothing
+    (length(t.path) == 1 && _tvar_upper(tvars, t.path[1]) !== nothing) && return nothing
     return t.path
 end
 
@@ -713,17 +722,35 @@ _is_written_union(t::ParamType) =
     length(t.path) == 1 && t.path[1] == "Union" && !isempty(t.args)
 
 # A recorded parameter type resolved to an operand `_has_type_intersection` can
-# judge. A union keeps its members so each branch can be tested on its own;
-# everything else resolves through its name.
-function _resolve_param_type(rt, root, env, defmod::Vector{String}, t::ParamType, tvars)
+# judge. A union keeps its members so each branch can be tested on its own; a
+# method-local type variable becomes its UPPER bound, which the method can only
+# ever be instantiated below, so an argument that cannot intersect the bound
+# matches no instantiation; everything else resolves through its name.
+#
+# `substitute` is false while resolving a bound, so a bound that is itself a type
+# variable (`where {T, S<:T}`) answers `Any` instead of being chased. Chasing
+# would need a cycle guard for no real gain — such a chain is vanishingly rare,
+# and `Any` is the permissive direction.
+function _resolve_param_type(rt, root, env, defmod::Vector{String}, t::ParamType, tvars,
+                             substitute::Bool=true)
     if _is_written_union(t)
-        members = Any[_resolve_param_type(rt, root, env, defmod, a, tvars) for a in t.args]
+        members = Any[_resolve_param_type(rt, root, env, defmod, a, tvars, substitute)
+                      for a in t.args]
         # `Union{Any,X}` IS `Any`: one unresolvable member makes the whole union
         # no-opinion, so a union carrying one is never built. (Such a union is
         # permissive anyway — every argument's supertype walk ends at `Any`, which
         # matches the member — this only makes it so by construction.)
         any(StaticLint._isany, members) && return StaticLint.CoreTypes.Any
         return StaticLint._fake_union(members)
+    end
+    # A bare `::T`. A variable carrying arguments (`::T{Int}`) is not a
+    # substitution site and falls through to the head leg, which declines it.
+    if length(t.path) == 1 && isempty(t.args) && isempty(t.value)
+        upper = _tvar_upper(tvars, t.path[1])
+        if upper !== nothing
+            substitute || return StaticLint.CoreTypes.Any
+            return _resolve_param_type(rt, root, env, defmod, upper, tvars, false)
+        end
     end
     return _resolve_recorded_type(rt, root, env, defmod,
                                   something(_recorded_type_head(t, tvars), _UNKNOWN_TYPE_PATH))
@@ -748,7 +775,7 @@ end
 function _resolve_param_types(rt, root, env, recs)
     out = @NamedTuple{arity::MethodArity, types::Vector{Any}, judgeable::Bool}[]
     for r in recs
-        tvars = isempty(r.sig.where_vars) ? _NO_TVARS : String[v.name for v in r.sig.where_vars]
+        tvars = r.sig.where_vars
         types = Any[_resolve_param_type(rt, root, env, r.defmod, p.type, tvars)
                     for p in r.sig.params]
         push!(out, (arity=_arity_of(r.sig), types=types, judgeable=_sig_is_judgeable(r)))

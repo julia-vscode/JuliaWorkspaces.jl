@@ -111,16 +111,48 @@ const CURRENT_FILE = Ref{Any}(nothing)
 const COMPARED = Dict{String,Set{Tuple{String,UInt}}}()
 const REJECTED = Dict{String,Set{Tuple{String,UInt}}}()
 
+# Per-root argument-slot tallies over the same aligned records. `PARAM_KNOWN` is
+# the ARM PROOF: every other quantity here is invariant to the parameter-type
+# resolver, so two arms that agree on it are not two arms. `BOTH_KNOWN` is the
+# sensitive marker — it counts the slots where a verdict is even possible, and so
+# moves when a change makes comparisons newly live without flipping any verdict.
+const PARAM_KNOWN = Dict{String,Int}()
+const BOTH_KNOWN = Dict{String,Int}()
+
 note_compared!(x) = push!(get!(() -> Set{Tuple{String,UInt}}(), COMPARED, CURRENT_ROOT[]),
                          (string(CURRENT_FILE[]), objectid(x)))
 note_rejected!(x) = push!(get!(() -> Set{Tuple{String,UInt}}(), REJECTED, CURRENT_ROOT[]),
                           (string(CURRENT_FILE[]), objectid(x)))
 
+function note_slots!(types, args)
+    r = CURRENT_ROOT[]
+    pk = bk = 0
+    for i in eachindex(args)
+        SL._isany(types[i]) && continue
+        pk += 1
+        SL._isany(args[i]) || (bk += 1)
+    end
+    PARAM_KNOWN[r] = get(PARAM_KNOWN, r, 0) + pk
+    BOTH_KNOWN[r] = get(BOTH_KNOWN, r, 0) + bk
+    return nothing
+end
+
+"Drop every instrumentation tally. Call between arms run in one session."
+function reset_instrumentation!()
+    empty!(COMPARED); empty!(REJECTED); empty!(PARAM_KNOWN); empty!(BOTH_KNOWN)
+    return nothing
+end
+
 """
 Replace `StaticLint._tree_types_match` with a copy that additionally records, per
 root, every distinct call site at which the per-position type comparison actually
-ran (`checked`), and every site it rejected. Behaviour-identical: the same
-returns in the same order, with `push!`es added.
+ran (`checked`), every site it rejected, and the slot tallies. Behaviour-identical:
+the same returns in the same order, with bookkeeping added.
+
+The tally pass is separate from — and runs before — the matching loop, so that it
+sees every aligned record rather than the prefix the loop happens to visit before
+an early `return true`. The loop's stopping point depends on the resolver; the
+tally must not.
 """
 function instrument!()
     M = @__MODULE__
@@ -132,6 +164,10 @@ function instrument!()
         args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
         isempty(kws) || return true
         all(_is_resolved_type, args) || return true
+        for r in recs
+            compare_f_call(r.arity, cc) && length(r.types) == length(args) &&
+                $(M).note_slots!(r.types, args)
+        end
         checked = false
         for r in recs
             compare_f_call(r.arity, cc) || continue
@@ -147,6 +183,45 @@ function instrument!()
     return nothing
 end
 
+"""
+Resolver-level survey, independent of any call site: for every parameter of every
+judgeable record under every root, whether the resolver reached a real type.
+Returns `root => Vector{Bool}` in a deterministic order (roots, then signature
+keys, then records, then parameters), so two arms' vectors align elementwise and a
+`resolved -> Any` regression is visible per parameter rather than only in a total.
+"""
+function param_survey(jw)
+    rt = jw.runtime
+    out = Dict{String,Vector{Bool}}()
+    unions = Dict{String,Int}()
+    for (nm, u) in sort(collect(JW.derived_workspace_package_roots(rt)); by=x -> x[1])
+        bits = Bool[]
+        nu = 0
+        env = try
+            JW.derived_stdlib_only_env(rt)
+        catch
+            continue
+        end
+        idx = try
+            JW.derived_method_signatures_index(rt, u)
+        catch
+            Dict()
+        end
+        for k in sort(collect(keys(idx)); by=string)
+            for r in JW._resolve_param_types(rt, u, env, idx[k])
+                r.judgeable || continue
+                for t in r.types
+                    push!(bits, !SL._isany(t))
+                    t isa JW.SymbolServer.FakeUnion && (nu += 1)
+                end
+            end
+        end
+        out[nm] = bits
+        unions[nm] = nu
+    end
+    return (; bits=out, unions)
+end
+
 # --- persistence --------------------------------------------------------------
 
 function save(arm, path::String)
@@ -155,7 +230,8 @@ function save(arm, path::String)
             println(io, "#ROOT\t", r, "\t", arm.counts[r], "\t",
                     get(arm.marker, r, (-1, -1))[1], "\t", get(arm.marker, r, (-1, -1))[2], "\t",
                     length(get(() -> Set{Tuple{String,UInt}}(), COMPARED, r)), "\t",
-                    length(get(() -> Set{Tuple{String,UInt}}(), REJECTED, r)))
+                    length(get(() -> Set{Tuple{String,UInt}}(), REJECTED, r)), "\t",
+                    get(PARAM_KNOWN, r, 0), "\t", get(BOTH_KNOWN, r, 0))
             for d in sort(collect(arm.diags[r]))
                 println(io, "#D\t", r, "\t", d)
             end
@@ -173,6 +249,8 @@ function load_saved(path::String)
     marker = Dict{String,Tuple{Int,Int}}()
     compared = Dict{String,Int}()
     rejected = Dict{String,Int}()
+    pknown = Dict{String,Int}()
+    bknown = Dict{String,Int}()
     errors = Dict{String,Vector{String}}()
     order = String[]
     for line in eachline(path)
@@ -184,6 +262,8 @@ function load_saved(path::String)
             marker[r] = (parse(Int, parts[4]), parse(Int, parts[5]))
             compared[r] = parse(Int, parts[6])
             rejected[r] = parse(Int, parts[7])
+            pknown[r] = length(parts) >= 8 ? parse(Int, parts[8]) : 0
+            bknown[r] = length(parts) >= 9 ? parse(Int, parts[9]) : 0
             diags[r] = Set{String}()
         elseif parts[1] == "#D"
             push!(diags[parts[2]], join(parts[3:end], '\t'))
@@ -191,7 +271,7 @@ function load_saved(path::String)
             push!(get!(() -> String[], errors, parts[2]), join(parts[3:end], '\t'))
         end
     end
-    return (; diags, counts, marker, compared, rejected, errors, roots=order)
+    return (; diags, counts, marker, compared, rejected, pknown, bknown, errors, roots=order)
 end
 
 "Compare two saved arms: per root, |branch \\ main| (the blocker) and |main \\ branch|."
@@ -206,6 +286,8 @@ function compare(branch_path::String, main_path::String)
                      nb=length(bs), nm=length(ms),
                      sigkeys=get(b.marker, r, (-1, -1))[1], sigrecs=get(b.marker, r, (-1, -1))[2],
                      compared=get(b.compared, r, 0), rejected=get(b.rejected, r, 0),
+                     pknown=get(b.pknown, r, 0), pknown_m=get(m.pknown, r, 0),
+                     bknown=get(b.bknown, r, 0), bknown_m=get(m.bknown, r, 0),
                      newset=sort(collect(setdiff(bs, ms))), goneset=sort(collect(setdiff(ms, bs)))))
     end
     return rows
@@ -220,12 +302,19 @@ function report(rows)
     println("total signature-index keys / records on branch: ",
             sum(r -> max(r.sigkeys, 0), rows), " / ", sum(r -> max(r.sigrecs, 0), rows))
     println("total distinct compared call sites: ", sum(r.compared for r in rows; init=0))
+    pk, pkm = sum(r.pknown for r in rows; init=0), sum(r.pknown_m for r in rows; init=0)
+    bk, bkm = sum(r.bknown for r in rows; init=0), sum(r.bknown_m for r in rows; init=0)
+    println("known-parameter slots, branch vs main: ", pk, " vs ", pkm,
+            pk == pkm ? "   <-- ARM PROOF FAILED: the arms resolve identically" : "")
+    println("both-sides-known slots, branch vs main: ", bk, " vs ", bkm)
     println()
     println(rpad("root", 26), lpad("new", 5), lpad("gone", 6), lpad("branch", 8), lpad("main", 7),
-            lpad("sigkeys", 9), lpad("sigrecs", 9), lpad("cmp", 7), lpad("rej", 6))
+            lpad("sigkeys", 9), lpad("sigrecs", 9), lpad("cmp", 7), lpad("rej", 6),
+            lpad("pknown", 14), lpad("bknown", 12))
     for r in rows
         println(rpad(r.root, 26), lpad(r.new, 5), lpad(r.gone, 6), lpad(r.nb, 8), lpad(r.nm, 7),
-                lpad(r.sigkeys, 9), lpad(r.sigrecs, 9), lpad(r.compared, 7), lpad(r.rejected, 6))
+                lpad(r.sigkeys, 9), lpad(r.sigrecs, 9), lpad(r.compared, 7), lpad(r.rejected, 6),
+                lpad("$(r.pknown)/$(r.pknown_m)", 14), lpad("$(r.bknown)/$(r.bknown_m)", 12))
     end
     for r in rows
         isempty(r.newset) && continue

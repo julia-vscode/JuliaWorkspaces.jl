@@ -2274,6 +2274,92 @@ end
     @test SL._isany(gtypes[2])
 end
 
+@testitem "file analysis: a where bound substitutes for its type variable" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: derived_method_signatures, derived_stdlib_only_env, _is_unknown_type
+    const SS = JuliaWorkspaces.SymbolServer
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\nend\n",
+        A => """
+        struct Own end
+        f(a::T, b::S, c::U, d::Union{T,Nothing}, e::W) where {T<:Real, S, U>:Int, W<:Own} = 1
+        g(a::T, b::S) where {T, S<:T} = 2
+        h(a::T, b::V) where {T<:Base.AbstractString, V<:Union{Int,Nothing}} = 3
+        """,
+    ))
+    rt = jw.runtime
+    env = derived_stdlib_only_env(rt)
+    syms = SL.getsymbols(env)
+    md = Dict{UInt64,SL.Meta}()
+    dt(m, n) = SL.get_eventual_datatype(SL.maybe_lookup(syms[m][n], env), env)
+    hits(a, b) = SL._has_type_intersection(a, b, syms, md)
+
+    frecs = derived_method_signatures(rt, ROOT, ["MainPkg"], "f")
+    # `where T>:Int` gives a LOWER bound, which licenses nothing: the record must
+    # carry an unknown upper bound for it, or substitution would be unsound.
+    @test _is_unknown_type(only(frecs).sig.where_vars[3].upper)
+    @test _is_unknown_type(only(frecs).sig.where_vars[2].upper)
+
+    types = only(JuliaWorkspaces._resolve_param_types(rt, ROOT, env, frecs)).types
+    @test length(types) == 5
+    # `T<:Real` can only be instantiated at a subtype of `Real`
+    @test string(SL._basename(types[1])) == "Core.Real"
+    @test !SL._isany(types[1])
+    # an unbounded variable stays no-opinion...
+    @test SL._isany(types[2])
+    # ...and so does one with only a lower bound
+    @test SL._isany(types[3])
+    # substitution reaches inside a union
+    @test types[4] isa SS.FakeUnion
+    @test hits(dt(:Core, :Int64), types[4]) && hits(dt(:Core, :Nothing), types[4])
+    @test !hits(dt(:Core, :String), types[4])
+    # a workspace-declared bound is no-opinion, exactly as the annotation would be
+    @test SL._isany(types[5])
+
+    gtypes = only(JuliaWorkspaces._resolve_param_types(
+        rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "g"))).types
+    @test SL._isany(gtypes[1])
+    # a bound that is itself a type variable is not chased
+    @test SL._isany(gtypes[2])
+
+    htypes = only(JuliaWorkspaces._resolve_param_types(
+        rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "h"))).types
+    # a dotted bound resolves through the qualified-store lookup
+    @test string(SL._basename(htypes[1])) == "Core.AbstractString"
+    # a union BOUND keeps its members
+    @test htypes[2] isa SS.FakeUnion
+    @test hits(dt(:Core, :Int64), htypes[2]) && !hits(dt(:Core, :String), htypes[2])
+end
+
+@testitem "derived_file_analysis: TYPE check on where-bound type variables" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # an upper bound rules out what cannot intersect it, and only that
+    @test length(diags("f(x::T) where T<:Real = x\n", "g() = f(\"s\")\n")) == 1
+    @test isempty(diags("f(x::T) where T<:Real = x\n", "g() = f(1)\n"))
+    # subtyping through the bound: `Int <: Integer <: Real`
+    @test isempty(diags("f(x::T) where T<:Integer = x\n", "g() = f(1)\n"))
+    # an unbounded variable, and a lower bound, license nothing
+    @test isempty(diags("f(x::T) where T = x\n", "g() = f(\"s\")\n"))
+    @test isempty(diags("f(x::T) where T>:Int = x\n", "g() = f(\"s\")\n"))
+    # substitution reaches inside a union
+    @test length(diags("f(x::Union{T,Nothing}) where T<:Real = x\n", "g() = f(\"s\")\n")) == 1
+    @test isempty(diags("f(x::Union{T,Nothing}) where T<:Real = x\n", "g() = f(1)\n"))
+    @test isempty(diags("f(x::Union{T,Nothing}) where T<:Real = x\n", "g() = f(nothing)\n"))
+    # a bound that is itself a type variable is not chased
+    @test isempty(diags("f(x::T, y::S) where {T, S<:T} = x\n", "g() = f(1, \"s\")\n"))
+    # a sibling overload accepting the argument keeps it silent
+    @test isempty(diags("f(x::T) where T<:Real = x\nf(x::String) = x\n", "g() = f(\"s\")\n"))
+    # a workspace-declared bound is no-opinion
+    @test isempty(diags("struct Own end\nf(x::T) where T<:Own = x\n", "g() = f(\"s\")\n"))
+    # the bound applies to every parameter that names the variable
+    @test length(diags("f(x::T, y::T) where T<:Real = x\n", "g() = f(1, \"s\")\n")) == 1
+end
+
 @testitem "derived_file_analysis: cross-file positional TYPE check" setup=[FileAnalysisWS] begin
     mm(fa) = [d.message for d in fa.diagnostics
               if occursin("No method matching", d.message) || occursin("method call error", d.message)]

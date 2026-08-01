@@ -1141,7 +1141,7 @@ end
     # name path per positional parameter (`String[]` = no opinion), and whether the
     # record may judge a call at all.
     paths(it) = begin
-        tv = Set{String}(v.name for v in it.method_sig.where_vars)
+        tv = it.method_sig.where_vars
         [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
     end
     judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
@@ -1199,7 +1199,7 @@ end
     using JuliaWorkspaces.URIs2: URI
 
     paths(it) = begin
-        tv = Set{String}(v.name for v in it.method_sig.where_vars)
+        tv = it.method_sig.where_vars
         [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
     end
 
@@ -1224,7 +1224,7 @@ end
     using JuliaWorkspaces.URIs2: URI
 
     paths(it) = begin
-        tv = Set{String}(v.name for v in it.method_sig.where_vars)
+        tv = it.method_sig.where_vars
         [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
     end
     judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
@@ -1263,7 +1263,7 @@ end
     using JuliaWorkspaces.URIs2: URI
 
     paths(it) = begin
-        tv = Set{String}(v.name for v in it.method_sig.where_vars)
+        tv = it.method_sig.where_vars
         [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
     end
     judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
