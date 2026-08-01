@@ -893,8 +893,11 @@ end
     MethodSignatureRecord
 
 One method's structured signature, with the module its text sits in. `defmod` is
-where the recorded type names resolve — for `Base.foo(x::MyType)` written in `M`
-that is `M`, not `Base`. Plain data, so it backdates.
+where the recorded type names resolve, which is NOT the module path the record is
+keyed under: a qualified extension written in `M.Inner` extending `M.g` is keyed
+`(["M"], "g")` and carries `defmod == ["M", "Inner"]`. `defmod` always names a
+module of this tree — an extension whose qualifier resolves outside it
+(`Base.foo(x::MyType)`) is not recorded at all. Plain data, so it backdates.
 """
 @auto_hash_equals struct MethodSignatureRecord
     defmod::Vector{String}

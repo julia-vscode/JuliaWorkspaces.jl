@@ -1676,6 +1676,71 @@ end
     @test !isequal(a1, derived_method_arities(jw.runtime, root, ["M"], "f"))
 end
 
+@testitem "derived_method_arities: an untouched name's arity node does not re-execute" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_method_arities, TextFile, SourceText, update_file!
+    using JuliaWorkspaces.URIs2: URI
+    using Logging
+
+    # The count of a node's `@debug` line is the count of its BODY running: value
+    # equality alone cannot see the difference between a node that backdated and
+    # one that was never asked, and only the latter is what routing the arity
+    # projection through the per-name signature node buys.
+    mutable struct Counter <: Logging.AbstractLogger
+        counts::Dict{String,Int}
+    end
+    Logging.min_enabled_level(::Counter) = Logging.Debug
+    Logging.shouldlog(::Counter, level, _module, group, id) = true
+    Logging.catch_exceptions(::Counter) = false
+    function Logging.handle_message(l::Counter, level, message, _module, group, id, file, line; kwargs...)
+        message isa String && (l.counts[message] = get(l.counts, message, 0) + 1)
+        return nothing
+    end
+    function runs(f)
+        l = Counter(Dict{String,Int}())
+        v = Logging.with_logger(f, l)
+        return v, k -> get(l.counts, k, 0)
+    end
+
+    root = URI("file:///ms6/src/M.jl")
+    src(ty, body) = "module M\nf(x::$ty) = $body\nq(a, b) = 2\nend\n"
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText(src("Int", "1"), "julia")))
+    af = derived_method_arities(jw.runtime, root, ["M"], "f")
+    aq = derived_method_arities(jw.runtime, root, ["M"], "q")
+
+    # a body-only edit runs nothing: the inventory is equal, so the index never
+    # recomputes and neither projection is asked
+    update_file!(jw, TextFile(root, SourceText(src("Int", "12345"), "julia")))
+    (_, nf) = runs(() -> derived_method_arities(jw.runtime, root, ["M"], "f"))
+    @test nf("derived_method_signatures_index") == 0
+    @test nf("derived_method_signatures") == 0
+    @test nf("derived_method_arities") == 0
+
+    # a type-only edit to `f`: the index and BOTH of `f`'s projections re-run...
+    update_file!(jw, TextFile(root, SourceText(src("String", "12345"), "julia")))
+    (vf, nf) = runs(() -> derived_method_arities(jw.runtime, root, ["M"], "f"))
+    @test nf("derived_method_signatures_index") == 1
+    @test nf("derived_method_signatures") == 1
+    @test nf("derived_method_arities") == 1
+    @test isequal(af, vf)
+
+    # ...while `q`'s signature node re-runs (its dependency, the index, moved) and
+    # backdates, so `q`'s ARITY node is never executed at all. This is the
+    # assertion a naive `arities -> index` chain fails; every value assertion in
+    # this file stays green under that chain.
+    (vq, nq) = runs(() -> derived_method_arities(jw.runtime, root, ["M"], "q"))
+    @test nq("derived_method_signatures") == 1
+    @test nq("derived_method_arities") == 0
+    @test isequal(aq, vq)
+
+    # a genuine count change on `q` does re-run its arity node, and moves it
+    update_file!(jw, TextFile(root, SourceText("module M\nf(x::String) = 12345\nq(a, b, c) = 2\nend\n", "julia")))
+    (vq2, nq2) = runs(() -> derived_method_arities(jw.runtime, root, ["M"], "q"))
+    @test nq2("derived_method_arities") == 1
+    @test !isequal(aq, vq2)
+end
+
 @testitem "derived_method_signatures_index: the eval marker blanks types, never counts" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
