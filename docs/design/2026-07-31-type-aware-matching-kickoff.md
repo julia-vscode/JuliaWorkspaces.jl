@@ -174,6 +174,30 @@ list is their only record.
   sweep would report no movement and could not confirm the fix helps anything real.
   The unit tests are the evidence. A wider corpus would be the place to look.
 
+### Also done
+
+- **Slice 2 — parametrics and `where` bounds** (`ab2d438`, `cdbfb90`, `0000010`).
+  A resolver change only, since 1.5 already recorded types as written. `Union{…}`
+  folds to a `FakeUnion`; any other parametric resolves its head and drops the
+  arguments, mirroring the local path; a parameter typed by a method-local type
+  variable resolves to that variable's **upper bound**, which is sound for a
+  rule-out check because the method can only instantiate at a subtype of it.
+
+  **The sweep moved nothing — 0 new, 0 removed — and that is a real result, not a
+  null.** An arm proof (non-`Any` parameter operands must differ between the arms)
+  rules out a silently-failed revert, and the slice demonstrably does more work:
+  +312 judgeable parameters resolve a real type, 0 fewer, with a live verdict change
+  absorbed by a sibling overload.
+
+  Two limits explain the absence of movement, and both are worth carrying forward.
+  The argument side is sparse — only ~10–11% of argument slots at compared sites
+  carry a known type — **and** the head-of-curly rule is a weak predicate, since an
+  argument reaching a `Vector{Int}` parameter is almost always already a `Vector`.
+  The `where`-bound rule is discriminating rather than weak, but the corpus supplies
+  only one live instance of the shape, so its false-positive rate is established by
+  a committed property test (384 pairs; every pair where Julia's own `<:` holds must
+  not be ruled out) rather than by the sweep.
+
 ### Accepted, no action
 
 - **Two latent widenings from the signature record**, both correct and both left in
@@ -190,6 +214,29 @@ list is their only record.
 
   Decided 2026-08-01: **keep both.** They are correct diagnostics. A future sweep over
   a wider corpus should expect movement from them and not treat it as a regression.
+
+### Known asymmetry, from slice 2
+
+- **The local path does not substitute `where` bounds; the cross-file path now does.**
+  `arg_type` (`src/StaticLint/methodmatching.jl:21-25`) deliberately returns `Any`
+  for a typevar-bound parameter — "we don't know the concrete constraint
+  statically". So `f(x::T) where T<:Real = x` called with a `String` is flagged when
+  the method is a cross-file sibling and silent when it is a local closure.
+
+  Plan-authorised and one-directional (cross-file is strictly more precise, never
+  less), and narrow in practice: in per-file mode a tree-visible callee never reaches
+  the local path, so it shows only between a top-level sibling method and a
+  same-scope local one. But it does mean moving a method *into* the calling function
+  can make a genuine diagnostic disappear. The fix is to teach the local path the
+  same substitution at `methodmatching.jl:21-25`, which currently discards a
+  constraint it can already see.
+
+- **An inner `where` in an annotation records as wholly unknown.** `x::Vector{T} where T`
+  loses even its head, so neither slice-2 rule can reach it. Fixing it needs a
+  record-shape change — and note the local path declines the same shape, so fixing
+  only the record would make the cross-file path *more* precise than the local one,
+  which is the asymmetry the head-of-curly rule exists to avoid. File behind a shape
+  change, with the parity item above.
 
 ### Deferred
 
