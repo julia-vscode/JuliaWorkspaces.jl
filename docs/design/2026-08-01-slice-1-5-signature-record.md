@@ -87,9 +87,25 @@ So: **one index, two projections.**
   return type, now *derived* from the merged records.
 
 A type-only change leaves the arity projection's value equal, so it still backdates
-exactly as today. The merge is then purely a saving: one splice walk instead of two,
-worth the 1.3–3.1 ms the index costs on a declaration-changing edit — a cost
-currently paid twice, which the budget doc never accounted for.
+exactly as today. **Measured, better than that:** chaining `arities → signatures →
+index` (rather than `arities → index`) means an untouched name's arity node is not
+merely equal but **not executed at all**. Note that Salsa's `changed_at` cannot
+observe this — a backdating recompute leaves it untouched — so only an execution
+count distinguishes the two chains, which is what the test pins.
+
+**Measured saving, corrected.** The merge does *not* halve the recompute. Over five
+roots on a declaration-changing edit (median of 9): 12–46%, median ≈**23%** —
+TestItemServer 20.3→15.6 ms, JuliaWorkspaces 14.7→11.3, CommonMark 7.4→6.3,
+LanguageServer 2.8→2.4. The original "paid twice" reasoning was wrong because the
+arity walk is the cheap one and had already been absorbed into the signature walk;
+the merge only removes the parameter-type walk on top of it.
+
+On a root where the `:opaque_definitions` marker fires there are two *new* costs
+pulling the other way: blanking costs 0.33–0.66 ms and 0.54–1.17 MiB per build,
+which the old empty-dict short-circuit never paid; and the old parameter-type index
+had **zero keys** there, so its value was constant and backdated across every edit,
+whereas the merged index carries full contents and so invalidates every per-name
+signature node in the root on any declaration edit.
 
 ## The other trap: withhold the type opinion, never the count opinion
 
@@ -146,8 +162,8 @@ Add one test per class in "the other trap": with a marker present, the arity
 diagnostic must still fire. That is the property the whole design rests on and it is
 currently verified by a single assertion added late in slice 1.
 
-Also re-measure the index recompute, since halving it is the performance case for
-doing this at all.
+Also re-measure the index recompute — and note that the measured saving is ≈23%,
+not the halving this document originally claimed (see above).
 
 ## Open questions
 

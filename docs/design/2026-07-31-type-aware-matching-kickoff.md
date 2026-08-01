@@ -180,6 +180,24 @@ exist nowhere in the code, so this list is their only record.
   `StaticLint/linting/checks.jl:263` both require `isdeclaration`, which a unary `::`
   is not. Wants its own sweep, since it changes arity behaviour repo-wide.
 
+**Latent widenings introduced by the signature record (slice 1.5) — queued, not bugs.**
+
+Both are cases where slice 1 recorded *unknown* and the structured record now
+resolves a real type. Both produce **true** positives, and both moved zero
+diagnostics across the 74-root corpus — but a different workspace can see a new
+(correct) diagnostic, so they are recorded rather than discovered later:
+
+- **`@nospecialize(x::Int)`** — the record unwraps the macrocall and keeps `Int`.
+  11 live typed spellings in the corpus, including a first-party one in JSONRPC.
+- **`T{}` resolves like `T`** — `ParamType` cannot distinguish an *absent* curly
+  from an *empty* one, so `x::Tuple{}` records as `["Tuple"]` exactly like a bare
+  `x::Tuple`. 8 spellings; 5 are constructors neutralised by the struct kind gate,
+  2 are live in JuliaFormatter. Fixing it properly means distinguishing the two in
+  the record, which was judged too invasive to do late in a green refactor.
+
+Whether to keep them (they are correct) or suppress them (they are unannounced) is
+the decision; either way the next sweep over a wider corpus should expect movement.
+
 **Refinements to slice 1, all measured and all optional.**
 
 - **Narrow the `eval` marker to evals that could actually define a method.** 7 of the
