@@ -32,7 +32,7 @@ Sketch — settle exact field names in Task 1 and keep them consistent thereafte
     role::Symbol        # :positional | :optional | :keyword | :vararg
 end
 
-@auto_hash_equals struct TypeVar
+@auto_hash_equals struct SigTypeVar   # NOT `TypeVar` — collides with Core.TypeVar
     name::String
     upper::ParamType    # unknown when there is no usable upper bound
 end
@@ -41,7 +41,7 @@ end
     params::Vector{SigParam}     # positional/optional/vararg, source order
     kwargs::Vector{SigParam}
     kwsplat::Bool
-    where_vars::Vector{TypeVar}
+    where_vars::Vector{SigTypeVar}
     shape_unknown::Bool          # macro-wrapped: arity must answer permissively
 end
 ```
@@ -62,7 +62,7 @@ type of that name. Slice 1 avoided this by filtering at record time. Upper bound
 
 | File | Responsibility |
 |---|---|
-| `src/layer_inventory.jl` | `SigParam`/`TypeVar`/`MethodSignature`/`ParamType`; extraction for methods (Task 1) and structs (Task 2); the `signature` field. |
+| `src/layer_inventory.jl` | `SigParam`/`SigTypeVar`/`MethodSignature`/`ParamType`; extraction for methods (Task 1) and structs (Task 2); the `signature` field. |
 | `src/layer_module_tree.jl` | The merged per-root index; the full-signature projection and the derived arity projection (Task 3). |
 | `src/layer_file_analysis.jl` | Resolution reads the new record (Task 4). |
 | `src/StaticLint/linting/checks.jl` | Consumers cut over; the `length(recs) == length(arities)` guard is deleted (Task 4). |
@@ -74,7 +74,7 @@ type of that name. Slice 1 avoided this by filtering at record time. Upper bound
 
 **Files:** `src/layer_inventory.jl`; test `test/test_inventory.jl`
 
-**Interfaces produced:** the four types above, plus `_method_signature(x::CSTParser.EXPR) -> Union{Nothing,MethodSignature}`, and `_arity_of(sig::MethodSignature) -> MethodArity`.
+**Interfaces produced (Task 1, SHIPPED — use these names):** the four types above, the field `InventoryItem.method_sig::Union{Nothing,MethodSignature}`, plus `_method_signature(x::CSTParser.EXPR) -> Union{Nothing,MethodSignature}`, and `_arity_of(sig::MethodSignature) -> MethodArity`.
 
 `arity` and `param_types` stay on `InventoryItem` for now — this task adds `signature` alongside them so the two can be compared. They are removed in Task 4.
 
