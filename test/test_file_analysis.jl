@@ -2211,9 +2211,10 @@ end
     @test length(types) == 4
     # NOTE: `CoreTypes.Any` is ITSELF a DataTypeStore, so `isa DataTypeStore` would
     # pass even on a total resolution failure. Assert the identity, not the type.
-    # `Int` is a constructor FunctionStore in the store — reaching Core.Int64 proves
-    # the `FunctionStore.extends` hop ran.
-    @test string(types[1].name) == "Core.Int64"
+    # `Int` is a constructor FunctionStore in the store — reaching the concrete
+    # integer proves the `FunctionStore.extends` hop ran. `Int` is the platform's,
+    # so this is `Int32` on a 32-bit build.
+    @test string(types[1].name) == "Core.$(nameof(Int))"
     # `AbstractString` is a VarRef in the store — this proves `maybe_lookup` ran.
     @test string(types[2].name) == "Core.AbstractString"
     @test !SL._isany(types[1]) && !SL._isany(types[2])
@@ -2255,7 +2256,7 @@ end
     @test !SL._isany(types[1])
     # a union keeps its members, so each branch can be tested on its own
     @test types[2] isa SS.FakeUnion
-    @test hits(dt(:Core, :Int64), types[2]) && hits(dt(:Core, :Nothing), types[2])
+    @test hits(dt(:Core, nameof(Int)), types[2]) && hits(dt(:Core, :Nothing), types[2])
     @test !hits(dt(:Core, :String), types[2])
     # a value argument stays a value: `Val{:String}` must not reach `String`
     @test !SL._isany(types[3]) && !hits(dt(:Core, :String), types[3])
@@ -2285,7 +2286,7 @@ end
         struct Own end
         f(a::T, b::S, c::U, d::Union{T,Nothing}, e::W) where {T<:Real, S, U>:Int, W<:Own} = 1
         g(a::T, b::S) where {T, S<:T} = 2
-        h(a::T, b::V) where {T<:Base.AbstractString, V<:Union{Int,Nothing}} = 3
+        h(a::T, b::V) where {T<:Base.Integer, V<:Union{Int,Nothing}} = 3
         k(a::T) where Int<:T<:Real = 4
         m(a::T) where Real>:T>:Int = 5
         """,
@@ -2314,7 +2315,7 @@ end
     @test SL._isany(types[3])
     # substitution reaches inside a union
     @test types[4] isa SS.FakeUnion
-    @test hits(dt(:Core, :Int64), types[4]) && hits(dt(:Core, :Nothing), types[4])
+    @test hits(dt(:Core, nameof(Int)), types[4]) && hits(dt(:Core, :Nothing), types[4])
     @test !hits(dt(:Core, :String), types[4])
     # a workspace-declared bound is no-opinion, exactly as the annotation would be
     @test SL._isany(types[5])
@@ -2327,11 +2328,12 @@ end
 
     htypes = only(JuliaWorkspaces._resolve_param_types(
         rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "h"))).types
-    # a dotted bound resolves through the qualified-store lookup
-    @test string(SL._basename(htypes[1])) == "Core.AbstractString"
+    # a dotted bound resolves through the qualified-store lookup, including the
+    # `FunctionStore.extends` hop `Base.Integer` needs
+    @test string(SL._basename(htypes[1])) == "Core.Integer"
     # a union BOUND keeps its members
     @test htypes[2] isa SS.FakeUnion
-    @test hits(dt(:Core, :Int64), htypes[2]) && !hits(dt(:Core, :String), htypes[2])
+    @test hits(dt(:Core, nameof(Int)), htypes[2]) && !hits(dt(:Core, :String), htypes[2])
 
     ktypes = only(JuliaWorkspaces._resolve_param_types(
         rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "k"))).types
@@ -2557,8 +2559,8 @@ end
     diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
 
     # a QUALIFIED annotation resolves through the store just like a bare one
-    @test length(diags("f(x::Base.AbstractString) = x\n", "g() = f(1)\n")) == 1
-    @test isempty(diags("f(x::Base.AbstractString) = x\n", "g() = f(\"s\")\n"))
+    @test length(diags("f(x::Base.Integer) = x\n", "g() = f(\"s\")\n")) == 1
+    @test isempty(diags("f(x::Base.Integer) = x\n", "g() = f(1)\n"))
 
     # a call nested several levels inside a function body (not at file top
     # level) is checked — the traversal must carry the closure down
