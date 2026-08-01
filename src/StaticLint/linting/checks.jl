@@ -631,13 +631,15 @@ function _tree_types_match(x, n, cc, env::ExternalEnv, meta_dict, tree_param_typ
     all(r -> r.judgeable, recs) || return true
     args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
     isempty(kws) || return true                      # keywords: not modelled
-    all(_is_resolved_type, args) || return true
     checked = false
     for r in recs
         compare_f_call(r.arity, cc) || continue
         length(r.types) == length(args) || return true    # defaults/alignment: decline
         checked = true
-        all(i -> _has_type_intersection(args[i], r.types[i], getsymbols(env), meta_dict),
+        # An unresolved argument declines its OWN slot, not the whole call: the
+        # remaining slots may still hold a definite mismatch.
+        all(i -> !_is_resolved_type(args[i]) ||
+                 _has_type_intersection(args[i], r.types[i], getsymbols(env), meta_dict),
             1:length(args)) && return true
     end
     return !checked

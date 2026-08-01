@@ -2836,3 +2836,29 @@ end
     # is not ruled out. Encodes the behaviour a parameter-aware comparison owes.
     @test_broken length(cross_diags("f(x::Vector{T} where T<:Integer) = x\n", "g() = f([\"a\"])\n")) == 1
 end
+
+@testitem "derived_file_analysis: an unresolved argument declines its own slot, not the call" setup=[FileAnalysisWS] begin
+    # A workspace-declared argument type resolves only partly here (its ancestry
+    # can dead-end at a `TreeRef`), so its slot carries no opinion. That must not
+    # silence the OTHER slots, which may hold a definite mismatch.
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    # `Own` is declared in the CALLING file, so an argument of that type reaches
+    # the comparison as a local `Binding` — the shape `_is_resolved_type` declines.
+    # Its supertype `MyAbs` is a sibling's, so the ancestry really does dead-end.
+    diags(b) = mm(JuliaWorkspaces.derived_file_analysis(ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs <: Integer end\nf(x::Integer, y::Int) = x\nh(x::Integer) = x\n",
+        B => "struct Own <: MyAbs end\n" * b)).runtime, ROOT, B))
+
+    # the unresolvable slot is skipped; the resolved one still rules the call out
+    @test length(diags("g(v::Own) = f(v, \"s\")\n")) == 1
+    # and agrees when the resolved slot matches
+    @test isempty(diags("g(v::Own) = f(v, 1)\n"))
+    # `Own <: MyAbs <: Integer` — a real subtype whose chain leaves the store.
+    # The one slot carries no opinion, so nothing is ruled out. Flagging this
+    # would be the false positive the whole-call decline existed to prevent.
+    @test isempty(diags("g(v::Own) = h(v)\n"))
+    # an argument of no known type at all is still just a skipped slot
+    @test isempty(diags("g(u) = h(u)\n"))
+end
