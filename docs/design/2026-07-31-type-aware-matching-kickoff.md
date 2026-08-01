@@ -169,6 +169,20 @@ exist nowhere in the code, so this list is their only record.
   coverage. Prerequisite for slice 2, which then becomes a resolver change rather
   than a schema change.
 
+**The one check slice 1.5's gate could not perform.**
+
+- **An incremental arm for `typesweep.jl`.** Every measurement backing the
+  signature-record merge is a *cold build*, and that merge changed the dependency
+  graph: arities now derive through signatures through a merged index, and a
+  marker-fired root went from a constant empty dict to full contents. A backdating or
+  invalidation defect yields *stale* diagnostics after an edit and is invisible to a
+  from-cold comparison. On two or three marker-fired roots (TestItemServer,
+  JuliaDynamicAnalysisProcess), apply a type-only, a count-changing and a body-only
+  edit, re-collect the whole root's diagnostics, and require they equal a from-cold
+  rebuild of the edited state. Small addition to a harness that already exists, and
+  the only failure mode this slice can plausibly introduce that 74 cold roots cannot
+  see. Numbers and rationale: `docs/perf/2026-08-01-slice-1-5-verification.md`.
+
 **Bugs found during slice 1, not caused by it.**
 
 - **`func_nargs` does not recognise an anonymous `::Vararg{T}`.** `f(x, ::Vararg{Int})`
