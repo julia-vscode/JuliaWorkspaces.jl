@@ -146,44 +146,13 @@ reaches, which still holds:
    yields a false *positive*, the one outcome a linter must not produce, so the
    permissive direction has to be the default at every step.
 
-## Follow-up queue — status as of 2026-07-31, after slice 1 shipped
+## Follow-up queue — status as of 2026-08-01, after slices 1 and 1.5 shipped
 
-Slice 1 landed in `217f325..2689292`. Everything below is deferred work, in the
-order I would take it. Several of these were found during slice 1's review loop and
-exist nowhere in the code, so this list is their only record.
+Slice 1 landed in `217f325..2689292`, slice 1.5 in `91868da..3e0010a`. Several items
+below were found during those review loops and exist nowhere in the code, so this
+list is their only record.
 
-**Planned, not started.**
-
-- **Slice 1.4 — reassigned locals infer to `Any` when assignments disagree.** Fixes
-  the one false positive slice 1 shipped with (§17b). Plan written and committed:
-  `docs/superpowers/plans/2026-07-31-slice-1-4-reassigned-local-types.md`. Ready to
-  execute as-is.
-- **Slice 1.5 — one signature record.** Specced in
-  `docs/design/2026-08-01-slice-1-5-signature-record.md`; needs a task plan next.
-  A structured `signature` field with parameter names, types and roles replaces
-  *three* overlapping fields — `arity`, `param_types` and the string `signature` —
-  and `MethodArity` becomes derived rather than stored. Two traps the spec turns
-  into design rules: merge the storage but keep **two projections**, or a type-only
-  edit stops backdating the count opinion; and withholding must blank the types
-  *inside* a record rather than drop it, or the `eval` marker starts deleting arity
-  coverage. Prerequisite for slice 2, which then becomes a resolver change rather
-  than a schema change.
-
-**The one check slice 1.5's gate could not perform.**
-
-- **An incremental arm for `typesweep.jl`.** Every measurement backing the
-  signature-record merge is a *cold build*, and that merge changed the dependency
-  graph: arities now derive through signatures through a merged index, and a
-  marker-fired root went from a constant empty dict to full contents. A backdating or
-  invalidation defect yields *stale* diagnostics after an edit and is invisible to a
-  from-cold comparison. On two or three marker-fired roots (TestItemServer,
-  JuliaDynamicAnalysisProcess), apply a type-only, a count-changing and a body-only
-  edit, re-collect the whole root's diagnostics, and require they equal a from-cold
-  rebuild of the edited state. Small addition to a harness that already exists, and
-  the only failure mode this slice can plausibly introduce that 74 cold roots cannot
-  see. Numbers and rationale: `docs/perf/2026-08-01-slice-1-5-verification.md`.
-
-**Bugs found during slice 1, not caused by it.**
+### Next up
 
 - **`func_nargs` does not recognise an anonymous `::Vararg{T}`.** `f(x, ::Vararg{Int})`
   yields `(2,2)` instead of `(1, typemax)`, where the named `f(x, y::Vararg{Int})` is
@@ -192,49 +161,74 @@ exist nowhere in the code, so this list is their only record.
   today, independent of type matching. Zero instances in the julia-vscode repo. Root
   cause: `is_explicit_vararg_decl` and the inline test at
   `StaticLint/linting/checks.jl:263` both require `isdeclaration`, which a unary `::`
-  is not. Wants its own sweep, since it changes arity behaviour repo-wide.
+  is not.
 
-**Latent widenings introduced by the signature record (slice 1.5) — queued, not bugs.**
+  Note the blast radius is wider than it looks: `_arity_of` was built to *mirror*
+  `func_nargs` exactly, bugs included, and `SigParam.names_vararg` exists precisely to
+  mark the parameters this bug makes invisible. Fixing `func_nargs` means fixing both
+  sides together, and it changes arity behaviour repo-wide — so it wants its own
+  both-direction sweep, where movement is expected rather than a failure.
 
-Both are cases where slice 1 recorded *unknown* and the structured record now
-resolves a real type. Both produce **true** positives, and both moved zero
-diagnostics across the 74-root corpus — but a different workspace can see a new
-(correct) diagnostic, so they are recorded rather than discovered later:
+### Accepted, no action
 
-- **`@nospecialize(x::Int)`** — the record unwraps the macrocall and keeps `Int`.
-  11 live typed spellings in the corpus, including a first-party one in JSONRPC.
-- **`T{}` resolves like `T`** — `ParamType` cannot distinguish an *absent* curly
-  from an *empty* one, so `x::Tuple{}` records as `["Tuple"]` exactly like a bare
-  `x::Tuple`. 8 spellings; 5 are constructors neutralised by the struct kind gate,
-  2 are live in JuliaFormatter. Fixing it properly means distinguishing the two in
-  the record, which was judged too invasive to do late in a green refactor.
+- **Two latent widenings from the signature record**, both correct and both left in
+  place deliberately. Each is a case where slice 1 recorded *unknown* and the
+  structured record now resolves a real type; both produce **true** positives and both
+  moved zero diagnostics across the 74-root corpus, but a different workspace can see
+  a new (correct) diagnostic:
+  - **`@nospecialize(x::Int)`** — the record unwraps the macrocall and keeps `Int`.
+    11 live typed spellings in the corpus, including a first-party one in JSONRPC.
+  - **`T{}` resolves like `T`** — `ParamType` cannot distinguish an *absent* curly from
+    an *empty* one, so `x::Tuple{}` records as `["Tuple"]` exactly like a bare
+    `x::Tuple`. 8 spellings; 5 are constructors neutralised by the struct kind gate,
+    2 are live in JuliaFormatter.
 
-Whether to keep them (they are correct) or suppress them (they are unannounced) is
-the decision; either way the next sweep over a wider corpus should expect movement.
+  Decided 2026-08-01: **keep both.** They are correct diagnostics. A future sweep over
+  a wider corpus should expect movement from them and not treat it as a regression.
 
-**Refinements to slice 1, all measured and all optional.**
+### Deferred
 
-- **Narrow the `eval` marker to evals that could actually define a method.** 7 of the
-  24 marker rows repo-wide are `Core.eval(@__MODULE__, :(global x::T))`,
-  `eval(Meta.parse("public …"))` and a re-export block — none can define a method, yet
-  each disables type checking for its whole root. Buys back **three** roots
-  (CommonMark, Runic, Tokenize); JuliaDynamicAnalysisProcess and TestItemServer also
-  carry a genuine `for … @eval <def>` and would stay disabled. Per-root figures in
-  `docs/perf/2026-07-31-slice-1-sweep-results.md`.
-- **Guard (c): treat an unresolved argument as `Any` per index** instead of declining
-  the whole call. Equally false-positive-safe — `_isany` short-circuits — and it keeps
-  the true positives where a *different*, resolved argument is a definite mismatch.
-  Add the `Own <: MyAbs <: Integer` fixture in the same change, since that is where
-  the false positive it guards against would return.
-- **Move resolution below the cheap gates in `_tree_types_match`.** `tree_param_types`
-  currently resolves before the keyword and resolved-argument checks, so ~719 of 4156
-  invocations resolve and discard, and each reached site takes a dependency on the
-  defining module's visible names. Mechanical reorder; natural to do during 1.5.
-- **The mid-edit false positive (§17a hole 5), if it proves annoying in practice.**
-  Prefer the consumer-side gate — decline when the *callee's defining file* failed to
-  parse — over the marker, which would toggle the whole-root index and cost two
-  full re-analyses per definition typed. Needs the records to carry the defining file,
-  so 1.5 is the natural moment.
+- **Slice 1.4 — reassigned locals infer to `Any` when assignments disagree.** Fixes the
+  one false positive slice 1 shipped with (§17b). Orthogonal to the signature-record
+  work, which is why it is deferred rather than blocking. Plan written, reviewed and
+  committed, ready to execute as-is:
+  `docs/superpowers/plans/2026-07-31-slice-1-4-reassigned-local-types.md`.
+- **An incremental arm for `typesweep.jl`.** Every measurement backing the
+  signature-record merge is a *cold build*, and no from-cold comparison can observe a
+  backdating defect. The plausible mechanism is a **dropped dependency edge** — the
+  merged index must register everything the two old indices did — rather than anything
+  about record equality, which holds in every case checked. **No demonstrated
+  instance; the argument is structural.** If run: on two or three marker-fired roots,
+  apply a type-only, a count-changing and a body-only edit, re-collect the whole
+  root's diagnostics, and require they equal a from-cold rebuild of the edited state.
+- **Four measured refinements to slice 1**, independent of each other:
+  - *Narrow the `eval` marker to evals that could actually define a method.* 7 of the
+    24 marker rows repo-wide cannot define one, yet each disables type checking for
+    its whole root. Buys back **three** roots (CommonMark, Runic, Tokenize);
+    JuliaDynamicAnalysisProcess and TestItemServer carry a genuine `for … @eval <def>`
+    and stay disabled. Per-root figures in
+    `docs/perf/2026-07-31-slice-1-sweep-results.md`.
+  - *Guard (c): treat an unresolved argument as `Any` per index* instead of declining
+    the whole call. Equally false-positive-safe, and it keeps the true positives where
+    a *different*, resolved argument is a definite mismatch. Add the
+    `Own <: MyAbs <: Integer` fixture in the same change.
+  - *Move resolution below the cheap gates in `_tree_types_match`.* Roughly 719 of
+    4156 invocations resolve and discard. Mechanical reorder.
+  - *The mid-edit false positive (§17a hole 5), if it proves annoying in practice.*
+    Prefer the consumer-side gate — decline when the *callee's defining file* failed
+    to parse — over the marker, which would toggle the whole-root index. Needs the
+    records to carry the defining file, which the 1.5 merge declined to add.
+
+### The actual feature work, when the above settles
+
+- **Slice 2 — parametrics**, the remaining 11.1% of annotated parameters, plus
+  `where`-bound substitution (same machinery; the record already carries the bounds).
+  Materially cheaper than originally scoped: because 1.5 records types *as written*
+  rather than as a resolvability verdict, this is a resolver change, not a schema one.
+- **§18 — the inverse type→methods index.** Still unmeasured, and the one piece whose
+  cost profile is genuinely unknown: it needs the supertype chain *enumerated* rather
+  than a pair predicate, and that chain can leave the store and pass through
+  workspace-declared types.
 
 ## Carried-over cautions
 

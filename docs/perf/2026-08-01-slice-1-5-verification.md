@@ -67,16 +67,36 @@ constant and backdated on every edit, whereas the merged index carries full cont
 and invalidates 1089/902/468 per-name signature nodes on any declaration edit.
 End-to-end including fan-out: 27.4→25.7, 25.9→23.9, 10.3→7.7 ms.
 
-## The gap this does not close
+## The gap this does not close, stated accurately
 
-**Every measurement above is a cold build.** The refactor changed the dependency graph
-— arities now derive through signatures through a merged index, and a marker-fired
-root went from a constant empty dict to full contents. A backdating or invalidation
-defect produces *stale* diagnostics after an edit and is invisible to a from-cold
-comparison. The unit tests cover the mechanism on single-file fixtures; nothing covers
-it at pipeline scale.
+**Every measurement above is a cold build**, and no from-cold comparison can observe a
+*backdating* defect — one where a node fails to re-run after an edit and serves a stale
+answer. Both arms rebuild from scratch, so the cache is never exercised across an edit.
 
-The check that would close it is queued: an **incremental arm** for `typesweep.jl` —
-on two or three marker-fired roots, apply a type-only edit, a count-changing edit and
-a body-only edit, re-collect diagnostics for the whole root, and require they equal a
-from-cold rebuild of the edited state.
+What that gap is **not**: a record-equality problem. Backdating is safe here because a
+record comparing equal implies every answer derived from it is equal, and that holds in
+each place the record is deliberately coarse — `T{}` and bare `T` record identically
+*and* resolve identically; the 255-clamp collapses different large ranges to one record
+*and* both derive `(0, typemax)`; `shape_unknown` records share an empty `params` *and*
+all derive the same permissive arity. Coarse record, equally coarse answer, in every
+case. Blanking likewise preserves role, `names_vararg`, `kwsplat`, `shape_unknown` and
+the `Vararg` bound — verified over 25,744 records with zero arity shifts and zero
+judgeability flips.
+
+(The `names_vararg` defect found in review is sometimes cited here; it does not belong.
+That was a violation of *blanking invariance* — `_blank_param` erased the field
+`_sig_is_judgeable` read — not of record equality. The record and its blanked form never
+compared equal to each other.)
+
+What survives is narrower: a **dropped dependency edge**. The merged index must register
+everything the two old indices did — every file's inventory, the module tree, and
+`_external_import_targets` for the withholding gate. If the merge lost one, an edit to
+that input would not invalidate, and the stale value would be served indefinitely. A
+cold sweep cannot see this because both arms register everything on a fresh build.
+
+**There is no demonstrated instance. The argument is structural.** The queued check, if
+run: on two or three marker-fired roots, apply a type-only edit, a count-changing edit
+and a body-only edit, re-collect the whole root's diagnostics, and require they equal a
+from-cold rebuild of the edited state — the rebuild being the oracle, so there is no
+expected-value list to maintain. It is deferred deliberately; see the follow-up queue in
+`docs/design/2026-07-31-type-aware-matching-kickoff.md`.
