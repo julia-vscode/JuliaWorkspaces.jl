@@ -2869,3 +2869,46 @@ end
     # an argument of no known type at all is still just a skipped slot
     @test isempty(diags("g(u) = h(u)\n"))
 end
+
+@testitem "derived_file_analysis: a local assigned differing types is not judged on one of them" setup=[FileAnalysisWS] begin
+    # `refof` is flow-insensitive, so a use reads whichever assignment's binding
+    # is live there. When the assignments disagree the type is no longer a claim
+    # the check may make.
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b)).runtime, ROOT, B))
+
+    # The informative assignment comes AFTER the guarded use, and the loop makes
+    # it reachable there.
+    @test isempty(diags("find_from_hash(name::String, h::Base.SHA1) = 1\n", """
+    function manifest_paths!()
+        h = nothing
+        for line in 1:3
+            if h !== nothing
+                find_from_hash("x", h)
+            elseif line == 2
+                h = Base.SHA1("abc")
+            end
+        end
+    end
+    """))
+
+    # One known type alongside an un-inferred parameter disagrees too: the
+    # rebinding is conditional, so the use may still see the original value.
+    @test isempty(diags("lookup_expr(e::Expr) = 1\n", """
+    function lookup(node)
+        if node isa Symbol
+            node = GlobalRef(Main, node)
+        end
+        if node isa Expr
+            lookup_expr(node)
+        end
+    end
+    """))
+
+    # Not a blanket disabling: a genuine mismatch still flags...
+    @test length(diags("f(x::Int) = x\n", "g() = f(\"s\")\n")) == 1
+    # ...including through a local whose assignments AGREE
+    @test length(diags("f(x::Int) = x\n", "function g()\n    y = \"a\"\n    y = \"b\"\n    f(y)\nend\n")) == 1
+end

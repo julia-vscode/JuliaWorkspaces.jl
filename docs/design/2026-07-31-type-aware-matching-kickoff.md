@@ -251,11 +251,6 @@ list is their only record.
 
 ### Deferred
 
-- **Slice 1.4 — reassigned locals infer to `Any` when assignments disagree.** Fixes the
-  one false positive slice 1 shipped with (§17b). Orthogonal to the signature-record
-  work, which is why it is deferred rather than blocking. Plan written, reviewed and
-  committed, ready to execute as-is:
-  `docs/superpowers/plans/2026-07-31-slice-1-4-reassigned-local-types.md`.
 - **An incremental arm for `typesweep.jl`.** Every measurement backing the
   signature-record merge is a *cold build*, and no from-cold comparison can observe a
   backdating defect. The plausible mechanism is a **dropped dependency edge** — the
@@ -268,6 +263,33 @@ list is their only record.
   Prefer the consumer-side gate — decline when the *callee's defining file* failed
   to parse — over the marker, which would toggle the whole-root index. Needs the
   records to carry the defining file, which the 1.5 merge declined to add.
+
+### Also done
+
+- **Slice 1.4 — a reassigned local settles on the type covering its assignments.**
+  §17b is fixed. The assignments of a rebound name are collected during the pass and
+  their types settled together at the end of each phase, so back-filling makes every
+  `refof`-based consumer correct at once — the lint, `isa`, hover, completions.
+
+  Two departures from the plan as written, both from evidence:
+  - **The join, not `Any`.** `Int` and `Float64` settle on `Real`, which still rules
+    out a `String` parameter. An un-inferred assignment joins at `Any`.
+  - **An explicit `::T` is left alone.** `x = x::Child1` and the per-branch
+    `y = x::Child1` / `y = x::Child2` idiom are assertions, not inferences, and the
+    plan's rule would have widened them — silently breaking type-assertion
+    narrowing in completions, which has tests.
+
+  Sweep over 74 roots: **3785 → 3774**. Sixteen false positives removed, in two
+  classes: the six method-matching ones (`find_from_hash(::Nothing)`,
+  `lookup_expr(::GlobalRef)`) and ten `Missing reference: <field>` hits on
+  reassigned locals such as JuliaFormatter's `ctx = newctx(ctx; …)`. Thirteen
+  diagnostics re-render with the joined type at the same sites and stay flagged.
+  Coverage cost: both-sides-known slots 6353 → 5952, −6.3%.
+
+  **Not implemented, and the reason the count is not lower:** the widening is
+  unconditional. A rebinding that *dominates* its uses — `x = something(x, 1)` at
+  the top of a body — is widened just like a conditional one, which is what most of
+  that 6.3% is. A dominance test would recover it; that is the dataflow follow-up.
 
 ### Closed by measurement — do not re-queue
 
@@ -325,12 +347,19 @@ Four distinct diagnostics appear when the marker is disabled, none of them
   the store and pass through workspace-declared types. Unmeasured — and the §17
   measurement is the precedent for doing that before designing.
 
-- **The argument side is now the binding constraint.** Slice 2 measured that only
-  ~10–11% of argument slots at compared sites carry a known type, so further work on
-  *parameter* types has little left to buy. Slice 1.4 (deferred above) is the first
-  step on the other side; whether more is worth it is itself a measurement question,
-  and the resolved-parameter/both-sides-known counters added to `typesweep.jl` are
-  the instrument for asking it.
+- **The argument side is the binding constraint.** Measured 2026-08-01 over the 74
+  roots: of 93220 argument slots at compared call sites, the parameter type is known
+  in 4.6%, the argument type in 11.5%, and both in 1.4% — and exactly **one** call
+  site is ruled out corpus-wide. Parameter-side unknowns are mostly a fact about the
+  source (no annotation), which no resolver can fix; argument-side unknowns are
+  inference gaps, which can be. Slice 1.4 was the first step; the dominance test
+  above is the next.
+
+- **A `where`-bound variable is typed `DataType`, but a type parameter can be a
+  value.** `update_domtree!(…::GenericDomTree{IsPostDom}…) where {IsPostDom}` passes
+  `IsPostDom` as an argument and it is `true`/`false`. `infer_type`'s
+  `iswhere(parentof(...))` arm should answer `Any`. Argument-side, small, and one of
+  the four false positives the `eval` switch now ships.
 
 ## Carried-over cautions
 

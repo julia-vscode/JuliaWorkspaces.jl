@@ -1353,3 +1353,32 @@ end
     @test occursin("is a function with", h)
     @test occursin("in `Iterators`", h)
 end
+
+@testitem "Hover: a reassigned local reports the type covering its assignments" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces.URIs2: URI
+
+    # User-visible consequence of settling a rebound local's type: hover reports
+    # what covers every assignment, not whichever one the traversal reached last.
+    source = """
+    function f()
+        x = 1
+        x = 2.0
+        x
+    end
+    function g()
+        y = 1
+        y = nothing
+        y
+    end
+    """
+    uri = URI("file:///hoverrebind/test.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+    hover(marker) = get_hover_text(jw, uri, findlast(marker, source)[end])
+
+    # Int and Float64 are both Reals
+    @test occursin("Real", hover("\n    x\n"))
+    # nothing shares only Any with Int
+    @test occursin("Any", hover("\n    y\n"))
+end

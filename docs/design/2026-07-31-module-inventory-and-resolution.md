@@ -694,11 +694,11 @@ unsound, because CSTParser's error recovery frequently swallows the rest of the 
 Either way, this is the reason a consumer of these records must keep the "rule out
 only" discipline rather than ever treating a non-match as a positive claim.
 
-#### 17b. The argument side: one accepted false positive
+#### 17b. The argument side: one accepted false positive — FIXED
 
-§17a is about the *method set*. The comparison has a second operand, and it has
-its own soundness hole — **accepted knowingly** when type matching shipped, so
-that a reader who hits it knows it is not a surprise.
+**Resolved 2026-08-01.** A local assigned differing types now settles on the
+nearest type covering them all, so no use claims a type the value may not have.
+The description below is kept because it explains what the machinery is for.
 
 `refof` is flow-insensitive. For a local reassigned across sibling branches it
 resolves to the textually preceding assignment, so the inferred type can be one
