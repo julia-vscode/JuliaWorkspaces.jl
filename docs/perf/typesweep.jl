@@ -333,4 +333,130 @@ function report(rows)
     return nothing
 end
 
+# --- the incremental arm ------------------------------------------------------
+#
+# Every other measurement in this file is a COLD build: it exercises the
+# computation and never the invalidation. A cached value that fails to update
+# after an edit is invisible to all of them. This arm edits files in a live
+# workspace and requires the whole root's diagnostics to equal a from-cold
+# rebuild of the same content.
+#
+# The probe is a callee and a cross-file caller appended to two files of a real
+# root, so an edit travels the same signature-index path a real one does while
+# what should change stays known. A synthetic name cannot collide with the root.
+
+const P_CALLEE = "__sweep_probe_callee"
+const P_CALLER = "__sweep_probe_caller"
+
+# The probe's states. Each is (label, callee text, caller text, does the caller
+# expect a diagnostic). The caller passes a String throughout, so only the
+# callee's signature decides.
+const PROBE_STATES = [
+    (:base,     "$(P_CALLEE)(x::Int) = 1",           true),   # String vs Int
+    (:type,     "$(P_CALLEE)(x::String) = 1",        false),  # type-only edit: now matches
+    (:count,    "$(P_CALLEE)(x::String, y) = 1",     true),   # count-changing edit
+    (:body,     "$(P_CALLEE)(x::String, y) = 22222", true),   # body-only: nothing may move
+]
+
+probe_caller_text() = "\n$(P_CALLER)() = $(P_CALLEE)(\"s\")\n"
+
+# The diagnostics of one root, keyed as everywhere else in this file.
+function root_diags(rt, u)
+    s = Set{String}()
+    for f in JW.derived_tree_files(rt, u)
+        fa = JW.derived_file_analysis(rt, u, f)
+        for d in fa.diagnostics
+            push!(s, dkey(d, f))
+        end
+    end
+    return s
+end
+
+# Two distinct INCLUDED `.jl` files of `u`'s tree, callee first. The entry file is
+# excluded: appending to it lands after the module's own `end`, where the probe
+# would be invisible to the module and prove nothing.
+function probe_files(rt, u)
+    fs = [f for f in JW.derived_tree_files(rt, u) if f != u && endswith(string(f), ".jl")]
+    length(fs) >= 2 || return nothing
+    return (fs[1], fs[2])
+end
+
+# Raw text of a file as the workspace holds it. NOT `string(::SourceText)`, which
+# returns the repr and silently corrupts the file.
+file_text(jw, uri) = JW.get_text_file(jw, uri).content.content
+
+"""
+Edit a root's files in place and require the result to match a cold rebuild.
+
+For each probe state: apply it to the live workspace, collect the root's whole
+diagnostic set, then build a FRESH workspace over the same content and collect
+again. Any difference is a stale cached value. Returns a row per (root, state).
+"""
+function run_incremental(; roots=nothing, verbose=true)
+    jw, files = load()
+    rt = jw.runtime
+    all_roots = JW.derived_workspace_package_roots(rt)
+    names = roots === nothing ? sort(collect(keys(all_roots))) : roots
+    rows = NamedTuple[]
+
+    for nm in names
+        u = get(all_roots, nm, nothing)
+        u === nothing && continue
+        pf = probe_files(rt, u)
+        pf === nothing && continue
+        callee_uri, caller_uri = pf
+        base_callee = file_text(jw, callee_uri)
+        base_caller = file_text(jw, caller_uri)
+
+        for (label, callee_src, expect_diag) in PROBE_STATES
+            callee_text = base_callee * "\n" * callee_src * "\n"
+            caller_text = base_caller * probe_caller_text()
+            JW.update_file!(jw, JW.TextFile(callee_uri, JW.SourceText(callee_text, "julia")))
+            JW.update_file!(jw, JW.TextFile(caller_uri, JW.SourceText(caller_text, "julia")))
+            incr = root_diags(rt, u)
+
+            cold_jw = JuliaWorkspace(; resolve_workspace_environments=false)
+            JW.add_files!(cold_jw, [tf.uri == callee_uri ? JW.TextFile(callee_uri, JW.SourceText(callee_text, "julia")) :
+                                    tf.uri == caller_uri ? JW.TextFile(caller_uri, JW.SourceText(caller_text, "julia")) :
+                                    tf for tf in files])
+            JW.set_active_project!(cold_jw, JW.filepath2uri(PROJECT))
+            cold_u = get(JW.derived_workspace_package_roots(cold_jw.runtime), nm, nothing)
+            cold = cold_u === nothing ? Set{String}() : root_diags(cold_jw.runtime, cold_u)
+
+            # Only a method-matching verdict counts. The probe also draws an
+            # unused-argument hint in every state, which says nothing about the edit.
+            probe_hits = count(d -> occursin(P_CALLEE, d) &&
+                                    (occursin("No method matching", d) || occursin("method call error", d)), incr)
+            push!(rows, (root=nm, state=label,
+                         stale=length(setdiff(incr, cold)), missing_=length(setdiff(cold, incr)),
+                         n=length(incr), probe_hits, expect_diag))
+            verbose && println(rpad(nm, 26), rpad(string(label), 8),
+                               " incremental=", lpad(length(incr), 5),
+                               " cold=", lpad(length(cold), 5),
+                               " stale=", lpad(length(setdiff(incr, cold)), 3),
+                               " missing=", lpad(length(setdiff(cold, incr)), 3),
+                               " probe=", probe_hits, expect_diag ? " (expected)" : " (expected none)")
+        end
+
+        JW.update_file!(jw, JW.TextFile(callee_uri, JW.SourceText(base_callee, "julia")))
+        JW.update_file!(jw, JW.TextFile(caller_uri, JW.SourceText(base_caller, "julia")))
+    end
+    return rows
+end
+
+function report_incremental(rows)
+    bad = [r for r in rows if r.stale != 0 || r.missing_ != 0]
+    wrong = [r for r in rows if (r.probe_hits > 0) != r.expect_diag]
+    println("\nstates checked: ", length(rows))
+    println("DISAGREE with a cold rebuild (BLOCKER if >0): ", length(bad))
+    for r in bad
+        println("   ", r.root, " ", r.state, "  stale=", r.stale, " missing=", r.missing_)
+    end
+    println("probe verdict wrong (the edit did not take effect): ", length(wrong))
+    for r in wrong
+        println("   ", r.root, " ", r.state, "  hits=", r.probe_hits, " expected=", r.expect_diag)
+    end
+    return isempty(bad) && isempty(wrong)
+end
+
 end # module
