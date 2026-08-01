@@ -84,7 +84,18 @@ Rather than asserting a handful of shapes by hand, assert that `_arity_of(_metho
 
 That is the only test that can give confidence the derived arity is a faithful replacement, and it is cheap — the inventory and item positions are already available (see `docs/perf/typebudget.jl` for the walk idiom).
 
-Add hand-written assertions only for shapes the package may not contain: `f(::Int)`, `f(x, ys...)`, `f(x::Vararg{Int,3})`, `f(x::Int=1; k::String="a", kw...)`, `f(x::T, y::Real) where T<:Real`, `f(x::T) where T>:Int`, `f(x::Vector{T}) where T`, an operator definition, and a macro-wrapped definition (which must set `shape_unknown` and make the derived arity permissive, matching `func_nargs`'s early return).
+Add hand-written assertions only for shapes the package may not contain: `f(::Int)`, `f(x, ys...)`, `f(x::Vararg{Int,3})`, `f(x::Int=1; k::String="a", kw...)`, `f(x::T, y::Real) where T<:Real`, `f(x::T) where T>:Int`, `f(x::Vector{T}) where T`, an operator definition, and a macro-wrapped definition.
+
+**Correction, confirmed in Task 1 — do not restore the original claim here.** This
+plan previously said a macro-wrapped definition must set `shape_unknown` and derive
+a permissive arity "matching `func_nargs`'s early return". That is wrong:
+`func_nargs`'s permissive early return is gated on `env !== nothing && meta_dict
+!== nothing`, and the inventory calls `func_nargs(x)` with neither, so a
+macro-wrapped **method** gets *exact* counts today. Honouring the original wording
+would make every top-level `@inline`/`@propagate_inbounds` method permissive at
+Task 4's cutover and silently delete real diagnostics. `_method_signature` sets
+`shape_unknown = false` unconditionally. `struct_nargs`'s macro arm *is* purely
+syntactic, so `shape_unknown` is genuinely Task 2's lever — see Task 2.
 
 - [ ] **Step 2: Run it; confirm it fails** (`_method_signature` undefined).
 

@@ -34,7 +34,7 @@ Plain data throughout, per the layer-1 firewall. Sketch, not final:
     role::Symbol                 # :positional | :optional | :keyword | :vararg
 end
 
-@auto_hash_equals struct TypeVar
+@auto_hash_equals struct SigTypeVar   # not `TypeVar` — collides with Core.TypeVar
     name::String
     upper::ParamType             # unknown when there is no usable upper bound
 end
@@ -43,7 +43,7 @@ end
     params::Vector{SigParam}     # positional and optional, in source order
     kwargs::Vector{SigParam}
     kwsplat::Bool
-    where_vars::Vector{TypeVar}  # method-local; see the open-questions entry
+    where_vars::Vector{SigTypeVar}  # method-local; see the open-questions entry
     shape_unknown::Bool          # macro-wrapped: arity must answer permissively
 end
 ```
