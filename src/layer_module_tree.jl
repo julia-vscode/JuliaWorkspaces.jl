@@ -981,14 +981,14 @@ function _blank_types(sig::MethodSignature)
         sig.shape_unknown)
 end
 
-# `names_vararg` is carried through unchanged: it is an alignment signal, not a
+# Roles are carried through unchanged: alignment is not a type opinion, and a
 # type opinion, and re-deriving it from the blanked type would lose it.
 function _blank_param(p::SigParam)
     if p.role === :vararg && _bounded_vararg_n(p.type) !== nothing
         skeleton = ParamType(p.type.path, ParamType[ParamType(), p.type.args[2]], "")
-        return SigParam(p.name, skeleton, p.role, p.names_vararg)
+        return SigParam(p.name, skeleton, p.role)
     end
-    return SigParam(p.name, ParamType(), p.role, p.names_vararg)
+    return SigParam(p.name, ParamType(), p.role)
 end
 
 const _NO_IMPORT_TARGETS = Dict{String,Vector{String}}()

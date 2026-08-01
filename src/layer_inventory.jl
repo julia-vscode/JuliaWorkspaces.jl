@@ -55,34 +55,22 @@ ParamType(path::Vector{String}) = ParamType(path, ParamType[], "")
 "Is this type unknown — neither a name, nor a name with arguments, nor a value?"
 _is_unknown_type(t::ParamType) = isempty(t.path) && isempty(t.args) && isempty(t.value)
 
-"Does this annotation name `Vararg`, bare or dotted (`Base.Vararg`)?"
-_names_vararg(t::ParamType) = !isempty(t.path) && last(t.path) == "Vararg"
-
 """
     SigParam
 
 One parameter of a signature: its bound `name` (`""` for a dispatch-only `::T`),
-its `type` as written, its `role` — `:positional`, `:optional` (has a default),
-`:keyword`, or `:vararg` — and `names_vararg`, set when the type as written names
-`Vararg`.
+its `type` as written, and its `role` — `:positional`, `:optional` (has a
+default), `:keyword`, or `:vararg`.
 
-`names_vararg` is an ALIGNMENT signal, not a type opinion: a `Vararg` annotation
-the count side does not read as variadic (an anonymous `::Vararg{T}`, a dotted
-`::Base.Vararg`) still consumes an unknown number of slots, so the parameter list
-cannot be lined up with a call's arguments. It is a field rather than a read of
-`type` because withholding erases the type and must not erase this. The
-three-argument constructor derives it from the type as written; only a caller
-that rewrites the type (blanking) passes it explicitly.
+Every `Vararg` spelling reaches `:vararg`, including the anonymous `::Vararg{T}`
+and the dotted `::Base.Vararg`, so alignment is readable from `role` alone and
+survives having the type blanked.
 """
 @auto_hash_equals struct SigParam
     name::String
     type::ParamType
     role::Symbol
-    names_vararg::Bool
 end
-
-SigParam(name::String, type::ParamType, role::Symbol) =
-    SigParam(name, type, role, _names_vararg(type))
 
 """
     SigTypeVar
@@ -720,9 +708,9 @@ end
 
 The structured signature of a method-defining EXPR, or `nothing` when it has no
 readable signature. Role assignment mirrors `StaticLint.func_nargs`'s traversal
-decision for decision, so [`_arity_of`](@ref) reproduces its counts — including
-its blind spot for an anonymous `::Vararg{T}`, which a unary `::` makes
-indistinguishable from an ordinary annotated parameter.
+decision for decision, so [`_arity_of`](@ref) reproduces its counts. Both sides
+route every `Vararg` spelling — bound, anonymous and dotted — through
+`StaticLint.is_explicit_vararg_decl`, so they cannot drift apart.
 
 `shape_unknown` is never set here: `func_nargs`'s permissive early return for a
 macro-wrapped definition needs an environment to resolve the macro, and this

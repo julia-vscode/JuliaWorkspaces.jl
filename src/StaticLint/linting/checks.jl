@@ -259,10 +259,7 @@ function func_nargs(x::EXPR, env=nothing, meta_dict=nothing)
                 else
                     maxargs !== typemax(Int) && (maxargs += 1)
                 end
-            elseif issplat(arg) ||
-                (isdeclaration(arg) &&
-                ((isidentifier(arg.args[2]) && valofid(arg.args[2]) == "Vararg") ||
-                (iscurly(arg.args[2]) && isidentifier(arg.args[2].args[1]) && valofid(arg.args[2].args[1]) == "Vararg")))
+            elseif issplat(arg) || is_explicit_vararg_decl(arg)
                 bn = bounded_vararg_N(arg)
                 if bn !== nothing
                     minargs += bn

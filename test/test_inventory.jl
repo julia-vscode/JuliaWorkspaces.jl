@@ -1248,11 +1248,9 @@ end
     # explicit `::Vararg{T}` / bare `::Vararg` make alignment unknowable, like a splat
     @test !judgeable(items["h"])
     @test !judgeable(items["i"])
-    # A DOTTED `Base.Vararg` is not read as variadic by the count side (its arity is
-    # 1, not unbounded), so the role alone does not disqualify it — the annotation
-    # naming `Vararg` has to, or the name's judgeability would hang on whether the
-    # environment happens to resolve `Base.Vararg` to a comparable type.
-    @test items["j"].method_sig.params[1].role === :positional
+    # A DOTTED `Base.Vararg` is variadic too, and reaches the same role, so
+    # alignment is readable from the role alone.
+    @test items["j"].method_sig.params[1].role === :vararg
     @test !judgeable(items["j"])
     @test judgeable(items["f"]) && judgeable(items["g"])
 end
@@ -1406,10 +1404,9 @@ end
     @test arity("f(x::Vector{T}) where T = 1") == MethodArity(1, 1, Symbol[], false)
     @test arity("Base.:+(a, b) = 1") == MethodArity(2, 2, Symbol[], false)
     @test arity("function f(@nospecialize(x), y) end") == MethodArity(2, 2, Symbol[], false)
-    # A bare, unbounded `Vararg` is unbounded; a dotted `Base.Vararg` is not
-    # recognized as one at all (mirrors `func_nargs`).
+    # Every `Vararg` spelling is unbounded, dotted included.
     @test arity("f(x::Vararg{Int}) = 1") == MethodArity(0, inf, Symbol[], false)
-    @test arity("f(x::Base.Vararg{Int}) = 1") == MethodArity(1, 1, Symbol[], false)
+    @test arity("f(x::Base.Vararg{Int}) = 1") == MethodArity(0, inf, Symbol[], false)
     # A splat carrying a BOUNDED `Vararg` is unbounded: `func_nargs` reads the
     # bound only from an unsplatted declaration, so the derived count must not
     # read it back out of the recorded type either.
@@ -1833,5 +1830,74 @@ end
         # Never narrower than what `struct_nargs` admits: only ever more permissive.
         o, d = oracle(src), _arity_of(sigof(src))
         @test d.minargs <= o.minargs && d.maxargs >= o.maxargs
+    end
+end
+
+@testitem "arity: an anonymous `::Vararg` is variadic on both the count and record sides" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, MethodArity,
+        _arity_of, _method_signature
+    using JuliaWorkspaces.URIs2: URI
+    const SL = JuliaWorkspaces.StaticLint
+    const CP = JuliaWorkspaces.CSTParser
+
+    sigof(src) = _method_signature(CP.parse(src, true).args[1])
+    oracle(src) = MethodArity(SL.func_nargs(CP.parse(src, true).args[1])...)
+
+    # The bug: a unary `::T` is not `isdeclaration`, so every `Vararg` test missed
+    # the anonymous spelling and counted it as one ordinary positional.
+    for (src, expected) in (
+        ("f(x, ::Vararg{Int}) = 1",      MethodArity(1, typemax(Int), Symbol[], false)),
+        ("f(::Vararg{Int}) = 1",         MethodArity(0, typemax(Int), Symbol[], false)),
+        ("f(x, ::Vararg) = 1",           MethodArity(1, typemax(Int), Symbol[], false)),
+        ("f(x, ::Base.Vararg{Int}) = 1", MethodArity(1, typemax(Int), Symbol[], false)),
+        # a bounded anonymous Vararg consumes exactly N, as the bound form does
+        ("f(x, ::Vararg{Int,3}) = 1",    MethodArity(4, 4, Symbol[], false)),
+        ("f(::Vararg{Int,2}) = 1",       MethodArity(2, 2, Symbol[], false)),
+    )
+        @test oracle(src) == expected
+        @test _arity_of(sigof(src)) == expected
+        # the record must agree with the count side, which is what the whole
+        # signature record rests on
+        @test _arity_of(sigof(src)) == oracle(src)
+    end
+
+    # the bound spellings were already correct and must not move
+    for src in ("f(x, y::Vararg{Int}) = 1", "f(x, ys...) = 1", "f(x, y::Vararg{Int,3}) = 1",
+                "f(x, ::Int) = 1", "f(x::Int, y) = 1")
+        @test _arity_of(sigof(src)) == oracle(src)
+    end
+
+    # an anonymous `::Vararg` now reaches the `:vararg` role, which is what makes
+    # alignment readable without consulting the type
+    roles(src) = [p.role for p in sigof(src).params]
+    @test roles("f(x, ::Vararg{Int}) = 1") == [:positional, :vararg]
+    @test roles("f(x, ::Base.Vararg) = 1") == [:positional, :vararg]
+    @test roles("f(x, ::Int) = 1") == [:positional, :positional]
+end
+
+@testitem "arity: an anonymous `::Vararg` is not judged positionally across files" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText,
+        _method_signature, _sig_is_judgeable, _blank_types, MethodSignatureRecord
+    using JuliaWorkspaces.CSTParser: parse
+
+    sigof(src) = _method_signature(parse(src, true).args[1])
+    rec(src) = MethodSignatureRecord(String[], :function, sigof(src))
+
+    # A variadic parameter list cannot be lined up with a call's arguments, so its
+    # types may not judge one — and that must hold for the anonymous spelling too.
+    for src in ("f(x, ::Vararg{Int}) = 1", "f(x, ::Base.Vararg) = 1",
+                "f(x, y::Vararg{Int}) = 1", "f(x, ys...) = 1")
+        @test !_sig_is_judgeable(rec(src))
+    end
+    @test _sig_is_judgeable(rec("f(x::Int, y::String) = 1"))
+
+    # judgeability reads only roles, so blanking the types cannot change it
+    for src in ("f(x, ::Vararg{Int}) = 1", "f(x, ::Base.Vararg) = 1",
+                "f(x::Int, y::String) = 1", "f(x, ys...) = 1")
+        r = rec(src)
+        blanked = MethodSignatureRecord(r.defmod, r.kind, _blank_types(r.sig))
+        @test _sig_is_judgeable(r) == _sig_is_judgeable(blanked)
     end
 end
