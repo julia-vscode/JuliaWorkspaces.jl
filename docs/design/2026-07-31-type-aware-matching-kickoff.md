@@ -229,10 +229,25 @@ list is their only record.
   touching binding creation, which has its own blast radius. Pinned by a test so it
   is a known state.
 
-- **An inner `where` in an annotation records as wholly unknown.** `x::Vector{T} where T`
-  loses even its head, so neither slice-2 rule reaches it. Needs a record-shape
-  change. Note the local path declines the same shape, so the two agree today —
-  fixing only the record would reintroduce an asymmetry.
+- **An inner `where` in an annotation now reads as its head.** `x::Vector{T} where T`
+  lost even its head; it records `Vector`, which for the unbounded form is not an
+  approximation — `Vector{T} where T` IS `Vector`. Both paths changed together, so
+  the shape stays symmetric: the record unwraps the clause, and `infer_type_decl`
+  strips it before the curly unwrapping it already did.
+
+  The clause's own variables are blanked wherever they appear in the recorded type,
+  so `x::(T where T)` cannot resolve against a global named `T`.
+
+  **Still not correct, only permissive:** a *bounded* inner where
+  (`Vector{T} where T<:Integer`) is read as plain `Vector`, since both sides drop
+  type arguments anyway. Pinned by a `@test_broken` that encodes what a
+  parameter-aware comparison would owe.
+
+  Sweep over the 74 roots: 3777 diagnostics in both arms, and every root outside
+  this package byte-identical. The corpus has ~1 live instance of the shape
+  (`DataStructures`, `::Type{T} where {T<:SortedContainer}`), and it reaches no
+  compared call site, so the sweep could not have moved — the unit tests are the
+  evidence, as with the `Vararg` fix.
 
 ### Deferred
 
