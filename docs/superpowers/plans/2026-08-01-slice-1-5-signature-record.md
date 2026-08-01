@@ -156,6 +156,27 @@ Today the struct site records `MethodArity(struct_nargs(x)...)` and `param_types
 
 **Files:** `src/layer_file_analysis.jl`, `src/StaticLint/linting/checks.jl`, `src/layer_inventory.jl`; tests `test/test_file_analysis.jl`
 
+- [ ] **Step 0 — REQUIRED, found in Task 2's review: keep struct items out of the parameter-type side with an explicit kind gate.**
+
+`derived_method_arities_index` already includes structs, so today a name that is
+both a struct and a method reliably hits `length(recs) != length(arities)` in
+`_tree_types_match` and declines outright. The moment structs enter the record set,
+those lengths match, the check *engages*, and a **sibling method's** record can
+drive a flag:
+
+```julia
+struct Point; x; y; end          # arity (2,2)
+Point(s::String) = Point(0, 0)   # arity (1,1), type ["String"]
+Point(1.0)                       # today: declined. Without the gate: FLAGGED.
+```
+
+Withholding struct field types does **not** prevent this — the struct's own record
+cannot flag, but its mere presence re-arms the check for the whole name. Arm-1 and
+arm-2 structs push the other way (`length(r.types) != length(args)` disarms the
+name entirely), which is a diagnostic change in the removing direction. Both break
+the identical-diagnostics gate. Gate on `item.kind`, and pin it with a test using
+the fixture above.
+
 - [ ] **Step 1** — point `_resolve_param_types` and the `tree_param_types` closure at `derived_method_signatures`, resolving `ParamType` and consulting `where_vars` so a parameter typed by a type variable is unknown (bound substitution is a follow-up, not this task).
 - [ ] **Step 2** — delete `check_call`'s `length(recs) == length(arities)` guard. It exists only because two indices could disagree about *membership*; one index cannot. Its test must be repointed, not deleted: the shape it guarded (a splat method beside a typed one) must still decline, now because the splat method's record carries unknown types.
 - [ ] **Step 3** — remove `arity` and `param_types` from `InventoryItem`, with their back-compat constructors, and delete `derived_method_param_types_index`/`derived_method_param_types`. Keep `MethodArity` itself — it is the derived projection's return type and is imported into StaticLint.
@@ -168,7 +189,15 @@ Today the struct site records `MethodArity(struct_nargs(x)...)` and `param_types
 
 Each is a coverage widening that produces new diagnostics, so each needs its own sweep in which new diagnostics are *expected* and every one must be validated as a true positive. They are cheap once the record exists:
 
-1. **Enable the struct type opinion.** The data lands in Task 2; only the withhold is removed.
+1. **Enable the struct type opinion.** *Re-costed after Task 2:* not a one-line
+   flip. Task 2 records struct field types as **unknown**, not faithfully, so this
+   must *add* the extraction — and `_struct_field_name` unwraps the macrocall /
+   `const` / default layers while discarding the unwrapped EXPR, so a literal
+   one-line change would silently withhold types for `const a::Int`,
+   `@atomic a::Int` and `a::Int = 1`. The honest shape is: factor the unwrap into a
+   decl-returning helper, record from it, extend the tests, then sweep — and expect
+   the sweep to *move* diagnostics rather than confirm they held. It also makes
+   field-type edits stop backdating, which they do today.
 2. **Substitute `where` upper bounds.** `f(x::T) where T<:Real` currently gives `x` no opinion; the bound is an over-approximation and therefore safe for a rule-out check. Requires substitution at every depth of the type expression (`x::Vector{T}`), which slice 1 never faced.
 3. **Record inner constructors as distinct signatures** instead of the union range, removing the "cannot express a gap" imprecision.
 4. **Derive the string signature** from the record and drop the field. Needs defaults recorded, and hover output will not be byte-identical to `to_codeobject`, so it needs its own pinned tests.
