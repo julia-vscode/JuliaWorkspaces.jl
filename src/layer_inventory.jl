@@ -113,12 +113,10 @@ top level (whatever module the file is spliced into by its includer).
 `String[]` means the name is bound locally (a plain definition, not a method
 extension of an already-existing name elsewhere). `signature` is a normalized
 (re-printed) signature string for functions and macros, `nothing` otherwise.
-`field_names` is populated for structs. `arity`, when non-`nothing`, is the
-callable's `MethodArity` (argument-count shape) computed from the defining EXPR —
-plain data (so it backdates), used by the cross-file argument-count check for
-methods whose full set spans files. `method_sig` is the structured signature of
-a real method or a struct's constructor, from which the arity is derivable
-([`_arity_of`](@ref)).
+`field_names` is populated for structs. `method_sig`, when non-`nothing`, is the
+structured signature of a real method or a struct's constructor — plain data (so
+it backdates), and the source of both the cross-file argument-count opinion
+([`_arity_of`](@ref)) and the cross-file parameter-type opinion.
 
 `order` is dense and monotone in source order, and exists so the module tree can
 recover Julia's textual-splice semantics; `id` identifies the declaring statement
@@ -136,17 +134,10 @@ const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
     signature::Union{Nothing,String}
     field_names::Vector{String}
     parent_module::Vector{String}
-    arity::Union{Nothing,MethodArity}
     # Set only on `:macro_declared` rows: the macro that declares this name, as
     # written at the call site. Identity is confirmed later, in
     # layer_visibility.jl, which needs the spelling to know what to confirm.
     declared_by::Union{Nothing,MacroSpelling}
-    # One entry per positional parameter, in source order, for a real method;
-    # `nothing` when alignment is unknowable (a positional splat) or the item is
-    # not a method. An empty inner vector means that parameter's type is unknown.
-    # Names are as written (`["CSTParser","EXPR"]`) and resolved by the consumer
-    # against the module the method's TEXT sits in.
-    param_types::Union{Nothing,Vector{Vector{String}}}
     # The structured signature of a real method or a struct's constructor —
     # parameters with names, types as written, roles, keywords and method-local
     # type variables. `nothing` for anything that is not callable. A struct's
@@ -158,15 +149,11 @@ const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
 end
 
 # Back-compat constructors: non-callable items (assignments, consts, enums, …)
-# carry no arity, and only `:macro_declared` rows carry a spelling.
+# carry no signature record, and only `:macro_declared` rows carry a spelling.
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing, nothing, nothing)
-InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing, nothing, nothing)
-InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, nothing, nothing)
-InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, param_types) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, param_types, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing)
+InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, declared_by) =
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, declared_by, nothing)
 
 "An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
 `alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
@@ -584,44 +571,6 @@ function _symbol_name(x)
     return x isa CSTParser.EXPR && CSTParser.isoperator(x) ? CSTParser.valof(x) : nothing
 end
 
-# The `where`-bound type variable names of a signature. Method-local: they name
-# nothing in the defining module, so a parameter annotated with one is unknown.
-# Collects ONLY the bound variable, never a subtype/supertype bound — a bound
-# sharing a spelling with an unrelated parameter's real type (`where T<:Real`
-# alongside a `y::Real` parameter) must not make that type unknown too. Any
-# where-clause shape not recognized below contributes nothing, which is safe:
-# under-collecting only means a tvar surfaces as an unresolvable name, handled
-# permissively downstream.
-function _where_var_names(sig::CSTParser.EXPR)
-    tvars = Set{String}()
-    s = sig
-    while s isa CSTParser.EXPR && CSTParser.iswhere(s)
-        for i in 2:length(s.args)
-            a = s.args[i]
-            if CSTParser.isidentifier(a)
-                # bare `where T`
-                push!(tvars, CSTParser.str_value(a))
-            elseif a isa CSTParser.EXPR && a.head isa CSTParser.EXPR &&
-                    CSTParser.isoperator(a.head) && CSTParser.valof(a.head) in ("<:", ">:") &&
-                    a.args !== nothing && length(a.args) == 2
-                # `where T<:Bound` / `where T>:Bound`: the variable is the
-                # left operand.
-                CSTParser.isidentifier(a.args[1]) && push!(tvars, CSTParser.str_value(a.args[1]))
-            elseif a isa CSTParser.EXPR && CSTParser.headof(a) === :comparison &&
-                    a.args !== nothing && length(a.args) == 5 &&
-                    CSTParser.headof(a.args[2]) === :OPERATOR && CSTParser.valof(a.args[2]) in ("<:", ">:") &&
-                    CSTParser.headof(a.args[4]) === :OPERATOR && CSTParser.valof(a.args[4]) in ("<:", ">:") &&
-                    CSTParser.isidentifier(a.args[3])
-                # `where Lo<:T<:Hi` / `where Lo>:T>:Hi`: the variable is the
-                # middle operand.
-                push!(tvars, CSTParser.str_value(a.args[3]))
-            end
-        end
-        s = s.args[1]
-    end
-    return tvars
-end
-
 # A dotted access chain as a name path (`Base.Iterators.Zip` →
 # ["Base","Iterators","Zip"]), or `nothing` for any other shape.
 function _dotted_name_path(x::CSTParser.EXPR)
@@ -638,18 +587,6 @@ function _dotted_name_path(x::CSTParser.EXPR)
     return nothing
 end
 
-# Does this parameter TYPE expression name `Vararg` (`Vararg`, `Vararg{T,N}`,
-# `Base.Vararg{T}`)? Such a parameter consumes an unknown number of positional
-# slots, so the whole record's alignment is unknowable, exactly like a splat.
-function _is_vararg_type_expr(t)
-    t isa CSTParser.EXPR || return false
-    if CSTParser.iscurly(t) && t.args !== nothing && !isempty(t.args)
-        t = t.args[1]
-    end
-    p = _dotted_name_path(t)
-    return p !== nothing && last(p) == "Vararg"
-end
-
 # The annotated type of one positional parameter, or `nothing` if unannotated.
 # Both `x::T` (binary `::`) and the anonymous, dispatch-only `::T` (unary `::`)
 # annotate exactly one slot, so both are recordable and alignment-preserving.
@@ -659,41 +596,6 @@ function _param_type_expr(decl::CSTParser.EXPR)
     CSTParser.isunarysyntax(decl) && CSTParser.headof(decl) isa CSTParser.EXPR &&
         CSTParser.valof(CSTParser.headof(decl)) == "::" && return decl.args[1]
     return nothing
-end
-
-# One recorded type per positional parameter of a method-defining EXPR, or
-# `nothing` when the positional alignment is unknowable. Only bare and qualified
-# names are recorded; every other shape (parametric, `where`-bound, a literal)
-# records as unknown, which the consumer treats permissively.
-function _param_type_names(x::CSTParser.EXPR)
-    sig = CSTParser.get_sig(x)
-    sig isa CSTParser.EXPR || return nothing
-    tvars = _where_var_names(sig)
-    sig = CSTParser.rem_wheres_decls(sig)
-    (sig isa CSTParser.EXPR && sig.args !== nothing) || return nothing
-
-    out = Vector{Vector{String}}()
-    for i in 2:length(sig.args)
-        arg = sig.args[i]
-        arg isa CSTParser.EXPR || return nothing
-        # keywords live in `:parameters` and are not positional
-        CSTParser.headof(arg) === :parameters && continue
-        # a positional splat/Vararg makes the alignment unknowable
-        CSTParser.issplat(arg) && return nothing
-        decl = CSTParser.iskwarg(arg) && arg.args !== nothing && length(arg.args) >= 1 &&
-                   arg.args[1] isa CSTParser.EXPR ? arg.args[1] : arg
-        CSTParser.issplat(decl) && return nothing
-        t = _param_type_expr(decl)
-        # a positional `::Vararg{T,N}`, named or anonymous, is variadic
-        _is_vararg_type_expr(t) && return nothing
-        if t === nothing
-            push!(out, String[])
-        else
-            p = _dotted_name_path(t)
-            push!(out, p === nothing || (length(p) == 1 && p[1] in tvars) ? String[] : p)
-        end
-    end
-    return out
 end
 
 # One type-annotation expression as a `ParamType`. Records the type AS WRITTEN;
@@ -753,9 +655,8 @@ function _sig_param_name(arg)
     return something(CSTParser.str_value(n), "")
 end
 
-# One `where`-clause entry as (variable name, upper bound). Recognizes the same
-# shapes as `_where_var_names`; a lower bound (`T>:B`) licenses nothing and so
-# records as unknown.
+# One `where`-clause entry as (variable name, upper bound). A lower bound
+# (`T>:B`) licenses nothing and so records as unknown.
 function _where_var_and_upper(a)
     a isa CSTParser.EXPR || return nothing, ParamType()
     if CSTParser.isidentifier(a)
@@ -1372,9 +1273,7 @@ function _classify_assignment!(acc, x, order, id, parent_module, kind_override, 
             qualifier = _item_qualifier(CSTParser.get_name(x))
             is_method = StaticLint._is_real_method(x)
             push!(acc.items, InventoryItem(order, id, name, qualifier, something(kind_override, :function),
-                _render_sig(x), String[], parent_module,
-                (is_method ? MethodArity(StaticLint.func_nargs(x)...) : nothing), nothing,
-                (is_method ? _param_type_names(x) : nothing),
+                _render_sig(x), String[], parent_module, nothing,
                 (is_method ? _method_signature(x) : nothing)))
         end
     elseif CSTParser.iscurly(x.args[1])
@@ -1443,7 +1342,7 @@ function _emit_macro_declarations!(acc, x, order, id, parent_module)
     spelling = (qualifier=_getfield_qualifier(p.args[1]), name=mname)
     for n in rule.derive(x)
         push!(acc.items, InventoryItem(order, id, n, String[], :macro_declared,
-            nothing, String[], parent_module, nothing, spelling))
+            nothing, String[], parent_module, spelling))
     end
     return
 end
@@ -1506,9 +1405,7 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
         qualifier = _item_qualifier(CSTParser.get_name(x))
         is_method = StaticLint._is_real_method(x)
         push!(acc.items, InventoryItem(order, id, name, qualifier, kind,
-            _render_sig(x), String[], parent_module,
-            (is_method ? MethodArity(StaticLint.func_nargs(x)...) : nothing), nothing,
-            (is_method ? _param_type_names(x) : nothing),
+            _render_sig(x), String[], parent_module, nothing,
             (is_method ? _method_signature(x) : nothing)))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
@@ -1527,10 +1424,8 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             field_names = String[]
         end
         is_struct = CSTParser.defines_struct(x)
-        arity = is_struct ? MethodArity(StaticLint.struct_nargs(x)...) : nothing
         push!(acc.items, InventoryItem(order, id, name, String[], kind, nothing, field_names,
-            parent_module, arity, nothing, nothing,
-            (is_struct ? _struct_signature(x) : nothing)))
+            parent_module, nothing, (is_struct ? _struct_signature(x) : nothing)))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;
         # curly lhs → :assignment (typealias); plain identifier lhs → :assignment

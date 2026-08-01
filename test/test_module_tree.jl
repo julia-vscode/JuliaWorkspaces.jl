@@ -1440,9 +1440,9 @@ end
 
 @testitem "method arity / external extension indices agree with the per-name queries" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+    using JuliaWorkspaces: derived_method_arities, derived_method_signatures_index,
         derived_external_method_extensions, derived_external_method_extensions_index,
-        derived_external_extension_names
+        derived_external_extension_names, MethodArity, _arity_of
     using JuliaWorkspaces.URIs2: URI
 
     root = URI("file:///ws/A/src/A.jl")
@@ -1464,15 +1464,17 @@ end
     """, "julia")))
     add_file!(jw, TextFile(URI("file:///ws/A/src/more.jl"), SourceText("f(x, y, z) = 4\n", "julia")))
 
-    arities = derived_method_arities_index(jw.runtime, root)
+    idx = derived_method_signatures_index(jw.runtime, root)
     # Methods spliced from an include are part of the same name's set.
     @test length(derived_method_arities(jw.runtime, root, ["A"], "f")) == 4
-    @test derived_method_arities(jw.runtime, root, ["A"], "f") == arities[(["A"], "f")]
+    @test derived_method_arities(jw.runtime, root, ["A"], "f") ==
+        MethodArity[_arity_of(r.sig) for r in idx[(["A"], "f")]]
     # A qualified extension counts for the module its qualifier resolves to.
     @test length(derived_method_arities(jw.runtime, root, ["A", "Inner"], "g")) == 2
     # Every index entry must be exactly what the per-name query returns.
-    for ((path, name), v) in arities
-        @test derived_method_arities(jw.runtime, root, path, name) == v
+    for ((path, name), recs) in idx
+        @test derived_method_arities(jw.runtime, root, path, name) ==
+            MethodArity[_arity_of(r.sig) for r in recs]
     end
     # An unknown module path or name yields no arities.
     @test isempty(derived_method_arities(jw.runtime, root, ["A"], "nosuchname"))
@@ -1491,108 +1493,9 @@ end
     @test !("f" in derived_external_extension_names(jw.runtime, root))
 end
 
-@testitem "derived_method_param_types: aggregates across files with the defining module" begin
+@testitem "derived_method_signatures: the arity projection is the index's derived arity" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_param_types, TextFile, SourceText, MethodArity
-    using JuliaWorkspaces.URIs2: URI
-
-    root = URI("file:///mp/src/M.jl")
-    a = URI("file:///mp/src/a.jl")
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(root, SourceText("module M\ninclude(\"a.jl\")\nf(x::Int) = 1\nend\n", "julia")))
-    add_file!(jw, TextFile(a, SourceText("f(x::String, y::Bool) = 2\nBase.sin(x::Int, y::Int) = 3\n", "julia")))
-
-    recs = derived_method_param_types(jw.runtime, root, ["M"], "f")
-    @test length(recs) == 2
-    @test Set(r.param_types for r in recs) == Set([[["Int"]], [["String"], ["Bool"]]])
-    @test all(r -> r.defmod == ["M"], recs)
-    @test Set(r.arity.minargs for r in recs) == Set([1, 2])
-
-    # a `Base.` extension keys under Base but its types resolve in M
-    braw = derived_method_param_types(jw.runtime, root, ["Base"], "sin")
-    @test isempty(braw)   # Base is not a module of this tree
-end
-
-@testitem "derived_method_param_types: qualified extension records the defining module" begin
-    using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_param_types, TextFile, SourceText
-    using JuliaWorkspaces.URIs2: URI
-
-    root = URI("file:///mp2/src/M.jl")
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(root, SourceText("""
-    module M
-    struct T end
-    module Inner
-    M.g(x::Int) = 1
-    end
-    g(x::T) = 2
-    end
-    """, "julia")))
-
-    recs = derived_method_param_types(jw.runtime, root, ["M"], "g")
-    @test length(recs) == 2
-    inner = only(filter(r -> r.param_types == [["Int"]], recs))
-    @test inner.defmod == ["M", "Inner"]      # where the TEXT is, not where the name lands
-    outer = only(filter(r -> r.param_types == [["T"]], recs))
-    @test outer.defmod == ["M"]
-end
-
-@testitem "derived_method_param_types_index: the eval marker leaves the ARITY index intact" begin
-    using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_param_types_index, derived_method_arities_index,
-        TextFile, SourceText
-    using JuliaWorkspaces.URIs2: URI
-
-    root = URI("file:///mp4/src/M.jl")
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(root, SourceText("""
-    module M
-    f(x::Int) = 1
-    g(x::Int, y::Int) = 2
-    for T in (Float64,)
-        @eval h(x::\$T) = 3
-    end
-    end
-    """, "julia")))
-
-    # An `eval` withholds the whole root's TYPE opinion...
-    @test isempty(derived_method_param_types_index(jw.runtime, root))
-    # ...and must leave the arity index untouched: the arity check keeps working
-    # on exactly the methods it always saw.
-    ar = derived_method_arities_index(jw.runtime, root)
-    @test !isempty(ar)
-    @test haskey(ar, (["M"], "f"))
-    @test haskey(ar, (["M"], "g"))
-
-    # Without the eval, the type index carries the same two names.
-    jw2 = JuliaWorkspace()
-    add_file!(jw2, TextFile(root, SourceText("module M\nf(x::Int) = 1\ng(x::Int, y::Int) = 2\nend\n", "julia")))
-    @test Set(keys(derived_method_param_types_index(jw2.runtime, root))) ==
-        Set([(["M"], "f"), (["M"], "g")])
-end
-
-@testitem "derived_method_param_types_index: body-only edit backdates" begin
-    using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_param_types_index, TextFile, SourceText, update_file!
-    using JuliaWorkspaces.URIs2: URI
-
-    root = URI("file:///mp3/src/M.jl")
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(root, SourceText("module M\nf(x::Int) = 1\nend\n", "julia")))
-    i1 = derived_method_param_types_index(jw.runtime, root)
-    update_file!(jw, TextFile(root, SourceText("module M\nf(x::Int) = 12345\nend\n", "julia")))
-    i2 = derived_method_param_types_index(jw.runtime, root)
-    @test isequal(i1, i2)
-
-    # a signature change must NOT backdate
-    update_file!(jw, TextFile(root, SourceText("module M\nf(x::String) = 1\nend\n", "julia")))
-    @test !isequal(i1, derived_method_param_types_index(jw.runtime, root))
-end
-
-@testitem "derived_method_signatures: the arity projection reproduces the arity index" begin
-    using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+    using JuliaWorkspaces: derived_method_arities,
         derived_method_signatures, derived_method_signatures_index,
         _arity_of, MethodArity, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI
@@ -1621,12 +1524,10 @@ end
     """, "julia")))
     add_file!(jw, TextFile(URI("file:///ms/src/more.jl"), SourceText("f(x, y, z) = 5\n", "julia")))
 
-    old = derived_method_arities_index(jw.runtime, root)
     idx = derived_method_signatures_index(jw.runtime, root)
-    @test Set(keys(idx)) == Set(keys(old))
-    for ((path, name), v) in old
-        @test derived_method_arities(jw.runtime, root, path, name) == v
-        @test MethodArity[_arity_of(r.sig) for r in idx[(path, name)]] == v
+    for ((path, name), recs) in idx
+        @test derived_method_arities(jw.runtime, root, path, name) ==
+            MethodArity[_arity_of(r.sig) for r in recs]
     end
 
     # the spread: several methods of one name (one spliced from an include), a
@@ -1743,33 +1644,38 @@ end
 
 @testitem "derived_method_signatures_index: the eval marker blanks types, never counts" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+    using JuliaWorkspaces: derived_method_arities,
         derived_method_signatures, derived_method_signatures_index,
         _arity_of, _is_unknown_type, MethodArity, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI
 
     root = URI("file:///ms3/src/M.jl")
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(root, SourceText("""
-    module M
+    body = """
     f(x::Int) = 1
     g(x::Int, y::Int) = 2
     h(xs::Vararg{Int,3}) = 3
+    """
+    ev = """
     for T in (Float64,)
         @eval k(x::\$T) = 4
     end
-    end
-    """, "julia")))
+    """
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root, SourceText("module M\n" * body * ev * "end\n", "julia")))
 
     idx = derived_method_signatures_index(jw.runtime, root)
     @test !isempty(idx)
     @test haskey(idx, (["M"], "f")) && haskey(idx, (["M"], "g"))
 
-    # the count opinion is untouched, name by name and index-wide
-    old = derived_method_arities_index(jw.runtime, root)
-    @test Set(keys(idx)) == Set(keys(old))
-    for ((path, name), v) in old
-        @test derived_method_arities(jw.runtime, root, path, name) == v
+    # The count opinion is untouched — measured against the SAME source with the
+    # eval removed, so the claim is a comparison and not a tautology.
+    clean = JuliaWorkspace()
+    add_file!(clean, TextFile(root, SourceText("module M\n" * body * "end\n", "julia")))
+    ref = derived_method_signatures_index(clean.runtime, root)
+    @test Set(keys(idx)) == Set(keys(ref))
+    for (path, name) in keys(ref)
+        @test derived_method_arities(jw.runtime, root, path, name) ==
+            derived_method_arities(clean.runtime, root, path, name)
     end
     # ...including a bounded `Vararg`, whose count lives inside its type
     @test derived_method_arities(jw.runtime, root, ["M"], "h") == [MethodArity(3, 3, Symbol[], false)]
@@ -1793,8 +1699,9 @@ end
 
 @testitem "derived_method_signatures_index: the import and macro-declared withholds blank types only" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
-        derived_method_signatures, _is_unknown_type, MethodArity, TextFile, SourceText
+    using JuliaWorkspaces: derived_method_arities, derived_method_signatures,
+        derived_method_signatures_index, _arity_of, _is_unknown_type, MethodArity,
+        TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI
 
     root = URI("file:///ms4/src/M.jl")
@@ -1824,9 +1731,20 @@ end
     # a name neither withhold touches keeps its types
     @test only(derived_method_signatures(jw.runtime, root, ["M"], "kept")).sig.params[1].type.path == ["Int"]
 
-    # and no withhold moves the count opinion anywhere in the root
-    for ((path, name), v) in derived_method_arities_index(jw.runtime, root)
-        @test derived_method_arities(jw.runtime, root, path, name) == v
+    # and no withhold moves the count opinion anywhere in the root: the same three
+    # names, written without the import and without the macro, derive the same
+    # counts.
+    clean = JuliaWorkspace()
+    add_file!(clean, TextFile(root, SourceText("""
+    module M
+    relpath(x::Int) = 1
+    d(x::String, y::Bool) = 2
+    kept(x::Int) = 3
+    end
+    """, "julia")))
+    for (path, name) in keys(derived_method_signatures_index(clean.runtime, root))
+        @test derived_method_arities(jw.runtime, root, path, name) ==
+            derived_method_arities(clean.runtime, root, path, name)
     end
 end
 
@@ -1855,12 +1773,16 @@ end
     @test outer.defmod == ["M"]
 end
 
-@testitem "derived_method_signatures_index: derived arities match the arity index over this package's own source" begin
+@testitem "derived_method_signatures_index: arity coverage over this package's own source" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_method_arities, derived_method_arities_index,
+    using JuliaWorkspaces: derived_method_arities, derived_method_signatures,
         derived_method_signatures_index, _arity_of, MethodArity, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI, filepath2uri
 
+    # The aggregation side of the coverage guard: the per-item records really do
+    # reach the index (a floor no partial walk can meet), and both projections
+    # agree with it name by name. What each record's arity should BE is pinned
+    # against `func_nargs`/`struct_nargs` at the item level, in test_inventory.jl.
     srcdir = joinpath(pkgdir(JuliaWorkspaces), "src")
     jw = JuliaWorkspace()
     for (dir, _, names) in walkdir(srcdir), n in names
@@ -1870,20 +1792,18 @@ end
     end
     root = filepath2uri(joinpath(srcdir, "JuliaWorkspaces.jl"))
 
-    old = derived_method_arities_index(jw.runtime, root)
     idx = derived_method_signatures_index(jw.runtime, root)
-    @test length(old) > 500
-    @test Set(keys(idx)) == Set(keys(old))
+    @test length(idx) > 500
+    @test sum(length, values(idx); init=0) > 1400
 
     bad = String[]
-    for ((path, name), v) in old
-        derived = MethodArity[_arity_of(r.sig) for r in get(idx, (path, name), [])]
-        derived == v || push!(bad, string(join(path, "."), ".", name,
-                                          "\n      index   -> ", v,
-                                          "\n      derived -> ", derived))
-        derived_method_arities(jw.runtime, root, path, name) == v ||
-            push!(bad, string(join(path, "."), ".", name, ": projection disagrees with the index"))
+    for ((path, name), recs) in idx
+        derived = MethodArity[_arity_of(r.sig) for r in recs]
+        derived_method_signatures(jw.runtime, root, path, name) == recs ||
+            push!(bad, string(join(path, "."), ".", name, ": signature projection disagrees with the index"))
+        derived_method_arities(jw.runtime, root, path, name) == derived ||
+            push!(bad, string(join(path, "."), ".", name, ": arity projection disagrees with the index"))
     end
-    isempty(bad) || println("\n", length(bad), " names whose derived arity moved:\n", join(bad, "\n"))
+    isempty(bad) || println("\n", length(bad), " names whose projection disagrees:\n", join(bad, "\n"))
     @test isempty(bad)
 end

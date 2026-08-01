@@ -856,40 +856,6 @@ end
 const _NO_ARITIES = MethodArity[]
 
 """
-    derived_method_arities_index(rt, root) -> Dict{Tuple{Vector{String},String},Vector{MethodArity}}
-
-Every `(module path, name) => arities` entry of `root`'s tree in one node: the
-same selection [`derived_method_arities`](@ref) exposes per name, computed by a
-single splice walk. Superseded by [`derived_method_signatures_index`](@ref),
-which derives the same answer; retained while `InventoryItem.arity` still exists
-to cross-check it.
-
-The walk reads the inventory of *every* file in the root, so computing it per
-name made each of the (many thousands of) per-name nodes depend on every file —
-the dominant term in the size of the dependency graph, hence in the cost of
-every incremental re-verification. Funnelling them through this one node makes
-each per-name node a single lookup, and keeps early cutoff: an edit that leaves
-the index equal backdates it, and one that changes it only re-runs the (O(1))
-per-name lookups.
-"""
-Salsa.@derived function derived_method_arities_index(rt, root)
-    @debug "derived_method_arities_index" root=root
-
-    tree = derived_module_tree(rt, root)
-    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
-    result = Dict{Tuple{Vector{String},String},Vector{MethodArity}}()
-
-    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
-        item.arity === nothing && return
-        resolved = isempty(item.qualifier) ? loc :
-            _resolve_extension_qualifier(modpaths, loc, item.qualifier)
-        (resolved === nothing || resolved ∉ modpaths) && return
-        push!(get!(() -> MethodArity[], result, (resolved, item.name)), item.arity)
-    end
-    return result
-end
-
-"""
     MethodSignatureRecord
 
 One method's structured signature, with the module its text sits in. `defmod` is
@@ -898,9 +864,14 @@ keyed under: a qualified extension written in `M.Inner` extending `M.g` is keyed
 `(["M"], "g")` and carries `defmod == ["M", "Inner"]`. `defmod` always names a
 module of this tree — an extension whose qualifier resolves outside it
 (`Base.foo(x::MyType)`) is not recorded at all. Plain data, so it backdates.
+
+`kind` is the declaring item's kind. A struct's record is here because the arity
+answer needs it, but its parameters are its FIELDS and carry no type opinion, so a
+type consumer must tell it apart from a method's — see `_sig_is_judgeable`.
 """
 @auto_hash_equals struct MethodSignatureRecord
     defmod::Vector{String}
+    kind::Symbol
     sig::MethodSignature
 end
 
@@ -981,13 +952,13 @@ Salsa.@derived function derived_method_signatures_index(rt, root)
             push!(withheld, (resolved, item.name))
         end
         push!(get!(() -> MethodSignatureRecord[], result, (resolved, item.name)),
-              MethodSignatureRecord(loc, item.method_sig))
+              MethodSignatureRecord(loc, item.kind, item.method_sig))
     end
 
     for k in (opaque ? collect(keys(result)) : withheld)
         recs = get(result, k, nothing)
         recs === nothing && continue
-        result[k] = MethodSignatureRecord[MethodSignatureRecord(r.defmod, _blank_types(r.sig))
+        result[k] = MethodSignatureRecord[MethodSignatureRecord(r.defmod, r.kind, _blank_types(r.sig))
                                           for r in recs]
     end
     return result
@@ -1018,101 +989,7 @@ function _blank_param(p::SigParam)
     return SigParam(p.name, ParamType(), p.role)
 end
 
-"""
-    MethodParamTypes
-
-One method's recorded parameter types, with the module its text sits in.
-`defmod` is where the recorded names resolve — for `Base.foo(x::MyType)` written
-in `M` that is `M`, not `Base`. Plain data, so it backdates.
-"""
-@auto_hash_equals struct MethodParamTypes
-    defmod::Vector{String}
-    arity::MethodArity
-    param_types::Vector{Vector{String}}
-end
-
-"""
-    derived_method_param_types(rt, root, path::Vector{String}, name::String) -> Vector{MethodParamTypes}
-
-The recorded parameter types of every method of `name` at module `path` — the
-same selection as [`derived_method_arities`](@ref), minus methods with no usable
-record. A `get` into the per-root index, so it backdates for an untouched name
-when the index changes elsewhere.
-"""
-Salsa.@derived function derived_method_param_types(rt, root, path, name)
-    @debug "derived_method_param_types" root=root path=path name=name
-
-    return get(derived_method_param_types_index(rt, root), (path, name), _NO_PARAM_TYPES)
-end
-
-const _NO_PARAM_TYPES = MethodParamTypes[]
-
-"""
-    derived_method_param_types_index(rt, root) -> Dict{Tuple{Vector{String},String},Vector{MethodParamTypes}}
-
-Every `(module path, name) => records` entry of `root`'s tree in one node, by a
-single splice walk — the same fan-in rationale as
-[`derived_method_arities_index`](@ref): per-name nodes would each depend on every
-file in the root.
-
-Unlike the arity index, this one is only ever consumed to RULE A CALL OUT, so it
-withholds any entry whose method set it cannot vouch for — a partial record set
-would reject calls the missing methods accept:
-
-- a name `import`ed from a non-tree target (`import Base: show`) and then
-  extended bare: the rest of its methods live in the env, not in the tree;
-- a name a modelled macro mints (`@deprecate f(x::Float64) g(x)`), whose method
-  is declared but never recorded as a typed item;
-- every name in the root, when any file evaluates code as it loads
-  (`:opaque_definitions`) — an `eval` can define any name in any module, so
-  nothing narrower is sound.
-
-The first of those overlaps `check_call`'s own store-valued-callee gate without
-subsuming it: this index withholds on the IMPORT, while `check_call` declines on
-a store-valued `Binding.val`, which a `const Foo = Base.Dict` alias also has with
-no import for this index to see.
-"""
-Salsa.@derived function derived_method_param_types_index(rt, root)
-    @debug "derived_method_param_types_index" root=root
-
-    tree = derived_module_tree(rt, root)
-    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
-    import_targets = _external_import_targets(tree)
-    result = Dict{Tuple{Vector{String},String},Vector{MethodParamTypes}}()
-    withheld = Set{Tuple{Vector{String},String}}()
-    opaque = false
-
-    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
-                                 kinds=_PARAM_TYPE_ITEM_KINDS) do F, item, loc
-        if item.kind === :opaque_definitions
-            opaque = true
-            return
-        elseif item.kind === :macro_declared
-            push!(withheld, (loc, item.name))
-            return
-        end
-        (item.arity === nothing || item.param_types === nothing) && return
-        resolved = isempty(item.qualifier) ? loc :
-            _resolve_extension_qualifier(modpaths, loc, item.qualifier)
-        (resolved === nothing || resolved ∉ modpaths) && return
-        if haskey(get(import_targets, loc, _NO_IMPORT_TARGETS), item.name)
-            push!(withheld, (resolved, item.name))
-            return
-        end
-        push!(get!(() -> MethodParamTypes[], result, (resolved, item.name)),
-              MethodParamTypes(loc, item.arity, item.param_types))
-    end
-
-    opaque && return Dict{Tuple{Vector{String},String},Vector{MethodParamTypes}}()
-    for k in withheld
-        delete!(result, k)
-    end
-    return result
-end
-
 const _NO_IMPORT_TARGETS = Dict{String,Vector{String}}()
-
-const _PARAM_TYPE_ITEM_KINDS = _SIGNATURE_ITEM_KINDS
 
 const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
 
@@ -1197,7 +1074,7 @@ const _NO_EXTERNAL_EXTENSIONS = ExternalExtension[]
 
 Every `name => extensions` entry of `root`'s tree in one node, computed by a
 single splice walk. Same rationale as
-[`derived_method_arities_index`](@ref): the walk reads every file in the root,
+[`derived_method_signatures_index`](@ref): the walk reads every file in the root,
 so a per-name node would make the graph the incremental engine re-verifies grow
 as files × names.
 """

@@ -2194,7 +2194,7 @@ end
 end
 
 @testitem "file analysis: recorded parameter types resolve to store datatypes" setup=[FileAnalysisWS] begin
-    using JuliaWorkspaces: derived_method_param_types, derived_stdlib_only_env
+    using JuliaWorkspaces: derived_method_signatures, derived_stdlib_only_env
 
     jw = ws_with(Dict(
         ROOT => "module MainPkg\ninclude(\"a.jl\")\nend\n",
@@ -2202,10 +2202,11 @@ end
     ))
     rt = jw.runtime
     env = derived_stdlib_only_env(rt)
-    recs = derived_method_param_types(rt, ROOT, ["MainPkg"], "f")
+    recs = derived_method_signatures(rt, ROOT, ["MainPkg"], "f")
     @test length(recs) == 1
 
     res = JuliaWorkspaces._resolve_param_types(rt, ROOT, env, recs)
+    @test only(res).judgeable
     types = only(res).types
     @test length(types) == 4
     # NOTE: `CoreTypes.Any` is ITSELF a DataTypeStore, so `isa DataTypeStore` would
@@ -2276,10 +2277,21 @@ end
     nested = "function g(v)\n    for i in v\n        if length(v) > 0\n            f(\"s\")\n        end\n    end\nend\n"
     @test length(diags("f(x::Int) = x\n", nested)) == 1
 
-    # A sibling method whose positional alignment is unrecordable (a splat)
-    # would accept the call, but carries no type record — the name must go
-    # unchecked rather than be judged on the recorded methods alone.
+    # A sibling method whose positional alignment is unknowable (a splat) would
+    # accept the call, and its record's parameters cannot be lined up against the
+    # call's arguments — so the name goes unchecked rather than being judged on the
+    # methods whose alignment IS knowable.
     @test isempty(diags("f(x::Int) = x\nf(args...) = 0\n", "g() = f(\"s\")\n"))
+    # The same for an explicit `::Vararg` declaration, and for the dotted spelling
+    # the COUNT side does not recognize as variadic at all. (The second holds here
+    # regardless of the annotation being read as variadic, because `Base.Vararg`
+    # resolves to no comparable type either way; `_sig_is_judgeable` is what makes
+    # it independent of that — see test_inventory.jl.)
+    @test isempty(diags("f(x::Int) = x\nf(y::Vararg{Int}) = 0\n", "g() = f(\"s\")\n"))
+    @test isempty(diags("f(x::Int) = x\nf(y::Base.Vararg) = 0\n", "g() = f(\"s\")\n"))
+    # ...and it is the SIBLING that disarms the name: the same call against the
+    # typed method alone is still flagged.
+    @test length(diags("f(x::Int) = x\n", "g() = f(\"s\")\n")) == 1
     # same for an optional positional argument, whose recorded type count
     # cannot align with a shorter call
     @test isempty(diags("f(x::Int, y::Int = 2) = x\n", "g() = f(\"s\")\n"))
@@ -2287,6 +2299,29 @@ end
     # a WORKSPACE-declared ARGUMENT type has no resolvable ancestry here, so it
     # is no-opinion in the same way a workspace-declared parameter type is
     @test isempty(diags("f(x::Int) = x\n", "struct Own end\ng() = (o = Own(); f(o))\n"))
+end
+
+@testitem "derived_file_analysis: a struct leaves its own name unjudged" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # A struct's parameters are its FIELDS: they carry no type opinion, and the
+    # struct with inner constructors carries count-shaped ones. The record is in
+    # the index because the ARITY answer needs it, so a type consumer that read it
+    # as a method would let a sibling outer constructor judge a call the struct's
+    # own constructor accepts.
+    point = "struct Point\n    x\n    y\nend\nPoint(s::String) = Point(0, 0)\n"
+    @test isempty(diags(point, "g() = Point(1.0)\n"))
+    # The count opinion on the same name is untouched: 3 arguments match neither
+    # the 2-field constructor nor the 1-argument outer one.
+    @test length(diags(point, "g() = Point(1, 2, 3)\n")) == 1
+    # A macro-wrapped struct answers permissively on counts and must not be read
+    # as a zero-parameter method either.
+    @test isempty(diags("Base.@kwdef struct Opt\n    a::Int = 1\nend\nOpt(s::String) = Opt()\n",
+                        "g() = Opt(1.0)\n"))
 end
 
 @testitem "derived_file_analysis: a qualified extension's types resolve in the DEFINING module" setup=[FileAnalysisWS] begin

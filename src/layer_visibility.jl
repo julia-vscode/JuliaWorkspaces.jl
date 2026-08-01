@@ -188,7 +188,7 @@ in the same DFS order the module tree uses, so a duplicate name resolves
 last-in-splice-order-wins exactly like `_declare!`.
 
 Funnelled through one per-root node for the same reason as
-[`derived_method_arities_index`](@ref): the walk reads every file in the root, so a
+[`derived_method_signatures_index`](@ref): the walk reads every file in the root, so a
 per-name node would depend on every file. Identity is confirmed once per distinct
 `(module path, spelling)`, not once per macrocall.
 

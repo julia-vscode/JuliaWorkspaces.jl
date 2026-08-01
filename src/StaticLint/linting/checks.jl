@@ -446,7 +446,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                                 # which a `const Foo = Base.Dict` alias also has
                                 # without any import to withhold on.
                                 if store === nothing &&
-                                   !_tree_types_match(x, n, cc, arities, env, meta_dict, tree_param_types)
+                                   !_tree_types_match(x, n, cc, env, meta_dict, tree_param_types)
                                     seterror!(x, IncorrectCallArgs, meta_dict)
                                 end
                             elseif store !== nothing
@@ -623,15 +623,15 @@ _is_resolved_type(t) = !(t isa Binding || t isa EXPR || t isa TreeRef || t === n
 # Does any cross-file method of `n` match the call on positional TYPES as well as
 # count? True (no opinion) whenever anything needed is unavailable — a resolved
 # type is only ever allowed to REMOVE a diagnostic, never to add one on a guess.
-function _tree_types_match(x, n, cc, arities, env::ExternalEnv, meta_dict, tree_param_types)
+function _tree_types_match(x, n, cc, env::ExternalEnv, meta_dict, tree_param_types)
     tree_param_types === nothing && return true
     recs = tree_param_types(n, x)
     isempty(recs) && return true
-    # The records cover only the methods whose positional alignment is knowable
-    # (no splat/`Vararg`, no struct constructor). If any method of the name is
-    # missing one, that method could be the call's target and nothing here can
-    # rule it out — judge the name as a whole or not at all.
-    length(recs) == length(arities) || return true
+    # Only records whose positional alignment is knowable carry a usable type
+    # opinion (no splat/`Vararg`, no struct constructor). If any method of the name
+    # lacks one, that method could be the call's target and nothing here can rule
+    # it out — judge the name as a whole or not at all.
+    all(r -> r.judgeable, recs) || return true
     args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
     isempty(kws) || return true                      # keywords: not modelled
     all(_is_resolved_type, args) || return true

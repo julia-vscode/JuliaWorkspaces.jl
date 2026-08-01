@@ -684,12 +684,50 @@ function _resolve_recorded_type(rt, root, env, defmod::Vector{String}, path::Vec
     return dt isa SymbolServer.DataTypeStore ? dt : StaticLint.CoreTypes.Any
 end
 
-# Resolve a name's cross-file method records into comparison operands.
+# Kinds whose signature record carries no type opinion at all: a struct's
+# parameters are its FIELDS, recorded without types, and a struct with inner
+# constructors has count-shaped ones. The record is in the index because the arity
+# answer needs it.
+const _UNTYPED_SIG_KINDS = (:struct, :mutable_struct)
+
+const _UNKNOWN_TYPE_PATH = String[]
+const _NO_TVARS = String[]
+
+# The dotted name a parameter's type resolves through, or `nothing` when it names
+# no single type: an unknown, a value, a parametric (whose arguments this slice
+# does not compare), or a method-local type variable — substituting a `where`
+# bound would widen what the check rules out, which is its own gate.
+function _recorded_type_path(t::ParamType, tvars)
+    (isempty(t.path) || !isempty(t.args) || !isempty(t.value)) && return nothing
+    (length(t.path) == 1 && t.path[1] in tvars) && return nothing
+    return t.path
+end
+
+# Does this record's parameter list align one-to-one with a call's positional
+# arguments, so that its types may judge a call at all? A variadic parameter
+# consumes an unknown number of slots (so does a `Vararg`-named annotation the
+# count side does not read as one), a struct carries no type opinion, and an
+# unreadable shape carries no parameter list — its empty `params` means "unknown",
+# not "none".
+function _sig_is_judgeable(r::MethodSignatureRecord)
+    r.kind in _UNTYPED_SIG_KINDS && return false
+    r.sig.shape_unknown && return false
+    for p in r.sig.params
+        p.role === :vararg && return false
+        (!isempty(p.type.path) && last(p.type.path) == "Vararg") && return false
+    end
+    return true
+end
+
+# Resolve a name's cross-file signature records into comparison operands.
 function _resolve_param_types(rt, root, env, recs)
-    out = @NamedTuple{arity::MethodArity, types::Vector{Any}}[]
+    out = @NamedTuple{arity::MethodArity, types::Vector{Any}, judgeable::Bool}[]
     for r in recs
-        types = Any[_resolve_recorded_type(rt, root, env, r.defmod, p) for p in r.param_types]
-        push!(out, (arity=r.arity, types=types))
+        tvars = isempty(r.sig.where_vars) ? _NO_TVARS : String[v.name for v in r.sig.where_vars]
+        types = Any[_resolve_recorded_type(rt, root, env, r.defmod,
+                                           something(_recorded_type_path(p.type, tvars), _UNKNOWN_TYPE_PATH))
+                    for p in r.sig.params]
+        push!(out, (arity=_arity_of(r.sig), types=types, judgeable=_sig_is_judgeable(r)))
     end
     return out
 end
@@ -803,8 +841,8 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # `tree_arities` lets the method-call lint check a tree-visible workspace
     # callee's ARGUMENT COUNT against its full cross-file method set (the local
     # `func_ref` sees only this file's methods). Plain-data arities from the
-    # inventory — no dependency on sibling analyses. (Positional-type checking of
-    # such callees is deferred; see the cross-file-method-checks design doc.)
+    # inventory — no dependency on sibling analyses. Kept SEPARATE from
+    # `tree_param_types` so the count opinion backdates across a type-only edit.
     tree_arities = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
         derived_method_arities(rt, root, p, name)
@@ -819,7 +857,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # remove a diagnostic.
     tree_param_types = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
-        _resolve_param_types(rt, root, env, derived_method_param_types(rt, root, p, name))
+        _resolve_param_types(rt, root, env, derived_method_signatures(rt, root, p, name))
     end
     StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope, tree_param_types)
 

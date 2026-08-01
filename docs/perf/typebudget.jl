@@ -178,7 +178,7 @@ struct MethodRecord
     nparams_annotated::Int
 end
 
-# Mirrors `derived_method_arities_index`'s walk, but records syntactic parameter
+# Mirrors `derived_method_signatures_index`'s walk, but records syntactic parameter
 # types instead of argument counts, and keeps the DEFINING module (`loc`)
 # alongside the qualifier-resolved key path — the two differ for `Base.foo(x::T)`,
 # and it is `loc` that `T` resolves against.
@@ -190,7 +190,7 @@ function build_records(rt, root)
     nitems = Ref(0)
 
     JW._walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
-        item.arity === nothing && return
+        item.method_sig === nothing && return
         resolved = isempty(item.qualifier) ? loc :
             JW._resolve_extension_qualifier(modpaths, loc, item.qualifier)
         (resolved === nothing || resolved ∉ modpaths) && return

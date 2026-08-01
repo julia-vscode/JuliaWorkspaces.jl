@@ -63,7 +63,7 @@ function run_arm(jw; want_index_stats::Bool=true)
     roots = JW.derived_workspace_package_roots(rt)
     diags = Dict{String,Set{String}}()
     counts = Dict{String,Int}()
-    marker = Dict{String,Tuple{Int,Int}}()   # root => (n_param_type_keys, n_arity_keys)
+    marker = Dict{String,Tuple{Int,Int}}()   # root => (n_signature_keys, n_records)
     errors = Dict{String,Vector{String}}()
     for (nm, u) in sort(collect(roots); by=x -> x[1])
         s = Set{String}()
@@ -92,8 +92,8 @@ function run_arm(jw; want_index_stats::Bool=true)
         counts[nm] = n
         if want_index_stats
             marker[nm] = try
-                (length(JW.derived_method_param_types_index(rt, u)),
-                 length(JW.derived_method_arities_index(rt, u)))
+                idx = JW.derived_method_signatures_index(rt, u)
+                (length(idx), sum(length, values(idx); init=0))
             catch
                 (-1, -1)
             end
@@ -124,11 +124,11 @@ returns in the same order, with `push!`es added.
 """
 function instrument!()
     M = @__MODULE__
-    @eval SL function _tree_types_match(x, n, cc, arities, env::ExternalEnv, meta_dict, tree_param_types)
+    @eval SL function _tree_types_match(x, n, cc, env::ExternalEnv, meta_dict, tree_param_types)
         tree_param_types === nothing && return true
         recs = tree_param_types(n, x)
         isempty(recs) && return true
-        length(recs) == length(arities) || return true
+        all(r -> r.judgeable, recs) || return true
         args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
         isempty(kws) || return true
         all(_is_resolved_type, args) || return true
@@ -204,7 +204,7 @@ function compare(branch_path::String, main_path::String)
         ms = get(() -> Set{String}(), m.diags, r)
         push!(rows, (root=r, new=length(setdiff(bs, ms)), gone=length(setdiff(ms, bs)),
                      nb=length(bs), nm=length(ms),
-                     ptkeys=get(b.marker, r, (-1, -1))[1], arkeys=get(b.marker, r, (-1, -1))[2],
+                     sigkeys=get(b.marker, r, (-1, -1))[1], sigrecs=get(b.marker, r, (-1, -1))[2],
                      compared=get(b.compared, r, 0), rejected=get(b.rejected, r, 0),
                      newset=sort(collect(setdiff(bs, ms))), goneset=sort(collect(setdiff(ms, bs)))))
     end
@@ -217,15 +217,15 @@ function report(rows)
     println("roots: ", length(rows))
     println("TOTAL new-on-branch (BLOCKER if >0): ", tot_new)
     println("TOTAL gone-on-branch: ", tot_gone)
-    println("roots with marker fired (param-types empty, arities non-empty): ",
-            count(r -> r.ptkeys == 0 && r.arkeys > 0, rows))
+    println("total signature-index keys / records on branch: ",
+            sum(r -> max(r.sigkeys, 0), rows), " / ", sum(r -> max(r.sigrecs, 0), rows))
     println("total distinct compared call sites: ", sum(r.compared for r in rows; init=0))
     println()
     println(rpad("root", 26), lpad("new", 5), lpad("gone", 6), lpad("branch", 8), lpad("main", 7),
-            lpad("ptkeys", 8), lpad("arkeys", 8), lpad("cmp", 7), lpad("rej", 6))
+            lpad("sigkeys", 9), lpad("sigrecs", 9), lpad("cmp", 7), lpad("rej", 6))
     for r in rows
         println(rpad(r.root, 26), lpad(r.new, 5), lpad(r.gone, 6), lpad(r.nb, 8), lpad(r.nm, 7),
-                lpad(r.ptkeys, 8), lpad(r.arkeys, 8), lpad(r.compared, 7), lpad(r.rejected, 6))
+                lpad(r.sigkeys, 9), lpad(r.sigrecs, 9), lpad(r.compared, 7), lpad(r.rejected, 6))
     end
     for r in rows
         isempty(r.newset) && continue

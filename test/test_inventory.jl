@@ -1078,7 +1078,7 @@ end
 
     # Inert: no shape, and outside the binding kinds, so nothing can treat
     # these as declarations before identity is confirmed.
-    @test all(it -> it.arity === nothing && it.signature === nothing, md)
+    @test all(it -> it.method_sig === nothing && it.signature === nothing, md)
     @test :macro_declared ∉ _BINDING_ITEM_KINDS
 
     # The module tree must not see them.
@@ -1133,8 +1133,18 @@ end
 
 @testitem "inventory: records bare and qualified parameter types" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText,
+        MethodSignatureRecord, _recorded_type_path, _sig_is_judgeable
     using JuliaWorkspaces.URIs2: URI
+
+    # What the cross-file type check actually reads off a record: one resolvable
+    # name path per positional parameter (`String[]` = no opinion), and whether the
+    # record may judge a call at all.
+    paths(it) = begin
+        tv = Set{String}(v.name for v in it.method_sig.where_vars)
+        [something(_recorded_type_path(p.type, tv), String[]) for p in it.method_sig.params]
+    end
+    judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
 
     u = URI("file:///pt/src/P.jl")
     jw = JuliaWorkspace()
@@ -1151,20 +1161,21 @@ end
     items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
 
     # bare + qualified, positionally aligned
-    @test items["f"].param_types == [["Int"], ["CSTParser", "EXPR"]]
+    @test paths(items["f"]) == [["Int"], ["CSTParser", "EXPR"]]
     # unannotated parameter records as unknown, not as absent
-    @test items["g"].param_types == [String[], ["String"]]
-    # parametric: unknown in this slice (the head is NOT recorded alone)
-    @test items["h"].param_types == [String[]]
+    @test paths(items["g"]) == [String[], ["String"]]
+    # parametric: unknown in this slice (the head is NOT resolved alone)
+    @test paths(items["h"]) == [String[]]
     # a where-bound type variable is method-local, never a resolvable name
-    @test items["k"].param_types == [String[]]
-    # a positional splat makes alignment unknowable -> no record at all
-    @test items["m"].param_types === nothing
+    @test paths(items["k"]) == [String[]]
+    # a positional splat makes alignment unknowable -> the record cannot judge
+    @test !judgeable(items["m"])
+    @test all(judgeable, (items["f"], items["g"], items["h"], items["k"], items["n"]))
     # value positions must not be harvested as type names
-    @test items["n"].param_types == [String[]]
+    @test paths(items["n"]) == [String[]]
 end
 
-@testitem "inventory: param_types is nothing for non-methods and backdates on body edits" begin
+@testitem "inventory: method_sig is nothing for non-methods and backdates on body edits" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, update_file!
     using JuliaWorkspaces.URIs2: URI
@@ -1173,7 +1184,7 @@ end
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(u, SourceText("module P\nconst C = 1\nf(x::Int) = 1\nend\n", "julia")))
     inv1 = derived_file_inventory(jw.runtime, u)
-    @test Dict(it.name => it for it in inv1.items)["C"].param_types === nothing
+    @test Dict(it.name => it for it in inv1.items)["C"].method_sig === nothing
 
     # a body-only edit must leave the inventory `isequal` so Salsa backdates
     update_file!(jw, TextFile(u, SourceText("module P\nconst C = 1\nf(x::Int) = 99\nend\n", "julia")))
@@ -1183,8 +1194,13 @@ end
 
 @testitem "inventory: a where-clause bound does not shadow a same-named parameter type" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, _recorded_type_path
     using JuliaWorkspaces.URIs2: URI
+
+    paths(it) = begin
+        tv = Set{String}(v.name for v in it.method_sig.where_vars)
+        [something(_recorded_type_path(p.type, tv), String[]) for p in it.method_sig.params]
+    end
 
     u = URI("file:///pt3/src/P.jl")
     jw = JuliaWorkspace()
@@ -1197,13 +1213,20 @@ end
 
     # `T`'s bound (`Real`) must not be collected as a type-variable name: `y`'s
     # own, unrelated `Real` parameter only happens to share its spelling.
-    @test items["f"].param_types == [String[], ["Real"]]
+    @test paths(items["f"]) == [String[], ["Real"]]
 end
 
 @testitem "inventory: keyword args, defaulted positional args, and explicit Vararg" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText,
+        MethodSignatureRecord, _recorded_type_path, _sig_is_judgeable
     using JuliaWorkspaces.URIs2: URI
+
+    paths(it) = begin
+        tv = Set{String}(v.name for v in it.method_sig.where_vars)
+        [something(_recorded_type_path(p.type, tv), String[]) for p in it.method_sig.params]
+    end
+    judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
 
     u = URI("file:///pt4/src/P.jl")
     jw = JuliaWorkspace()
@@ -1213,23 +1236,38 @@ end
     g(x::Int, z::Int=2) = 2
     h(x::Vararg{Int}) = 3
     i(x::Vararg) = 4
+    j(x::Base.Vararg) = 5
     end
     """, "julia")))
     items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
 
     # a keyword arg lives in `:parameters` and must not disturb positional alignment
-    @test items["f"].param_types == [["Int"]]
+    @test paths(items["f"]) == [["Int"]]
     # a defaulted POSITIONAL arg is still positional, not a keyword
-    @test items["g"].param_types == [["Int"], ["Int"]]
+    @test paths(items["g"]) == [["Int"], ["Int"]]
     # explicit `::Vararg{T}` / bare `::Vararg` make alignment unknowable, like a splat
-    @test items["h"].param_types === nothing
-    @test items["i"].param_types === nothing
+    @test !judgeable(items["h"])
+    @test !judgeable(items["i"])
+    # A DOTTED `Base.Vararg` is not read as variadic by the count side (its arity is
+    # 1, not unbounded), so the role alone does not disqualify it — the annotation
+    # naming `Vararg` has to, or the name's judgeability would hang on whether the
+    # environment happens to resolve `Base.Vararg` to a comparable type.
+    @test items["j"].method_sig.params[1].role === :positional
+    @test !judgeable(items["j"])
+    @test judgeable(items["f"]) && judgeable(items["g"])
 end
 
 @testitem "inventory: dispatch-only (unary `::T`) parameters record their type" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText,
+        MethodSignatureRecord, _recorded_type_path, _sig_is_judgeable
     using JuliaWorkspaces.URIs2: URI
+
+    paths(it) = begin
+        tv = Set{String}(v.name for v in it.method_sig.where_vars)
+        [something(_recorded_type_path(p.type, tv), String[]) for p in it.method_sig.params]
+    end
+    judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
 
     u = URI("file:///pt5/src/P.jl")
     jw = JuliaWorkspace()
@@ -1248,18 +1286,18 @@ end
     items = Dict(it.name => it for it in derived_file_inventory(jw.runtime, u).items)
 
     # an anonymous parameter still occupies exactly one positional slot
-    @test items["f"].param_types == [["Int"]]
+    @test paths(items["f"]) == [["Int"]]
     # mixed anonymous/named: alignment must be preserved in both directions
-    @test items["g"].param_types == [["Int"], ["String"]]
-    @test items["q"].param_types == [["Int"], ["String"]]
+    @test paths(items["g"]) == [["Int"], ["String"]]
+    @test paths(items["q"]) == [["Int"], ["String"]]
     # qualified, same as the named form
-    @test items["h"].param_types == [["Base", "AbstractString"]]
+    @test paths(items["h"]) == [["Base", "AbstractString"]]
     # parametric and where-bound stay unknown, same as the named form
-    @test items["k"].param_types == [String[]]
-    @test items["w"].param_types == [String[]]
+    @test paths(items["k"]) == [String[]]
+    @test paths(items["w"]) == [String[]]
     # an anonymous Vararg is still variadic -> alignment unknowable
-    @test items["v"].param_types === nothing
-    @test items["z"].param_types === nothing
+    @test !judgeable(items["v"])
+    @test !judgeable(items["z"])
 end
 
 @testitem "signature record: derived arity equals func_nargs over this package's own source" begin
@@ -1440,11 +1478,11 @@ end
     # the type opinion withheld.
     @test items["S"].method_sig !== nothing
     @test items["S"].method_sig.params == [SigParam("a", ParamType(), :positional)]
-    @test _arity_of(items["S"].method_sig) == items["S"].arity
+    @test _arity_of(items["S"].method_sig) == MethodArity(1, 1, Symbol[], false)
     @test items["f"].method_sig !== nothing
     @test items["f"].method_sig.params ==
         [SigParam("x", ParamType(["Int"]), :positional), SigParam("ys", ParamType(), :vararg)]
-    @test _arity_of(items["f"].method_sig) == items["f"].arity
+    @test _arity_of(items["f"].method_sig) == MethodArity(1, typemax(Int), Symbol[], false)
 
     # A body-only edit must leave the inventory `isequal` so Salsa backdates.
     update_file!(jw, TextFile(u, SourceText("""
@@ -1613,14 +1651,31 @@ end
     @test sigof(macro_wrapped).where_vars == SigTypeVar[]
 end
 
-@testitem "signature record: every arity-carrying inventory item derives its arity" begin
+@testitem "signature record: every callable inventory item carries one, and it derives the right arity" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, _arity_of
+    using JuliaWorkspaces: derived_file_inventory, derived_item_positions, TextFile, SourceText,
+        MethodArity, _arity_of
+    using JuliaWorkspaces: CSTParser, StaticLint
     using JuliaWorkspaces.URIs2: URI, filepath2uri
 
-    # End to end over the real inventory, which is what the cross-file
-    # argument-count check consumes: no arity-carrying item may be missing its
-    # signature record, and none may disagree with it.
+    # End to end over the real inventory, against an oracle taken from the item's
+    # OWN defining EXPR (reached through the position map): every item that
+    # declares a callable must carry a record, and that record must derive the
+    # count `func_nargs`/`struct_nargs` gives for the same EXPR. This is the only
+    # guard on the coverage the per-root index filters by `method_sig === nothing`
+    # — a construction site that forgets the record drops arity coverage silently.
+    #
+    # `_classify_item!` recurses into a `const`/`global` wrapper with the STATEMENT's
+    # id, so the oracle has to unwrap the same layer to reach the definition.
+    function unwrap_wrapper(x)
+        x isa CSTParser.EXPR || return x
+        (CSTParser.headof(x) === :const || CSTParser.headof(x) === :global) || return x
+        for inner in something(x.args, CSTParser.EXPR[])
+            inner isa CSTParser.EXPR && CSTParser.isassignment(inner) && return inner
+        end
+        return x
+    end
+
     srcdir = joinpath(pkgdir(JuliaWorkspaces), "src")
     jw = JuliaWorkspace()
     uris = URI[]
@@ -1632,24 +1687,37 @@ end
         push!(uris, u)
     end
 
-    nitems = Ref(0)
+    nmethods, nstructs = Ref(0), Ref(0)
     bad = String[]
     for u in uris
+        pos = derived_item_positions(jw.runtime, u)
         for it in derived_file_inventory(jw.runtime, u).items
-            it.arity === nothing && continue
-            nitems[] += 1
+            entry = get(pos, it.id, nothing)
+            entry === nothing && continue
+            x = unwrap_wrapper(entry.expr)
+            expected = if it.kind in (:struct, :mutable_struct) && CSTParser.defines_struct(x)
+                nstructs[] += 1
+                MethodArity(StaticLint.struct_nargs(x)...)
+            elseif it.kind in (:function, :macro, :const, :global) && StaticLint._is_real_method(x)
+                nmethods[] += 1
+                MethodArity(StaticLint.func_nargs(x)...)
+            else
+                continue
+            end
             if it.method_sig === nothing
                 push!(bad, string(basename(string(u)), ": ", it.name, " (", it.kind, ") has no method_sig"))
-            elseif _arity_of(it.method_sig) != it.arity
+            elseif _arity_of(it.method_sig) != expected
                 push!(bad, string(basename(string(u)), ": ", it.name, " (", it.kind, ")",
-                                  "\n      item.arity -> ", it.arity,
-                                  "\n      _arity_of  -> ", _arity_of(it.method_sig)))
+                                  "\n      oracle    -> ", expected,
+                                  "\n      _arity_of -> ", _arity_of(it.method_sig)))
             end
         end
     end
 
-    @test nitems[] > 1000
-    isempty(bad) || println("\n", length(bad), " items whose arity is not derived:\n",
+    # Guard against a vacuous pass (a broken join finding nothing to compare).
+    @test nmethods[] > 1000
+    @test nstructs[] > 100
+    isempty(bad) || println("\n", length(bad), " items whose record is missing or wrong:\n",
                             join(bad, "\n"))
     @test isempty(bad)
 end
