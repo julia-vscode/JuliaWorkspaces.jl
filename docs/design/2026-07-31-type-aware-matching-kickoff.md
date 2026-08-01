@@ -158,10 +158,16 @@ exist nowhere in the code, so this list is their only record.
   the one false positive slice 1 shipped with (§17b). Plan written and committed:
   `docs/superpowers/plans/2026-07-31-slice-1-4-reassigned-local-types.md`. Ready to
   execute as-is.
-- **Slice 1.5 — merge the arity and parameter-type records into one signature
-  record.** Designed, not planned in task form; the trailing section of
-  `docs/superpowers/plans/2026-07-31-type-aware-matching-slice-1.md` has the shape,
-  the two-independently-gated-opinions constraint, and the acceptance gate.
+- **Slice 1.5 — one signature record.** Specced in
+  `docs/design/2026-08-01-slice-1-5-signature-record.md`; needs a task plan next.
+  A structured `signature` field with parameter names, types and roles replaces
+  *three* overlapping fields — `arity`, `param_types` and the string `signature` —
+  and `MethodArity` becomes derived rather than stored. Two traps the spec turns
+  into design rules: merge the storage but keep **two projections**, or a type-only
+  edit stops backdating the count opinion; and withholding must blank the types
+  *inside* a record rather than drop it, or the `eval` marker starts deleting arity
+  coverage. Prerequisite for slice 2, which then becomes a resolver change rather
+  than a schema change.
 
 **Bugs found during slice 1, not caused by it.**
 
