@@ -215,28 +215,24 @@ list is their only record.
   Decided 2026-08-01: **keep both.** They are correct diagnostics. A future sweep over
   a wider corpus should expect movement from them and not treat it as a regression.
 
-### Known asymmetry, from slice 2
+### Residual from slice 2
 
-- **The local path does not substitute `where` bounds; the cross-file path now does.**
-  `arg_type` (`src/StaticLint/methodmatching.jl:21-25`) deliberately returns `Any`
-  for a typevar-bound parameter — "we don't know the concrete constraint
-  statically". So `f(x::T) where T<:Real = x` called with a `String` is flagged when
-  the method is a cross-file sibling and silent when it is a local closure.
+- **The `where`-bound parity gap is fixed** (`b935441`). `arg_type` now reads a
+  typevar binding's upper bound instead of discarding the constraint, so the local
+  and cross-file paths agree about the same signature by construction —
+  `where_upper_bound_expr` mirrors the shapes the inventory records.
 
-  Plan-authorised and one-directional (cross-file is strictly more precise, never
-  less), and narrow in practice: in per-file mode a tree-visible callee never reaches
-  the local path, so it shows only between a top-level sibling method and a
-  same-scope local one. But it does mean moving a method *into* the calling function
-  can make a genuine diagnostic disappear. The fix is to teach the local path the
-  same substitution at `methodmatching.jl:21-25`, which currently discards a
-  constraint it can already see.
+  **One residual, pinned rather than fixed:** `f(x::T) where Lo<:T<:Hi` still rules
+  nothing out on the *local* path, because `mark_binding!` binds no name for the
+  middle identifier of a `:comparison` chain, so there is no typevar binding to read
+  a bound from. Permissive, rare, and upstream of the substitution — fixing it means
+  touching binding creation, which has its own blast radius. Pinned by a test so it
+  is a known state.
 
 - **An inner `where` in an annotation records as wholly unknown.** `x::Vector{T} where T`
-  loses even its head, so neither slice-2 rule can reach it. Fixing it needs a
-  record-shape change — and note the local path declines the same shape, so fixing
-  only the record would make the cross-file path *more* precise than the local one,
-  which is the asymmetry the head-of-curly rule exists to avoid. File behind a shape
-  change, with the parity item above.
+  loses even its head, so neither slice-2 rule reaches it. Needs a record-shape
+  change. Note the local path declines the same shape, so the two agree today —
+  fixing only the record would reintroduce an asymmetry.
 
 ### Deferred
 
