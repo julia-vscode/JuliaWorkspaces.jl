@@ -1134,7 +1134,7 @@ end
 @testitem "inventory: records bare and qualified parameter types" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText,
-        MethodSignatureRecord, _recorded_type_path, _sig_is_judgeable
+        MethodSignatureRecord, _recorded_type_head, _sig_is_judgeable
     using JuliaWorkspaces.URIs2: URI
 
     # What the cross-file type check actually reads off a record: one resolvable
@@ -1142,7 +1142,7 @@ end
     # record may judge a call at all.
     paths(it) = begin
         tv = Set{String}(v.name for v in it.method_sig.where_vars)
-        [something(_recorded_type_path(p.type, tv), String[]) for p in it.method_sig.params]
+        [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
     end
     judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
 
@@ -1164,15 +1164,16 @@ end
     @test paths(items["f"]) == [["Int"], ["CSTParser", "EXPR"]]
     # unannotated parameter records as unknown, not as absent
     @test paths(items["g"]) == [String[], ["String"]]
-    # parametric: unknown in this slice (the head is NOT resolved alone)
-    @test paths(items["h"]) == [String[]]
+    # parametric: the HEAD is what resolves, its arguments are dropped
+    @test paths(items["h"]) == [["Vector"]]
     # a where-bound type variable is method-local, never a resolvable name
     @test paths(items["k"]) == [String[]]
     # a positional splat makes alignment unknowable -> the record cannot judge
     @test !judgeable(items["m"])
     @test all(judgeable, (items["f"], items["g"], items["h"], items["k"], items["n"]))
-    # value positions must not be harvested as type names
-    @test paths(items["n"]) == [String[]]
+    # value positions must not be harvested as type names: only the head is read,
+    # so neither `(:w,)` nor the nested `String` can stand in for the parameter
+    @test paths(items["n"]) == [["NamedTuple"]]
 end
 
 @testitem "inventory: method_sig is nothing for non-methods and backdates on body edits" begin
@@ -1194,12 +1195,12 @@ end
 
 @testitem "inventory: a where-clause bound does not shadow a same-named parameter type" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, _recorded_type_path
+    using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, _recorded_type_head
     using JuliaWorkspaces.URIs2: URI
 
     paths(it) = begin
         tv = Set{String}(v.name for v in it.method_sig.where_vars)
-        [something(_recorded_type_path(p.type, tv), String[]) for p in it.method_sig.params]
+        [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
     end
 
     u = URI("file:///pt3/src/P.jl")
@@ -1219,12 +1220,12 @@ end
 @testitem "inventory: keyword args, defaulted positional args, and explicit Vararg" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText,
-        MethodSignatureRecord, _recorded_type_path, _sig_is_judgeable
+        MethodSignatureRecord, _recorded_type_head, _sig_is_judgeable
     using JuliaWorkspaces.URIs2: URI
 
     paths(it) = begin
         tv = Set{String}(v.name for v in it.method_sig.where_vars)
-        [something(_recorded_type_path(p.type, tv), String[]) for p in it.method_sig.params]
+        [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
     end
     judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
 
@@ -1258,12 +1259,12 @@ end
 @testitem "inventory: dispatch-only (unary `::T`) parameters record their type" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText,
-        MethodSignatureRecord, _recorded_type_path, _sig_is_judgeable
+        MethodSignatureRecord, _recorded_type_head, _sig_is_judgeable
     using JuliaWorkspaces.URIs2: URI
 
     paths(it) = begin
         tv = Set{String}(v.name for v in it.method_sig.where_vars)
-        [something(_recorded_type_path(p.type, tv), String[]) for p in it.method_sig.params]
+        [something(_recorded_type_head(p.type, tv), String[]) for p in it.method_sig.params]
     end
     judgeable(it) = _sig_is_judgeable(MethodSignatureRecord(String[], it.kind, it.method_sig))
 
@@ -1290,8 +1291,8 @@ end
     @test paths(items["q"]) == [["Int"], ["String"]]
     # qualified, same as the named form
     @test paths(items["h"]) == [["Base", "AbstractString"]]
-    # parametric and where-bound stay unknown, same as the named form
-    @test paths(items["k"]) == [String[]]
+    # parametric head and where-bound, same as the named form
+    @test paths(items["k"]) == [["Vector"]]
     @test paths(items["w"]) == [String[]]
     # an anonymous Vararg is still variadic -> alignment unknowable
     @test !judgeable(items["v"])

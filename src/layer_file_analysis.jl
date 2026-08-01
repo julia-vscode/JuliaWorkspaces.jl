@@ -693,14 +693,40 @@ const _UNTYPED_SIG_KINDS = (:struct, :mutable_struct)
 const _UNKNOWN_TYPE_PATH = String[]
 const _NO_TVARS = String[]
 
-# The dotted name a parameter's type resolves through, or `nothing` when it names
-# no single type: an unknown, a value, a parametric (whose arguments this slice
-# does not compare), or a method-local type variable — substituting a `where`
-# bound would widen what the check rules out, which is its own gate.
-function _recorded_type_path(t::ParamType, tvars)
-    (isempty(t.path) || !isempty(t.args) || !isempty(t.value)) && return nothing
+# The dotted name a parameter's type resolves through — its own name, or the HEAD
+# of a parametric, whose arguments are deliberately dropped (`Vector{Int}` and
+# `Vector{String}` both resolve to `Vector`, exactly as the local path's
+# `_resolve_type_expr` does; comparing type arguments is nobody's job here).
+# `nothing` when it names no type: an unknown, a value — a value never carries a
+# path, so `Val{:String}` cannot yield `String` — or a method-local type variable,
+# where substituting a `where` bound would widen what the check rules out.
+function _recorded_type_head(t::ParamType, tvars)
+    (isempty(t.path) || !isempty(t.value)) && return nothing
     (length(t.path) == 1 && t.path[1] in tvars) && return nothing
     return t.path
+end
+
+# Is this a written `Union{A,B,…}` with at least one member? Spelling-based, like
+# the local path's `_is_union_curly`; a qualified `Core.Union{…}` falls through to
+# the head leg and lands on the bare `Union` datatype, in both paths alike.
+_is_written_union(t::ParamType) =
+    length(t.path) == 1 && t.path[1] == "Union" && !isempty(t.args)
+
+# A recorded parameter type resolved to an operand `_has_type_intersection` can
+# judge. A union keeps its members so each branch can be tested on its own;
+# everything else resolves through its name.
+function _resolve_param_type(rt, root, env, defmod::Vector{String}, t::ParamType, tvars)
+    if _is_written_union(t)
+        members = Any[_resolve_param_type(rt, root, env, defmod, a, tvars) for a in t.args]
+        # `Union{Any,X}` IS `Any`: one unresolvable member makes the whole union
+        # no-opinion, so a union carrying one is never built. (Such a union is
+        # permissive anyway — every argument's supertype walk ends at `Any`, which
+        # matches the member — this only makes it so by construction.)
+        any(StaticLint._isany, members) && return StaticLint.CoreTypes.Any
+        return StaticLint._fake_union(members)
+    end
+    return _resolve_recorded_type(rt, root, env, defmod,
+                                  something(_recorded_type_head(t, tvars), _UNKNOWN_TYPE_PATH))
 end
 
 # Does this record's parameter list align one-to-one with a call's positional
@@ -723,8 +749,7 @@ function _resolve_param_types(rt, root, env, recs)
     out = @NamedTuple{arity::MethodArity, types::Vector{Any}, judgeable::Bool}[]
     for r in recs
         tvars = isempty(r.sig.where_vars) ? _NO_TVARS : String[v.name for v in r.sig.where_vars]
-        types = Any[_resolve_recorded_type(rt, root, env, r.defmod,
-                                           something(_recorded_type_path(p.type, tvars), _UNKNOWN_TYPE_PATH))
+        types = Any[_resolve_param_type(rt, root, env, r.defmod, p.type, tvars)
                     for p in r.sig.params]
         push!(out, (arity=_arity_of(r.sig), types=types, judgeable=_sig_is_judgeable(r)))
     end

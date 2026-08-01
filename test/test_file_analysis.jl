@@ -2223,6 +2223,57 @@ end
     @test SL._isany(types[4])
 end
 
+@testitem "file analysis: parametric parameter types resolve their head, unions their members" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: derived_method_signatures, derived_stdlib_only_env
+    const SS = JuliaWorkspaces.SymbolServer
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\nend\n",
+        A => """
+        struct Own end
+        f(a::Vector{Int}, b::Union{Int,Nothing}, c::Val{:String}, d::Base.Vector{Int},
+          e::Union{Int,Own}, h::Vector{T} where T) = 1
+        g(x::Vector{T}, y::T) where T = 2
+        """,
+    ))
+    rt = jw.runtime
+    env = derived_stdlib_only_env(rt)
+    syms = SL.getsymbols(env)
+    md = Dict{UInt64,SL.Meta}()
+    dt(m, n) = SL.get_eventual_datatype(SL.maybe_lookup(syms[m][n], env), env)
+    hits(a, b) = SL._has_type_intersection(a, b, syms, md)
+
+    types = only(JuliaWorkspaces._resolve_param_types(
+        rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "f"))).types
+    @test length(types) == 6
+
+    # a parametric resolves its HEAD; the arguments are not compared (so
+    # `Vector{Int}` and `Vector{String}` alike reach `Array`). `Vector` is an
+    # ALIAS, so the store value carries pinned parameters (`Core.Array{T,1}`) --
+    # the base name is what the comparison keys on.
+    @test string(SL._basename(types[1])) == "Core.Array"
+    @test !SL._isany(types[1])
+    # a union keeps its members, so each branch can be tested on its own
+    @test types[2] isa SS.FakeUnion
+    @test hits(dt(:Core, :Int64), types[2]) && hits(dt(:Core, :Nothing), types[2])
+    @test !hits(dt(:Core, :String), types[2])
+    # a value argument stays a value: `Val{:String}` must not reach `String`
+    @test !SL._isany(types[3]) && !hits(dt(:Core, :String), types[3])
+    # a DOTTED head resolves through the qualified-store lookup
+    @test string(SL._basename(types[4])) == "Core.Array"
+    # a union with an unresolvable member IS `Any` -- never a union carrying one
+    @test SL._isany(types[5])
+    # an inner `where` in the annotation records as unknown, so no opinion
+    @test SL._isany(types[6])
+
+    gtypes = only(JuliaWorkspaces._resolve_param_types(
+        rt, ROOT, env, derived_method_signatures(rt, ROOT, ["MainPkg"], "g"))).types
+    # the head resolves even when an argument is a method-local type variable...
+    @test string(SL._basename(gtypes[1])) == "Core.Array"
+    # ...while the type variable itself is still no-opinion
+    @test SL._isany(gtypes[2])
+end
+
 @testitem "derived_file_analysis: cross-file positional TYPE check" setup=[FileAnalysisWS] begin
     mm(fa) = [d.message for d in fa.diagnostics
               if occursin("No method matching", d.message) || occursin("method call error", d.message)]
@@ -2242,12 +2293,47 @@ end
     @test isempty(diags("f(x) = x\n", "g() = f(\"s\")\n"))
     # a WORKSPACE-declared parameter type is no-opinion in this slice
     @test isempty(diags("struct Own end\nf(x::Own) = x\n", "g() = f(\"s\")\n"))
-    # parametric annotation -> unknown -> no opinion
-    @test isempty(diags("f(x::Vector{Int}) = x\n", "g() = f(\"s\")\n"))
+    # a parametric annotation is judged on its HEAD
+    @test length(diags("f(x::Vector{Int}) = x\n", "g() = f(\"s\")\n")) == 1
     # keyword arguments -> decline
     @test isempty(diags("f(x::Int; k=1) = x\n", "g() = f(\"s\"; k=2)\n"))
     # arity mismatch keeps its existing message, and is not doubled up
     @test length(diags("f(x::Int) = x\n", "g() = f(1, 2)\n")) == 1
+end
+
+@testitem "derived_file_analysis: TYPE check on parametric and union annotations" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # the head decides: a `String` is no `Array`, a vector literal is
+    @test length(diags("f(x::Vector{Int}) = x\n", "g() = f(\"s\")\n")) == 1
+    @test isempty(diags("f(x::Vector{Int}) = x\n", "g() = f([1, 2])\n"))
+    # ...and the arguments are NOT compared, so an element-type mismatch is silent
+    @test isempty(diags("f(x::Vector{String}) = x\n", "g() = f([1, 2])\n"))
+    # a dotted head resolves the same way
+    @test length(diags("f(x::Base.Vector{Int}) = x\n", "g() = f(\"s\")\n")) == 1
+
+    # a union accepts EVERY member and rejects a non-member
+    @test isempty(diags("f(x::Union{Int,String}) = x\n", "g() = f(1)\n"))
+    @test isempty(diags("f(x::Union{Int,String}) = x\n", "g() = f(\"s\")\n"))
+    @test length(diags("f(x::Union{Int,Float64}) = x\n", "g() = f(\"s\")\n")) == 1
+    # subtyping still applies inside a union member
+    @test isempty(diags("f(x::Union{Integer,Nothing}) = x\n", "g() = f(1)\n"))
+    # a member that resolves to nothing makes the WHOLE union no-opinion
+    @test isempty(diags("struct Own end\nf(x::Union{Int,Own}) = x\n", "g() = f(\"s\")\n"))
+    # a bare/empty `Union` names some union with unknown members -> no opinion
+    @test isempty(diags("f(x::Union) = x\n", "g() = f(\"s\")\n"))
+
+    # `Val{:String}` is a `Val`, never a `String`: had the value been read as a
+    # type name, this call would match instead of being flagged
+    @test length(diags("f(x::Val{:String}) = x\n", "g() = f(\"s\")\n")) == 1
+
+    # a `where`-bound type variable is still no-opinion, at the head or alone
+    @test isempty(diags("f(x::T) where T = x\n", "g() = f(\"s\")\n"))
+    @test length(diags("f(x::Vector{T}) where T = x\n", "g() = f(\"s\")\n")) == 1
 end
 
 @testitem "derived_file_analysis: type check declines when the argument type is unknown" setup=[FileAnalysisWS] begin
