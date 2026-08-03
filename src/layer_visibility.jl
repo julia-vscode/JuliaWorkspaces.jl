@@ -144,7 +144,9 @@ function _implicit_member(rt, root, path::Vector{String}, name::String)
         mpath = [String(m)]
         store = _resolve_external_module(rt, root, mpath)
         store === nothing && continue
-        (sym in store.exportednames && haskey(store.vals, sym)) || continue
+        # haskey first: O(1) dict probe rejects most misses before the O(n)
+        # exportednames scan runs; both are still required for correctness.
+        (haskey(store.vals, sym) && sym in store.exportednames) || continue
         val = StaticLint.maybe_lookup(store.vals[sym], _resolve_env(rt, root))
         val === nothing && continue
         val isa SymbolServer.ModuleStore &&
