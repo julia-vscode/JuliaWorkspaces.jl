@@ -114,12 +114,16 @@ question.
   baremodule T + Base.@deprecate  ->  confirmed: ["f"]   wrong (Base isn't in scope either)
   ```
 
-  That fix is not part of this slice, but it must not grow a second copy of the
-  gate: its shape is to make the implicit-owner branch available only to a non-bare
-  module and otherwise **fall through to requiring a real import**, which then
-  handles `baremodule T; using Base; @deprecate …` by construction rather than by
-  accident. Whichever of the two lands first introduces the node; the other
-  consumes it.
+  **The node is landed on this branch**, with a test that exercises it directly
+  rather than through either consumer. The confirmation fix itself could not land
+  with it: `_macro_owner_confirmed` does not exist on `main`, only on
+  `sp/macro-declared-names`. Its shape, for whoever applies it — most likely as
+  part of this branch's rebase after that one merges — is to make the
+  implicit-owner branch available only to a non-bare module and otherwise **fall
+  through to requiring a real import**, which then handles
+  `baremodule T; using Base; @deprecate …` by construction rather than by accident.
+  It must consume `derived_module_is_bare` rather than growing a second copy of the
+  gate.
 - Otherwise, walks `StaticLint.IMPLICIT_SCOPE_MODULES` **in order, first match
   wins**, accepting `name` only when it is in that store's `exportednames` **and**
   present in its `vals`. This mirrors `maybe_getfield`'s inner test.

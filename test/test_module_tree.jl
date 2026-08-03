@@ -1490,3 +1490,32 @@ end
     # A workspace-local function is not an external extension.
     @test !("f" in derived_external_extension_names(jw.runtime, root))
 end
+
+@testitem "module tree: derived_module_is_bare distinguishes baremodule" setup=[ModuleTreeWS] begin
+    using JuliaWorkspaces: derived_module_is_bare
+
+    # A `baremodule` has no implicit `using Base`/`using Core`, so it is the one
+    # module where a bare name the implicit scope would otherwise provide resolves
+    # to nothing. Tested directly rather than through a consumer: the node is
+    # shared, and its consumers arrive on separate branches.
+    a_uri = URI("file:///t/src/a.jl")
+    _, root_uri, jw = tree_of("""
+    module Outer
+    module Plain
+    end
+    baremodule Bare
+    end
+    include("a.jl")
+    end
+    """; extra_files=Dict(a_uri => "baremodule Spliced\nend\n"))
+    rt = jw.runtime
+
+    @test derived_module_is_bare(rt, root_uri, ["Outer", "Bare"])
+    @test !derived_module_is_bare(rt, root_uri, ["Outer", "Plain"])
+    @test !derived_module_is_bare(rt, root_uri, ["Outer"])
+    # A module spliced in from an included file keeps its bare-ness.
+    @test derived_module_is_bare(rt, root_uri, ["Outer", "Spliced"])
+    # The synthetic root, and a path naming no module, are not bare.
+    @test !derived_module_is_bare(rt, root_uri, String[])
+    @test !derived_module_is_bare(rt, root_uri, ["Outer", "Nope"])
+end

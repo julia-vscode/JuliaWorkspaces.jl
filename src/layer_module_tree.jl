@@ -658,6 +658,29 @@ Salsa.@derived function derived_module_exists(rt, root, path)
 end
 
 """
+    derived_module_is_bare(rt, root, path::Vector{String}) -> Bool
+
+Whether `path` names a `baremodule` in `root`'s tree. `false` for an ordinary
+module, for a path that names no module at all, and for the synthetic root.
+
+A `baremodule` gets no implicit `using Base`/`using Core`, so it is the one module
+in which a bare `Int`, a `Foo.println`, or an unimported `@deprecate` resolves to
+nothing. Anything that would otherwise treat those as always available has to ask
+this first.
+
+A per-module projection for the same reason as [`derived_module_exists`](@ref): a
+`Bool` backdates on every tree change that doesn't flip this one module's
+bare-ness, so a consumer running inside a per-file analysis frame picks up no
+whole-tree dependency.
+"""
+Salsa.@derived function derived_module_is_bare(rt, root, path)
+    @debug "derived_module_is_bare" root=root path=path
+
+    node = module_node(derived_module_tree(rt, root), path)
+    return node !== nothing && node.bare
+end
+
+"""
     derived_module_declared_at(rt, root, path::Vector{String}) -> Union{Nothing,ItemRef}
 
 The `ItemRef` of the `module` declaration for the module at `path` — a
