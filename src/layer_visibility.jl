@@ -156,6 +156,20 @@ function _implicit_member(rt, root, path::Vector{String}, name::String)
     return nothing
 end
 
+# `_member_lookup`'s answer for a member that came from the implicit scope, or its
+# `:unknown` answer when nothing did. `origin_module` is the PROVIDER, like the
+# `:external` branch's, so `resolve_treeref_store` can find the name in the env; a
+# module-valued member also gets an `:external` target so a chain can continue
+# through it.
+function _implicit_member_lookup(rt, root, tp::Vector{String}, member_name::String)
+    im = _implicit_member(rt, root, tp, member_name)
+    im === nothing && return (:unknown, nothing, tp, nothing)
+    val, prov = im
+    mt = val isa StaticLint.TreeRef ?
+        ImportTarget(:external, vcat(prov, [member_name])) : nothing
+    return (:external_symbol, nothing, prov, mt)
+end
+
 _tier(origin::Symbol) = origin === :declared ? 3 : origin === :import_binding ? 2 : 1
 
 # --- internal helpers: bringing in a resolved import's names ----------------
@@ -293,7 +307,8 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
             return (:module, _module_declared_at(rt, root, tp), tp, target)
         end
         names = derived_module_names(rt, root, tp)
-        haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
+        haskey(names, member_name) ||
+            return _implicit_member_lookup(rt, root, tp, member_name)
         mt = names[member_name] === :module ? ImportTarget(:tree, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_module_declared(rt, root, tp)[member_name], tp, mt)
     elseif target.sort === :workspace_package
@@ -306,7 +321,8 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
             return (:module, _module_declared_at(rt, entry, tp), tp, target)
         end
         names = derived_module_names(rt, entry, tp)
-        haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
+        haskey(names, member_name) ||
+            return _implicit_member_lookup(rt, entry, tp, member_name)
         mt = names[member_name] === :module ? ImportTarget(:workspace_package, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_module_declared(rt, entry, tp)[member_name], tp, mt)
     elseif target.sort === :external

@@ -163,3 +163,55 @@ end
     @test only(refs_of(jw, root, b, "println")) === nothing
     @test only(refs_of(jw, root, b, "Threads")) === nothing
 end
+
+@testitem "implicit scope: a colon-list member can come from the implicit scope" setup=[ImplicitScopeWS] begin
+    using JuliaWorkspaces: derived_module_visible_names
+
+    root = URI("file:///is5/src/T.jl")
+    a = URI("file:///is5/src/a.jl")
+    b = URI("file:///is5/src/b.jl")
+    jw = ws_files(
+        root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        a => "module Foo\nf(x) = x\nend\n",
+        b => "module Consumer\nusing ..Foo: println, f\ng() = println(f(1))\nend\n",
+    )
+    vis = derived_module_visible_names(jw.runtime, root, ["T", "Consumer"])
+
+    # `f` is Foo's own declaration: unchanged.
+    @test haskey(vis, "f")
+    @test vis["f"].origin_module == ["T", "Foo"]
+
+    # `println` came from Foo's implicit `using Base`, so it binds as an external
+    # symbol whose origin module is the PROVIDER — that is the path
+    # resolve_treeref_store walks to find it in the env.
+    @test haskey(vis, "println")
+    @test vis["println"].kind === :external_symbol
+    @test vis["println"].origin_module == ["Base"]
+    @test vis["println"].item === nothing
+
+    # ...and both occurrences resolve — the name in the colon list and the call site
+    # in `g` — rather than being reported as missing references.
+    prefs = refs_of(jw, root, b, "println")
+    @test length(prefs) == 2
+    @test all(r -> r !== nothing, prefs)
+    @test isempty(diagnostics_of(jw, root, b))
+end
+
+@testitem "implicit scope: a colon-list member that is public-not-exported stays unknown" setup=[ImplicitScopeWS] begin
+    using JuliaWorkspaces: derived_module_visible_names
+
+    root = URI("file:///is6/src/T.jl")
+    a = URI("file:///is6/src/a.jl")
+    b = URI("file:///is6/src/b.jl")
+    jw = ws_files(
+        root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        a => "module Foo\nf(x) = x\nend\n",
+        b => "module Consumer\nusing ..Foo: Filesystem\nend\n",
+    )
+    vis = derived_module_visible_names(jw.runtime, root, ["T", "Consumer"])
+
+    # Julia binds the name lexically even when the import is wrong, so the entry
+    # exists — but it must stay `:unknown`, NOT resolve to Base.Filesystem.
+    @test haskey(vis, "Filesystem")
+    @test vis["Filesystem"].kind === :unknown
+end
