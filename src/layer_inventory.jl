@@ -46,6 +46,8 @@ recover Julia's textual-splice semantics; `id` identifies the declaring statemen
 and is what `ItemRef` carries. Both are minted by
 [`_foreach_toplevel_item`](@ref).
 """
+const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
+
 @auto_hash_equals struct InventoryItem
     order::Int
     id::Int64
@@ -56,12 +58,18 @@ and is what `ItemRef` carries. Both are minted by
     field_names::Vector{String}
     parent_module::Vector{String}
     arity::Union{Nothing,MethodArity}
+    # Set only on `:macro_declared` rows: the macro that declares this name, as
+    # written at the call site. Identity is confirmed later, in
+    # layer_visibility.jl, which needs the spelling to know what to confirm.
+    declared_by::Union{Nothing,MacroSpelling}
 end
 
-# Back-compat constructor: non-callable items (assignments, consts, enums, …)
-# carry no arity.
+# Back-compat constructors: non-callable items (assignments, consts, enums, …)
+# carry no arity, and only `:macro_declared` rows carry a spelling.
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing)
+InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity) =
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing)
 
 "An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
 `alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
@@ -479,6 +487,53 @@ function _symbol_name(x)
     return x isa CSTParser.EXPR && CSTParser.isoperator(x) ? CSTParser.valof(x) : nothing
 end
 
+# --- Modelled macros that declare names their argument never spells ---------
+#
+# A macrocall is transparent to the walker, so a macro that mints extra names
+# leaves no trace of them anywhere. Each rule maps a macro to the names its
+# FIRST argument implies. `derive` returns an empty vector when the argument is
+# not the shape the macro requires — the only error path at this layer.
+#
+# `owner` is where the macro must come from. Nothing here checks that; it is the
+# input to the confirmation step in layer_visibility.jl. Keeping both halves in
+# one table is deliberate: the walker needs the names, confirmation needs the
+# paths, and two tables would drift.
+struct MacroDeclarationRule
+    owner::Vector{String}
+    macro_name::String
+    derive::Function
+end
+
+# `@declare_input foo(rt, x::Int)::V` declares `foo`, `set_foo!`, `delete_foo!`
+# (Salsa's declare_input_macro.jl builds the latter two by string interpolation).
+function _declare_input_names(arg1::CSTParser.EXPR)
+    CSTParser.isdeclaration(arg1) || return String[]
+    (arg1.args !== nothing && length(arg1.args) >= 1) || return String[]
+    CSTParser.iscall(arg1.args[1]) || return String[]
+    n = _symbol_name(CSTParser.get_name(arg1.args[1]))
+    return n === nothing ? String[] : [n, "set_$(n)!", "delete_$(n)!"]
+end
+
+# `@deprecate f(x::Int) g(x)` and `@deprecate old new` both declare the first
+# argument's name. `get_name` unwraps a `where` and a getfield; `_symbol_name`
+# additionally covers operator names.
+function _deprecate_names(arg1::CSTParser.EXPR)
+    n = _symbol_name(CSTParser.get_name(arg1))
+    return n === nothing ? String[] : [n]
+end
+
+const MACRO_DECLARATION_RULES = MacroDeclarationRule[
+    MacroDeclarationRule(["Salsa"], "@declare_input", _declare_input_names),
+    MacroDeclarationRule(["Base"], "@deprecate", _deprecate_names),
+]
+
+function _macro_declaration_rule(macro_name::AbstractString)
+    for r in MACRO_DECLARATION_RULES
+        r.macro_name == macro_name && return r
+    end
+    return nothing
+end
+
 # Split a getfield chain `A.B.c` (parsed as nested binary "." operators, each
 # level's rhs a `quotenode`-wrapped identifier; see `is_getfield_w_quotenode`)
 # into its leading qualifier path `["A", "B"]`, peeling one level at a time —
@@ -736,7 +791,34 @@ function _classify_assignment!(acc, x, order, id, parent_module, kind_override, 
     return
 end
 
+# Names a modelled macro declares that its argument never spells. The walker is
+# transparent through a macrocall, but CSTParser keeps parent links, so a
+# statement can still tell that it is the macrocall's FIRST argument — `args[3]`,
+# since `args[1]` is the macro name and `args[2]` a zero-span placeholder. Rows
+# carry that argument's own id, so every name from one macrocall shares it (the
+# shape `@enum` members already use).
+#
+# Matching is by bare macro name only: nothing here judges which module the macro
+# came from, and nothing here reads the environment.
+function _emit_macro_declarations!(acc, x, order, id, parent_module)
+    p = CSTParser.parentof(x)
+    (p isa CSTParser.EXPR && CSTParser.ismacrocall(p)) || return
+    (p.args !== nothing && length(p.args) >= 3 && p.args[3] === x) || return
+    mname = _macro_name_string(p.args[1])
+    mname === nothing && return
+    rule = _macro_declaration_rule(mname)
+    rule === nothing && return
+
+    spelling = (qualifier=_getfield_qualifier(p.args[1]), name=mname)
+    for n in rule.derive(x)
+        push!(acc.items, InventoryItem(order, id, n, String[], :macro_declared,
+            nothing, String[], parent_module, nothing, spelling))
+    end
+    return
+end
+
 function _classify_item!(acc, x, order, id, parent_module, offset, include_targets_by_offset, include_records)
+    _emit_macro_declarations!(acc, x, order, id, parent_module)
     if CSTParser.defines_module(x)
         # name/bare per bindings.jl:90-92 and scope.jl:172-181
         name = CSTParser.isidentifier(x.args[2]) ? StaticLint.valofid(x.args[2]) : nothing

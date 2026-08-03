@@ -66,6 +66,150 @@ Salsa.@derived function derived_module_self_and_parents(rt, root, path)
     return chain
 end
 
+# --- Macro identity confirmation --------------------------------------------
+#
+# A `:macro_declared` inventory row is a claim conditional on the wrapping macro
+# really being the one we model. Confirming it is two checks: does the spelling
+# point at the owner (structural, from classified imports), and does the owner
+# actually provide that macro (the environment store for a registry owner, the
+# owner package's own tree for a workspace one).
+#
+# This lives here, not in the module tree, because it reads `env`: the tree must
+# stay env-free. Reading the TREE from here is fine — no tree consumes this — but
+# reading VISIBILITY from here would close the resolution cycle. Do not.
+
+# `Base` and `Core` are in scope in every module without an import.
+const _IMPLICIT_MACRO_OWNERS = (["Base"], ["Core"])
+
+# The import of `path`'s own module that could bring `spelling` in, or `nothing`.
+# Only this module's imports count: Julia does not inherit an enclosing module's
+# `using`, and `_visible_names_pass1` reads `path`'s imports alone for the same
+# reason.
+function _macro_owner_import(rt, root::URI, path::Vector{String},
+                             spelling::MacroSpelling, owner::Vector{String})
+    for ri in derived_module_imports(rt, root, path)
+        ri.target.path == owner || continue
+        if isempty(spelling.qualifier)
+            # A bare `@declare_input` needs the name brought in: a wildcard
+            # `using Salsa`, or a colon-list naming the macro.
+            if isempty(ri.symbols)
+                ri.kind === :using && return ri
+            else
+                any(s -> s.name == spelling.name, ri.symbols) && return ri
+            end
+        else
+            # A qualified `Salsa.@declare_input` needs the QUALIFIER actually
+            # bound, which is exactly what `_bound_module_name` answers — the
+            # same rule the bring-in arms use, so the two cannot disagree about
+            # what a qualifier could be pointing at. `nothing` (a colon-list
+            # that never lists the module itself) matches no qualifier.
+            _bound_module_name(ri) == spelling.qualifier[1] && return ri
+        end
+    end
+    return nothing
+end
+
+# Does the environment's store for `owner` provide `macro_name`? The module walk is
+# `_resolve_external_module`'s, which is also what resolves an `:external` import
+# target, so an owner path is looked up exactly as any other module path is.
+function _env_provides_macro(rt, root::URI, owner::Vector{String}, macro_name::String)
+    store = _resolve_external_module(rt, root, owner)
+    return store !== nothing && haskey(store.vals, Symbol(macro_name))
+end
+
+# Does the workspace package `owner` declare `macro_name` in its own tree?
+# `derived_module_names` rather than `derived_module_declared`: it is id-free, so
+# an item-id shift in the owner package does not invalidate us, and it carries
+# kinds, so we can require an actual macro.
+function _workspace_package_provides_macro(rt, owner::Vector{String}, macro_name::String)
+    roots = derived_workspace_package_roots(rt)
+    entry = get(roots, owner[1], nothing)
+    entry === nothing && return false
+    return get(derived_module_names(rt, entry, owner), macro_name, nothing) === :macro
+end
+
+function _macro_owner_confirmed(rt, root::URI, path::Vector{String}, spelling::MacroSpelling)
+    rule = _macro_declaration_rule(spelling.name)
+    rule === nothing && return false
+    owner = rule.owner
+
+    # A local macro of the same name shadows a BARE use — but not a qualified
+    # one, which names its module explicitly.
+    if isempty(spelling.qualifier) &&
+            haskey(derived_module_declared(rt, root, path), spelling.name)
+        return false
+    end
+
+    if owner in _IMPLICIT_MACRO_OWNERS
+        # No import needed; a qualifier, if written, must still be the owner.
+        isempty(spelling.qualifier) || spelling.qualifier == owner || return false
+        return _env_provides_macro(rt, root, owner, spelling.name)
+    end
+
+    ri = _macro_owner_import(rt, root, path, spelling, owner)
+    ri === nothing && return false
+
+    if ri.target.sort === :workspace_package
+        return _workspace_package_provides_macro(rt, owner, spelling.name)
+    elseif ri.target.sort === :external
+        return _env_provides_macro(rt, root, owner, spelling.name)
+    else
+        # `:tree` is a same-named submodule of THIS root, `:unresolved` is a
+        # target we could not place. Neither is the owner.
+        return false
+    end
+end
+
+"""
+    derived_macro_declared_names_index(rt, root) -> Dict{Tuple{Vector{String},String},ItemRef}
+
+Every `(module path, name) => declaring item` a CONFIRMED modelled macro declares
+anywhere in `root`'s tree. One splice walk over `:macro_declared` inventory rows,
+in the same DFS order the module tree uses, so a duplicate name resolves
+last-in-splice-order-wins exactly like `_declare!`.
+
+Funnelled through one per-root node for the same reason as
+[`derived_method_arities_index`](@ref): the walk reads every file in the root, so a
+per-name node would depend on every file. Identity is confirmed once per distinct
+`(module path, spelling)`, not once per macrocall.
+
+Reads the module tree and the environment; never visibility, which would close the
+cycle this whole layering exists to keep open.
+"""
+Salsa.@derived function derived_macro_declared_names_index(rt, root)
+    @debug "derived_macro_declared_names_index" root=root
+
+    result = Dict{Tuple{Vector{String},String},ItemRef}()
+    confirmed = Dict{Tuple{Vector{String},MacroSpelling},Bool}()
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
+                                 kinds=(:macro_declared,)) do F, item, loc
+        spelling = item.declared_by
+        spelling === nothing && return
+        ok = get!(() -> _macro_owner_confirmed(rt, root, loc, spelling), confirmed, (loc, spelling))
+        ok || return
+        result[(loc, item.name)] = ItemRef(F, item.id)
+    end
+    return result
+end
+
+"""
+    derived_module_macro_declared_names(rt, root, path) -> Dict{String,ItemRef}
+
+The confirmed macro-declared names of one module: a thin projection of
+[`derived_macro_declared_names_index`](@ref), so each module backdates
+independently. Empty for a module with no confirmed modelled macrocall, which is
+almost every module.
+"""
+Salsa.@derived function derived_module_macro_declared_names(rt, root, path)
+    @debug "derived_module_macro_declared_names" root=root path=path
+
+    result = Dict{String,ItemRef}()
+    for ((p, n), ref) in derived_macro_declared_names_index(rt, root)
+        p == path && (result[n] = ref)
+    end
+    return result
+end
+
 # --- internal helpers: tree/env plumbing ------------------------------------
 
 # The module's own `declared_at` (where `path` itself was declared as a
@@ -126,6 +270,31 @@ _tier(origin::Symbol) = origin === :declared ? 3 : origin === :import_binding ? 
 # `origin` (which is `:import_binding` for all of them).
 const _BringIn = Tuple{String,VisibleName,Union{Nothing,ImportTarget}}
 
+"""
+    _bound_module_name(target::ImportTarget, alias) -> Union{Nothing,String}
+    _bound_module_name(ri::ResolvedImport) -> Union{Nothing,String}
+
+The name an import statement binds for the TARGET MODULE ITSELF, or `nothing` when
+it binds none. A whole-module `using`/`import X` binds `X`, or its alias. A
+colon-list binds the module only when it lists the module's own name
+(`using X: X as Y`), the per-symbol alias winning — `using X: bar` brings in `bar`
+and leaves `X` unbound.
+
+One rule, one place: every bring-in arm needs the whole-module answer, and macro
+owner confirmation needs the colon-list one, and they have to agree about what a
+qualifier like `Salsa.@declare_input` could be pointing at.
+"""
+_bound_module_name(target::ImportTarget, alias) =
+    isempty(target.path) ? nothing : (alias === nothing ? last(target.path) : alias)
+
+function _bound_module_name(ri::ResolvedImport)
+    isempty(ri.symbols) && return _bound_module_name(ri.target, ri.alias)
+    isempty(ri.target.path) && return nothing
+    hit = findfirst(s -> s.name == last(ri.target.path), ri.symbols)
+    hit === nothing && return nothing
+    return ri.symbols[hit].alias === nothing ? ri.symbols[hit].name : ri.symbols[hit].alias
+end
+
 # Bring in the names for one fully-resolved (never `:unresolved`)
 # `ImportTarget` — rule 2's `:tree`/`:workspace_package`/`:external` bullets.
 # `kind` (`:using`/`:import`) and `alias` come from the owning `ResolvedImport`
@@ -145,10 +314,16 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
             names = derived_module_names(rt, root, tp)
             exports = derived_module_exports(rt, root, tp).exports
             declared = derived_module_declared(rt, root, tp)
+            mdecl = derived_module_macro_declared_names(rt, root, tp)
             for name in exports
                 if haskey(names, name)
                     mt = names[name] === :module ? ImportTarget(:tree, vcat(tp, [name])) : nothing
                     push!(entries, (name, VisibleName(names[name], :using_tree, declared[name], tp), mt))
+                elseif haskey(mdecl, name)
+                    # Exported and confirmed macro-declared: not in `names`, since
+                    # a macro-declared name never enters the tree's `declared` map
+                    # by design (see `derived_module_macro_declared_names`).
+                    push!(entries, (name, VisibleName(:macro_declared, :using_tree, mdecl[name], tp), nothing))
                 else
                     # A re-export of a name the submodule brought in through its
                     # OWN imports (`using ..Prov; export bar`): exported but not
@@ -162,7 +337,7 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
                 end
             end
         end
-        bound = alias !== nothing ? alias : tp[end]
+        bound = _bound_module_name(target, alias)
         push!(entries, (bound, VisibleName(:module, origin, _module_declared_at(rt, root, tp), tp), target))
 
     elseif target.sort === :workspace_package
@@ -189,7 +364,7 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
                 push!(entries, (name, VisibleName(vn.kind, :using_workspace_package, vn.item, tp), mt))
             end
         end
-        bound = alias !== nothing ? alias : tp[end]
+        bound = _bound_module_name(target, alias)
         push!(entries, (bound, VisibleName(:module, origin, _module_declared_at(rt, entry, tp), tp), target))
 
     elseif target.sort === :external
@@ -206,7 +381,7 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
             # without the store; only the module name itself binds. The ledger
             # entry keeps the denoted target so relative/member chains through
             # the binding re-attempt (and fail) at their own use sites.
-            bound = alias !== nothing ? alias : tp[end]
+            bound = _bound_module_name(target, alias)
             push!(entries, (bound, VisibleName(:external_symbol, origin, nothing, tp), target))
             return entries
         end
@@ -223,7 +398,7 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
                 push!(entries, (name, VisibleName(:external_symbol, :using_external, nothing, tp), mt))
             end
         end
-        bound = alias !== nothing ? alias : tp[end]
+        bound = _bound_module_name(target, alias)
         push!(entries, (bound, VisibleName(:external_symbol, origin, nothing, tp), target))
     end
     return entries
@@ -248,7 +423,11 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
             return (:module, _module_declared_at(rt, root, tp), tp, target)
         end
         names = derived_module_names(rt, root, tp)
-        haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
+        if !haskey(names, member_name)
+            ref = get(derived_module_macro_declared_names(rt, root, tp), member_name, nothing)
+            ref === nothing && return (:unknown, nothing, tp, nothing)
+            return (:macro_declared, ref, tp, nothing)
+        end
         mt = names[member_name] === :module ? ImportTarget(:tree, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_module_declared(rt, root, tp)[member_name], tp, mt)
     elseif target.sort === :workspace_package
@@ -261,7 +440,11 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
             return (:module, _module_declared_at(rt, entry, tp), tp, target)
         end
         names = derived_module_names(rt, entry, tp)
-        haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
+        if !haskey(names, member_name)
+            ref = get(derived_module_macro_declared_names(rt, entry, tp), member_name, nothing)
+            ref === nothing && return (:unknown, nothing, tp, nothing)
+            return (:macro_declared, ref, tp, nothing)
+        end
         mt = names[member_name] === :module ? ImportTarget(:workspace_package, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_module_declared(rt, entry, tp)[member_name], tp, mt)
     elseif target.sort === :external
@@ -631,6 +814,21 @@ function _visible_names_impl_body(rt, root, path::Vector{String}, visited::Set{U
     visited = union(visited, Set([root]))
 
     result, _ = _visible_names_pass1(rt, root, path, visited)
+
+    # Confirmed macro-declared names (layer: `derived_module_macro_declared_names`)
+    # rank as DECLARATIONS: `origin = :declared` gives them `_tier` 3, so pass 2
+    # cannot displace them and a wildcard bring-in from pass 1 loses to them. A
+    # name the module really declares wins, because that one is written text.
+    #
+    # `origin = :declared` without a matching `derived_module_declared` entry is
+    # deliberate — see the spec. Consumers that branch on this origin must
+    # tolerate the name being absent from that dict.
+    let declared = derived_module_declared(rt, root, path)
+        for (name, ref) in derived_module_macro_declared_names(rt, root, path)
+            haskey(declared, name) && continue
+            result[name] = VisibleName(:macro_declared, :declared, ref, path)
+        end
+    end
 
     # Pass 2: the ledger re-attempt — see `_reattempt_unresolved`'s docstring
     # for why this stays a single bounded pass. Both statement forms are
