@@ -371,6 +371,39 @@ end
     @test vis2["max"].origin_module == ["Base"]
 end
 
+@testitem "implicit scope: a wildcard using of a WORKSPACE PACKAGE withholds only its exports" setup=[ImplicitScopeWS] begin
+    using JuliaWorkspaces: derived_module_visible_names
+
+    # The `:workspace_package` arm of the same export-list test. `Prov` wildcard-
+    # `using`s the deved `Other`, so `Prov.parse` could be Other's and is withheld,
+    # while `Prov.println` cannot be and stays Base's. Read off `Other`'s own
+    # `derived_module_exports` — never its visible names, which would re-enter the
+    # query this runs inside.
+    other_toml = URI("file:///wsp3/Other/Project.toml")
+    other_src = URI("file:///wsp3/Other/src/Other.jl")
+    prov_toml = URI("file:///wsp3/Prov/Project.toml")
+    prov_src = URI("file:///wsp3/Prov/src/Prov.jl")
+    cons_toml = URI("file:///wsp3/Cons/Project.toml")
+    cons_src = URI("file:///wsp3/Cons/src/Cons.jl")
+
+    jw = ws_files(
+        other_toml => project_toml("Other", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee3001"),
+        other_src => "module Other\nexport parse\nparse(x) = x\nend\n",
+        prov_toml => project_toml("Prov", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee3002"),
+        prov_src => "module Prov\nusing Other\nend\n",
+        cons_toml => project_toml("Cons", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee3003"),
+        cons_src => "module Cons\nusing Prov: parse, println\nend\n",
+    )
+    vis = derived_module_visible_names(jw.runtime, cons_src, ["Cons"])
+
+    @test haskey(vis, "parse")
+    @test vis["parse"].kind === :unknown
+
+    @test haskey(vis, "println")
+    @test vis["println"].kind === :external_symbol
+    @test vis["println"].origin_module == ["Base"]
+end
+
 @testitem "implicit scope: a member the target got from its OWN imports stays unknown" setup=[ImplicitScopeWS] begin
     using JuliaWorkspaces: derived_module_visible_names
 
@@ -398,6 +431,9 @@ end
         module Wild
         using ..Inner
         end
+        module ExtWild
+        using Base.Iterators
+        end
         module Unrelated
         using ..Inner: f
         end
@@ -408,7 +444,10 @@ end
         h() = parse("x")
         end
         module WildUser
-        using ..Wild: println
+        using ..Wild: parse, println
+        end
+        module ExtWildUser
+        using ..ExtWild: flatten, println
         end
         module UnrelatedUser
         using ..Unrelated: println
@@ -420,11 +459,27 @@ end
     @test vis["parse"].kind === :unknown
     @test vis["parse"].origin_module != ["Base"]
 
-    # A wildcard `using` in the target can bring in ANY name, so the same applies to
-    # every member of such a module, not just the ones an explicit list mentions.
+    # A wildcard `using` in the target withholds the names that target could
+    # ACTUALLY bring in, not every name. `Wild` wildcard-`using`s `Inner`, whose
+    # export list is exactly `parse`: so `Wild.parse` is withheld (it is Inner's,
+    # and following it is the recursion we cannot make)...
     wvis = derived_module_visible_names(jw.runtime, root, ["T", "WildUser"])
+    @test haskey(wvis, "parse")
+    @test wvis["parse"].kind === :unknown
+
+    # ...while `Wild.println` is Base's, because no export list in `Wild`'s imports
+    # contains it. Declining here too is what made a provider's unrelated
+    # `using SomePkg` stop resolving every Base member it has.
     @test haskey(wvis, "println")
-    @test wvis["println"].kind === :unknown
+    @test wvis["println"].kind === :external_symbol
+    @test wvis["println"].origin_module == ["Base"]
+
+    # The same split for an `:external` target, which is the shape that actually
+    # occurs: `Base.Iterators` exports `flatten` and does not export `println`.
+    evis = derived_module_visible_names(jw.runtime, root, ["T", "ExtWildUser"])
+    @test evis["flatten"].kind === :unknown
+    @test evis["println"].kind === :external_symbol
+    @test evis["println"].origin_module == ["Base"]
 
     # ...and the guard is narrow: a target whose imports name OTHER symbols keeps
     # answering from the implicit scope.

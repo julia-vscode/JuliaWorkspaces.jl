@@ -330,18 +330,21 @@ end
 #
 # - an explicit symbol list binds this name: the member is the ORIGIN's, and
 #   following it there is exactly the visibility recursion we cannot make here;
-# - a wildcard `using` (empty symbol list): it can bring in ANY name, and which
-#   ones is again only knowable by expanding the target's visible names.
+# - a wildcard `using` whose target's EXPORT LIST contains this name: same, and
+#   the export list is what a wildcard `using` brings in.
 #
 # A whole-module `import X` binds just the one name `X` (or its alias), so only
 # that name is withheld.
 function _member_may_come_from_imports(rt, root, path::Vector{String}, member_name::String)
     for ri in derived_module_imports(rt, root, path)
         if isempty(ri.symbols)
-            ri.kind === :using && return true
-            bound = ri.alias !== nothing ? ri.alias :
-                isempty(ri.target.path) ? nothing : last(ri.target.path)
-            bound == member_name && return true
+            if ri.kind === :using
+                _wildcard_could_bring_in(rt, root, ri.target, member_name) && return true
+            else
+                bound = ri.alias !== nothing ? ri.alias :
+                    isempty(ri.target.path) ? nothing : last(ri.target.path)
+                bound == member_name && return true
+            end
         else
             for sym in ri.symbols
                 (sym.alias !== nothing ? sym.alias : sym.name) == member_name && return true
@@ -349,6 +352,41 @@ function _member_may_come_from_imports(rt, root, path::Vector{String}, member_na
         end
     end
     return false
+end
+
+# Could a wildcard `using` of `target` bring in `member_name`? The export list
+# answers it, and each sort's list is read exactly where `_target_bring_ins`
+# reads it, so the two cannot disagree about what the statement brings in.
+#
+# Cycle-free by construction: only the TREE and the env are consulted, never
+# `derived_module_visible_names` — which is why a `:workspace_package` target is
+# gated on the package's own `derived_module_exports` alone, and not on the
+# cross-root visible names `_target_bring_ins` additionally intersects. That is
+# the conservative direction: a name exported but not actually resolvable there
+# is withheld, exactly as before.
+#
+# `true` whenever the list cannot be trusted — an unresolvable target, or a store
+# with no exports at all, which is the shape an unindexable package gets
+# (`"could not be indexed"`, empty `vals`). Every genuinely indexed module has
+# exports, so reading emptiness as "unknown" rather than "brings in nothing"
+# costs nothing real and keeps a failed index from silently answering for Base.
+function _wildcard_could_bring_in(rt, root, target::ImportTarget, member_name::String)
+    if target.sort === :tree
+        return member_name in derived_module_exports(rt, root, target.path).exports
+    elseif target.sort === :workspace_package
+        entry = get(derived_workspace_package_roots(rt), target.path[1], nothing)
+        entry === nothing && return true
+        return member_name in derived_module_exports(rt, entry, target.path).exports
+    elseif target.sort === :external
+        store = _resolve_external_module(rt, root, target.path)
+        store === nothing && return true
+        isempty(store.exportednames) && return true
+        return StaticLint.isexportedby(Symbol(member_name), store)
+    else
+        # `:unresolved` — any name is possible. Resolvability is NOT re-attempted
+        # here: that walks `_visible_names_pass1`, which is the in-progress query.
+        return true
+    end
 end
 
 # `_member_lookup`'s answer for a member that came from the implicit scope, or its

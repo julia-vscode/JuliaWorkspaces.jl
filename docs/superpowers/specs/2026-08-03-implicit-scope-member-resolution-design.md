@@ -293,15 +293,17 @@ Found by the whole-branch review (2026-08-03) and deliberately not fixed in this
 slice. None is a regression: every one is either a shape that resolved to nothing
 before, or cosmetic wrongness on code that does not compile.
 
-- **The site-2 import guard is coarse.** `_member_may_come_from_imports` declines the
-  implicit fallback whenever the target module has *any* wildcard `using`, for every
-  member name — not just names that package could plausibly provide. So a provider
-  that writes `using SomePkg` for unrelated reasons stops resolving members that
-  genuinely come from `Base`. Chosen over the alternative: the gate cannot consult
-  `derived_module_visible_names` (that re-enters an in-progress Salsa query — see
-  `_target_bring_ins`' comment), and a correct-but-uninformative `:unknown` beats a
-  confident wrong answer. A tighter cycle-free version — compare the name against the
-  target's own `derived_module_exports` / the store's `exportednames` — is possible.
+- **The site-2 import guard was coarse; it is now per-name.** It declined the implicit
+  fallback whenever the target had *any* wildcard `using`, so a provider writing
+  `using SomePkg` for unrelated reasons stopped resolving every member that genuinely
+  comes from `Base`. `_wildcard_could_bring_in` now asks whether that target's EXPORT
+  LIST contains the name, reading each sort's list exactly where `_target_bring_ins`
+  reads it: `derived_module_exports` for `:tree`, the package root's own
+  `derived_module_exports` for `:workspace_package`, `exportednames` for `:external`.
+  Cycle-free as required — tree and env only, never `derived_module_visible_names`.
+  Still `true` wherever the list cannot be trusted: an `:unresolved` target (whose
+  resolvability is deliberately NOT re-attempted, since that walks the in-progress
+  `_visible_names_pass1`), a missing store, or a store with no exports at all.
 - **Site 1's wildcard guard misses an UNINDEXABLE package.** A package SymbolServer
   recorded as "could not be indexed" gets a real but export-less `ModuleStore`, so
   `derived_module_unresolved_wildcard_using` reads the target as resolved while the
@@ -309,6 +311,12 @@ before, or cosmetic wrongness on code that does not compile.
   before. Not folded into that predicate on purpose: it also drives bare missing-ref
   suppression, where the whole-closure pass does NOT suppress for an unindexable
   package, so widening it there is a cross-mode deviation needing its own sign-off.
+  Site 2 no longer has this hole — `_wildcard_could_bring_in` reads an export-less
+  store as untrustworthy — and site 1 could adopt the same rule, but not by calling
+  that helper directly: it reads `derived_module_imports`, whose values carry
+  `ItemRef`s, and the per-file frame deliberately depends only on id-free
+  projections. It would want its own memoized `Bool` beside
+  `derived_module_unresolved_wildcard_using`.
 - **`derived_module_is_bare` conflates "not bare" with "no such module".** A
   `:workspace_package` target path naming nothing (`using DevedPkg.NoSuchSub: println`)
   is therefore not bare, so Base's members are offered for it. Invalid code, no
