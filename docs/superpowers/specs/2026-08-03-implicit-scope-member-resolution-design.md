@@ -123,7 +123,11 @@ question.
   with it: `_macro_owner_confirmed` does not exist on `main`, only on
   `sp/macro-declared-names`.
 
-  **Decided: that branch ships the bug, and this branch's rebase fixes it.** The
+  **DONE (718be7d):** the fix landed with this branch's merge of `main`, once
+  `_macro_owner_confirmed` was reachable here. The implicit-owner shortcut is gated on
+  `derived_module_is_bare` and otherwise falls through to the import requirement, and
+  `_IMPLICIT_MACRO_OWNERS` now asks `StaticLint.IMPLICIT_SCOPE_MODULES` instead of
+  restating it. Historical note on the decision that got us here: The
   alternative — a local `bare` check on the macro branch, collapsed onto the node
   later — was rejected as not worth a knowingly-duplicated gate for a shape that
   needs a `baremodule` containing a modelled macro. So a reviewer of
