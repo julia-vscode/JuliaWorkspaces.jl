@@ -708,19 +708,15 @@ function _can_rename(runtime, uri::URI, offset::Int)
     return (start=_offset_to_position(runtime, uri, x_start), stop=_offset_to_position(runtime, uri, x_start + x.span))
 end
 
-# True when `x` resolves to a name a modelled macro declares (inventory kind
-# `:macro_declared`). All three generated names from one macrocall share the
-# same item id, so the lookup also matches on `x`'s own spelling.
+# True when `x` resolves to a name a modelled macro declares. All the names from one
+# macrocall share the declaring statement's id, so the lookup matches on `x`'s own
+# spelling too — and `_macro_declared_item` is what decides that an inert row
+# sharing that id does not speak for a name written source really declares.
 function _is_macro_declared_target(runtime, root::URI, uri::URI, x::CSTParser.EXPR)
     meta_dict = derived_file_analysis(runtime, root, uri).meta
     tgt = _reference_target(runtime, root, uri, x, meta_dict)
     (tgt === nothing || tgt[1] !== :tree) && return false
-    ref = tgt[2]
-    sv = CSTParser.str_value(x)
-    for it in derived_file_inventory(runtime, ref.file).items
-        it.id == ref.id && it.kind === :macro_declared && _bare_macro_name(it.name) == _bare_macro_name(sv) && return true
-    end
-    return false
+    return _macro_declared_item(runtime, tgt[2], CSTParser.str_value(x)) !== nothing
 end
 
 # ============================================================================

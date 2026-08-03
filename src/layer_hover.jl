@@ -532,7 +532,7 @@ function _get_tree_ref_hover(tr::StaticLint.TreeRef, documentation::String, expr
         # a fabrication for `set_foo!`. Name, declaring macro, docstring; no
         # signature.
         documentation = string(documentation, "```julia\n", tr.name, "\n```\n")
-        spelling = _macro_declared_spelling(rt, tr.item)
+        spelling = _macro_declared_spelling(rt, tr.item, tr.name)
         spelling === nothing ||
             (documentation = string(documentation, "declared by `", spelling, "`\n\n"))
         return _tree_item_fallback_hover(tr.item, documentation, rt)
@@ -614,17 +614,15 @@ function _tree_item_fallback_hover(item::ItemRef, documentation::String, rt)
     return string(documentation, doc)
 end
 
-# The macro that declares `item`'s name, as written at the call site
-# (`Salsa.@declare_input`), or `nothing` when `item` is not a macro-declared row.
-function _macro_declared_spelling(rt, item::Union{Nothing,ItemRef})
+# The macro that declares `name` at `item`, as written at the call site
+# (`Salsa.@declare_input`), or `nothing` when written source declares it instead.
+function _macro_declared_spelling(rt, item::Union{Nothing,ItemRef}, name::AbstractString)
     item === nothing && return nothing
-    for it in derived_file_inventory(rt, item.file).items
-        it.id == item.id && it.kind === :macro_declared || continue
-        s = it.declared_by
-        s === nothing && continue
-        return isempty(s.qualifier) ? s.name : string(join(s.qualifier, "."), ".", s.name)
-    end
-    return nothing
+    it = _macro_declared_item(rt, item, name)
+    it === nothing && return nothing
+    s = it.declared_by
+    s === nothing && return nothing
+    return isempty(s.qualifier) ? s.name : string(join(s.qualifier, "."), ".", s.name)
 end
 
 _get_hover(b::StaticLint.Binding, documentation::String, expr, env, meta_dict) =

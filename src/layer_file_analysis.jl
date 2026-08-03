@@ -906,11 +906,39 @@ _bare_macro_name(s::AbstractString) = startswith(s, "@") ? s[nextind(s, 1):end] 
 
 # The declared name of an inventory item, from its file's inventory
 # (`@`-prefixed for macros). `nothing` when the id is absent (stale ref).
-function _inventory_item_name(rt, ref::ItemRef)
-    for it in derived_file_inventory(rt, ref.file).items
-        it.id == ref.id && return it.name
+# Every inventory row of `ref.file` that shares `ref.id`. One statement can declare
+# several names — an `@enum` type and its members, a tuple destructure, the names a
+# modelled macro mints — and they all carry the statement's id, so this is the shape
+# every id-keyed lookup starts from.
+_items_with_id(rt, ref::ItemRef) =
+    [it for it in derived_file_inventory(rt, ref.file).items if it.id == ref.id]
+
+"""
+    _macro_declared_item(rt, ref::ItemRef, name) -> Union{Nothing,InventoryItem}
+
+The inert `:macro_declared` row that declares `name` at `ref`, or `nothing` when
+written source declares it instead.
+
+The precedence matters and belongs in one place: an inert row shares its id with a
+REAL one exactly when the macro's argument also parses as a genuine declaration
+(the invalid-but-parseable `@deprecate f(x) = 1`), and then the real declaration
+wins — the same rule `_build_kind_index` applies. Deciding it per call site is how
+rename came to refuse a genuine function that happened to share an id.
+"""
+function _macro_declared_item(rt, ref::ItemRef, name::AbstractString)
+    bare = _bare_macro_name(name)
+    found = nothing
+    for it in _items_with_id(rt, ref)
+        _bare_macro_name(it.name) == bare || continue
+        it.kind === :macro_declared || return nothing
+        found === nothing && (found = it)
     end
-    return nothing
+    return found
+end
+
+function _inventory_item_name(rt, ref::ItemRef)
+    its = _items_with_id(rt, ref)
+    return isempty(its) ? nothing : first(its).name
 end
 
 # True when more than one inventory item in `ref.file` shares `ref.id` — the id
@@ -919,15 +947,7 @@ end
 # the id alone does NOT identify one declaration, so references/rename/highlight
 # must additionally match on the name (unlike the single-name case, where the
 # id-only join is what lets `f as g` aliases resolve through the SOURCE item).
-function _itemref_is_ambiguous(rt, ref::ItemRef)
-    n = 0
-    for it in derived_file_inventory(rt, ref.file).items
-        it.id == ref.id || continue
-        n += 1
-        n > 1 && return true
-    end
-    return false
-end
+_itemref_is_ambiguous(rt, ref::ItemRef) = length(_items_with_id(rt, ref)) > 1
 
 # The module-level `Binding` that declares `target` in its OWN file's per-file
 # meta: materialize the item's defining EXPR (`derived_item_positions` — the

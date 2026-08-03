@@ -730,6 +730,41 @@ end
     @test derived_module_names(jw.runtime, root, ["T"])["f"] === :function
 end
 
+@testitem "macro-declared: an inert row does not make a real declaration unrenameable" setup=[MacroDeclWS] begin
+    # The same shared-id shape as above, on the RENAME path. `f` is written right
+    # there in the source, so it is renameable; refusing it would make rename
+    # silently do nothing. The precedence lives in `_macro_declared_item`, so this
+    # and `_build_kind_index` cannot disagree about which row speaks for the name.
+    using JuliaWorkspaces: can_rename, get_rename_edits, get_text_file
+
+    jw, root = macro_ws("""
+    module T
+    @deprecate f(x) = 1
+    g(x) = x
+    end
+    """)
+    src = get_text_file(jw, root).content.content
+
+    off = first(findfirst("f(x) = 1", src))
+    @test can_rename(jw, root, off) !== nothing
+    @test !isempty(get_rename_edits(jw, root, off, "renamed"))
+
+    # An unrelated declaration is unaffected, and a genuinely macro-declared name
+    # is still refused — the precedence only rescues names written in the source.
+    off_g = first(findfirst("g(x) = x", src))
+    @test can_rename(jw, root, off_g) !== nothing
+
+    jw2, root2 = macro_ws("""
+    module T
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    h(rt) = set_foo!(rt, 1, 2)
+    end
+    """; with_salsa_package=true)
+    src2 = get_text_file(jw2, root2).content.content
+    @test can_rename(jw2, root2, first(findlast("set_foo!", src2))) === nothing
+end
+
 @testitem "macro-declared: get_rename_edits refuses a macro-declared name" setup=[MacroDeclWS] begin
     # `_can_rename` refuses a macro-declared target, but `_get_rename_edits`
     # is a separate mutation-producing entry point and must refuse
