@@ -83,11 +83,15 @@ built-in negative control: it must stay that way.
 ### The helper
 
 ```
-_implicit_member(rt, root, path::Vector{String}, name::String) -> Union{Nothing,Any}
+_implicit_member(rt, root, path::Vector{String}, name::String) -> Union{Nothing,Tuple{Any,Vector{String}}}
 ```
 
-Lives in `layer_file_analysis.jl`, which is included after `StaticLint` and so can
-reach both the env and the tree.
+Returns `(value, provider_path)` — the provider comes back with the value because a
+consumer recording `origin_module` cannot recover it from a bare store value.
+
+Lives in `layer_visibility.jl`, the layer that already reads the env, alongside its
+other consumer `_implicit_member_lookup`. (Site 1, in `layer_file_analysis.jl`, is
+included later and reaches it fine.)
 
 "Member of `M`" and "name in scope at `M`" are the same lookup here, which is why
 one helper serves every call site: a name the implicit `using` brings into `M`
@@ -167,6 +171,15 @@ continue to shadow `Base`, matching Julia.
 2. `_member_lookup`'s `:tree` and `:workspace_package` branches, at
    `!haskey(names, member_name)`, in place of returning `(:unknown, …)`. Fixes
    `using .Foo: println` binding the name with no kind and no declaration.
+
+   Site 1's gate (`derived_module_visible_names_idfree`) includes the module's
+   imports; site 2's (`derived_module_names`) is declared names only, so it needs
+   an extra guard — `_member_may_come_from_imports`, off `derived_module_imports` —
+   or a member the target got from its own imports (`module Outer; using ..Inner:
+   parse; end`) would mis-resolve to `Base.parse`. A member an explicit symbol list
+   names, or any member of a module with a wildcard `using`, declines back to
+   `:unknown`. The guard cannot consult `derived_module_visible_names`: this runs
+   inside that computation.
 
 The third, `_resolve_recorded_type`'s no-face case folded into a
 candidate-qualifier walk over the same implicit list, is the rider described under

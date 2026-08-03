@@ -4446,7 +4446,7 @@ end
         @test scopehasmodule(sc, m)
     end
 
-    # A bare exported Base name still resolves — the point of the seeding.
-    cst2, meta_dict2 = parse_and_pass("f() = println(1)")
-    @test scopehasmodule(scopeof(cst2, meta_dict2), :Base)
+    # A bare exported Base name really resolves through that seeding — the point of
+    # it. (Both ids: `f`'s own binding, and `println` reached via the root scope.)
+    @test check_resolved("f() = println(1)") == [true, true]
 end
