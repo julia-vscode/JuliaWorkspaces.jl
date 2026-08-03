@@ -144,9 +144,10 @@ function _implicit_member(rt, root, path::Vector{String}, name::String)
         mpath = [String(m)]
         store = _resolve_external_module(rt, root, mpath)
         store === nothing && continue
-        # haskey first: O(1) dict probe rejects most misses before the O(n)
-        # exportednames scan runs; both are still required for correctness.
-        (haskey(store.vals, sym) && sym in store.exportednames) || continue
+        # The canonical export predicate, the same one the `used_modules` walk this
+        # mirrors uses. Its own `haskey` comes first, so the O(1) `vals` probe still
+        # rejects most misses before the O(n) `exportednames` scan.
+        StaticLint.isexportedby(sym, store) || continue
         val = StaticLint.maybe_lookup(store.vals[sym], _resolve_env(rt, root))
         val === nothing && continue
         val isa SymbolServer.ModuleStore &&
