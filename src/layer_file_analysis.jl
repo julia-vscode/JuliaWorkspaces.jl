@@ -922,11 +922,39 @@ _bare_macro_name(s::AbstractString) = startswith(s, "@") ? s[nextind(s, 1):end] 
 
 # The declared name of an inventory item, from its file's inventory
 # (`@`-prefixed for macros). `nothing` when the id is absent (stale ref).
-function _inventory_item_name(rt, ref::ItemRef)
-    for it in derived_file_inventory(rt, ref.file).items
-        it.id == ref.id && return it.name
+# Every inventory row of `ref.file` that shares `ref.id`. One statement can declare
+# several names — an `@enum` type and its members, a tuple destructure, the names a
+# modelled macro mints — and they all carry the statement's id, so this is the shape
+# every id-keyed lookup starts from.
+_items_with_id(rt, ref::ItemRef) =
+    [it for it in derived_file_inventory(rt, ref.file).items if it.id == ref.id]
+
+"""
+    _macro_declared_item(rt, ref::ItemRef, name) -> Union{Nothing,InventoryItem}
+
+The inert `:macro_declared` row that declares `name` at `ref`, or `nothing` when
+written source declares it instead.
+
+The precedence matters and belongs in one place: an inert row shares its id with a
+REAL one exactly when the macro's argument also parses as a genuine declaration
+(the invalid-but-parseable `@deprecate f(x) = 1`), and then the real declaration
+wins — the same rule `_build_kind_index` applies. Deciding it per call site is how
+rename came to refuse a genuine function that happened to share an id.
+"""
+function _macro_declared_item(rt, ref::ItemRef, name::AbstractString)
+    bare = _bare_macro_name(name)
+    found = nothing
+    for it in _items_with_id(rt, ref)
+        _bare_macro_name(it.name) == bare || continue
+        it.kind === :macro_declared || return nothing
+        found === nothing && (found = it)
     end
-    return nothing
+    return found
+end
+
+function _inventory_item_name(rt, ref::ItemRef)
+    its = _items_with_id(rt, ref)
+    return isempty(its) ? nothing : first(its).name
 end
 
 # True when more than one inventory item in `ref.file` shares `ref.id` — the id
@@ -935,15 +963,7 @@ end
 # the id alone does NOT identify one declaration, so references/rename/highlight
 # must additionally match on the name (unlike the single-name case, where the
 # id-only join is what lets `f as g` aliases resolve through the SOURCE item).
-function _itemref_is_ambiguous(rt, ref::ItemRef)
-    n = 0
-    for it in derived_file_inventory(rt, ref.file).items
-        it.id == ref.id || continue
-        n += 1
-        n > 1 && return true
-    end
-    return false
-end
+_itemref_is_ambiguous(rt, ref::ItemRef) = length(_items_with_id(rt, ref)) > 1
 
 # The module-level `Binding` that declares `target` in its OWN file's per-file
 # meta: materialize the item's defining EXPR (`derived_item_positions` — the
@@ -991,16 +1011,19 @@ For every root in the workspace and every file spliced into that root:
 
 - the DECLARING file (`file == target.file`) contributes the old within-file
   `loose_refs` walk of the item's module-level binding — its declaration
-  site(s) and same-file uses;
-- any OTHER file contributes only when its `outbound` table has a row whose
-  `target == target` — **the join is on the `ItemRef`, never the row name**.
-  Cross-file aliases (`using .Sib: f as g`) surface their uses under the
-  BOUND name (`g`) but carry the SOURCE's `ItemRef` as `target`, so joining
-  on `target` finds the `g`-call sites when asked for references of `f`
-  (which the old whole-closure pass missed). Matching files are walked and
-  every identifier whose `refof` is a `TreeRef` — or a `Binding` whose `.val`
-  is a `TreeRef` (import/alias statement components) — with `item == target`
-  is emitted.
+  site(s) and same-file uses — when that binding exists. A `:macro_declared`
+  item has no such binding (nothing in the source spells `set_foo!`), so for
+  those `_item_declaring_binding` returns `nothing` and this file falls
+  through to the same tree-walk used for other files, below;
+- any OTHER file, or the declaring file when it has no old-style binding,
+  contributes only when its `outbound` table has a row whose `target ==
+  target` — **the join is on the `ItemRef`, never the row name**. Cross-file
+  aliases (`using .Sib: f as g`) surface their uses under the BOUND name
+  (`g`) but carry the SOURCE's `ItemRef` as `target`, so joining on `target`
+  finds the `g`-call sites when asked for references of `f` (which the old
+  whole-closure pass missed). Matching files are walked and every identifier
+  whose `refof` is a `TreeRef` — or a `Binding` whose `.val` is a `TreeRef`
+  (import/alias statement components) — with `item == target` is emitted.
 
 All workspace roots are scanned (not just `derived_roots_for_uri(target.file)`):
 a file references `target` through an `import` of its package, which is NOT an
@@ -1027,37 +1050,43 @@ function each_reference(f, rt, target::ItemRef, restrict_name::Union{Nothing,Abs
         f(x, uri, o)
         return
     end
+    walk_tree_matches = function (analysis, file)
+        any(o -> o.target == target, analysis.outbound) || return
+        cst = derived_julia_legacy_syntax_tree(rt, file)
+        cst isa CSTParser.EXPR || return
+        _walk_exprs(cst) do x
+            CSTParser.is_id_or_macroname(x) || return
+            StaticLint.hasref(x, analysis.meta) || return
+            r = StaticLint.refof(x, analysis.meta)
+            tr = r isa StaticLint.TreeRef ? r :
+                (r isa StaticLint.Binding && r.val isa StaticLint.TreeRef) ? r.val : nothing
+            (tr !== nothing && tr.item == target &&
+                (restrict_name === nothing || _bare_macro_name(tr.name) == _bare_macro_name(restrict_name))) && emit(x)
+            return
+        end
+    end
 
     for root in derived_roots(rt)
         for file in derived_tree_files(rt, root)
             analysis = derived_file_analysis(rt, root, file)
             if file == target.file
                 b = _item_declaring_binding(rt, target, analysis.meta, declname)
-                b isa StaticLint.Binding || continue
-                # `loose_refs` can list the same node twice (a macro name lands
-                # in the binding's refs twice); dedupe by identity as
-                # `_for_each_ref` does.
-                seen = Base.IdSet{CSTParser.EXPR}()
-                for r in StaticLint.loose_refs(b, analysis.meta)
-                    if r isa CSTParser.EXPR && !(r in seen)
-                        push!(seen, r)
-                        emit(r)
+                if b isa StaticLint.Binding
+                    # `loose_refs` can list the same node twice (a macro name
+                    # lands in the binding's refs twice); dedupe by identity as
+                    # `_for_each_ref` does.
+                    seen = Base.IdSet{CSTParser.EXPR}()
+                    for r in StaticLint.loose_refs(b, analysis.meta)
+                        if r isa CSTParser.EXPR && !(r in seen)
+                            push!(seen, r)
+                            emit(r)
+                        end
                     end
+                else
+                    walk_tree_matches(analysis, file)
                 end
             else
-                any(o -> o.target == target, analysis.outbound) || continue
-                cst = derived_julia_legacy_syntax_tree(rt, file)
-                cst isa CSTParser.EXPR || continue
-                _walk_exprs(cst) do x
-                    CSTParser.is_id_or_macroname(x) || return
-                    StaticLint.hasref(x, analysis.meta) || return
-                    r = StaticLint.refof(x, analysis.meta)
-                    tr = r isa StaticLint.TreeRef ? r :
-                        (r isa StaticLint.Binding && r.val isa StaticLint.TreeRef) ? r.val : nothing
-                    (tr !== nothing && tr.item == target &&
-                        (restrict_name === nothing || _bare_macro_name(tr.name) == _bare_macro_name(restrict_name))) && emit(x)
-                    return
-                end
+                walk_tree_matches(analysis, file)
             end
         end
     end

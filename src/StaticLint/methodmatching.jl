@@ -20,9 +20,13 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
                     type = type.val
                 elseif type isa Binding && CoreTypes.isdatatype(type.type)
                     # Bound through a typevar (the link's `.type` is the
-                    # `DataType` meta-type). We don't know the concrete
-                    # constraint statically — fall back to `Any`.
-                    return CoreTypes.Any
+                    # `DataType` meta-type). A `where` clause may still give an
+                    # UPPER bound, and the method can only ever instantiate at a
+                    # subtype of it, so the bound is sound for ruling a call out.
+                    # `>:` gives a lower bound and licenses nothing.
+                    ub = store === nothing ? nothing : where_upper_bound_expr(type)
+                    ub === nothing && return CoreTypes.Any
+                    return _resolve_type_expr(ub, store, meta_dict)
                 end
                 return type
             end
@@ -56,6 +60,30 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
 end
 
 isquotedsymbol(x) = x isa EXPR && x.head === :quotenode && length(x.args) == 1 && x.args[1].head === :IDENTIFIER && hastrivia(x)
+
+"""
+    where_upper_bound_expr(b::Binding)
+
+The type expression of a `where`-bound type variable's UPPER bound, or `nothing`
+when it has none: a bare `T`, a lower bound (`T>:B`), or a descending chain. A
+typevar's binding keeps the `where` argument as its `.val`, so the bound is
+readable from the binding alone.
+"""
+function where_upper_bound_expr(b::Binding)
+    a = b.val
+    a isa EXPR || return nothing
+    CSTParser.iswhere(parentof(a)) || return nothing
+    if a.head isa EXPR && isoperator(a.head) && valof(a.head) == "<:" &&
+            a.args !== nothing && length(a.args) == 2 && isidentifier(a.args[1])
+        return a.args[2]
+    elseif headof(a) === :comparison && a.args !== nothing && length(a.args) == 5 &&
+            headof(a.args[2]) === :OPERATOR && headof(a.args[4]) === :OPERATOR &&
+            valof(a.args[2]) == "<:" && valof(a.args[4]) == "<:" && isidentifier(a.args[3])
+        # `Lo<:T<:Hi`: only the ascending chain has a readable upper bound.
+        return a.args[5]
+    end
+    return nothing
+end
 
 # Extract the name from a kwarg in a `:parameters` block. The entry may be a
 # bare identifier (sig form `f(a; p)`), a kwarg with default (`p = v`), or a
@@ -179,12 +207,44 @@ True if `arg` is a method-arg declaration of the form `x::Vararg` or
 `x::Vararg{...}` (the explicit `::Vararg` spelling, not the `x...` splat).
 """
 function is_explicit_vararg_decl(arg)
-    isdeclaration(arg) || return false
-    length(arg.args) >= 2 || return false
-    t = arg.args[2]
-    isidentifier(t) && valofid(t) == "Vararg" && return true
-    iscurly(t) && length(t.args) >= 1 && isidentifier(t.args[1]) && valofid(t.args[1]) == "Vararg" && return true
+    t = arg_decl_type(arg)
+    t === nothing && return false
+    names_vararg(t) && return true
+    iscurly(t) && length(t.args) >= 1 && names_vararg(t.args[1]) && return true
     return false
+end
+
+"Does this type expression name `Vararg`, bare or dotted (`Base.Vararg`)?"
+function names_vararg(t)
+    t isa EXPR || return false
+    isidentifier(t) && return valofid(t) == "Vararg"
+    if is_getfield_w_quotenode(t)
+        q = t.args[2]
+        return q isa EXPR && q.args !== nothing && !isempty(q.args) &&
+            isidentifier(q.args[1]) && valofid(q.args[1]) == "Vararg"
+    end
+    return false
+end
+
+"""
+    arg_decl_type(arg)
+
+The type expression of a method-arg declaration, for both the bound `x::T` form
+and the anonymous `::T` form; `nothing` for anything else. The anonymous form is
+UNARY `::`, so it has one argument rather than two and `isdeclaration` is false
+for it — reading only the binary form silently treats `f(::Vararg{Int})` as one
+ordinary positional.
+"""
+function arg_decl_type(arg)
+    arg isa EXPR || return nothing
+    if isdeclaration(arg)
+        return length(arg.args) >= 2 ? arg.args[2] : nothing
+    end
+    h = headof(arg)
+    if h isa EXPR && isoperator(h) && valof(h) == "::" && arg.args !== nothing && length(arg.args) == 1
+        return arg.args[1]
+    end
+    return nothing
 end
 
 """
@@ -196,12 +256,11 @@ with an integer literal `N`; otherwise `nothing`. Distinguishes bounded
 parametric `Vararg{T,N} where N`.
 """
 function bounded_vararg_N(arg)
-    isdeclaration(arg) || return nothing
-    length(arg.args) >= 2 || return nothing
-    t = arg.args[2]
+    t = arg_decl_type(arg)
+    t === nothing && return nothing
     iscurly(t) || return nothing
     length(t.args) == 3 || return nothing
-    isidentifier(t.args[1]) && valofid(t.args[1]) == "Vararg" || return nothing
+    names_vararg(t.args[1]) || return nothing
     N_expr = t.args[3]
     CSTParser.headof(N_expr) === :INTEGER || return nothing
     N_expr.val isa AbstractString || return nothing

@@ -635,6 +635,12 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
     x = get_expr1(cst, offset)
     x === nothing && return results
 
+    # Same refusal as `_can_rename`: a client without `prepareSupport` skips
+    # straight to rename without calling prepareRename first, so this path
+    # must refuse a macro-declared target on its own rather than relying on
+    # `_can_rename` having been called.
+    _is_macro_declared_target(runtime, root, uri, x) && return results
+
     # A macro's definition uses the bare name (`add_2`) while every invocation
     # carries a leading `@` (`@add_2`). The client may send the new name with or
     # without the `@`; normalize to the bare form and re-add the `@` only for the
@@ -688,11 +694,29 @@ function _can_rename(runtime, uri::URI, offset::Int)
     x = get_expr1(cst, offset)
     x isa CSTParser.EXPR || return nothing
 
+    # A name a modelled macro declares cannot be renamed: the declaring
+    # statement contains no token spelling it (e.g. `set_foo!` never appears
+    # in `@declare_input foo(rt, x)::V`), so there is nothing to rewrite there
+    # and a rename would leave the code broken. Renaming the whole family of
+    # generated names together is a separate change, out of scope here.
+    _is_macro_declared_target(runtime, root, uri, x) && return nothing
+
     loc = _get_file_loc(x, runtime)
     loc === nothing && return nothing
     _, x_start = loc
 
     return (start=_offset_to_position(runtime, uri, x_start), stop=_offset_to_position(runtime, uri, x_start + x.span))
+end
+
+# True when `x` resolves to a name a modelled macro declares. All the names from one
+# macrocall share the declaring statement's id, so the lookup matches on `x`'s own
+# spelling too — and `_macro_declared_item` is what decides that an inert row
+# sharing that id does not speak for a name written source really declares.
+function _is_macro_declared_target(runtime, root::URI, uri::URI, x::CSTParser.EXPR)
+    meta_dict = derived_file_analysis(runtime, root, uri).meta
+    tgt = _reference_target(runtime, root, uri, x, meta_dict)
+    (tgt === nothing || tgt[1] !== :tree) && return false
+    return _macro_declared_item(runtime, tgt[2], CSTParser.str_value(x)) !== nothing
 end
 
 # ============================================================================

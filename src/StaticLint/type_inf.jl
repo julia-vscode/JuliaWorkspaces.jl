@@ -399,23 +399,100 @@ function _settype_from_decl!(binding, t, state)
     end
 end
 
-function infer_type_decl(binding, state, scope)
-    t = binding.val.args[2]
-    if isidentifier(t)
-        resolve_ref(t, scope, state)
+infer_type_decl(binding, state, scope) = infer_type_decl(binding, binding.val.args[2], state, scope)
+
+# Do two settled types name the same type? Store values for the same type are not
+# guaranteed to be the same object, so compare by name, not by identity.
+function _same_inferred_type(a, b)
+    a === b && return true
+    (a === nothing || b === nothing) && return false
+    na, nb = _basename(a), _basename(b)
+    return na !== nothing && na == nb
+end
+
+# A type's supertypes, nearest first. Stops at `Any`, at a type that supertypes
+# to itself, and at a fixed depth, so a malformed chain cannot spin.
+function _ancestry(t, store, meta_dict)
+    out = Any[t]
+    cur = t
+    for _ in 1:32
+        _isany(cur) && break
+        nxt = _super(cur, store, meta_dict)
+        (nxt === nothing || _same_inferred_type(nxt, cur)) && break
+        push!(out, nxt)
+        cur = nxt
     end
-    if iscurly(t)
-        t = t.args[1]
-        resolve_ref(t, scope, state)
+    return out
+end
+
+# The nearest type every one of `types` sits beneath. `Any` whenever the chains
+# do not meet — a workspace type's supertype can dead-end outside this file.
+function _join_types(types, store, meta_dict)
+    for cand in _ancestry(first(types), store, meta_dict)
+        all(t -> any(a -> _same_inferred_type(a, cand), _ancestry(t, store, meta_dict)), types) &&
+            return cand
     end
-    if CSTParser.is_getfield_w_quotenode(t)
-        resolve_getfield(t, scope, state)
-        t = t.args[2].args[1]
+    return CoreTypes.Any
+end
+
+# Settle the type of every name that was assigned more than once in a scope. The
+# assignments disagree when they name two different types, or when one of them
+# never inferred a type at all — in both cases a use can see a value the binding
+# it resolves to does not describe, so no one assignment's type may be claimed.
+#
+# What they settle on is the nearest type that covers them all: `Int` and
+# `Float64` settle on `Real`, which still rules out a `String` parameter. An
+# un-inferred assignment could hold anything, so it joins at `Any`.
+#
+# A join, not a union: `_type_compare` has only a right-side union method, so a
+# union-typed argument would rule out every member that is a proper subtype of an
+# abstract parameter. Widening only ever removes an opinion, never adds one.
+#
+# Only bindings that already inferred a type are written. `nothing` means "not
+# inferred", which consumers answer with by-use inference of their own.
+
+# Was this binding's value written with an explicit `::T`? `x = x::Child1` and
+# `x::Child1 = v` assert a type rather than infer one, and the assertion holds
+# wherever it was written — including one branch of an `if`. Those types are the
+# author's, and a use reads the binding live where it sits, so they are left as
+# written.
+function _asserts_its_type(b::Binding)
+    v = b.val
+    (v isa EXPR && isassignment(v) && v.args !== nothing && length(v.args) == 2) || return false
+    return isdeclaration(v.args[1]) || isdeclaration(v.args[2])
+end
+
+function _unify_rebound_types!(state)
+    for (_, group) in state.rebound
+        length(group) > 1 || continue
+        any(_asserts_its_type, group) && continue
+        known = Any[]
+        any_unknown = false
+        for b in group
+            if b.type === nothing
+                any_unknown = true
+            elseif !any(k -> _same_inferred_type(k, b.type), known)
+                push!(known, b.type)
+            end
+        end
+        isempty(known) && continue
+        (any_unknown || length(known) > 1) || continue
+        settled = any_unknown ? CoreTypes.Any :
+            _join_types(known, getsymbols(state), state.meta_dict)
+        for b in group
+            b.type === nothing || settype!(b, settled)
+        end
     end
-    _settype_from_decl!(binding, t, state)
+    empty!(state.rebound)
+    return
 end
 
 function infer_type_decl(binding, t, state, scope)
+    # `x::Vector{T} where T` declares `Vector`: the clause narrows the type
+    # ARGUMENTS, which the curly unwrapping below drops anyway.
+    while iswhere(t) && t.args !== nothing && !isempty(t.args)
+        t = t.args[1]
+    end
     if isidentifier(t)
         resolve_ref(t, scope, state)
     end

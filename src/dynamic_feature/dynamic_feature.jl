@@ -157,6 +157,12 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 delete!(env_to_use, "JULIA_DEPOT_PATH")
             end
 
+            # An inherited JULIA_LOAD_PATH (e.g. from a Pkg app shim) would
+            # replace the default load path in the child, so `@` no longer
+            # resolves and loading JuliaDynamicAnalysisProcess fails.
+            delete!(env_to_use, "JULIA_LOAD_PATH")
+            delete!(env_to_use, "JULIA_PROJECT")
+
             # Use the same binary as the current process: `julia` from PATH may
             # not resolve at all inside an editor-launched language server (which
             # is started with an explicit executable path), or may resolve to a
@@ -348,11 +354,17 @@ struct DynamicFeature
     # re-reading (and re-`set_input`ing) multi-MB cache files.
     loaded_pkg_metadata::Set{PkgCacheKey}
     pending_count::Threads.Atomic{Int}
-    # Whether any result has been consumed by `process_from_dynamic`. Together
-    # with `pending_count` this is what `is_ready` reports: a workspace that has
-    # not produced a single result yet is not "done", however empty its queues
-    # look at that moment.
+    # Whether any result has been consumed by `process_from_dynamic`, or a
+    # reconcile completed without any work to do. Together with `pending_count`
+    # this is what `is_ready` reports: a workspace that has not settled a
+    # single reconcile yet is not "done", however empty its queues look at
+    # that moment.
     saw_result::Threads.Atomic{Bool}
+    # Whether `_reconcile!` has ever sent a `ReconcileMsg`. The first reconcile
+    # is always sent — even when the required set is empty — so `saw_result`
+    # gets settled and `is_ready`/`wait_until_ready` cannot block forever on a
+    # workspace that needs no dynamic work at all.
+    reconciled_once::Threads.Atomic{Bool}
     update_channel::Channel{Symbol}
     progress_callback::Union{Nothing,Function}
     # Last child-reported indexing percentage per work item (reactor-owned).
@@ -398,6 +410,7 @@ struct DynamicFeature
             Set{PkgCacheKey}(),
             Set{PkgCacheKey}(),
             Threads.Atomic{Int}(0),
+            Threads.Atomic{Bool}(false),
             Threads.Atomic{Bool}(false),
             Channel{Symbol}(1),   # coalesced wakeup signal (see _complete_work_item!)
             progress_callback,
@@ -1382,6 +1395,14 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
     end
 
     _drain_launch_queue!(df)
+
+    # A reconcile that leaves no work outstanding settles readiness: without
+    # this, a workspace that never requires any dynamic work would never set
+    # `saw_result` and `wait_until_ready` would block forever.
+    if df.pending_count[] == 0 && isempty(df.inflight)
+        df.saw_result[] = true
+        isready(df.update_channel) || try put!(df.update_channel, :data_available) catch; end
+    end
 
     return false
 end

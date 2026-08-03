@@ -233,6 +233,10 @@ getsymbolextendeds(env::ExternalEnv) = env.extended_methods
 getsymbols(state::TraverseState) = getsymbols(state.env)
 getsymbolextendeds(state::TraverseState) = getsymbolextendeds(state.env)
 
+# Every binding a rebound name got in one scope, in source order. Pass-local:
+# it exists only to settle the types at the end of a traversal phase.
+const ReboundBindings = Dict{Tuple{Scope,String},Vector{Binding}}
+
 mutable struct Toplevel{RT} <: TraverseState
     uri::URI
     included_files::Vector{URI}
@@ -253,12 +257,13 @@ mutable struct Toplevel{RT} <: TraverseState
     flags::Int
     meta_dict::Dict{UInt64,Meta}
     runtime::RT
+    rebound::ReboundBindings
 end
 
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
 Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, runtime) =
-    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, true, 0, meta_dict, runtime)
+    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, true, 0, meta_dict, runtime, ReboundBindings())
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -299,9 +304,22 @@ mutable struct Delayed <: TraverseState
     meta_dict::Dict{UInt64,Meta}
     urefs::Vector{EXPR} # refs that failed to resolve
     deferred_unused::Vector{Tuple{Binding,Scope}} # unused checks pending parent-scope completion
+    rebound::ReboundBindings
 end
 
-Delayed(scope, env, workspace_packages, meta_dict, flags=0) = Delayed(scope, env, workspace_packages, flags, meta_dict, EXPR[], Tuple{Binding,Scope}[])
+Delayed(scope, env, workspace_packages, meta_dict, flags=0) = Delayed(scope, env, workspace_packages, flags, meta_dict, EXPR[], Tuple{Binding,Scope}[], ReboundBindings())
+
+# Note the binding a plain assignment displaces and the one it installs, so both
+# can be settled together once the phase has seen every assignment. Types are not
+# inferred yet at this point. Only the two binding states collect; the others
+# reach no rebinding.
+_note_rebound!(::TraverseState, _, _, _, _) = nothing
+function _note_rebound!(state::Union{Toplevel,Delayed}, scope, name, displaced, b::Binding)
+    g = get!(() -> Binding[], state.rebound, (scope, name))
+    displaced isa Binding && (isempty(g) || g[end] !== displaced) && push!(g, displaced)
+    push!(g, b)
+    return
+end
 
 function process_EXPR(x::EXPR, state::Delayed)
     meta_dict = state.meta_dict
@@ -396,8 +414,9 @@ function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; wo
     root_modules = Dict{Symbol,Any}(m => env.symbols[m] for m in IMPLICIT_SCOPE_MODULES)
     module_context !== nothing && (root_modules[:__tree__] = module_context)
     setscope!(cst, Scope(nothing, cst, Dict(), root_modules, nothing), meta_dict)
-    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, module_context === nothing, 0, meta_dict, rt)
+    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, module_context === nothing, 0, meta_dict, rt, ReboundBindings())
     process_EXPR(cst, state)
+    _unify_rebound_types!(state)
     unique!(state.delayed)
     for x in state.delayed
         if hasscope(x, meta_dict)
@@ -412,6 +431,7 @@ function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; wo
             traverse(x, ds)
             retry_urefs!(ds)
         end
+        _unify_rebound_types!(ds)
         for (b, sc) in ds.deferred_unused
             check_unused_binding(b, sc, meta_dict)
         end

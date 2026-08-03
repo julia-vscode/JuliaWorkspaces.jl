@@ -106,7 +106,11 @@ function _reconcile!(jw::JuliaWorkspace)
 
     required = derived_required_dynamic_projects(jw.runtime)
 
-    if required != df.last_required
+    # The first reconcile is always sent, even when nothing is required, so the
+    # reactor can settle `saw_result` for workspaces without any dynamic work.
+    first_reconcile = !df.reconciled_once[]
+    if required != df.last_required || first_reconcile
+        df.reconciled_once[] = true
         # `df` is an immutable struct, but `last_required` is a mutable `Set`,
         # so update it in place.
         empty!(df.last_required)

@@ -1862,7 +1862,10 @@ end
     # both cover the missing ref and the nothing-equality lint hint ...
     @test any(d -> occursin("undefined_ref_xyz", d.message), new)
     @test any(d -> occursin("nothing", d.message), new)
-    # ... and the two sets are byte-identical (no sanctioned divergence here)
+    # ... and the two sets are byte-identical (no sanctioned divergence here).
+    # The old whole-closure pass never sees macro-declared names, so adding a
+    # `@declare_input` or `@deprecate` to this fixture would break this
+    # assertion legitimately — that is not a regression.
     @test new == old
     @test new isa Set{JuliaWorkspaces.Diagnostic}
 end

@@ -3513,6 +3513,41 @@ end
         end""")
 end
 
+@testitem "every Vararg spelling is variadic" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: func_nargs, is_explicit_vararg_decl, bounded_vararg_N
+    using JuliaWorkspaces.CSTParser: parse
+
+    inf = typemax(Int)
+
+    # A unary `::T` is not `isdeclaration` — it carries one argument, not two — so
+    # the anonymous spelling was counted as an ordinary positional, and the dotted
+    # one was missed because its head is a getfield rather than an identifier. Both
+    # produced arity false positives.
+    @test func_nargs(parse("f(x, ::Vararg{Int}) = 1")) == (1, inf, Symbol[], false)
+    @test func_nargs(parse("f(::Vararg{Int}) = 1")) == (0, inf, Symbol[], false)
+    @test func_nargs(parse("f(x, ::Vararg) = 1")) == (1, inf, Symbol[], false)
+    @test func_nargs(parse("f(x, ::Base.Vararg{Int}) = 1")) == (1, inf, Symbol[], false)
+    # a bounded anonymous Vararg consumes exactly N, as the bound form does
+    @test func_nargs(parse("f(x, ::Vararg{Int,3}) = 1")) == (4, 4, Symbol[], false)
+    @test func_nargs(parse("f(::Vararg{Int,2}) = 1")) == (2, 2, Symbol[], false)
+
+    # the spellings that were already correct must not move
+    @test func_nargs(parse("f(x, y::Vararg{Int}) = 1")) == (1, inf, Symbol[], false)
+    @test func_nargs(parse("f(x, ys...) = 1")) == (1, inf, Symbol[], false)
+    @test func_nargs(parse("f(x, y::Vararg{Int,3}) = 1")) == (4, 4, Symbol[], false)
+    @test func_nargs(parse("f(x, ::Int) = 1")) == (2, 2, Symbol[], false)
+    @test func_nargs(parse("f(x::Int, y) = 1")) == (2, 2, Symbol[], false)
+
+    # the helpers `func_nargs` now shares with the rest of the arity machinery
+    argof(src) = parse(src).args[1].args[3]      # the second parameter
+    @test is_explicit_vararg_decl(argof("f(x, ::Vararg{Int}) = 1"))
+    @test is_explicit_vararg_decl(argof("f(x, ::Base.Vararg) = 1"))
+    @test is_explicit_vararg_decl(argof("f(x, y::Vararg{Int}) = 1"))
+    @test !is_explicit_vararg_decl(argof("f(x, ::Int) = 1"))
+    @test bounded_vararg_N(argof("f(x, ::Vararg{Int,3}) = 1")) == 3
+    @test bounded_vararg_N(argof("f(x, ::Vararg{Int}) = 1")) === nothing
+end
+
 @testitem "@nospecialize without argument (#390)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: func_nargs
     using JuliaWorkspaces.CSTParser: parse, EXPR
