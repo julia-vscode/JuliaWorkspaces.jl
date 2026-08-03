@@ -208,6 +208,87 @@ end
     @test isempty(diagnostics_of(jw, root, b))
 end
 
+@testitem "implicit scope: a colon-list member that is a MODULE carries a use-site chain" setup=[ImplicitScopeWS] begin
+    using JuliaWorkspaces: derived_module_visible_names
+
+    # `using ..Foo: Threads` picks a module-valued member out of Foo's implicit
+    # scope; `Threads.nthreads()` then has to continue THROUGH the bound name. The
+    # second hop is the assertion — the first only proves the name got bound to
+    # something. What carries it is `qualified_module_target`'s `:external_symbol`
+    # arm re-deriving `["Base"] + "Threads"` from the ref alone, NOT the
+    # module-target ledger: this passes with `_implicit_member_lookup`'s synthesized
+    # `ImportTarget` deleted. The ledger has its own test below.
+    root = URI("file:///is9/src/T.jl")
+    a = URI("file:///is9/src/a.jl")
+    b = URI("file:///is9/src/b.jl")
+    jw = ws_files(
+        root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        a => "module Foo\nf(x) = x\nend\n",
+        b => "module Consumer\nusing ..Foo: Threads\ng() = Threads.nthreads()\nend\n",
+    )
+    vis = derived_module_visible_names(jw.runtime, root, ["T", "Consumer"])
+
+    # Bound like any other implicit-scope member: origin is the PROVIDER, and no
+    # workspace item defines it.
+    @test haskey(vis, "Threads")
+    @test vis["Threads"].kind === :external_symbol
+    @test vis["Threads"].origin_module == ["Base"]
+    @test vis["Threads"].item === nothing
+
+    # The colon-list name and the use site both bind...
+    trefs = refs_of(jw, root, b, "Threads")
+    @test length(trefs) == 2
+    @test all(r -> r !== nothing, trefs)
+
+    # ...and the chain continues THROUGH the binding into the env module.
+    @test only(refs_of(jw, root, b, "nthreads")) isa SS.FunctionStore
+    @test isempty(diagnostics_of(jw, root, b))
+end
+
+@testitem "implicit scope: a module-valued colon-list member enters the module-target ledger" setup=[ImplicitScopeWS] begin
+    using JuliaWorkspaces: derived_module_visible_names
+
+    # The one thing `_implicit_member_lookup`'s synthesized `ImportTarget` is FOR.
+    # It goes into pass 1's module-target ledger, whose only consumer is
+    # `_reattempt_unresolved`: `Inner`'s `using ..Threads` names no tree module, so
+    # it classifies `:unresolved` and the re-attempt looks `Threads` up in the
+    # anchor's ledger and continues into `["Base", "Threads"]` from there. Delete the
+    # synthesis and `nthreads` has no origin to be resolved against.
+    root = URI("file:///isa/src/T.jl")
+    a = URI("file:///isa/src/a.jl")
+    b = URI("file:///isa/src/b.jl")
+    jw = ws_files(
+        root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        a => "module Foo\nf(x) = x\nend\n",
+        b => """
+        module Consumer
+        using ..Foo: Threads
+        module Inner
+        using ..Threads: nthreads
+        g() = nthreads()
+        end
+        end
+        """,
+    )
+    vis = derived_module_visible_names(jw.runtime, root, ["T", "Consumer", "Inner"])
+
+    @test haskey(vis, "nthreads")
+    @test vis["nthreads"].kind === :external_symbol
+    # The PROVIDER is the extended path, which is the ledger entry's whole point:
+    # without it the re-attempt finds no target and this name never resolves.
+    @test vis["nthreads"].origin_module == ["Base", "Threads"]
+    @test vis["nthreads"].item === nothing
+
+    # The per-file pass does NOT keep up with the visibility layer here, and this
+    # asserts that split rather than hiding it: `resolve_import_block` chains raw
+    # `_get_field` calls, which have no arm for a `TreeRef` mid-path, so the import
+    # statement is reported unresolved. Pre-existing to this fallback (the same
+    # dead-end as `import Foo.Threads.nthreads`) and benign — the message promises
+    # exactly that nothing through the statement is checked.
+    @test diagnostics_of(jw, root, b) ==
+        ["Failed to resolve `nthreads`. Anything imported through this statement is assumed to exist and will not be checked."]
+end
+
 @testitem "implicit scope: a colon-list member that is public-not-exported stays unknown" setup=[ImplicitScopeWS] begin
     using JuliaWorkspaces: derived_module_visible_names
 

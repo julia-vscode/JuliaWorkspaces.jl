@@ -319,13 +319,20 @@ before, or cosmetic wrongness on code that does not compile.
   single-file mode's `_get_field(::Scope)` arm. The module-valued exports that are
   real `ModuleStore`s (`Threads`, `Iterators`, `Meta`, `Sys`, `Libc`, `Docs`,
   `Broadcast`, `MathConstants`, `StackTraces`, `GC`) chain correctly.
-- **Cost on the miss path.** `_implicit_member` re-resolves the env per iteration and
-  once more for `maybe_lookup`, and allocates `[String(m)]` per iteration. Also new:
-  `derived_module_visible_names` for a module with no `:external` imports now takes an
-  `ExternalEnv` dependency it did not have, so it re-executes on env change.
-- **`_implicit_member_lookup`'s module-valued arm is untested.** `using ..Foo: Threads`
-  followed by `Threads.nthreads()` — the synthesized `ImportTarget(:external, …)` is
-  reachable but no test proves it carries a chain. Site 1's equivalent IS pinned.
+- **Cost on the miss path.** `derived_module_visible_names` for a module with no
+  `:external` imports now takes an `ExternalEnv` dependency it did not have, so it
+  re-executes on env change. (`_implicit_member`'s own per-iteration env resolve and
+  `mpath` allocation are gone — one resolve, hoisted, and the vector is built only
+  for the answer.)
+- **`_implicit_member_lookup`'s module-valued arm** is pinned now, but not by the
+  spelling this list first named: `using ..Foo: Threads` then `Threads.nthreads()`
+  passes with the synthesized `ImportTarget` deleted, because
+  `qualified_module_target`'s `:external_symbol` arm re-derives `["Base"] + "Threads"`
+  from the ref alone. The synthesis' only consumer is pass 1's module-target ledger,
+  read by `_reattempt_unresolved` — so the discriminating spelling is a nested
+  module's `using ..Threads: nthreads`, which is what the test now uses. Note the two
+  layers disagree there: visibility resolves it, while the per-file pass reports the
+  import unresolved (the dead-end below), and the test asserts both.
 - **The parity test hardcodes single-file's shapes** rather than analysing the
   single-file spelling alongside, so drift there would not fail it.
 - **Deep dotted imports still dead-end** (pre-existing, and improved by one hop):

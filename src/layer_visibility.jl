@@ -294,16 +294,21 @@ continues past `Threads` exactly as it does in single-file mode.
 function _implicit_member(rt, root, path::Vector{String}, name::String)
     derived_module_is_bare(rt, root, path) && return nothing
     sym = Symbol(name)
+    # Resolved once, not per candidate: every module in the list is top-level, so
+    # `_resolve_external_module`'s segment walk would only repeat this lookup.
+    env = _resolve_env(rt, root)
+    syms = StaticLint.getsymbols(env)
     for m in StaticLint.IMPLICIT_SCOPE_MODULES
-        mpath = [String(m)]
-        store = _resolve_external_module(rt, root, mpath)
-        store === nothing && continue
+        store = get(syms, m, nothing)
+        store isa SymbolServer.ModuleStore || continue
         # The canonical export predicate, the same one the `used_modules` walk this
         # mirrors uses. Its own `haskey` comes first, so the O(1) `vals` probe still
         # rejects most misses before the O(n) `exportednames` scan.
         StaticLint.isexportedby(sym, store) || continue
-        val = StaticLint.maybe_lookup(store.vals[sym], _resolve_env(rt, root))
+        val = StaticLint.maybe_lookup(store.vals[sym], env)
         val === nothing && continue
+        # Allocated only for the answer, never for a candidate that declines.
+        mpath = [String(m)]
         val isa SymbolServer.ModuleStore &&
             return (StaticLint.TreeRef(name, :external_module, nothing, mpath), mpath)
         return (val, mpath)
