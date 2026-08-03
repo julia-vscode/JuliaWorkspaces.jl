@@ -123,17 +123,12 @@ function _macro_owner_import(rt, root::URI, path::Vector{String},
     return nothing
 end
 
-# Does the environment's store for `owner` provide `macro_name`?
+# Does the environment's store for `owner` provide `macro_name`? The module walk is
+# `_resolve_external_module`'s, which is also what resolves an `:external` import
+# target, so an owner path is looked up exactly as any other module path is.
 function _env_provides_macro(rt, root::URI, owner::Vector{String}, macro_name::String)
-    project_uri = derived_project_uri_for_root(rt, root)
-    env = project_uri === nothing ? derived_stdlib_only_env(rt) : derived_environment(rt, project_uri)
-    store = get(env.symbols, Symbol(owner[1]), nothing)
-    store isa SymbolServer.ModuleStore || return false
-    for seg in owner[2:end]
-        store = get(store.vals, Symbol(seg), nothing)
-        store isa SymbolServer.ModuleStore || return false
-    end
-    return haskey(store.vals, Symbol(macro_name))
+    store = _resolve_external_module(rt, root, owner)
+    return store !== nothing && haskey(store.vals, Symbol(macro_name))
 end
 
 # Does the workspace package `owner` declare `macro_name` in its own tree?
