@@ -371,6 +371,16 @@ function flag!(state, x::EXPR)
 end
 
 """
+    IMPLICIT_SCOPE_MODULES
+
+The modules every module can reach without an import. `semantic_pass` seeds them
+into the root scope, which is what makes a bare `Int` resolve in any file; anything
+else that has to answer for a name no written import accounts for is answering the
+same question, and must read this list rather than restate it.
+"""
+const IMPLICIT_SCOPE_MODULES = (:Base, :Core)
+
+"""
     semantic_pass(file, modified_expr=nothing)
 
 Performs a semantic pass across a project from the entry point `file`. A first pass traverses the top-level scope after which secondary passes handle delayed scopes (e.g. functions). These secondary passes can be, optionally, very light and only seek to resovle references (e.g. link symbols to bindings). This can be done by supplying a list of expressions on which the full secondary pass should be made (`modified_expr`), all others will receive the light-touch version.
@@ -383,7 +393,7 @@ scopes and the Base/Core stores — and includes are NOT followed
 (`follow_includes = false`; included files' names come from the tree).
 """
 function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing)
-    root_modules = Dict{Symbol,Any}(:Base => env.symbols[:Base], :Core => env.symbols[:Core])
+    root_modules = Dict{Symbol,Any}(m => env.symbols[m] for m in IMPLICIT_SCOPE_MODULES)
     module_context !== nothing && (root_modules[:__tree__] = module_context)
     setscope!(cst, Scope(nothing, cst, Dict(), root_modules, nothing), meta_dict)
     state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, module_context === nothing, 0, meta_dict, rt)
