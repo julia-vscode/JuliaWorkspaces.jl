@@ -361,6 +361,39 @@ Four distinct diagnostics appear when the marker is disabled, none of them
   `iswhere(parentof(...))` arm should answer `Any`. Argument-side, small, and one of
   the four false positives the `eval` switch now ships.
 
+- **Cross-file workspace-type ancestry — the largest remaining parity gap.** A type
+  the workspace declares carries no opinion on either side once the declaration is
+  not in this file: the parameter side answers `Any` from `_resolve_recorded_type`,
+  the argument side is declined by `_is_resolved_type`. Measured over this package's
+  own source (2026-08-03): of 1593 **annotated** parameters, 877 (55%) name a
+  workspace-declared head, 563 (35%) Base/Core, 153 (9.6%) an imported dependency.
+  Note the different denominator from the 74-root argument-slot figures above — this
+  counts recorded parameters, not compared call sites.
+
+  The blocker is not the data, it is `subtypes.jl`'s `_super(_, _, _) = CoreTypes.Any`.
+  An operand with no `_super` method reports its supertype AS `Any`, so `_issubtype`
+  stops and both directions return false — an unknown type is indistinguishable from
+  one with no common ancestor, and the caller flags the call. The failure direction is
+  a **false positive on correct code**, which is what both guards above exist to
+  prevent. The same hole truncates a chain that starts same-file: `_super(::Binding)`
+  ends at `refof(sup)`, which for a sibling-file supertype is a `TreeRef`, hence the
+  catch-all.
+
+  Needs: the supertype recorded on `InventoryItem` (absent today) as a
+  parameters-dropped head — enough, since `_type_compare` goes through `_basename`;
+  a per-`(module, name)` projection beside `derived_method_signatures_index`; and a
+  tree-backed operand in `subtypes.jl`, arriving as a closure as `tree_param_types`
+  does. The real work is the contract change: `_super` must distinguish "reached `Any`"
+  from "ran out of information", and the latter must abort the whole comparison —
+  today they are one value, so this touches every `_super` method and caller,
+  including `_ancestry`/`_join_types`, which terminate on `Any`. Also needs a
+  tree→store hop mid-walk (`struct MyInt <: Integer`) and a cycle guard.
+
+  Overlaps **§18** above, which needs the same chain enumerated rather than as a pair
+  predicate; do them together or land this first. Own spec, and gate it on
+  `docs/perf/typesweep.jl` across real roots — the signal is not whether new
+  diagnostics appear but whether any of them are wrong.
+
 ## Carried-over cautions
 
 - The plan's own sample code is where defects hide — six of seven findings in the
