@@ -265,9 +265,12 @@ end
 #   SIBLING file (`import JSON as J` there, `J.parse` here) is not
 #   recognizable from the TreeRef alone (name matches neither shape) and
 #   stays unresolved.
-# - `:external_module` — the post-strip stand-in shape (origin_module
-#   EXCLUDES the name); handled for completeness, unreachable during the
-#   pass (the strip runs after all resolution steps).
+# - `:external_module` — the stand-in shape for an env module (origin_module
+#   EXCLUDES the name). Reached DURING the pass: `_get_field`'s
+#   implicit-scope miss returns it for a module-valued Base/Core export, and
+#   this is the hop that continues `Foo.Threads.nthreads()` past `Threads`.
+#   Also what `_strip_module_stores!` rewrites module-store refs to, after
+#   all resolution steps.
 #
 # The returned `ModuleStore` is consumed transiently by `resolve_getfield`'s
 # ModuleStore arm and never stored (leaf member stores in refs are fine,
@@ -699,9 +702,9 @@ visible-names faces of the modules the file's names resolve through
 (`derived_module_visible_names_idfree`) plus one per-name
 `derived_visible_item` for each DISTINCT tree-declared name the file
 actually references, the per-module import-component selectors
-(`derived_module_exists`/`derived_module_declared_at`), the file's lint
-configuration, and the environment. Nothing in the analysis frame reads the
-whole `derived_module_tree` value. Consequences:
+(`derived_module_exists`/`derived_module_declared_at`/`derived_module_is_bare`),
+the file's lint configuration, and the environment. Nothing in the analysis
+frame reads the whole `derived_module_tree` value. Consequences:
 
 - A body edit in a SIBLING file: that file's inventory backdates → the
   module tree backdates → every selector backdates → this analysis is
