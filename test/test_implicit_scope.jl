@@ -7,14 +7,24 @@
     const CP = JuliaWorkspaces.CSTParser
     const SS = JuliaWorkspaces.SymbolServer
 
-    # A workspace of julia files, keyed by URI. The first pair is the root.
+    # A workspace of files, keyed by URI. The first pair is the root. Language is
+    # picked from the extension so `Project.toml`/`Manifest.toml` pairs are
+    # recognized as projects, not julia source.
     function ws_files(pairs...)
         jw = JuliaWorkspace()
         for (u, s) in pairs
-            add_file!(jw, TextFile(u, SourceText(s, "julia")))
+            lang = endswith(string(u), ".toml") ? "toml" : "julia"
+            add_file!(jw, TextFile(u, SourceText(s, lang)))
         end
         return jw
     end
+
+    # A minimal Project.toml body naming a workspace package.
+    project_toml(name, uuid) = """
+    name = "$name"
+    uuid = "$uuid"
+    version = "0.1.0"
+    """
 
     # The ref of every occurrence of `name` in `file`, analysed under `root`.
     function refs_of(jw, root::URI, file::URI, name::String)
@@ -214,4 +224,54 @@ end
     # exists — but it must stay `:unknown`, NOT resolve to Base.Filesystem.
     @test haskey(vis, "Filesystem")
     @test vis["Filesystem"].kind === :unknown
+end
+
+@testitem "implicit scope: a workspace-package colon-list member can come from the implicit scope" setup=[ImplicitScopeWS] begin
+    using JuliaWorkspaces: derived_module_visible_names
+
+    # Prov and Consumer are separate workspace packages (own Project.toml, own
+    # root), so `Consumer`'s `using Prov: println` resolves through the
+    # `:workspace_package` branch of `_member_lookup`, not `:tree`.
+    prov_toml = URI("file:///wsp1/Prov/Project.toml")
+    prov_src = URI("file:///wsp1/Prov/src/Prov.jl")
+    cons_toml = URI("file:///wsp1/Consumer/Project.toml")
+    cons_src = URI("file:///wsp1/Consumer/src/Consumer.jl")
+
+    jw = ws_files(
+        prov_toml => project_toml("Prov", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee2001"),
+        prov_src => "module Prov\nend\n",
+        cons_toml => project_toml("Consumer", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee2002"),
+        cons_src => "module Consumer\nusing Prov: println\ng() = println()\nend\n",
+    )
+    vis = derived_module_visible_names(jw.runtime, cons_src, ["Consumer"])
+
+    @test haskey(vis, "println")
+    @test vis["println"].kind === :external_symbol
+    @test vis["println"].origin_module == ["Base"]
+    @test vis["println"].item === nothing
+
+    # The case above alone can't catch a `root`/`entry` mix-up: neither package
+    # has a Manifest.toml, so both resolve to the SAME shared stdlib-only env, and
+    # Consumer's own tree has no "Prov" node either way — a wrong `root` and the
+    # right `entry` land on the same `println`. Force a real divergence with a
+    # BARE provider: the bareness gate (`derived_module_is_bare`) is keyed on
+    # whichever root is passed in. The right `entry` finds BareProv's own bare
+    # declaration and honours the gate (`:unknown`); the wrong `root`
+    # (Consumer2's own tree, which has no "BareProv" node) defaults to "not
+    # bare" and would wrongly let `println` through as `:external_symbol`.
+    bare_toml = URI("file:///wsp2/BareProv/Project.toml")
+    bare_src = URI("file:///wsp2/BareProv/src/BareProv.jl")
+    cons2_toml = URI("file:///wsp2/Consumer2/Project.toml")
+    cons2_src = URI("file:///wsp2/Consumer2/src/Consumer2.jl")
+
+    jw2 = ws_files(
+        bare_toml => project_toml("BareProv", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee2003"),
+        bare_src => "baremodule BareProv\nend\n",
+        cons2_toml => project_toml("Consumer2", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee2004"),
+        cons2_src => "module Consumer2\nusing BareProv: println\nend\n",
+    )
+    vis2 = derived_module_visible_names(jw2.runtime, cons2_src, ["Consumer2"])
+
+    @test haskey(vis2, "println")
+    @test vis2["println"].kind === :unknown
 end
