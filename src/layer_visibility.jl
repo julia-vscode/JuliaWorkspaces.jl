@@ -99,25 +99,11 @@ function _macro_owner_import(rt, root::URI, path::Vector{String},
             end
         else
             # A qualified `Salsa.@declare_input` needs the QUALIFIER actually
-            # bound: a whole-module `using`/`import Salsa` (bound name is the
-            # alias if any, else the module's own name — same rule as
-            # `_target_bring_ins`'s `alias !== nothing ? alias : tp[end]`), or
-            # a colon-list that explicitly lists the module's OWN name (mirrors
-            # `_member_lookup`'s `member_name == tp[end]` self-binding check;
-            # per-symbol alias wins over the symbol's own name, same as there).
-            # A colon-list that never lists the module itself binds no
-            # qualifier at all — `using Salsa: bar` does not bring `Salsa` into
-            # scope, only `bar`.
-            isempty(ri.target.path) && continue
-            self_name = last(ri.target.path)
-            bound = if isempty(ri.symbols)
-                ri.alias !== nothing ? ri.alias : self_name
-            else
-                hit = findfirst(s -> s.name == self_name, ri.symbols)
-                hit === nothing ? nothing :
-                    (ri.symbols[hit].alias !== nothing ? ri.symbols[hit].alias : ri.symbols[hit].name)
-            end
-            bound == spelling.qualifier[1] && return ri
+            # bound, which is exactly what `_bound_module_name` answers — the
+            # same rule the bring-in arms use, so the two cannot disagree about
+            # what a qualifier could be pointing at. `nothing` (a colon-list
+            # that never lists the module itself) matches no qualifier.
+            _bound_module_name(ri) == spelling.qualifier[1] && return ri
         end
     end
     return nothing
@@ -284,6 +270,31 @@ _tier(origin::Symbol) = origin === :declared ? 3 : origin === :import_binding ? 
 # `origin` (which is `:import_binding` for all of them).
 const _BringIn = Tuple{String,VisibleName,Union{Nothing,ImportTarget}}
 
+"""
+    _bound_module_name(target::ImportTarget, alias) -> Union{Nothing,String}
+    _bound_module_name(ri::ResolvedImport) -> Union{Nothing,String}
+
+The name an import statement binds for the TARGET MODULE ITSELF, or `nothing` when
+it binds none. A whole-module `using`/`import X` binds `X`, or its alias. A
+colon-list binds the module only when it lists the module's own name
+(`using X: X as Y`), the per-symbol alias winning — `using X: bar` brings in `bar`
+and leaves `X` unbound.
+
+One rule, one place: every bring-in arm needs the whole-module answer, and macro
+owner confirmation needs the colon-list one, and they have to agree about what a
+qualifier like `Salsa.@declare_input` could be pointing at.
+"""
+_bound_module_name(target::ImportTarget, alias) =
+    isempty(target.path) ? nothing : (alias === nothing ? last(target.path) : alias)
+
+function _bound_module_name(ri::ResolvedImport)
+    isempty(ri.symbols) && return _bound_module_name(ri.target, ri.alias)
+    isempty(ri.target.path) && return nothing
+    hit = findfirst(s -> s.name == last(ri.target.path), ri.symbols)
+    hit === nothing && return nothing
+    return ri.symbols[hit].alias === nothing ? ri.symbols[hit].name : ri.symbols[hit].alias
+end
+
 # Bring in the names for one fully-resolved (never `:unresolved`)
 # `ImportTarget` — rule 2's `:tree`/`:workspace_package`/`:external` bullets.
 # `kind` (`:using`/`:import`) and `alias` come from the owning `ResolvedImport`
@@ -326,7 +337,7 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
                 end
             end
         end
-        bound = alias !== nothing ? alias : tp[end]
+        bound = _bound_module_name(target, alias)
         push!(entries, (bound, VisibleName(:module, origin, _module_declared_at(rt, root, tp), tp), target))
 
     elseif target.sort === :workspace_package
@@ -353,7 +364,7 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
                 push!(entries, (name, VisibleName(vn.kind, :using_workspace_package, vn.item, tp), mt))
             end
         end
-        bound = alias !== nothing ? alias : tp[end]
+        bound = _bound_module_name(target, alias)
         push!(entries, (bound, VisibleName(:module, origin, _module_declared_at(rt, entry, tp), tp), target))
 
     elseif target.sort === :external
@@ -370,7 +381,7 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
             # without the store; only the module name itself binds. The ledger
             # entry keeps the denoted target so relative/member chains through
             # the binding re-attempt (and fail) at their own use sites.
-            bound = alias !== nothing ? alias : tp[end]
+            bound = _bound_module_name(target, alias)
             push!(entries, (bound, VisibleName(:external_symbol, origin, nothing, tp), target))
             return entries
         end
@@ -387,7 +398,7 @@ function _target_bring_ins(rt, root, kind::Symbol, target::ImportTarget, alias, 
                 push!(entries, (name, VisibleName(:external_symbol, :using_external, nothing, tp), mt))
             end
         end
-        bound = alias !== nothing ? alias : tp[end]
+        bound = _bound_module_name(target, alias)
         push!(entries, (bound, VisibleName(:external_symbol, origin, nothing, tp), target))
     end
     return entries
