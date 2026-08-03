@@ -207,12 +207,44 @@ True if `arg` is a method-arg declaration of the form `x::Vararg` or
 `x::Vararg{...}` (the explicit `::Vararg` spelling, not the `x...` splat).
 """
 function is_explicit_vararg_decl(arg)
-    isdeclaration(arg) || return false
-    length(arg.args) >= 2 || return false
-    t = arg.args[2]
-    isidentifier(t) && valofid(t) == "Vararg" && return true
-    iscurly(t) && length(t.args) >= 1 && isidentifier(t.args[1]) && valofid(t.args[1]) == "Vararg" && return true
+    t = arg_decl_type(arg)
+    t === nothing && return false
+    names_vararg(t) && return true
+    iscurly(t) && length(t.args) >= 1 && names_vararg(t.args[1]) && return true
     return false
+end
+
+"Does this type expression name `Vararg`, bare or dotted (`Base.Vararg`)?"
+function names_vararg(t)
+    t isa EXPR || return false
+    isidentifier(t) && return valofid(t) == "Vararg"
+    if is_getfield_w_quotenode(t)
+        q = t.args[2]
+        return q isa EXPR && q.args !== nothing && !isempty(q.args) &&
+            isidentifier(q.args[1]) && valofid(q.args[1]) == "Vararg"
+    end
+    return false
+end
+
+"""
+    arg_decl_type(arg)
+
+The type expression of a method-arg declaration, for both the bound `x::T` form
+and the anonymous `::T` form; `nothing` for anything else. The anonymous form is
+UNARY `::`, so it has one argument rather than two and `isdeclaration` is false
+for it — reading only the binary form silently treats `f(::Vararg{Int})` as one
+ordinary positional.
+"""
+function arg_decl_type(arg)
+    arg isa EXPR || return nothing
+    if isdeclaration(arg)
+        return length(arg.args) >= 2 ? arg.args[2] : nothing
+    end
+    h = headof(arg)
+    if h isa EXPR && isoperator(h) && valof(h) == "::" && arg.args !== nothing && length(arg.args) == 1
+        return arg.args[1]
+    end
+    return nothing
 end
 
 """
@@ -224,12 +256,11 @@ with an integer literal `N`; otherwise `nothing`. Distinguishes bounded
 parametric `Vararg{T,N} where N`.
 """
 function bounded_vararg_N(arg)
-    isdeclaration(arg) || return nothing
-    length(arg.args) >= 2 || return nothing
-    t = arg.args[2]
+    t = arg_decl_type(arg)
+    t === nothing && return nothing
     iscurly(t) || return nothing
     length(t.args) == 3 || return nothing
-    isidentifier(t.args[1]) && valofid(t.args[1]) == "Vararg" || return nothing
+    names_vararg(t.args[1]) || return nothing
     N_expr = t.args[3]
     CSTParser.headof(N_expr) === :INTEGER || return nothing
     N_expr.val isa AbstractString || return nothing

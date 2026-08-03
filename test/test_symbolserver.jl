@@ -1170,3 +1170,57 @@ end
     @test sort(r.publicnames) == [:expf, :pubf]
     @test haskey(r.vals, :pubf) && haskey(r.vals, :expf)
 end
+
+@testitem "SymbolServer: version-specific manifests are candidates for this Julia version" begin
+    using JuliaWorkspaces.SymbolServer: get_manifest_candidates, manifest_names
+
+    this_version = "Manifest-v$(VERSION.major).$(VERSION.minor).toml"
+    other_version = "Manifest-v$(VERSION.major).$(VERSION.minor + 1).toml"
+
+    mktempdir() do dir
+        @test isempty(get_manifest_candidates(dir))
+
+        write(joinpath(dir, "Manifest.toml"), "")
+        @test basename.(get_manifest_candidates(dir)) == ["Manifest.toml"]
+
+        # Pkg prefers the version-specific manifest, so we must index that one.
+        write(joinpath(dir, this_version), "")
+        @test basename.(get_manifest_candidates(dir)) == [this_version, "Manifest.toml"]
+
+        # A manifest for another Julia version is never a candidate: it was
+        # resolved for a Julia this process cannot build caches for.
+        write(joinpath(dir, other_version), "")
+        @test basename.(get_manifest_candidates(dir)) == [this_version, "Manifest.toml"]
+    end
+
+    @test manifest_names(v"1.10.5") ==
+        ["JuliaManifest-v1.10.toml", "Manifest-v1.10.toml", "JuliaManifest.toml", "Manifest.toml"]
+end
+
+@testitem "SymbolServer: _get_missing_packages reads a version-specific manifest" begin
+    using JuliaWorkspaces: JuliaWorkspaces
+
+    uuid = "7876af07-990d-54b4-ab0e-23690620f79a"
+    th = "46e44e869b4d90b96bd8ed1fdcf32244fddfb6cc"
+
+    mktempdir() do root
+        proj = joinpath(root, "proj")
+        store = joinpath(root, "store")
+        mkpath(proj)
+
+        # A project that only has a version-specific manifest is a valid
+        # environment; its packages must still be reported as missing, otherwise
+        # nothing ever indexes them.
+        write(joinpath(proj, "Manifest-v$(VERSION.major).$(VERSION.minor).toml"), """
+        julia_version = "$(VERSION.major).$(VERSION.minor).0"
+        manifest_format = "2.0"
+
+        [[deps.Example]]
+        uuid = "$uuid"
+        version = "0.5.3"
+        git-tree-sha1 = "$th"
+        """)
+
+        @test any(m -> m.name == "Example", JuliaWorkspaces._get_missing_packages(proj, store))
+    end
+end
