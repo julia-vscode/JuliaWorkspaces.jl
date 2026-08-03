@@ -399,23 +399,14 @@ function _settype_from_decl!(binding, t, state)
     end
 end
 
-function infer_type_decl(binding, state, scope)
-    t = binding.val.args[2]
-    if isidentifier(t)
-        resolve_ref(t, scope, state)
-    end
-    if iscurly(t)
-        t = t.args[1]
-        resolve_ref(t, scope, state)
-    end
-    if CSTParser.is_getfield_w_quotenode(t)
-        resolve_getfield(t, scope, state)
-        t = t.args[2].args[1]
-    end
-    _settype_from_decl!(binding, t, state)
-end
+infer_type_decl(binding, state, scope) = infer_type_decl(binding, binding.val.args[2], state, scope)
 
 function infer_type_decl(binding, t, state, scope)
+    # `x::Vector{T} where T` declares `Vector`: the clause narrows the type
+    # ARGUMENTS, which the curly unwrapping below drops anyway.
+    while iswhere(t) && t.args !== nothing && !isempty(t.args)
+        t = t.args[1]
+    end
     if isidentifier(t)
         resolve_ref(t, scope, state)
     end
