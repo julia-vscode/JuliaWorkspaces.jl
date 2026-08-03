@@ -67,8 +67,14 @@ end
     # `Core.vals[:Int]` is the DataTypeStore. Assert what consumers actually ask —
     # `get_eventual_datatype`, which follows `.extends` — rather than the store type
     # Base happens to hold, so this passes whichever module answers first.
+    # `Int` is exported by BOTH Base and Core, which makes it the order witness:
+    # if the loop tried Core first (or the tuple were swapped), `intval` would
+    # come back as Core's DataTypeStore instead, and `iprov` as ["Core"]. Do not
+    # simplify this back to an order-blind form.
     env = derived_stdlib_only_env(rt)
-    intval, _ = _implicit_member(rt, root, foo, "Int")
+    intval, iprov = _implicit_member(rt, root, foo, "Int")
+    @test iprov == ["Base"]
+    @test intval isa SS.FunctionStore
     @test SL.get_eventual_datatype(intval, env) isa SS.DataTypeStore
     @test SL.resolves_to_datatype(intval, env)
 
