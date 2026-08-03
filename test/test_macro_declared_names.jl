@@ -618,6 +618,83 @@ end
     @test StaticLint.hasref(target, fa.meta)
 end
 
+@testitem "macro-declared: cross-root wildcard `using Pkg` brings the names in" setup=[MacroDeclWS] begin
+    # A BARE `set_foo!` in a consumer package, brought in by a wildcard
+    # `using Prov`. This reaches the names by a different route than the
+    # sibling-module case: `_target_bring_ins`' `:workspace_package` arm has no
+    # explicit macro-declared fallback of its own — it takes whatever
+    # `_cross_root_visible_names` reports for the provider, which includes the
+    # union because that goes through the provider's FULL visible names. Nothing
+    # else pins that, so a future change to either half could break this while
+    # every `:tree`-arm test still passed.
+    using JuliaWorkspaces: StaticLint, CSTParser, derived_file_analysis,
+        derived_module_visible_names
+
+    consumer = URI("file:///ws/App/src/App.jl")
+    function two_roots(prov_src)
+        jw, _ = macro_ws(prov_src; root_uri=URI("file:///ws/Prov/src/Prov.jl"),
+                         with_salsa_package=true)
+        add_file!(jw, TextFile(URI("file:///ws/Prov/Project.toml"), SourceText("""
+        name = "Prov"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0009"
+        version = "0.1.0"
+        """, "toml")))
+        add_file!(jw, TextFile(URI("file:///ws/App/Project.toml"), SourceText("""
+        name = "App"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee000a"
+        version = "0.1.0"
+        """, "toml")))
+        add_file!(jw, TextFile(consumer, SourceText("""
+        module App
+        using Prov
+        f(rt) = set_foo!(rt, 1, 2)
+        end
+        """, "julia")))
+        return jw
+    end
+
+    exported = """
+    module Prov
+    using Salsa
+    Salsa.@declare_input foo(rt, x::Int)::V
+    export set_foo!
+    end
+    """
+    jw = two_roots(exported)
+
+    # The visibility entry carries the cross-root origin, not the sibling one, and
+    # keeps the provider's ItemRef — which is what makes go-to-definition land in
+    # Prov rather than nowhere.
+    vn = derived_module_visible_names(jw.runtime, consumer, ["App"])["set_foo!"]
+    @test vn.kind === :macro_declared
+    @test vn.origin === :using_workspace_package
+    @test vn.origin_module == ["Prov"]
+    @test vn.item !== nothing
+    @test vn.item.file == URI("file:///ws/Prov/src/Prov.jl")
+
+    # ...and the bare use site resolves to it, with no missing-reference hint.
+    fa = derived_file_analysis(jw.runtime, consumer, consumer)
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, consumer)
+    ids = CSTParser.EXPR[]
+    walk(x) = (CSTParser.headof(x) === :IDENTIFIER && push!(ids, x);
+               x.args === nothing || foreach(walk, x.args))
+    walk(cst)
+    target = only(filter(i -> CSTParser.valof(i) == "set_foo!", ids))
+    r = StaticLint.refof(target, fa.meta)
+    @test r isa StaticLint.TreeRef
+    @test r.kind === :macro_declared
+    @test r.item !== nothing && r.item.file == URI("file:///ws/Prov/src/Prov.jl")
+    @test isempty(fa.diagnostics)
+
+    # The export gate is what admits it: unexported, a wildcard brings nothing,
+    # even though the name is still visible inside Prov itself. Without this the
+    # assertions above would pass on a bring-in that ignored exports entirely.
+    unexported = replace(exported, "export set_foo!\n" => "")
+    jw2 = two_roots(unexported)
+    @test !haskey(derived_module_visible_names(jw2.runtime, consumer, ["App"]), "set_foo!")
+    @test haskey(derived_module_visible_names(jw2.runtime, URI("file:///ws/Prov/src/Prov.jl"), ["Prov"]), "set_foo!")
+end
+
 @testitem "macro-declared: origin :declared consumers tolerate the missing declared entry" setup=[MacroDeclWS] begin
     # A macro-declared name is visible with `origin = :declared` even though it
     # has no matching entry in `derived_module_declared` — that dict only ever
