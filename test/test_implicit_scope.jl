@@ -74,20 +74,38 @@ end
     @test tr.item === nothing
     @test tprov == ["Base"]
 
-    # A type: `Base.vals[:Int]` is the CONSTRUCTOR (a FunctionStore) while
-    # `Core.vals[:Int]` is the DataTypeStore. Assert what consumers actually ask —
-    # `get_eventual_datatype`, which follows `.extends` — rather than the store type
-    # Base happens to hold, so this passes whichever module answers first.
-    # `Int` is exported by BOTH Base and Core, which makes it the order witness:
-    # if the loop tried Core first (or the tuple were swapped), `intval` would
-    # come back as Core's DataTypeStore instead, and `iprov` as ["Core"]. Do not
-    # simplify this back to an order-blind form.
+    # A type. Assert what consumers actually ask — `get_eventual_datatype`, which
+    # follows `.extends` — and NOT the store type the provider happens to hold: on a
+    # 64-bit build `Base.vals[:Int]` is the constructor `FunctionStore` while
+    # `Core.vals[:Int]` is the `DataTypeStore`, and both answer the same question.
+    #
+    # `Int` is still the order witness, but branched on the env instead of hardcoded:
+    # where BOTH modules export it, the FIRST in `IMPLICIT_SCOPE_MODULES` must win, so
+    # reversing that tuple fails here. Where Base's store has no `Int` the lookup
+    # accepts — a 32-bit build, `Int === Int32` — Core is the only provider and the
+    # order says nothing. Do not collapse this to an order-blind form.
     env = derived_stdlib_only_env(rt)
+    syms = SL.getsymbols(env)
+    # Whether Base provides `Int` AT ALL is the platform-dependent part, so it is
+    # asked rather than assumed; that the winner is the earlier module is not.
+    base_provides = SL.isexportedby(:Int, syms[:Base]) &&
+        SL.maybe_lookup(syms[:Base].vals[:Int], env) !== nothing
     intval, iprov = _implicit_member(rt, root, foo, "Int")
-    @test iprov == ["Base"]
-    @test intval isa SS.FunctionStore
+    @test iprov == (base_provides ? ["Base"] : ["Core"])
     @test SL.get_eventual_datatype(intval, env) isa SS.DataTypeStore
     @test SL.resolves_to_datatype(intval, env)
+
+    # The fall-through to a LATER module in the list, which nothing else here pins —
+    # and which is what a build whose Base has no `Int` takes for real (`:Int` is
+    # absent from `names(Base)` before 1.12, and `exportednames` is seeded from that).
+    # The witness is derived, not named, so it survives the two export lists drifting
+    # between versions; on 1.12 it is `ccall`, and on 1.11 `Int` is itself one.
+    core_only = [n for n in syms[:Core].exportednames
+                 if SL.isexportedby(n, syms[:Core]) && !SL.isexportedby(n, syms[:Base])]
+    if !isempty(core_only)
+        cm = _implicit_member(rt, root, foo, String(first(core_only)))
+        @test cm !== nothing && cm[2] == ["Core"]
+    end
 
     # `public`, not exported: `using Base` does not bring it in, so neither does this.
     @test _implicit_member(rt, root, foo, "Filesystem") === nothing
