@@ -20,9 +20,13 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
                     type = type.val
                 elseif type isa Binding && CoreTypes.isdatatype(type.type)
                     # Bound through a typevar (the link's `.type` is the
-                    # `DataType` meta-type). We don't know the concrete
-                    # constraint statically — fall back to `Any`.
-                    return CoreTypes.Any
+                    # `DataType` meta-type). A `where` clause may still give an
+                    # UPPER bound, and the method can only ever instantiate at a
+                    # subtype of it, so the bound is sound for ruling a call out.
+                    # `>:` gives a lower bound and licenses nothing.
+                    ub = store === nothing ? nothing : where_upper_bound_expr(type)
+                    ub === nothing && return CoreTypes.Any
+                    return _resolve_type_expr(ub, store, meta_dict)
                 end
                 return type
             end
@@ -56,6 +60,30 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
 end
 
 isquotedsymbol(x) = x isa EXPR && x.head === :quotenode && length(x.args) == 1 && x.args[1].head === :IDENTIFIER && hastrivia(x)
+
+"""
+    where_upper_bound_expr(b::Binding)
+
+The type expression of a `where`-bound type variable's UPPER bound, or `nothing`
+when it has none: a bare `T`, a lower bound (`T>:B`), or a descending chain. A
+typevar's binding keeps the `where` argument as its `.val`, so the bound is
+readable from the binding alone.
+"""
+function where_upper_bound_expr(b::Binding)
+    a = b.val
+    a isa EXPR || return nothing
+    CSTParser.iswhere(parentof(a)) || return nothing
+    if a.head isa EXPR && isoperator(a.head) && valof(a.head) == "<:" &&
+            a.args !== nothing && length(a.args) == 2 && isidentifier(a.args[1])
+        return a.args[2]
+    elseif headof(a) === :comparison && a.args !== nothing && length(a.args) == 5 &&
+            headof(a.args[2]) === :OPERATOR && headof(a.args[4]) === :OPERATOR &&
+            valof(a.args[2]) == "<:" && valof(a.args[4]) == "<:" && isidentifier(a.args[3])
+        # `Lo<:T<:Hi`: only the ascending chain has a readable upper bound.
+        return a.args[5]
+    end
+    return nothing
+end
 
 # Extract the name from a kwarg in a `:parameters` block. The entry may be a
 # bare identifier (sig form `f(a; p)`), a kwarg with default (`p = v`), or a

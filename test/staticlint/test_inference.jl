@@ -740,6 +740,35 @@ end
     end
 end
 
+@testitem "a where-bounded type variable rules out by its upper bound" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A typevar parameter used to fall back to `Any`, so a `where` bound ruled
+    # nothing out. The method can only ever instantiate at a SUBTYPE of an upper
+    # bound, so an argument that cannot intersect the bound matches no
+    # instantiation — sound for ruling a call out.
+    for (src, expected) in [
+        ("f(x::T) where T<:Real = x\nf(\"s\")"      => IncorrectCallArgs),
+        ("f(x::T) where T<:Real = x\nf(1)"          => nothing),
+        ("f(x::T) where T<:Integer = x\nf(1)"       => nothing),
+        ("f(x::T) where T<:AbstractString = x\nf(1)" => IncorrectCallArgs),
+        # an unbounded variable licenses nothing: `T` may well be `String`
+        ("f(x::T) where T = x\nf(\"s\")"            => nothing),
+        # ...and a LOWER bound licenses nothing either, for a rule-out check
+        ("f(x::T) where T>:Int = x\nf(\"s\")"       => nothing),
+        # a second method that does accept the call keeps it quiet
+        ("f(x::T) where T<:Real = x\nf(x::String) = x\nf(\"s\")" => nothing),
+        # KNOWN RESIDUAL, pinned: an ascending chain rules nothing out here,
+        # because `mark_binding!` binds no name for the middle identifier of a
+        # `:comparison`, so there is no typevar binding to read a bound from.
+        # Permissive, and upstream of this substitution.
+        ("f(x::T) where Int<:T<:Real = x\nf(\"s\")" => nothing),
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        @test errorof(cst.args[end], meta_dict) === expected
+    end
+end
+
 @testitem "a rebound local's type unifies to Any when its assignments disagree" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: bindingof, Binding, _isany, _basename
 
