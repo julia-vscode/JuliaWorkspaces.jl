@@ -117,13 +117,19 @@ question.
   **The node is landed on this branch**, with a test that exercises it directly
   rather than through either consumer. The confirmation fix itself could not land
   with it: `_macro_owner_confirmed` does not exist on `main`, only on
-  `sp/macro-declared-names`. Its shape, for whoever applies it — most likely as
-  part of this branch's rebase after that one merges — is to make the
-  implicit-owner branch available only to a non-bare module and otherwise **fall
-  through to requiring a real import**, which then handles
-  `baremodule T; using Base; @deprecate …` by construction rather than by accident.
-  It must consume `derived_module_is_bare` rather than growing a second copy of the
-  gate.
+  `sp/macro-declared-names`.
+
+  **Decided: that branch ships the bug, and this branch's rebase fixes it.** The
+  alternative — a local `bare` check on the macro branch, collapsed onto the node
+  later — was rejected as not worth a knowingly-duplicated gate for a shape that
+  needs a `baremodule` containing a modelled macro. So a reviewer of
+  `sp/macro-declared-names` who finds this is looking at an accepted defect, not an
+  oversight, and should not fix it there.
+
+  The fix's shape at rebase time: make the implicit-owner branch available only to a
+  non-bare module and otherwise **fall through to requiring a real import**, which
+  then handles `baremodule T; using Base; @deprecate …` by construction rather than
+  by accident. It must consume `derived_module_is_bare`, not re-derive the gate.
 - Otherwise, walks `StaticLint.IMPLICIT_SCOPE_MODULES` **in order, first match
   wins**, accepting `name` only when it is in that store's `exportednames` **and**
   present in its `vals`. This mirrors `maybe_getfield`'s inner test.
