@@ -272,3 +272,43 @@ import producing a positional type opinion.
 
 The precedence rule under **Precedence at a shared miss point** is tested by
 whichever branch lands second, since neither fallback exists without the other.
+
+## Residual limitations after implementation
+
+Found by the whole-branch review (2026-08-03) and deliberately not fixed in this
+slice. None is a regression: every one is either a shape that resolved to nothing
+before, or cosmetic wrongness on code that does not compile.
+
+- **The site-2 import guard is coarse.** `_member_may_come_from_imports` declines the
+  implicit fallback whenever the target module has *any* wildcard `using`, for every
+  member name — not just names that package could plausibly provide. So a provider
+  that writes `using SomePkg` for unrelated reasons stops resolving members that
+  genuinely come from `Base`. Chosen over the alternative: the gate cannot consult
+  `derived_module_visible_names` (that re-enters an in-progress Salsa query — see
+  `_target_bring_ins`' comment), and a correct-but-uninformative `:unknown` beats a
+  confident wrong answer. A tighter cycle-free version — compare the name against the
+  target's own `derived_module_exports` / the store's `exportednames` — is possible.
+- **`derived_module_is_bare` conflates "not bare" with "no such module".** A
+  `:workspace_package` target path naming nothing (`using DevedPkg.NoSuchSub: println`)
+  is therefore not bare, so Base's members are offered for it. Invalid code, no
+  diagnostic suppressed.
+- **`Foo.Base.x` / `Foo.Core.x` / `Foo.Main.x` resolve the first hop, then stop.**
+  Those three Base exports are `VarRef`s rather than `ModuleStore`s, and
+  `_resolve_external_module`'s segment walk does not `maybe_lookup`, unlike
+  single-file mode's `_get_field(::Scope)` arm. The module-valued exports that are
+  real `ModuleStore`s (`Threads`, `Iterators`, `Meta`, `Sys`, `Libc`, `Docs`,
+  `Broadcast`, `MathConstants`, `StackTraces`, `GC`) chain correctly.
+- **Cost on the miss path.** `_implicit_member` re-resolves the env per iteration and
+  once more for `maybe_lookup`, and allocates `[String(m)]` per iteration. Also new:
+  `derived_module_visible_names` for a module with no `:external` imports now takes an
+  `ExternalEnv` dependency it did not have, so it re-executes on env change.
+- **`_implicit_member_lookup`'s module-valued arm is untested.** `using ..Foo: Threads`
+  followed by `Threads.nthreads()` — the synthesized `ImportTarget(:external, …)` is
+  reachable but no test proves it carries a chain. Site 1's equivalent IS pinned.
+- **The parity test hardcodes single-file's shapes** rather than analysing the
+  single-file spelling alongside, so drift there would not fail it.
+- **Deep dotted imports still dead-end** (pre-existing, and improved by one hop):
+  `resolve_import_block` chains raw `_get_field` calls without going through
+  `qualified_module_target`, so `import Foo.Threads.nthreads` stops at the
+  `:external_module` stand-in. Benign — the generic `_get_field` falls through to
+  `nothing`, not a `MethodError`.
