@@ -111,6 +111,49 @@ function _resolve_external_module(rt, root, path::Vector{String})
     return store
 end
 
+"""
+    _implicit_member(rt, root, path::Vector{String}, name::String)
+
+The member `name` of the tree module at `path` that comes from its implicit
+`using Base`/`using Core`, as `(value, provider_path)` — or `nothing` when neither
+provides it. The provider comes back with the value because a consumer recording
+`origin_module` cannot recover it from a bare store value, and re-deriving it would
+mean scanning `exportednames` twice.
+
+Only *exported* names count: `using` brings in exports, so a `public`-but-not-exported
+name like `Base.Filesystem` is unreachable as `Foo.Filesystem` — mirroring
+`SymbolServer.maybe_getfield`, which gates its `used_modules` walk the same way. A
+`baremodule` has no implicit `using` and so has no such members at all.
+
+Modules are tried in `StaticLint.IMPLICIT_SCOPE_MODULES` order, first match wins.
+The order IS observable — `Base.vals[:Int]` is the constructor `FunctionStore` while
+`Core.vals[:Int]` is the `DataTypeStore` — and `Base` first is what reproduces bare
+resolution, which reaches the same `FunctionStore` through the root scope's `Base`
+store. Consumers reach the datatype through `get_eventual_datatype`, which follows
+`.extends`, either way.
+
+A module-valued member is returned as its plain-data `TreeRef` stand-in, never as a
+`ModuleStore`: per-file meta must stay Salsa-pure, and the `:external_module` TreeRef
+is the shape `qualified_module_target` already resolves, so `Foo.Threads.nthreads()`
+continues past `Threads` exactly as it does in single-file mode.
+"""
+function _implicit_member(rt, root, path::Vector{String}, name::String)
+    derived_module_is_bare(rt, root, path) && return nothing
+    sym = Symbol(name)
+    for m in StaticLint.IMPLICIT_SCOPE_MODULES
+        mpath = [String(m)]
+        store = _resolve_external_module(rt, root, mpath)
+        store === nothing && continue
+        (sym in store.exportednames && haskey(store.vals, sym)) || continue
+        val = StaticLint.maybe_lookup(store.vals[sym], _resolve_env(rt, root))
+        val === nothing && continue
+        val isa SymbolServer.ModuleStore &&
+            return (StaticLint.TreeRef(name, :external_module, nothing, mpath), mpath)
+        return (val, mpath)
+    end
+    return nothing
+end
+
 _tier(origin::Symbol) = origin === :declared ? 3 : origin === :import_binding ? 2 : 1
 
 # --- internal helpers: bringing in a resolved import's names ----------------

@@ -134,8 +134,11 @@ question.
   wins**, accepting `name` only when it is in that store's `exportednames` **and**
   present in its `vals`. This mirrors `maybe_getfield`'s inner test.
   `publicnames` is deliberately never read — that is what keeps `Foo.Filesystem`
-  unresolved. (Order is not observable in practice: where `Base` and `Core` share
-  a name they share the binding.)
+  unresolved. The order IS observable, contrary to this document's first draft:
+  `Base.vals[:Int]` is the constructor `FunctionStore` while `Core.vals[:Int]` is
+  the `DataTypeStore`. `Base` first is correct because it reproduces bare-name
+  resolution, which reaches that same `FunctionStore` through the root scope's
+  `Base` store; consumers reach the datatype via `get_eventual_datatype` either way.
 - Resolves a `VarRef` value through the env before returning it, as the store path
   does via `maybe_lookup`.
 - Returns the store value, except a module-valued one, which is returned as
