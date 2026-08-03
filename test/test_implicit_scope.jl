@@ -358,3 +358,52 @@ end
     # nothing about the mis-resolution may become a spurious hint either.
     @test isempty(diagnostics_of(jw, root, b))
 end
+
+@testitem "implicit scope: a member of a module with a failed wildcard `using` stays unresolved" setup=[ImplicitScopeWS] begin
+    using JuliaWorkspaces: derived_module_unresolved_wildcard_using
+
+    # A wildcard `using` whose target does not resolve can bring in ANY name, and
+    # the visible-names face cannot enumerate them — so it is the one case where a
+    # visible-names miss does NOT mean "no import accounts for this name", and the
+    # implicit scope must decline. Confidently answering `Base.parse` here would
+    # also feed `check_call`, turning a call that is fine into a hint, on code
+    # whose import already promised nothing through it would be checked.
+    #
+    # `Sib` exists so the qualified access itself is not what fails.
+    function foo_ws(tag, body, use)
+        root = URI("file:///is8$tag/src/T.jl")
+        a = URI("file:///is8$tag/src/a.jl")
+        b = URI("file:///is8$tag/src/b.jl")
+        jw = ws_files(
+            root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            a => "module Sib\nsib(x) = x\nend\nmodule Foo\n$body\nend\n",
+            b => use,
+        )
+        return (jw, root, b)
+    end
+
+    # An `:external` target the environment doesn't have, and an `:unresolved`
+    # relative one: both unenumerable, so `Foo.parse` stays ref-less and silent.
+    for (tag, body) in (("a", "using NotAnIndexedPackage"), ("b", "using ..NoSuchSibling"))
+        jw, root, b = foo_ws(tag, body, "g() = Foo.parse(1)\n")
+        @test derived_module_unresolved_wildcard_using(jw.runtime, root, ["T", "Foo"])
+        @test only(refs_of(jw, root, b, "parse")) === nothing
+        @test isempty(diagnostics_of(jw, root, b))
+    end
+
+    # The narrowness control, and the reason it is `Base.Iterators` rather than a
+    # package: this workspace has no Project.toml, so the env is stdlib-only —
+    # `using SomeStdlib` would read as unresolved too unless the stdlib cache
+    # happens to be loaded, and the control would assert nothing. A wildcard
+    # `using` whose exports ARE enumerable must keep answering from Base.
+    jw, root, b = foo_ws("c", "using Base.Iterators", "h() = Foo.println(2)\n")
+    @test !derived_module_unresolved_wildcard_using(jw.runtime, root, ["T", "Foo"])
+    @test only(refs_of(jw, root, b, "println")) isa SS.FunctionStore
+    @test isempty(diagnostics_of(jw, root, b))
+
+    # A COLON-form `using` of an unresolvable target binds only the listed names,
+    # so it says nothing about any other member: the fallback still applies.
+    jw, root, b = foo_ws("d", "using NotAnIndexedPackage: whatever", "h() = Foo.println(2)\n")
+    @test !derived_module_unresolved_wildcard_using(jw.runtime, root, ["T", "Foo"])
+    @test only(refs_of(jw, root, b, "println")) isa SS.FunctionStore
+end

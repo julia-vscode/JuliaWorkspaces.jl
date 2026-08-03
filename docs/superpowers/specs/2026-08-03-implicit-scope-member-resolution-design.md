@@ -185,6 +185,16 @@ continue to shadow `Base`, matching Julia.
    `:unknown`. The guard cannot consult `derived_module_visible_names`: this runs
    inside that computation.
 
+   Site 1 needs one guard of its own, for the single case where its gate does NOT
+   cover the module's imports: a wildcard `using` whose target didn't resolve brings
+   in names the face cannot enumerate, so a hit there may really be that module's.
+   `derived_module_unresolved_wildcard_using` — already a per-file dependency, for
+   the bare missing-ref suppression at `derived_file_analysis` — is exactly that
+   predicate, so the site declines on it and asks it only after `_implicit_member`
+   has actually answered. Without it, `module Foo; using SomeUnindexedPkg; end` plus
+   `Foo.parse(1)` resolved to `Base.parse` and flagged a call that is fine, on code
+   whose import already promised nothing through it would be checked.
+
 The third, `_resolve_recorded_type`'s no-face case folded into a
 candidate-qualifier walk over the same implicit list, is the rider described under
 **Scope and base**.
@@ -292,6 +302,13 @@ before, or cosmetic wrongness on code that does not compile.
   `_target_bring_ins`' comment), and a correct-but-uninformative `:unknown` beats a
   confident wrong answer. A tighter cycle-free version — compare the name against the
   target's own `derived_module_exports` / the store's `exportednames` — is possible.
+- **Site 1's wildcard guard misses an UNINDEXABLE package.** A package SymbolServer
+  recorded as "could not be indexed" gets a real but export-less `ModuleStore`, so
+  `derived_module_unresolved_wildcard_using` reads the target as resolved while the
+  face still enumerates none of its names — `Foo.<name>` falls through to `Base` as
+  before. Not folded into that predicate on purpose: it also drives bare missing-ref
+  suppression, where the whole-closure pass does NOT suppress for an unindexable
+  package, so widening it there is a cross-mode deviation needing its own sign-off.
 - **`derived_module_is_bare` conflates "not bare" with "no such module".** A
   `:workspace_package` target path naming nothing (`using DevedPkg.NoSuchSub: println`)
   is therefore not bare, so Base's members are offered for it. Invalid code, no

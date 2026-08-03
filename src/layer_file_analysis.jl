@@ -205,7 +205,14 @@ function StaticLint._get_field(par::TreeModuleContext, arg, state, visited=Base.
         # macro-declared names come FIRST, the implicit scope SECOND.
         # The provider path is for the import side; a use site only needs the value.
         im = _implicit_member(par.rt, par.root, par.path, name)
-        return im === nothing ? nothing : first(im)
+        im === nothing && return nothing
+        # The one case where the face's miss does NOT mean "no import accounts for
+        # this name": a wildcard `using` whose target didn't resolve brings in names
+        # nothing here can enumerate, so the hit above may really be that module's.
+        # Declining restores the plain miss rather than answering confidently —
+        # asked AFTER the lookup so a double miss pays nothing for the guard.
+        derived_module_unresolved_wildcard_using(par.rt, par.root, par.path) && return nothing
+        return first(im)
     end
     if vn.kind === :module
         child = _denoted_tree_module_path(par, name, vn)
