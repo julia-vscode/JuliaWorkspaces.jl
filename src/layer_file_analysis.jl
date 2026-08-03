@@ -196,7 +196,15 @@ function StaticLint._get_field(par::TreeModuleContext, arg, state, visited=Base.
     (name isa String && !isempty(name)) || return nothing
     visible = derived_module_visible_names_idfree(par.rt, par.root, par.path)
     vn = get(visible, name, nothing)
-    vn === nothing && return nothing
+    if vn === nothing
+        # Not a name the tree module declares or imports — but every non-bare module
+        # implicitly `using`s Base and Core, and those members are reachable as
+        # `Foo.println` / `Foo.Threads`. Consulted only on the miss, so a real
+        # declaration or import always wins. The provider path is for the import
+        # side; a use site only needs the value.
+        im = _implicit_member(par.rt, par.root, par.path, name)
+        return im === nothing ? nothing : first(im)
+    end
     if vn.kind === :module
         child = _denoted_tree_module_path(par, name, vn)
         child !== nothing && return TreeModuleContext(par.rt, par.root, child, par.item_cache)

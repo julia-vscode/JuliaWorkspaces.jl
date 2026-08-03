@@ -90,3 +90,76 @@ end
     @test _implicit_member(rt, root, bare, "Threads") === nothing
     @test _implicit_member(rt, root, bare, "Int") === nothing
 end
+
+@testitem "implicit scope: cross-file member access matches single-file, cell for cell" setup=[ImplicitScopeWS] begin
+    # The parity matrix. `Foo` is declared in a sibling file, so every lookup goes
+    # through the module tree; single-file mode already resolves all of these, and
+    # this asserts the tree path now agrees.
+    root = URI("file:///is2/src/T.jl")
+    a = URI("file:///is2/src/a.jl")
+    b = URI("file:///is2/src/b.jl")
+    jw = ws_files(
+        root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        a => "module Foo\nf(x) = x\nend\n",
+        b => """
+        g1() = Foo.f(1)
+        g2() = Foo.println(2)
+        g3() = Foo.Threads.nthreads()
+        g4() = Foo.Filesystem
+        """,
+    )
+
+    # The module's own member: unchanged.
+    @test only(refs_of(jw, root, b, "f")) isa SL.TreeRef
+
+    # A Base export reached as a member: the store value, as in single-file mode.
+    @test only(refs_of(jw, root, b, "println")) isa SS.FunctionStore
+
+    # A Base-exported MODULE, and the chain continuing past it — the second hop is
+    # what proves the stand-in is resolvable and not just present.
+    tr = only(refs_of(jw, root, b, "Threads"))
+    @test tr isa SL.TreeRef
+    @test tr.kind === :external_module
+    @test tr.origin_module == ["Base"]
+    @test only(refs_of(jw, root, b, "nthreads")) isa SS.FunctionStore
+
+    # `public`, not exported: still unresolved, and this is the assertion that fails
+    # if the implementation reads `publicnames` or the full `vals`.
+    @test only(refs_of(jw, root, b, "Filesystem")) === nothing
+
+    # Nothing new is flagged.
+    @test isempty(diagnostics_of(jw, root, b))
+end
+
+@testitem "implicit scope: a module's own declaration shadows the implicit scope" setup=[ImplicitScopeWS] begin
+    # `Foo` declares its own `println`, so `Foo.println` must be Foo's, not Base's.
+    # The fallback is consulted only after the tree lookup misses.
+    root = URI("file:///is3/src/T.jl")
+    a = URI("file:///is3/src/a.jl")
+    b = URI("file:///is3/src/b.jl")
+    jw = ws_files(
+        root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        a => "module Foo\nprintln(x) = x\nend\n",
+        b => "g() = Foo.println(2)\n",
+    )
+    r = only(refs_of(jw, root, b, "println"))
+    @test r isa SL.TreeRef
+    @test r.kind !== :external_module
+    @test r.item !== nothing && r.item.file == a
+end
+
+@testitem "implicit scope: a baremodule member stays unresolved" setup=[ImplicitScopeWS] begin
+    root = URI("file:///is4/src/T.jl")
+    a = URI("file:///is4/src/a.jl")
+    b = URI("file:///is4/src/b.jl")
+    jw = ws_files(
+        root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        a => "baremodule Bare\nf(x) = x\nend\n",
+        b => "g1() = Bare.f(1)\ng2() = Bare.println(2)\ng3() = Bare.Threads\n",
+    )
+    # Its own member still resolves...
+    @test only(refs_of(jw, root, b, "f")) isa SL.TreeRef
+    # ...but it has no implicit `using`, so these do not.
+    @test only(refs_of(jw, root, b, "println")) === nothing
+    @test only(refs_of(jw, root, b, "Threads")) === nothing
+end
