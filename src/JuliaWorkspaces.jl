@@ -14,4 +14,6 @@ include("packagedef.jl")
 
 include("CloudIndexApp.jl")
 
+include("precompile.jl")
+
 end

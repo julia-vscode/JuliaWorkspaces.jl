@@ -838,3 +838,29 @@ function write_depot(server::Server, ctx, written_caches)
         !isempty(written_path) && push!(written_caches, written_path)
     end
 end
+
+"""
+    manifest_names(version = VERSION)
+
+The manifest file names Pkg would consider for `version`, most specific first
+(mirrors `Base.manifest_names`). Version-specific manifests are only recognized
+for `version`, i.e. the Julia version this process runs under, because that is
+the version the symbol caches are built with.
+"""
+function manifest_names(version = VERSION)
+    return [
+        "JuliaManifest-v$(version.major).$(version.minor).toml",
+        "Manifest-v$(version.major).$(version.minor).toml",
+        "JuliaManifest.toml",
+        "Manifest.toml",
+    ]
+end
+
+"""
+    get_manifest_candidates(environment_path, version = VERSION)
+
+Return the manifest files that exist in `environment_path`, most specific first.
+"""
+function get_manifest_candidates(environment_path, version = VERSION)
+    return filter(isfile, joinpath.(environment_path, manifest_names(version)))
+end

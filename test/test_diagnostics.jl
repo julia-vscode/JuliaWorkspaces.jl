@@ -950,6 +950,61 @@ end
     @test any(d -> startswith(d.message, "Failed to resolve `NotARealPackage`"), diags)
 end
 
+@testitem "unresolved-import: false suppresses only the import diagnostic" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UnresTog"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee44"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    # Explicit import (not wildcard) so missing-ref checks stay on in the scope:
+    # the genuine typo must still be reported to prove the toggle is surgical.
+    source = """
+    module UnresTog
+    using NotARealPackage: NotARealPackage
+    function f()
+        return genuine_typo()
+    end
+    end
+    """
+
+    # Enabled (default) — both the import warning and the genuine typo appear.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///unrestog/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestog/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///unrestog/src/UnresTog.jl"), SourceText(source, "julia")))
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, URI("file:///unrestog/src/UnresTog.jl"))
+    @test any(d -> startswith(d.message, "Failed to resolve `NotARealPackage`"), diags)
+    @test any(d -> d.message == "Missing reference: genuine_typo", diags)
+
+    # Disabled — the import warning is gone, but the rest of static-lint still runs.
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(URI("file:///unrestog2/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw2, TextFile(URI("file:///unrestog2/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw2, TextFile(URI("file:///unrestog2/src/UnresTog.jl"), SourceText(source, "julia")))
+    add_file!(jw2, TextFile(URI("file:///unrestog2/JuliaLint.toml"), SourceText("unresolved-import = false", "toml")))
+    JuliaWorkspaces.set_input_env_ready!(jw2.runtime, true)
+
+    diags2 = get_diagnostic(jw2, URI("file:///unrestog2/src/UnresTog.jl"))
+    # The UnresolvedImport diagnostic (both "Failed to resolve" and "could not be
+    # indexed" phrasings) is suppressed...
+    @test !any(d -> contains(d.message, "Failed to resolve `") || contains(d.message, "could not be indexed"), diags2)
+    # ...and it did not fall through to the generic LintCode "Failed to resolve import." message.
+    @test !any(d -> d.message == "Failed to resolve import.", diags2)
+    # ...while an unrelated static-lint check (missing reference) stays active.
+    @test any(d -> d.message == "Missing reference: genuine_typo", diags2)
+end
+
 @testitem "unresolved import: late-resolving sibling module fills binding" begin
     using JuliaWorkspaces.URIs2: URI
 

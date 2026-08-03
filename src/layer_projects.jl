@@ -7,6 +7,20 @@ Salsa.@derived function derived_project_files(rt)
 end
 
 """
+    _manifest_priority(path)
+
+Rank a manifest path the way Pkg picks one: version-specific for the Julia
+version we run under first, then the plain names. Returns `nothing` for a
+manifest we must not bind at all — a version-specific manifest for a *different*
+Julia version describes an environment this process cannot index, since the
+caches it asks for are keyed by that version.
+"""
+function _manifest_priority(path)
+    name = lowercase(basename(path))
+    return findfirst(n -> lowercase(n) == name, SymbolServer.manifest_names())
+end
+
+"""
     derived_project_toml_files(rt, folder_uri)
 
 Probe for Project.toml and Manifest.toml files in `folder_uri` by
@@ -30,7 +44,7 @@ Salsa.@derived function derived_project_toml_files(rt, folder_uri)
     end
 
     manifest_file = nothing
-    for name in ("JuliaManifest.toml", "Manifest.toml")
+    for name in SymbolServer.manifest_names()
         candidate = filepath2uri(joinpath(folder_path, name))
         tf = derived_text_file_content(rt, candidate)
         if tf !== nothing
@@ -60,7 +74,10 @@ Salsa.@derived function derived_potential_project_folders(rt)
                 pf[folder_uri] = file_uri
             end
         elseif is_path_manifest_file(file_path)
-            if !haskey(mf, folder_uri) || endswith(lowercase(file_path), "juliamanifest.toml")
+            priority = _manifest_priority(file_path)
+            existing = get(mf, folder_uri, nothing)
+            if priority !== nothing &&
+                (existing === nothing || priority < _manifest_priority(uri2filepath(existing)))
                 mf[folder_uri] = file_uri
             end
         else

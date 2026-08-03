@@ -23,6 +23,7 @@ InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 FileWatching = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 
 [extras]
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
@@ -47,6 +48,7 @@ CancellationTokens = "2"
 InteractiveUtils = "<0.0.1, 1"
 Sockets = "<0.0.1, 1"
 FileWatching = "1.11.0"
+PrecompileTools = "1.2"
 
 [targets]
 test = ["JSON", "Test", "TestItemRunner"]

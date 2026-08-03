@@ -786,3 +786,96 @@ end
     @test param_type("function f(x::(Vector{T} where T)) end", "x") === nothing
     @test param_type("function f(x::(Vector{T} where T) where S) end", "x") === nothing
 end
+
+@testitem "a where-bounded type variable rules out by its upper bound" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # A typevar parameter used to fall back to `Any`, so a `where` bound ruled
+    # nothing out. The method can only ever instantiate at a SUBTYPE of an upper
+    # bound, so an argument that cannot intersect the bound matches no
+    # instantiation — sound for ruling a call out.
+    for (src, expected) in [
+        ("f(x::T) where T<:Real = x\nf(\"s\")"      => IncorrectCallArgs),
+        ("f(x::T) where T<:Real = x\nf(1)"          => nothing),
+        ("f(x::T) where T<:Integer = x\nf(1)"       => nothing),
+        ("f(x::T) where T<:AbstractString = x\nf(1)" => IncorrectCallArgs),
+        # an unbounded variable licenses nothing: `T` may well be `String`
+        ("f(x::T) where T = x\nf(\"s\")"            => nothing),
+        # ...and a LOWER bound licenses nothing either, for a rule-out check
+        ("f(x::T) where T>:Int = x\nf(\"s\")"       => nothing),
+        # a second method that does accept the call keeps it quiet
+        ("f(x::T) where T<:Real = x\nf(x::String) = x\nf(\"s\")" => nothing),
+        # KNOWN RESIDUAL, pinned: an ascending chain rules nothing out here,
+        # because `mark_binding!` binds no name for the middle identifier of a
+        # `:comparison`, so there is no typevar binding to read a bound from.
+        # Permissive, and upstream of this substitution.
+        ("f(x::T) where Int<:T<:Real = x\nf(\"s\")" => nothing),
+    ]
+        cst, meta_dict = parse_and_pass(src)
+        @test errorof(cst.args[end], meta_dict) === expected
+    end
+end
+
+@testitem "a rebound local's type unifies to Any when its assignments disagree" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, Binding, _isany, _basename
+
+    # Every binding created for `name`, in source order, with its settled type.
+    function types_of(src, name)
+        cst, meta_dict = parse_and_pass(src)
+        out = []
+        walk(x) = begin
+            if x.head === :IDENTIFIER && JuliaWorkspaces.CSTParser.valof(x) == name
+                b = bindingof(x, meta_dict)
+                b isa Binding && push!(out, b.type)
+            end
+            x.args === nothing || foreach(walk, x.args)
+        end
+        walk(cst)
+        out
+    end
+    nm(t) = t === nothing ? "nothing" : _isany(t) ? "Any" : string(_basename(t))
+
+    # Disagreeing assignments: BOTH bindings widen, including the earlier one —
+    # a use between them can still see the later value at runtime.
+    @test nm.(types_of("function f(c)\n    x = nothing\n    g(x)\n    x = 1\nend\n", "x")) ==
+        ["Any", "Any"]
+
+    # Agreement is left alone
+    @test nm.(types_of("function f(c)\n    x = 1\n    g(x)\n    x = 2\nend\n", "x")) == ["Core.Int64", "Core.Int64"]
+
+    # They settle on the nearest type covering both, not on `Any`: `Real` still
+    # rules out a `String` parameter, which `Any` would not.
+    @test nm.(types_of("function f(c)\n    x = 1\n    g(x)\n    x = 2.0\nend\n", "x")) ==
+        ["Core.Real", "Core.Real"]
+
+    # One known type alongside an un-inferred binding also disagrees: the known
+    # one widens, and the un-inferred one is never written (consumers fall back
+    # to by-use inference when they see `nothing`).
+    @test nm.(types_of("function f(node, m)\n    if m\n        node = GlobalRef(m, node)\n    end\n    g(node)\nend\n", "node")) ==
+        ["nothing", "Any"]
+
+    # A name assigned once is untouched
+    @test nm.(types_of("function f()\n    x = 1\n    g(x)\nend\n", "x")) == ["Core.Int64"]
+
+    # Method accumulation is not rebinding
+    @test all(t -> !_isany(t), types_of("f(x) = 1\nf(x, y) = 2\n", "f"))
+
+    # Grouping is per (scope, name). The closure takes `x` as a PARAMETER, which
+    # is a fresh local — a plain assignment there would reassign the captured
+    # outer `x` instead, making it one group rather than two.
+    outer = types_of("""
+    function f()
+        x = 1
+        h = function (x)
+            x = nothing
+            g(x)
+            x = "s"
+        end
+        g(x)
+    end
+    """, "x")
+    # the outer `x` is assigned once and keeps its type
+    @test nm(outer[1]) == "Core.Int64"
+    # the closure's parameter stays un-inferred, its two assignments widen
+    @test nm.(outer[2:end]) == ["nothing", "Any", "Any"]
+end

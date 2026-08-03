@@ -215,3 +215,52 @@ end
     # nothing`.
     get_diagnostics(jw)
 end
+
+@testitem "derived_project prefers the manifest for the running Julia version" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, derived_project
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "Foo"
+    uuid = "5c0ad2b5-2f9c-4b2c-9f0c-1e5c4dd1a1cd"
+    version = "0.1.0"
+
+    [deps]
+    """
+
+    manifest_toml(julia_version) = """
+    julia_version = "$julia_version"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    versioned_name = "Manifest-v$(VERSION.major).$(VERSION.minor).toml"
+    foreign_name = "Manifest-v$(VERSION.major).$(VERSION.minor + 1).toml"
+
+    # All three manifests in one folder: Pkg would use the version-specific one,
+    # and so must we — the caches we look up are keyed by the entries of the
+    # manifest this Julia version resolves against.
+    folder_uri = URI("file:///versionedmanifesttest")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///versionedmanifesttest/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///versionedmanifesttest/Manifest.toml"), SourceText(manifest_toml("1.0.0"), "toml")))
+    add_file!(jw, TextFile(URI("file:///versionedmanifesttest/$foreign_name"), SourceText(manifest_toml("1.0.0"), "toml")))
+    add_file!(jw, TextFile(URI("file:///versionedmanifesttest/$versioned_name"), SourceText(manifest_toml(string(VERSION)), "toml")))
+
+    project = derived_project(jw.runtime, folder_uri)
+    @test project !== nothing
+    @test endswith(string(project.manifest_file_uri), versioned_name)
+    @test project.julia_version == VERSION
+
+    # A manifest for another Julia version is not bound at all: we can only
+    # index an environment resolved for the Julia version we run under, so this
+    # folder counts as having no manifest rather than as a wrongly-keyed one.
+    other_uri = URI("file:///foreignmanifesttest")
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(URI("file:///foreignmanifesttest/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw2, TextFile(URI("file:///foreignmanifesttest/$foreign_name"), SourceText(manifest_toml("1.0.0"), "toml")))
+
+    @test derived_project(jw2.runtime, other_uri) === nothing
+end
