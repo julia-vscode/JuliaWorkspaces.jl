@@ -530,7 +530,7 @@ a module's written usings but not the implicit ones."
 
 **Interfaces:**
 - Consumes: `_implicit_member(rt, root, path, name)` (Task 2).
-- Produces: no new names. Behaviour: `using .Foo: println` binds `println` with kind `:external_symbol` and `origin_module == ["Base"]` instead of `:unknown`/`nothing`.
+- Produces: `_implicit_member_lookup(rt, root, tp, member_name)` -> the same 4-tuple `_member_lookup` returns. Behaviour: `using .Foo: println` binds `println` with kind `:external_symbol` and `origin_module == ["Base"]` instead of `:unknown`/`nothing`.
 
 Note on the returned tuple: `_member_lookup` returns `(kind, item, origin_module, module_target)`, and the third slot becomes `VisibleName.origin_module`, which is what `StaticLint.resolve_treeref_store` later walks to find the name in the env. It must therefore be the **providing** module (`["Base"]`), not the tree module's path — matching the existing `:external` branch, which likewise returns the providing module's path.
 
@@ -613,19 +613,8 @@ with
 
 ```julia
         names = derived_module_names(rt, root, tp)
-        if !haskey(names, member_name)
-            # A member the module gets from its implicit `using Base`/`using Core`.
-            # `origin_module` is the PROVIDER, like the `:external` branch below, so
-            # `resolve_treeref_store` can find the name in the env.
-            im = _implicit_member(rt, root, tp, member_name)
-            if im !== nothing
-                val, prov = im
-                mt = val isa StaticLint.TreeRef ?
-                    ImportTarget(:external, vcat(prov, [member_name])) : nothing
-                return (:external_symbol, nothing, prov, mt)
-            end
-            return (:unknown, nothing, tp, nothing)
-        end
+        haskey(names, member_name) ||
+            return _implicit_member_lookup(rt, root, tp, member_name)
 ```
 
 and the `:workspace_package` branch's
@@ -635,21 +624,33 @@ and the `:workspace_package` branch's
         haskey(names, member_name) || return (:unknown, nothing, tp, nothing)
 ```
 
-with the same block, but resolving against `entry` rather than `root` — the provider
-is looked up in the *package's* env, which is the env its own names resolve in:
+with the same call against `entry` rather than `root` — a workspace package's names
+resolve in the package's own env, so its implicit modules must be looked up there:
 
 ```julia
         names = derived_module_names(rt, entry, tp)
-        if !haskey(names, member_name)
-            im = _implicit_member(rt, entry, tp, member_name)
-            if im !== nothing
-                val, prov = im
-                mt = val isa StaticLint.TreeRef ?
-                    ImportTarget(:external, vcat(prov, [member_name])) : nothing
-                return (:external_symbol, nothing, prov, mt)
-            end
-            return (:unknown, nothing, tp, nothing)
-        end
+        haskey(names, member_name) ||
+            return _implicit_member_lookup(rt, entry, tp, member_name)
+```
+
+Both branches need the identical `_member_lookup`-shaped answer, differing only in
+which root resolves it, so write it once. Add this next to `_implicit_member` in
+`src/layer_visibility.jl`:
+
+```julia
+# `_member_lookup`'s answer for a member that came from the implicit scope, or its
+# `:unknown` answer when nothing did. `origin_module` is the PROVIDER, like the
+# `:external` branch's, so `resolve_treeref_store` can find the name in the env; a
+# module-valued member also gets an `:external` target so a chain can continue
+# through it.
+function _implicit_member_lookup(rt, root, tp::Vector{String}, member_name::String)
+    im = _implicit_member(rt, root, tp, member_name)
+    im === nothing && return (:unknown, nothing, tp, nothing)
+    val, prov = im
+    mt = val isa StaticLint.TreeRef ?
+        ImportTarget(:external, vcat(prov, [member_name])) : nothing
+    return (:external_symbol, nothing, prov, mt)
+end
 ```
 
 - [ ] **Step 4: Restart the session, run the tests**
