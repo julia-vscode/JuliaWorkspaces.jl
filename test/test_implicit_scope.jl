@@ -8,8 +8,9 @@
     const SS = JuliaWorkspaces.SymbolServer
 
     # A workspace of files, keyed by URI. The first pair is the root. Language is
-    # picked from the extension so `Project.toml`/`Manifest.toml` pairs are
-    # recognized as projects, not julia source.
+    # picked from the extension so a `.toml` isn't fed to the julia-file nodes as
+    # if it were source. Project discovery itself is path-based and does not
+    # depend on the language tag.
     function ws_files(pairs...)
         jw = JuliaWorkspace()
         for (u, s) in pairs
@@ -264,14 +265,96 @@ end
     cons2_toml = URI("file:///wsp2/Consumer2/Project.toml")
     cons2_src = URI("file:///wsp2/Consumer2/src/Consumer2.jl")
 
+    ok_toml = URI("file:///wsp2/OkProv/Project.toml")
+    ok_src = URI("file:///wsp2/OkProv/src/OkProv.jl")
+
     jw2 = ws_files(
         bare_toml => project_toml("BareProv", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee2003"),
         bare_src => "baremodule BareProv\nend\n",
+        ok_toml => project_toml("OkProv", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee2005"),
+        ok_src => "module OkProv\nend\n",
         cons2_toml => project_toml("Consumer2", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee2004"),
-        cons2_src => "module Consumer2\nusing BareProv: println\nend\n",
+        cons2_src => "module Consumer2\nusing BareProv: println\nusing OkProv: max\nend\n",
     )
     vis2 = derived_module_visible_names(jw2.runtime, cons2_src, ["Consumer2"])
 
     @test haskey(vis2, "println")
     @test vis2["println"].kind === :unknown
+
+    # The positive control for THIS workspace: `:unknown` above has to mean "the
+    # provider is bare", not "no workspace package was discovered here at all" —
+    # which would give the same answer. A non-bare sibling package in the same
+    # workspace does resolve its implicit-scope member.
+    @test haskey(vis2, "max")
+    @test vis2["max"].kind === :external_symbol
+    @test vis2["max"].origin_module == ["Base"]
+end
+
+@testitem "implicit scope: a member the target got from its OWN imports stays unknown" setup=[ImplicitScopeWS] begin
+    using JuliaWorkspaces: derived_module_visible_names
+
+    # `Outer.parse` is Inner's `parse`, brought in by Outer's own colon-list import.
+    # That is an IMPORT binding, which `derived_module_names` — the miss gate at this
+    # call site — does not report, so without a guard the lookup falls through to the
+    # implicit scope and answers `Base.parse`, pointing hover and go-to-definition at
+    # the wrong function. `:unknown` is the honest answer: following the import means
+    # expanding Outer's own visible names, which cannot be done from inside the
+    # visibility computation. Names in this class are common (`parse`, `merge`,
+    # `count`, `keys`, `filter`, `get`, `run`).
+    root = URI("file:///is7/src/T.jl")
+    a = URI("file:///is7/src/a.jl")
+    b = URI("file:///is7/src/b.jl")
+    jw = ws_files(
+        root => "module T\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        a => """
+        module Inner
+        export parse
+        parse(x) = x
+        end
+        module Outer
+        using ..Inner: parse
+        end
+        module Wild
+        using ..Inner
+        end
+        module Unrelated
+        using ..Inner: f
+        end
+        """,
+        b => """
+        module User
+        using ..Outer: parse
+        h() = parse("x")
+        end
+        module WildUser
+        using ..Wild: println
+        end
+        module UnrelatedUser
+        using ..Unrelated: println
+        end
+        """,
+    )
+    vis = derived_module_visible_names(jw.runtime, root, ["T", "User"])
+    @test haskey(vis, "parse")
+    @test vis["parse"].kind === :unknown
+    @test vis["parse"].origin_module != ["Base"]
+
+    # A wildcard `using` in the target can bring in ANY name, so the same applies to
+    # every member of such a module, not just the ones an explicit list mentions.
+    wvis = derived_module_visible_names(jw.runtime, root, ["T", "WildUser"])
+    @test haskey(wvis, "println")
+    @test wvis["println"].kind === :unknown
+
+    # ...and the guard is narrow: a target whose imports name OTHER symbols keeps
+    # answering from the implicit scope.
+    uvis = derived_module_visible_names(jw.runtime, root, ["T", "UnrelatedUser"])
+    @test uvis["println"].kind === :external_symbol
+    @test uvis["println"].origin_module == ["Base"]
+
+    # A `Base.parse` `FunctionStore` ref would feed `check_call`, and `parse("x")`
+    # matches no `Base.parse` method by type. It does not currently flag (a TreeRef
+    # callee isn't `is_something_with_methods`, and one `Base.parse` method is
+    # vararg-shaped anyway), so this is a guard, not the discriminating assertion:
+    # nothing about the mis-resolution may become a spurious hint either.
+    @test isempty(diagnostics_of(jw, root, b))
 end

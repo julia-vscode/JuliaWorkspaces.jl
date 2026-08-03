@@ -156,12 +156,49 @@ function _implicit_member(rt, root, path::Vector{String}, name::String)
     return nothing
 end
 
+# Whether `member_name` could be a member the module at `path` got from its OWN
+# imports. `_member_lookup`'s miss gate is `derived_module_names`, which is
+# DECLARED names only, so an import-bound member (`module Outer; using ..Inner:
+# parse; end`, then `Outer.parse`) reaches the implicit-scope fallback and would
+# mis-resolve to `Base.parse`. Declining there restores the pre-existing
+# `:unknown` — no hover/goto, but honest.
+#
+# Answered off `derived_module_imports` — a per-module projection of the module
+# tree — and deliberately NOT off `derived_module_visible_names`, which would
+# re-enter an in-progress query (the same constraint `_target_bring_ins`'
+# re-export branch documents). Two cases, both conservative:
+#
+# - an explicit symbol list binds this name: the member is the ORIGIN's, and
+#   following it there is exactly the visibility recursion we cannot make here;
+# - a wildcard `using` (empty symbol list): it can bring in ANY name, and which
+#   ones is again only knowable by expanding the target's visible names.
+#
+# A whole-module `import X` binds just the one name `X` (or its alias), so only
+# that name is withheld.
+function _member_may_come_from_imports(rt, root, path::Vector{String}, member_name::String)
+    for ri in derived_module_imports(rt, root, path)
+        if isempty(ri.symbols)
+            ri.kind === :using && return true
+            bound = ri.alias !== nothing ? ri.alias :
+                isempty(ri.target.path) ? nothing : last(ri.target.path)
+            bound == member_name && return true
+        else
+            for sym in ri.symbols
+                (sym.alias !== nothing ? sym.alias : sym.name) == member_name && return true
+            end
+        end
+    end
+    return false
+end
+
 # `_member_lookup`'s answer for a member that came from the implicit scope, or its
 # `:unknown` answer when nothing did. `origin_module` is the PROVIDER, like the
 # `:external` branch's, so `resolve_treeref_store` can find the name in the env; a
 # module-valued member also gets an `:external` target so a chain can continue
 # through it.
 function _implicit_member_lookup(rt, root, tp::Vector{String}, member_name::String)
+    _member_may_come_from_imports(rt, root, tp, member_name) &&
+        return (:unknown, nothing, tp, nothing)
     im = _implicit_member(rt, root, tp, member_name)
     im === nothing && return (:unknown, nothing, tp, nothing)
     val, prov = im
@@ -307,6 +344,8 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
             return (:module, _module_declared_at(rt, root, tp), tp, target)
         end
         names = derived_module_names(rt, root, tp)
+        # Miss point. Precedence for any further fallback added here: the module's
+        # own confirmed macro-declared names come FIRST, the implicit scope SECOND.
         haskey(names, member_name) ||
             return _implicit_member_lookup(rt, root, tp, member_name)
         mt = names[member_name] === :module ? ImportTarget(:tree, vcat(tp, [member_name])) : nothing
@@ -321,6 +360,8 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
             return (:module, _module_declared_at(rt, entry, tp), tp, target)
         end
         names = derived_module_names(rt, entry, tp)
+        # Miss point. Precedence for any further fallback added here: the module's
+        # own confirmed macro-declared names come FIRST, the implicit scope SECOND.
         haskey(names, member_name) ||
             return _implicit_member_lookup(rt, entry, tp, member_name)
         mt = names[member_name] === :module ? ImportTarget(:workspace_package, vcat(tp, [member_name])) : nothing
