@@ -2591,6 +2591,43 @@ end
     @test isempty(diags("f(x::Int) = x\n", "struct Own end\ng() = (o = Own(); f(o))\n"))
 end
 
+@testitem "derived_file_analysis: TYPE check on a type a DEPENDENCY provides" setup=[FileAnalysisWS] begin
+    mm(fa) = [d.message for d in fa.diagnostics
+              if occursin("No method matching", d.message) || occursin("method call error", d.message)]
+    ws(a, b) = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n", A => a, B => b))
+    diags(a, b) = mm(JuliaWorkspaces.derived_file_analysis(ws(a, b).runtime, ROOT, B))
+
+    # Where a type is DECLARED must not change whether it is checked. A name an
+    # import brought in from a store-backed module is resolved in the module it
+    # came FROM — not looked for in `Base`/`Core`, and not written off as a
+    # workspace declaration because it happens to be a visible name.
+    #
+    # `Base.Iterators` stands in for a dependency: it is a real, resolvable
+    # non-`Base` module in the test env (a project's own dependencies are not
+    # indexed here). `Zip` is present in it but NOT exported, so it can only be
+    # reached through the import — exactly like a dependency's type.
+    @test length(diags("using Base.Iterators: Zip\nf(x::Zip) = x\n", "g() = f(\"s\")\n")) == 1
+    # ...and it accepts what it should: a union member that matches keeps quiet.
+    @test isempty(diags("using Base.Iterators: Zip\nf(x::Union{Int,Zip}) = x\n", "g() = f(1)\n"))
+    # The qualifier may itself be an imported binding rather than a module path
+    # spelled from the top, including under an alias.
+    @test length(diags("using Base.Iterators\nf(x::Iterators.Zip) = x\n", "g() = f(\"s\")\n")) == 1
+    @test length(diags("import Base.Iterators as It\nf(x::It.Zip) = x\n", "g() = f(\"s\")\n")) == 1
+
+    # An `as`-renamed NAME is the one spelling that cannot be followed: visibility
+    # records the module the name came from, not the name it had there. Declining
+    # is the permissive direction.
+    @test isempty(diags("using Base.Iterators: Zip as Z\nf(x::Z) = x\n", "g() = f(\"s\")\n"))
+
+    # A dependency the env never indexed binds only its module name, so nothing
+    # resolves through it — no opinion, in either spelling. (`Dates` is a real
+    # stdlib, but the project-less test env carries only `Base`/`Core`, which is
+    # exactly the unindexed-dependency shape.)
+    @test isempty(diags("using Dates\nf(x::DateTime) = x\n", "g() = f(\"s\")\n"))
+    @test isempty(diags("using Dates\nf(x::Dates.DateTime) = x\n", "g() = f(\"s\")\n"))
+end
+
 @testitem "derived_file_analysis: a struct leaves its own name unjudged" setup=[FileAnalysisWS] begin
     mm(fa) = [d.message for d in fa.diagnostics
               if occursin("No method matching", d.message) || occursin("method call error", d.message)]

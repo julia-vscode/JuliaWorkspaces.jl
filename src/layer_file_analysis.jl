@@ -656,24 +656,36 @@ const _CORE_MODULE_PATH = ["Core"]
 
 # A recorded type name resolved to a value the type comparison accepts.
 # `CoreTypes.Any` means "no opinion" and can only ever remove a diagnostic.
-# The bare-name leg looks the head up in Base's and Core's FULL `vals`, so a name a
-# dependency exports can collide with an unexported Base name of the same spelling
-# whenever the env fails to bind that dependency's names (the stdlib-only fallback
-# binds only the module name); when the env does resolve the dependency, its
-# exported names are visible here and the annotation yields `Any` instead.
+#
+# Where the type is DECLARED must not change the answer, so the head is resolved
+# through whatever brought it into `defmod`: a dependency's name resolves in the
+# module it came from, exactly as a `Base` name resolves in `Base`. The one head
+# that cannot be resolved here is a workspace-declared one — see below.
+#
+# The `Base`/`Core` leg looks a bare name up in their FULL `vals`, so a name a
+# dependency exports can still collide with an unexported `Base` name of the same
+# spelling when the env failed to bind that dependency at all (the stdlib-only
+# fallback binds only the module name, so nothing is visible to resolve through).
 function _resolve_recorded_type(rt, root, env, defmod::Vector{String}, path::Vector{String})
     isempty(path) && return StaticLint.CoreTypes.Any
-    head = path[1]
-    # A workspace-declared type: known, but comparing against it needs workspace
-    # ancestry, which the store's supertype walk cannot climb. No opinion.
-    haskey(derived_module_visible_names_idfree(rt, root, defmod), head) &&
-        return StaticLint.CoreTypes.Any
-    store = if length(path) > 1
+    face = get(derived_module_visible_names_idfree(rt, root, defmod), path[1], nothing)
+    # A workspace-declared head — a sibling's `struct`, or a tree submodule
+    # qualifying one: known, but comparing against it needs workspace ancestry,
+    # which the store's supertype walk cannot climb. No opinion.
+    face !== nothing && face.kind !== :external_symbol && return StaticLint.CoreTypes.Any
+    store = if face !== nothing
+        # A dependency's name, resolved in the module it was brought in FROM, so a
+        # renamed module (`import Dates as D`, then `D.DateTime`) resolves like the
+        # plain spelling. An `as`-renamed NAME (`using Dates: DateTime as DT`) is
+        # the one spelling this cannot follow — the face records the module the
+        # name came from, but not the name it had there — and answers `nothing`.
+        _resolve_qualified_store(env, vcat(face.origin_module, path[2:end-1]), Symbol(path[end]))
+    elseif length(path) > 1
         _resolve_qualified_store(env, path[1:end-1], Symbol(path[end]))
     else
-        # A bare name: `Base` and `Core` are in scope in every module without an
-        # import, so they are the only qualifiers a bare head can carry.
-        sym = Symbol(head)
+        # Nothing brought this bare name in, so only `Base` and `Core` can provide
+        # it: they are in scope in every module without an import.
+        sym = Symbol(path[1])
         s = _resolve_qualified_store(env, _BASE_MODULE_PATH, sym)
         s === nothing ? _resolve_qualified_store(env, _CORE_MODULE_PATH, sym) : s
     end
