@@ -740,6 +740,53 @@ end
     end
 end
 
+@testitem "infer_type_decl reads an inner `where` as the head it wraps" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, hasbinding, Binding, _basename
+    using JuliaWorkspaces: CSTParser
+
+    # The type of the parameter named `want`, as inferred from its annotation.
+    function param_type(src, want)
+        cst, meta_dict = parse_and_pass(src)
+        found = Ref{Any}(nothing)
+        walk(x) = begin
+            x isa CSTParser.EXPR || return
+            if found[] === nothing && hasbinding(x, meta_dict)
+                b = bindingof(x, meta_dict)
+                b isa Binding && b.name isa CSTParser.EXPR &&
+                    CSTParser.str_value(b.name) == want && (found[] = b.type)
+            end
+            x.args === nothing && return
+            foreach(walk, x.args)
+        end
+        walk(cst)
+        return found[]
+    end
+    basename_of(src) = (t = param_type(src, "x"); t === nothing ? nothing : string(_basename(t)))
+
+    # `Vector{T} where T` IS `Vector` — the clause narrows the type ARGUMENTS, which
+    # the curly unwrapping drops anyway. Before the fix the wrapper was not stripped
+    # and the annotation lost even its head, inferring no type at all.
+    @test basename_of("function f(x::Vector{T} where T) end") == "Core.Array"
+    # the unwrapped spellings are the reference: all three must agree
+    @test basename_of("function f(x::Vector) end") == "Core.Array"
+    @test basename_of("function f(x::Vector{Int}) end") == "Core.Array"
+    # a chain of clauses strips all the way down
+    @test basename_of("function f(x::Vector{T} where T where S) end") == "Core.Array"
+
+    # A bare `S where S` names no type. Unwrapping must not reach for a global of
+    # that name, which would type the parameter as something unrelated.
+    @test param_type("function f(x::(S where S)) end", "x") === nothing
+    @test param_type("struct S end\nfunction f(x::(S where S)) end", "x") === nothing
+
+    # KNOWN RESIDUAL, pinned so a change is deliberate: a clause wrapped in
+    # PARENTHESES is not stripped, because this path has no bracket unwrapping —
+    # the annotation's head is `:brackets`, not `:where`. The cross-file record
+    # side does strip brackets, so the two disagree on this one spelling. Both
+    # answers are permissive (no type, hence no opinion), so nothing is misjudged.
+    @test param_type("function f(x::(Vector{T} where T)) end", "x") === nothing
+    @test param_type("function f(x::(Vector{T} where T) where S) end", "x") === nothing
+end
+
 @testitem "a where-bounded type variable rules out by its upper bound" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
 
