@@ -917,3 +917,28 @@ end
     @test haskey(vis_q, "set_foo!")
     @test haskey(vis_q, "bar")
 end
+
+@testitem "macro-declared: a baremodule has no implicit owner to confirm against" setup=[MacroDeclWS] begin
+    # `@deprecate`'s owner is `Base`, which needs no import — but only in a module
+    # that HAS the implicit `using Base`. A `baremodule` does not, so neither
+    # `@deprecate` nor `Base` itself is in scope there and the macrocall declares
+    # nothing. Confirming it anyway minted a phantom declared name.
+    using JuliaWorkspaces: derived_macro_declared_names_index
+
+    names_of(src) = begin
+        jw, root = macro_ws(src)
+        sort([n for ((_, n), _) in derived_macro_declared_names_index(jw.runtime, root)])
+    end
+
+    # An ordinary module: Base is in scope, so the owner confirms.
+    @test names_of("module T\n@deprecate f g\nend\n") == ["f"]
+
+    # A baremodule: nothing to confirm against, in either spelling. `Base.@deprecate`
+    # fails too — `Base` is not a binding in a baremodule either.
+    @test names_of("baremodule T\n@deprecate f g\nend\n") == String[]
+    @test names_of("baremodule T\nBase.@deprecate f g\nend\n") == String[]
+
+    # ...but an EXPLICIT `using Base` restores it, by falling through to the ordinary
+    # import requirement rather than by a special case.
+    @test names_of("baremodule T\nusing Base\n@deprecate f g\nend\n") == ["f"]
+end

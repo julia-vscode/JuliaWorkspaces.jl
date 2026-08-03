@@ -78,8 +78,13 @@ end
 # stay env-free. Reading the TREE from here is fine — no tree consumes this — but
 # reading VISIBILITY from here would close the resolution cycle. Do not.
 
-# `Base` and `Core` are in scope in every module without an import.
-const _IMPLICIT_MACRO_OWNERS = (["Base"], ["Core"])
+# Is this rule's owner a module that needs no import to be in scope? Asks
+# `StaticLint.IMPLICIT_SCOPE_MODULES` — the same list `semantic_pass` seeds the root
+# scope from — rather than restating it. Only a top-level module can be implicitly
+# in scope, and whether a given module actually HAS that scope is a separate
+# question (`derived_module_is_bare`).
+_is_implicitly_in_scope(owner::Vector{String}) =
+    length(owner) == 1 && Symbol(owner[1]) in StaticLint.IMPLICIT_SCOPE_MODULES
 
 # The import of `path`'s own module that could bring `spelling` in, or `nothing`.
 # Only this module's imports count: Julia does not inherit an enclosing module's
@@ -140,8 +145,13 @@ function _macro_owner_confirmed(rt, root::URI, path::Vector{String}, spelling::M
         return false
     end
 
-    if owner in _IMPLICIT_MACRO_OWNERS
-        # No import needed; a qualifier, if written, must still be the owner.
+    # An implicitly-scoped owner needs no import — but only in a module that HAS the
+    # implicit scope. A `baremodule` gets no `using Base`, so neither `@deprecate` nor
+    # `Base` itself is in scope there; falling through to the import requirement below
+    # is what then makes `baremodule T; using Base; @deprecate …` work by construction
+    # rather than by accident.
+    if _is_implicitly_in_scope(owner) && !derived_module_is_bare(rt, root, path)
+        # A qualifier, if written, must still be the owner.
         isempty(spelling.qualifier) || spelling.qualifier == owner || return false
         return _env_provides_macro(rt, root, owner, spelling.name)
     end
