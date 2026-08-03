@@ -651,6 +651,9 @@ end
 _store_extended_in_workspace(rt, root, env, func_ref) =
     !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
 
+const _BASE_MODULE_PATH = ["Base"]
+const _CORE_MODULE_PATH = ["Core"]
+
 # A recorded type name resolved to a value the type comparison accepts.
 # `CoreTypes.Any` means "no opinion" and can only ever remove a diagnostic.
 # The bare-name leg looks the head up in Base's and Core's FULL `vals`, so a name a
@@ -665,19 +668,14 @@ function _resolve_recorded_type(rt, root, env, defmod::Vector{String}, path::Vec
     # ancestry, which the store's supertype walk cannot climb. No opinion.
     haskey(derived_module_visible_names_idfree(rt, root, defmod), head) &&
         return StaticLint.CoreTypes.Any
-    syms = StaticLint.getsymbols(env)
-    store = nothing
-    if length(path) > 1
-        store = _resolve_qualified_store(env, path[1:end-1], Symbol(path[end]))
+    store = if length(path) > 1
+        _resolve_qualified_store(env, path[1:end-1], Symbol(path[end]))
     else
-        for m in (:Base, :Core)
-            st = get(syms, m, nothing)
-            st isa SymbolServer.ModuleStore || continue
-            v = get(st.vals, Symbol(head), nothing)
-            v === nothing && continue
-            store = StaticLint.maybe_lookup(v, env)
-            break
-        end
+        # A bare name: `Base` and `Core` are in scope in every module without an
+        # import, so they are the only qualifiers a bare head can carry.
+        sym = Symbol(head)
+        s = _resolve_qualified_store(env, _BASE_MODULE_PATH, sym)
+        s === nothing ? _resolve_qualified_store(env, _CORE_MODULE_PATH, sym) : s
     end
     store === nothing && return StaticLint.CoreTypes.Any
     dt = StaticLint.get_eventual_datatype(store, env)
@@ -685,9 +683,9 @@ function _resolve_recorded_type(rt, root, env, defmod::Vector{String}, path::Vec
 end
 
 # Kinds whose signature record carries no type opinion at all: a struct's
-# parameters are its FIELDS, recorded without types, and a struct with inner
-# constructors has count-shaped ones. The record is in the index because the arity
-# answer needs it.
+# parameters are its FIELDS, recorded without types, and inner constructors can
+# make even their COUNT unrelated to the call's. The record is in the index
+# because the arity answer needs it.
 const _UNTYPED_SIG_KINDS = (:struct, :mutable_struct)
 
 const _UNKNOWN_TYPE_PATH = String[]
@@ -759,7 +757,7 @@ end
 # Does this record's parameter list align one-to-one with a call's positional
 # arguments, so that its types may judge a call at all? A variadic parameter
 # consumes an unknown number of slots, a struct carries no type opinion, and an
-# unreadable shape carries no parameter list — its empty `params` means
+# unreadable shape carries no parameter list at all — its empty `params` means
 # "unknown", not "none". Reads no type, so a record answers the same blanked as
 # unblanked.
 function _sig_is_judgeable(r::MethodSignatureRecord)
@@ -778,7 +776,7 @@ function _resolve_param_types(rt, root, env, recs)
         tvars = r.sig.where_vars
         types = Any[_resolve_param_type(rt, root, env, r.defmod, p.type, tvars)
                     for p in r.sig.params]
-        push!(out, (arity=_arity_of(r.sig), types=types, judgeable=_sig_is_judgeable(r)))
+        push!(out, (arity=r.sig.arity, types=types, judgeable=_sig_is_judgeable(r)))
     end
     return out
 end

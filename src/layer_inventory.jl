@@ -90,17 +90,19 @@ end
 
 The structured shape of a callable: its positional parameters in source order
 (`:positional`, `:optional` and `:vararg` roles), its keywords, whether it
-accepts a keyword splat, its method-local type variables, and `shape_unknown`
-for a definition whose real signature cannot be read (a macro-wrapped struct,
-say) and which must therefore answer permissively.
+accepts a keyword splat, its method-local type variables, `shape_unknown` for a
+definition whose real signature cannot be read (a macro-wrapped struct, say) and
+which must therefore answer permissively, and the `arity` that definition's
+argument count was measured at.
 
-`params` is in source order for a method and for a struct whose fields are its
-constructor's arguments. For a struct carrying inner constructors it is instead
-a COUNT-SHAPED synthesis of their combined range: nameless, typeless entries
-whose length is unrelated to the field count. Only read them for arity — a
-consumer that renders them (hover, signature help) must exclude that case.
+`arity` is `StaticLint.func_nargs`/`struct_nargs`' own answer, recorded rather
+than re-derived from `params`: those two are the definition of the count this
+whole layer must agree with, and a second implementation of them could only
+drift. It also means `params` needs to carry nothing but the type opinion — a
+struct's parameters are its FIELDS (typeless, since a constructor carries no type
+opinion), whatever arity its inner constructors actually give it.
 
-Plain data throughout. [`_arity_of`](@ref) derives the `MethodArity` from it.
+Plain data throughout.
 """
 @auto_hash_equals struct MethodSignature
     params::Vector{SigParam}
@@ -108,6 +110,7 @@ Plain data throughout. [`_arity_of`](@ref) derives the `MethodArity` from it.
     kwsplat::Bool
     where_vars::Vector{SigTypeVar}
     shape_unknown::Bool
+    arity::MethodArity
 end
 
 """
@@ -123,8 +126,8 @@ extension of an already-existing name elsewhere). `signature` is a normalized
 (re-printed) signature string for functions and macros, `nothing` otherwise.
 `field_names` is populated for structs. `method_sig`, when non-`nothing`, is the
 structured signature of a real method or a struct's constructor — plain data (so
-it backdates), and the source of both the cross-file argument-count opinion
-([`_arity_of`](@ref)) and the cross-file parameter-type opinion.
+it backdates), and the source of both the cross-file argument-count opinion (its
+`arity`) and the cross-file parameter-type opinion.
 
 `order` is dense and monotone in source order, and exists so the module tree can
 recover Julia's textual-splice semantics; `id` identifies the declaring statement
@@ -580,17 +583,26 @@ function _symbol_name(x)
 end
 
 # A dotted access chain as a name path (`Base.Iterators.Zip` →
-# ["Base","Iterators","Zip"]), or `nothing` for any other shape.
-function _dotted_name_path(x::CSTParser.EXPR)
+# ["Base","Iterators","Zip"]), or `nothing` for any other shape. Peels one level
+# at a time, the same shape StaticLint's `resolve_getfield`/`rhs_of_getfield`/
+# `lhs_of_getfield` (references.jl) peel during resolution, but collecting
+# strings instead of resolving.
+#
+# Interior segments must be plain identifiers — they can only be module names.
+# `operator_tail` additionally accepts an operator as the FINAL segment, which
+# a quoted-operator method extension (`Base.:+`) needs; type positions do not,
+# and pass it false so a non-type never records as one.
+function _dotted_name_path(x::CSTParser.EXPR, operator_tail::Bool=false)
     if CSTParser.isidentifier(x)
-        return [CSTParser.str_value(x)]
+        n = _item_name(x)
+        return n === nothing ? nothing : [n]
     elseif CSTParser.is_getfield_w_quotenode(x)
         lhs = _dotted_name_path(x.args[1])
         lhs === nothing && return nothing
-        q = x.args[2]
-        (q isa CSTParser.EXPR && q.args !== nothing && length(q.args) >= 1 &&
-            CSTParser.isidentifier(q.args[1])) || return nothing
-        return vcat(lhs, CSTParser.str_value(q.args[1]))
+        rhs = CSTParser.unquotenode(CSTParser.rhs_getfield(x))
+        seg = operator_tail ? _symbol_name(rhs) : _item_name(rhs)
+        seg === nothing && return nothing
+        return push!(lhs, seg)
     end
     return nothing
 end
@@ -611,10 +623,11 @@ end
 function _where_clause_names(w::CSTParser.EXPR)
     w.args === nothing && return nothing
     out = String[]
-    for i in 2:length(w.args)
-        n, _ = _where_var_and_upper(w.args[i])
+    for a in Iterators.drop(w.args, 1)
+        # Names only: recording the bound here would be work thrown away.
+        n = first(StaticLint.where_var_and_bound(a))
         n === nothing && return nothing
-        push!(out, n)
+        push!(out, CSTParser.str_value(n))
     end
     return out
 end
@@ -687,41 +700,35 @@ function _sig_param_name(arg)
     return something(CSTParser.str_value(n), "")
 end
 
-# One `where`-clause entry as (variable name, upper bound). A lower bound
-# (`T>:B`) licenses nothing and so records as unknown.
+# One `where`-clause entry as (variable name, recorded upper bound). The clause
+# grammar itself is read by `StaticLint.where_var_and_bound`, the single reader
+# shared with the local method-matching path; a bound it declines to report — an
+# unbounded variable, a lower bound — records as unknown.
 function _where_var_and_upper(a)
-    a isa CSTParser.EXPR || return nothing, ParamType()
-    if CSTParser.isidentifier(a)
-        return CSTParser.str_value(a), ParamType()
-    elseif a.head isa CSTParser.EXPR && CSTParser.isoperator(a.head) &&
-            CSTParser.valof(a.head) in ("<:", ">:") && a.args !== nothing && length(a.args) == 2
-        CSTParser.isidentifier(a.args[1]) || return nothing, ParamType()
-        upper = CSTParser.valof(a.head) == "<:" ? _param_type_record(a.args[2]) : ParamType()
-        return CSTParser.str_value(a.args[1]), upper
-    elseif CSTParser.headof(a) === :comparison && a.args !== nothing && length(a.args) == 5 &&
-            CSTParser.headof(a.args[2]) === :OPERATOR && CSTParser.valof(a.args[2]) in ("<:", ">:") &&
-            CSTParser.headof(a.args[4]) === :OPERATOR && CSTParser.valof(a.args[4]) in ("<:", ">:") &&
-            CSTParser.isidentifier(a.args[3])
-        # `Lo<:T<:Hi`: only the ascending chain has a readable upper bound.
-        upper = (CSTParser.valof(a.args[2]) == "<:" && CSTParser.valof(a.args[4]) == "<:") ?
-            _param_type_record(a.args[5]) : ParamType()
-        return CSTParser.str_value(a.args[3]), upper
+    name, upper = StaticLint.where_var_and_bound(a)
+    name === nothing && return nothing, ParamType()
+    return CSTParser.str_value(name), upper === nothing ? ParamType() : _param_type_record(upper)
+end
+
+# Collect type variables from `where`-clause or curly type-parameter entries,
+# skipping unreadable and repeated ones. Shared by the two spellings of the same
+# grammar: a method's `where` clauses and a struct's own type parameters.
+function _collect_type_vars!(out::Vector{SigTypeVar}, seen::Set{String}, entries)
+    for a in entries
+        name, upper = _where_var_and_upper(a)
+        (name === nothing || name in seen) && continue
+        push!(seen, name)
+        push!(out, SigTypeVar(name, upper))
     end
-    return nothing, ParamType()
+    return out
 end
 
 # The method-local type variables of a signature, outermost `where` first.
 function _where_type_vars(sig::CSTParser.EXPR)
-    out = SigTypeVar[]
-    seen = Set{String}()
+    out, seen = SigTypeVar[], Set{String}()
     s = sig
     while s isa CSTParser.EXPR && CSTParser.iswhere(s)
-        for i in 2:length(s.args)
-            name, upper = _where_var_and_upper(s.args[i])
-            (name === nothing || name in seen) && continue
-            push!(seen, name)
-            push!(out, SigTypeVar(name, upper))
-        end
+        _collect_type_vars!(out, seen, Iterators.drop(s.args, 1))
         s = s.args[1]
     end
     return out
@@ -731,14 +738,16 @@ end
     _method_signature(x::CSTParser.EXPR) -> Union{Nothing,MethodSignature}
 
 The structured signature of a method-defining EXPR, or `nothing` when it has no
-readable signature. Role assignment mirrors `StaticLint.func_nargs`'s traversal
-decision for decision, so [`_arity_of`](@ref) reproduces its counts. Both sides
-route every `Vararg` spelling — bound, anonymous and dotted — through
-`StaticLint.is_explicit_vararg_decl`, so they cannot drift apart.
+readable signature. The `arity` comes from `StaticLint.func_nargs` itself; the
+parameter list is walked here only to record each slot's type and role, and both
+walks route every `Vararg` spelling — bound, anonymous and dotted — through
+`StaticLint.is_explicit_vararg_decl`, so a slot's `:vararg` role and the count it
+contributed cannot disagree.
 
-`shape_unknown` is never set here: `func_nargs`'s permissive early return for a
-macro-wrapped definition needs an environment to resolve the macro, and this
-layer has none, so a macro-wrapped method is read exactly as written.
+`shape_unknown` is never set here, and `func_nargs` is deliberately called without
+an env: its permissive early return for a macro-wrapped definition needs one to
+resolve the macro, and this layer has none, so a macro-wrapped method is both read
+and counted exactly as written.
 """
 function _method_signature(x::CSTParser.EXPR)
     raw = CSTParser.get_sig(x)
@@ -778,100 +787,53 @@ function _method_signature(x::CSTParser.EXPR)
             end
         end
     end
-    return MethodSignature(params, kwargs, kwsplat, tvars, false)
+    return MethodSignature(params, kwargs, kwsplat, tvars, false,
+                           MethodArity(StaticLint.func_nargs(x)...))
 end
-
-"An anonymous parameter of the given role, with no type opinion."
-_bare_param(role::Symbol) = SigParam("", ParamType(), role)
-
-# The widest range the synthesis below spells out one entry at a time. A literal
-# `Vararg{T,N}` bound would otherwise size a cached record by N — `Vararg{Int,2000000}`
-# costs 203 MB and half a second for one struct. 255 is far above any genuine
-# signature, and exceeding it degrades to a range that only ever accepts MORE, so
-# the clamp can remove a diagnostic but never add one.
-const _MAX_SYNTH_ARITIES = 255
-
-# A parameter list that derives exactly `minargs..maxargs`: the required count as
-# positionals, the rest as optionals — or a trailing vararg when unbounded. Used
-# where the shape is only known as a COUNT RANGE, so the individual parameters
-# are synthetic and carry neither name nor type.
-function _params_for_range(minargs::Int, maxargs::Int)
-    # Too many required arguments to spell out: accept any count.
-    minargs > _MAX_SYNTH_ARITIES && return SigParam[_bare_param(:vararg)]
-    params = SigParam[_bare_param(:positional) for _ in 1:max(minargs, 0)]
-    if maxargs == typemax(Int) || maxargs - minargs + 1 > _MAX_SYNTH_ARITIES
-        push!(params, _bare_param(:vararg))
-    else
-        for _ in 1:max(maxargs - minargs, 0)
-            push!(params, _bare_param(:optional))
-        end
-    end
-    return params
-end
-
-# A shape that accepts any count but claims no keyword splat — an empty struct
-# body. `shape_unknown` is the wrong lever here: it also asserts a keyword splat.
-_any_count_signature(tvars) = MethodSignature([_bare_param(:vararg)], SigParam[], false, tvars, false)
 
 """
     _struct_signature(x::CSTParser.EXPR) -> MethodSignature
 
-The structured signature of a struct's constructor, mirroring
-`StaticLint.struct_nargs` arm for arm so [`_arity_of`](@ref) reproduces its
-counts: a macro-wrapped struct may gain arbitrary constructors and so is
-`shape_unknown`; inner constructors make the arity the union of their ranges;
-otherwise each field is one positional parameter.
+The structured signature of a struct's constructor. The `arity` is
+`StaticLint.struct_nargs`' own answer — which accounts for inner constructors
+(alternative methods, so the union of their ranges) and for an empty body, neither
+of which the field list describes. `shape_unknown` marks a macro-wrapped struct,
+which may have gained arbitrary constructors.
 
-Field types are deliberately withheld — a struct constructor carries no type
-opinion, and giving it one would change what the argument-type check says.
-
-The inner-constructor arm reads `func_nargs` rather than [`_method_signature`](@ref)
-by design: it needs the combined COUNT range of the constructors, not their
-individual shapes, which would each have to be recorded as a signature of their
-own.
+`params` is one entry per field, in source order. Field types are deliberately
+withheld — a struct constructor carries no type opinion, and giving it one would
+change what the argument-type check says — so the entries exist to be counted and
+named, never to be compared against an argument.
 """
 function _struct_signature(x::CSTParser.EXPR)
     tvars = _struct_type_vars(x)
-    # Unlike a method, this arm is purely syntactic: no env is needed to tell
-    # that the macro may have added constructors.
+    arity = MethodArity(StaticLint.struct_nargs(x)...)
+    # Unlike a method, this is purely syntactic: no env is needed to tell that the
+    # macro may have added constructors. `struct_nargs` makes the same check, so
+    # the permissive arity comes along with the flag.
     p = CSTParser.parentof(x)
     if p isa CSTParser.EXPR && CSTParser.ismacrocall(p) && !StaticLint.is_doc_macrocall(p)
-        return MethodSignature(SigParam[], SigParam[], false, tvars, true)
+        return MethodSignature(SigParam[], _arity_kwargs(arity), arity.kwsplat, tvars, true, arity)
     end
 
-    body = (x.args !== nothing && length(x.args) >= 3) ? x.args[3] : nothing
-    (body isa CSTParser.EXPR && body.args !== nothing && !isempty(body.args)) ||
-        return _any_count_signature(tvars)
-
-    inner = findall(a -> CSTParser.defines_function(a), body.args)
-    if !isempty(inner)
-        # Inner constructors are alternative methods: the arity is their union,
-        # which a single range can only over-accept, never over-reject.
-        minargs, maxargs = typemax(Int), 0
-        kws, kwsplat = Symbol[], false
-        for i in inner
-            imin, imax, ikws, ikwsplat = StaticLint.func_nargs(body.args[i])
-            minargs = min(minargs, imin)
-            maxargs = max(maxargs, imax)
-            union!(kws, ikws)
-            kwsplat |= ikwsplat
-        end
-        return MethodSignature(_params_for_range(minargs, maxargs),
-                               SigParam[SigParam(String(k), ParamType(), :keyword) for k in kws],
-                               kwsplat, tvars, false)
-    end
-
-    # Only real fields count towards the default constructor; a field's
-    # docstring is a bare string child of the body block, not a field.
+    # Only real fields are constructor arguments; a field's docstring is a bare
+    # string child of the body block, not a field. Inner constructors are not
+    # fields either — they are what made `arity` disagree with this list.
     params = SigParam[]
-    for a in body.args
-        CSTParser.isstringliteral(a) && continue
-        push!(params, SigParam(something(_struct_field_name(a), ""), ParamType(), :positional))
+    body = (x.args !== nothing && length(x.args) >= 3) ? x.args[3] : nothing
+    if body isa CSTParser.EXPR && body.args !== nothing
+        for a in body.args
+            (CSTParser.isstringliteral(a) || CSTParser.defines_function(a)) && continue
+            push!(params, SigParam(something(_struct_field_name(a), ""), ParamType(), :positional))
+        end
     end
-    # A body carrying no fields at all answers like an empty one.
-    isempty(params) && return _any_count_signature(tvars)
-    return MethodSignature(params, SigParam[], false, tvars, false)
+    # A struct's keywords are its inner constructors', which `struct_nargs` has
+    # already unioned; taking them from the arity keeps the two from disagreeing.
+    return MethodSignature(params, _arity_kwargs(arity), arity.kwsplat, tvars, false, arity)
 end
+
+# A counted arity's keyword names as (typeless) signature parameters.
+_arity_kwargs(a::MethodArity) = SigParam[SigParam(String(k), ParamType(), :keyword) for k in a.kws]
 
 # A struct's own type parameters, as `where`-style variables: `struct Foo{T<:Real}
 # <: Bar` yields `T<:Real`. The declaration's supertype clause is stripped first.
@@ -885,56 +847,7 @@ function _struct_type_vars(x::CSTParser.EXPR)
         sig = sig.args[1]
     end
     (sig isa CSTParser.EXPR && CSTParser.iscurly(sig) && sig.args !== nothing) || return out
-    seen = Set{String}()
-    for i in 2:length(sig.args)
-        name, upper = _where_var_and_upper(sig.args[i])
-        (name === nothing || name in seen) && continue
-        push!(seen, name)
-        push!(out, SigTypeVar(name, upper))
-    end
-    return out
-end
-
-# The literal `N` of a bounded `Vararg{T,N}`, or `nothing`. Mirrors
-# `StaticLint.bounded_vararg_N`: a bare `Vararg` head, exactly two arguments, and
-# an integer-literal `N`.
-function _bounded_vararg_n(t::ParamType)
-    (length(t.path) == 1 && t.path[1] == "Vararg") || return nothing
-    length(t.args) == 2 || return nothing
-    n = t.args[2]
-    (isempty(n.path) && isempty(n.args)) || return nothing
-    return tryparse(Int, n.value)
-end
-
-"""
-    _arity_of(sig::MethodSignature) -> MethodArity
-
-The argument-count shape implied by a signature record. Equal to
-`MethodArity(StaticLint.func_nargs(x)...)` for every `x` the record was built
-from; a record whose shape is unknown answers permissively, as `func_nargs` does
-when it cannot read the signature at all.
-"""
-function _arity_of(sig::MethodSignature)
-    sig.shape_unknown && return MethodArity(0, typemax(Int), Symbol[], true)
-    minargs, maxargs = 0, 0
-    for p in sig.params
-        if p.role === :vararg
-            n = _bounded_vararg_n(p.type)
-            if n === nothing
-                maxargs = typemax(Int)
-            else
-                minargs += n
-                maxargs !== typemax(Int) && (maxargs += n)
-            end
-        elseif p.role === :optional
-            maxargs !== typemax(Int) && (maxargs += 1)
-        else
-            minargs += 1
-            maxargs !== typemax(Int) && (maxargs += 1)
-        end
-    end
-    kws = Symbol[Symbol(k.name) for k in sig.kwargs if k.role === :keyword]
-    return MethodArity(minargs, maxargs, kws, sig.kwsplat)
+    return _collect_type_vars!(out, Set{String}(), Iterators.drop(sig.args, 1))
 end
 
 # Is `x` itself a load-time evaluation — an `eval(...)`/`Mod.eval(...)` call or an
@@ -1071,32 +984,17 @@ function _macro_declaration_rule(macro_name::AbstractString)
     return nothing
 end
 
-# Split a getfield chain `A.B.c` (parsed as nested binary "." operators, each
-# level's rhs a `quotenode`-wrapped identifier; see `is_getfield_w_quotenode`)
-# into its leading qualifier path `["A", "B"]`, peeling one level at a time —
-# the same shape StaticLint's `resolve_getfield`/`rhs_of_getfield`/
-# `lhs_of_getfield` (references.jl) peel during resolution, but collecting
-# strings instead of resolving. `x` is the FULL chain (i.e. what `get_name`
-# would reduce down to the final identifier); returns `String[]` if the chain
-# doesn't bottom out in a plain identifier.
+# Split a getfield chain `A.B.c` into its leading qualifier path `["A", "B"]`.
+# `x` is the FULL chain (i.e. what `get_name` would reduce down to the final
+# identifier), whose last segment is the defined name and is dropped — it may be
+# an operator (`Base.:+`), hence `operator_tail`. `String[]` for anything that is
+# not a chain bottoming out in a plain identifier, a bare name included.
 function _getfield_qualifier(x)
-    CSTParser.is_getfield_w_quotenode(x) || return String[]
-    parts = String[]
-    while CSTParser.is_getfield_w_quotenode(x)
-        # `_symbol_name`, not `_item_name`: the innermost level peeled is the
-        # defined name itself (discarded below via `parts[1:end - 1]`), which
-        # may be an operator for a quoted-operator method extension
-        # (`Base.:+` — confirmed via CST exploration: `rhs_getfield` here is a
-        # quotenode wrapping an OPERATOR node, not an identifier).
-        nm = _symbol_name(CSTParser.unquotenode(CSTParser.rhs_getfield(x)))
-        nm === nothing && return String[]
-        pushfirst!(parts, nm)
-        x = x.args[1]
-    end
-    lhs_name = _item_name(x)
-    lhs_name === nothing && return String[]
-    pushfirst!(parts, lhs_name)
-    return parts[1:end - 1]
+    x isa CSTParser.EXPR || return String[]
+    parts = _dotted_name_path(x, true)
+    (parts === nothing || length(parts) < 2) && return String[]
+    pop!(parts)
+    return parts
 end
 
 """

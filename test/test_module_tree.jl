@@ -1442,7 +1442,7 @@ end
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_method_arities, derived_method_signatures_index,
         derived_external_method_extensions, derived_external_method_extensions_index,
-        derived_external_extension_names, MethodArity, _arity_of
+        derived_external_extension_names, MethodArity
     using JuliaWorkspaces.URIs2: URI
 
     root = URI("file:///ws/A/src/A.jl")
@@ -1468,13 +1468,13 @@ end
     # Methods spliced from an include are part of the same name's set.
     @test length(derived_method_arities(jw.runtime, root, ["A"], "f")) == 4
     @test derived_method_arities(jw.runtime, root, ["A"], "f") ==
-        MethodArity[_arity_of(r.sig) for r in idx[(["A"], "f")]]
+        MethodArity[r.sig.arity for r in idx[(["A"], "f")]]
     # A qualified extension counts for the module its qualifier resolves to.
     @test length(derived_method_arities(jw.runtime, root, ["A", "Inner"], "g")) == 2
     # Every index entry must be exactly what the per-name query returns.
     for ((path, name), recs) in idx
         @test derived_method_arities(jw.runtime, root, path, name) ==
-            MethodArity[_arity_of(r.sig) for r in recs]
+            MethodArity[r.sig.arity for r in recs]
     end
     # An unknown module path or name yields no arities.
     @test isempty(derived_method_arities(jw.runtime, root, ["A"], "nosuchname"))
@@ -1497,7 +1497,7 @@ end
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_method_arities,
         derived_method_signatures, derived_method_signatures_index,
-        _arity_of, MethodArity, TextFile, SourceText
+        MethodArity, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI
 
     root = URI("file:///ms/src/A.jl")
@@ -1527,7 +1527,7 @@ end
     idx = derived_method_signatures_index(jw.runtime, root)
     for ((path, name), recs) in idx
         @test derived_method_arities(jw.runtime, root, path, name) ==
-            MethodArity[_arity_of(r.sig) for r in recs]
+            MethodArity[r.sig.arity for r in recs]
     end
 
     # the spread: several methods of one name (one spliced from an include), a
@@ -1646,7 +1646,7 @@ end
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_method_arities,
         derived_method_signatures, derived_method_signatures_index,
-        _arity_of, _is_unknown_type, MethodArity, TextFile, SourceText
+        _is_unknown_type, MethodArity, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI
 
     root = URI("file:///ms3/src/M.jl")
@@ -1706,7 +1706,7 @@ end
 @testitem "derived_method_signatures_index: the import and macro-declared withholds blank types only" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_method_arities, derived_method_signatures,
-        derived_method_signatures_index, _arity_of, _is_unknown_type, MethodArity,
+        derived_method_signatures_index, _is_unknown_type, MethodArity,
         TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI
 
@@ -1782,7 +1782,7 @@ end
 @testitem "derived_method_signatures_index: arity coverage over this package's own source" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_method_arities, derived_method_signatures,
-        derived_method_signatures_index, _arity_of, MethodArity, TextFile, SourceText
+        derived_method_signatures_index, MethodArity, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI, filepath2uri
 
     # The aggregation side of the coverage guard: the per-item records really do
@@ -1804,7 +1804,7 @@ end
 
     bad = String[]
     for ((path, name), recs) in idx
-        derived = MethodArity[_arity_of(r.sig) for r in recs]
+        derived = MethodArity[r.sig.arity for r in recs]
         derived_method_signatures(jw.runtime, root, path, name) == recs ||
             push!(bad, string(join(path, "."), ".", name, ": signature projection disagrees with the index"))
         derived_method_arities(jw.runtime, root, path, name) == derived ||

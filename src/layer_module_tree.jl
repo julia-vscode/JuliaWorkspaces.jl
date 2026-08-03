@@ -839,18 +839,18 @@ backdates; a thin projection of `derived_module_tree` + the per-file inventories
 with NO dependency on any file's analysis. Lets the per-file method-call lint
 check a call's argument count against the callee's FULL cross-file method set.
 
-Derived from [`derived_method_signatures`](@ref) rather than stored, and kept
-SEPARATE from it on purpose: the count opinion must not move when only a type
-does, so a type-only edit (`f(x::Int)` → `f(x::String)`) leaves this node's value
-equal and its consumers backdate. Withholding never reaches it — a withheld
-record keeps its parameter count.
+A projection of [`derived_method_signatures`](@ref), kept SEPARATE from it on
+purpose: the count opinion must not move when only a type does, so a type-only
+edit (`f(x::Int)` → `f(x::String)`) leaves this node's value equal and its
+consumers backdate. Withholding never reaches it — a withheld record keeps its
+recorded `arity`.
 """
 Salsa.@derived function derived_method_arities(rt, root, path, name)
     @debug "derived_method_arities" root=root path=path name=name
 
     recs = derived_method_signatures(rt, root, path, name)
     isempty(recs) && return _NO_ARITIES
-    return MethodArity[_arity_of(r.sig) for r in recs]
+    return MethodArity[r.sig.arity for r in recs]
 end
 
 const _NO_ARITIES = MethodArity[]
@@ -973,27 +973,19 @@ const _WITHHOLD_ON_LOAD_TIME_EVAL = false
 # method set of this name (or of the whole root) is not fully recorded".
 const _SIGNATURE_ITEM_KINDS = (_BINDING_ITEM_KINDS..., :macro_declared, :opaque_definitions)
 
-# A record with its type opinion withheld: every parameter keeps its name, role,
-# position and alignment flag, and loses its type. The arity it derives is
-# unchanged — which is why a bounded `Vararg{T,N}` keeps its skeleton with the
-# element blanked: that `N` is a count, not a type.
+# A record with its type opinion withheld: every parameter keeps its name, role
+# and position, and loses its type. Roles survive because alignment is not a type
+# opinion — a `:vararg` slot still consumes an unknown number of arguments — and
+# so does `arity`, which was counted from the source rather than derived from
+# these types.
 function _blank_types(sig::MethodSignature)
     return MethodSignature(
-        SigParam[_blank_param(p) for p in sig.params],
-        SigParam[_blank_param(p) for p in sig.kwargs],
+        SigParam[SigParam(p.name, ParamType(), p.role) for p in sig.params],
+        SigParam[SigParam(p.name, ParamType(), p.role) for p in sig.kwargs],
         sig.kwsplat,
         SigTypeVar[SigTypeVar(v.name, ParamType()) for v in sig.where_vars],
-        sig.shape_unknown)
-end
-
-# Roles are carried through unchanged: alignment is not a type opinion, and a
-# type opinion, and re-deriving it from the blanked type would lose it.
-function _blank_param(p::SigParam)
-    if p.role === :vararg && _bounded_vararg_n(p.type) !== nothing
-        skeleton = ParamType(p.type.path, ParamType[ParamType(), p.type.args[2]], "")
-        return SigParam(p.name, skeleton, p.role)
-    end
-    return SigParam(p.name, ParamType(), p.role)
+        sig.shape_unknown,
+        sig.arity)
 end
 
 const _NO_IMPORT_TARGETS = Dict{String,Vector{String}}()

@@ -62,28 +62,52 @@ end
 isquotedsymbol(x) = x isa EXPR && x.head === :quotenode && length(x.args) == 1 && x.args[1].head === :IDENTIFIER && hastrivia(x)
 
 """
+    where_var_and_bound(a) -> (name, upper)
+
+One `where`-clause entry — or one curly type-parameter entry, which has the same
+grammar — split into the type variable it binds and that variable's UPPER bound,
+both as `EXPR`s and either possibly `nothing`. A bare `T` binds a name with no
+bound; a lower bound (`T>:B`) licenses nothing and so reports none; of a chain
+only the ascending `Lo<:T<:Hi` has a readable upper bound. A `nothing` name means
+the entry is unreadable and binds nothing at all.
+
+The single reader for this grammar. The local method-matching path resolves the
+bound through [`_resolve_type_expr`](@ref) and the inventory records it as a
+`ParamType`; reading it in one place is what keeps them describing the same
+signature.
+"""
+function where_var_and_bound(a)
+    a isa EXPR || return nothing, nothing
+    if isidentifier(a)
+        return a, nothing
+    elseif a.head isa EXPR && isoperator(a.head) && valof(a.head) in ("<:", ">:") &&
+            a.args !== nothing && length(a.args) == 2
+        isidentifier(a.args[1]) || return nothing, nothing
+        return a.args[1], (valof(a.head) == "<:" ? a.args[2] : nothing)
+    elseif headof(a) === :comparison && a.args !== nothing && length(a.args) == 5 &&
+            headof(a.args[2]) === :OPERATOR && valof(a.args[2]) in ("<:", ">:") &&
+            headof(a.args[4]) === :OPERATOR && valof(a.args[4]) in ("<:", ">:") &&
+            isidentifier(a.args[3])
+        # `Lo<:T<:Hi`: only the ascending chain has a readable upper bound.
+        ascending = valof(a.args[2]) == "<:" && valof(a.args[4]) == "<:"
+        return a.args[3], (ascending ? a.args[5] : nothing)
+    end
+    return nothing, nothing
+end
+
+"""
     where_upper_bound_expr(b::Binding)
 
 The type expression of a `where`-bound type variable's UPPER bound, or `nothing`
-when it has none: a bare `T`, a lower bound (`T>:B`), or a descending chain. A
-typevar's binding keeps the `where` argument as its `.val`, so the bound is
-readable from the binding alone. Mirrors the shapes the inventory records, so
-the local and cross-file paths agree about the same signature.
+when it has none. A typevar's binding keeps the `where` argument as its `.val`,
+so the entry — and through [`where_var_and_bound`](@ref) the bound — is readable
+from the binding alone.
 """
 function where_upper_bound_expr(b::Binding)
     a = b.val
     a isa EXPR || return nothing
     CSTParser.iswhere(parentof(a)) || return nothing
-    if a.head isa EXPR && isoperator(a.head) && valof(a.head) == "<:" &&
-            a.args !== nothing && length(a.args) == 2 && isidentifier(a.args[1])
-        return a.args[2]
-    elseif headof(a) === :comparison && a.args !== nothing && length(a.args) == 5 &&
-            headof(a.args[2]) === :OPERATOR && headof(a.args[4]) === :OPERATOR &&
-            valof(a.args[2]) == "<:" && valof(a.args[4]) == "<:" && isidentifier(a.args[3])
-        # `Lo<:T<:Hi`: only the ascending chain has a readable upper bound.
-        return a.args[5]
-    end
-    return nothing
+    return last(where_var_and_bound(a))
 end
 
 # Extract the name from a kwarg in a `:parameters` block. The entry may be a

@@ -1382,9 +1382,9 @@ end
     end
 end
 
-@testitem "signature record: derived arity equals func_nargs over this package's own source" begin
+@testitem "signature record: roles and arity agree over this package's own source" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: _method_signature, _arity_of, _render_sig, MethodArity
+    using JuliaWorkspaces: _method_signature, _render_sig, MethodArity
     using JuliaWorkspaces: CSTParser, StaticLint
 
     # Every callable definition anywhere in a file, not just the top-level ones,
@@ -1409,31 +1409,40 @@ end
         for d in each_def!(CSTParser.EXPR[], cst)
             StaticLint._is_real_method(d) || continue
             ndefs[] += 1
-            expected = MethodArity(StaticLint.func_nargs(d)...)
             sig = _method_signature(d)
-            got = sig === nothing ? nothing : _arity_of(sig)
-            got == expected && continue
+            sig === nothing && continue
+            # The arity is `func_nargs`' own answer, so the two cannot disagree.
+            # What CAN disagree is the parameter list the type check aligns against
+            # it: `_sig_is_judgeable` lets types judge a call only when no slot is
+            # `:vararg`, and then `_tree_types_match` requires one recorded type per
+            # positional argument. So for exactly those records the list length must
+            # BE the accepted count, and the required slots must be the required
+            # count — a variadic slot that failed to reach the `:vararg` role would
+            # break that, and silently mis-align every type it compares.
+            any(p -> p.role === :vararg, sig.params) && continue
+            aligned = length(sig.params) == sig.arity.maxargs &&
+                count(p -> p.role === :positional, sig.params) == sig.arity.minargs
+            aligned && continue
             push!(mismatches, string(relpath(path, srcdir), ": ", something(_render_sig(d), "<unrenderable>"),
-                                     "\n      func_nargs -> ", expected,
-                                     "\n      _arity_of  -> ", got))
+                                     "\n      arity -> ", sig.arity,
+                                     "\n      roles -> ", [p.role for p in sig.params]))
         end
     end
 
     # Guard against a vacuous pass (a broken walk finding nothing to compare).
     @test ndefs[] > 1000
-    isempty(mismatches) || println("\n", length(mismatches), " arity mismatches:\n",
+    isempty(mismatches) || println("\n", length(mismatches), " role/arity mismatches:\n",
                                    join(mismatches, "\n"))
     @test isempty(mismatches)
 end
 
-@testitem "signature record: derived arity on hand-written shapes" begin
-    using JuliaWorkspaces: _method_signature, _arity_of, MethodArity
+@testitem "signature record: recorded arity on hand-written shapes" begin
+    using JuliaWorkspaces: _method_signature, MethodArity
     using JuliaWorkspaces: CSTParser, StaticLint
 
     defof(src) = CSTParser.parse(src, true).args[1]
-    arity(src) = _arity_of(_method_signature(defof(src)))
-    oracle(src) = MethodArity(StaticLint.func_nargs(defof(src))...)
-    both(src) = (arity(src), oracle(src))
+    sigof(src) = _method_signature(defof(src))
+    arity(src) = sigof(src).arity
 
     inf = typemax(Int)
 
@@ -1455,6 +1464,9 @@ end
     @test arity("f(xs::Vararg{Int,3}...) = 1") == MethodArity(0, inf, Symbol[], false)
     @test arity("f(x, xs::Vararg{Int,3}...) = 1") == MethodArity(1, inf, Symbol[], false)
 
+    # Every variadic spelling reaches the `:vararg` role, and where none does the
+    # parameter list aligns one-to-one with the counts — the property the
+    # positional type check reads the list under.
     for src in ("f(::Int) = 1", "f(x, ys...) = 1", "f(x::Vararg{Int,3}) = 1",
                 "f(x::Int=1; k::String=\"a\", kw...) = 1", "f(x::T, y::Real) where T<:Real = 1",
                 "f(x::T) where T>:Int = 1", "f(x::Vector{T}) where T = 1", "Base.:+(a, b) = 1",
@@ -1462,29 +1474,22 @@ end
                 "f(x::Base.Vararg{Int}) = 1", "f(x, ::Vararg{Int}) = 1",
                 "f(xs::Vararg{Int,3}...) = 1", "f(x, xs::Vararg{Int,3}...) = 1",
                 "f(xs::Vararg{Int}...) = 1", "f(xs::Vararg{Int,N}...) where N = 1")
-        a, o = both(src)
-        @test a == o
+        s = sigof(src)
+        variadic = s.arity.maxargs == typemax(Int) || s.arity.maxargs > length(s.params)
+        @test variadic == any(p -> p.role === :vararg, s.params)
+        variadic && continue
+        @test length(s.params) == s.arity.maxargs
+        @test count(p -> p.role === :positional, s.params) == s.arity.minargs
     end
 
     # A macro-wrapped definition: `func_nargs`'s permissive early return needs an
-    # env to resolve the macro, and the inventory has none, so the counts stay
-    # exact. `shape_unknown` is what makes the derived arity permissive, and it
-    # is set by callers that CAN tell (see below).
+    # env to resolve the macro, and the inventory calls it without one, so the
+    # counts stay exact. `shape_unknown` is set only by callers that CAN tell
+    # a macro added constructors — see the struct shapes below.
     wrapped = CSTParser.parse("@inline f(x, y) = 1", true).args[1].args[3]
     @test StaticLint._is_real_method(wrapped)
-    @test _arity_of(_method_signature(wrapped)) == MethodArity(StaticLint.func_nargs(wrapped)...)
-    @test _arity_of(_method_signature(wrapped)) == MethodArity(2, 2, Symbol[], false)
-end
-
-@testitem "signature record: shape_unknown makes the derived arity permissive" begin
-    using JuliaWorkspaces: MethodSignature, SigParam, SigTypeVar, ParamType, MethodArity, _arity_of
-
-    params = [SigParam("x", ParamType(["Int"]), :positional)]
-    known = MethodSignature(params, SigParam[], false, SigTypeVar[], false)
-    unknown = MethodSignature(params, SigParam[], false, SigTypeVar[], true)
-
-    @test _arity_of(known) == MethodArity(1, 1, Symbol[], false)
-    @test _arity_of(unknown) == MethodArity(0, typemax(Int), Symbol[], true)
+    @test !_method_signature(wrapped).shape_unknown
+    @test _method_signature(wrapped).arity == MethodArity(2, 2, Symbol[], false)
 end
 
 @testitem "signature record: parameter roles, names and types as written" begin
@@ -1537,7 +1542,7 @@ end
 @testitem "signature record: InventoryItem carries it, and it backdates" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, update_file!
-    using JuliaWorkspaces: SigParam, SigTypeVar, ParamType, MethodArity, _arity_of
+    using JuliaWorkspaces: SigParam, SigTypeVar, ParamType, MethodArity
     using JuliaWorkspaces.URIs2: URI
 
     u = URI("file:///sr/src/P.jl")
@@ -1559,11 +1564,11 @@ end
     # the type opinion withheld.
     @test items["S"].method_sig !== nothing
     @test items["S"].method_sig.params == [SigParam("a", ParamType(), :positional)]
-    @test _arity_of(items["S"].method_sig) == MethodArity(1, 1, Symbol[], false)
+    @test items["S"].method_sig.arity == MethodArity(1, 1, Symbol[], false)
     @test items["f"].method_sig !== nothing
     @test items["f"].method_sig.params ==
         [SigParam("x", ParamType(["Int"]), :positional), SigParam("ys", ParamType(), :vararg)]
-    @test _arity_of(items["f"].method_sig) == MethodArity(1, typemax(Int), Symbol[], false)
+    @test items["f"].method_sig.arity == MethodArity(1, typemax(Int), Symbol[], false)
 
     # A body-only edit must leave the inventory `isequal` so Salsa backdates.
     update_file!(jw, TextFile(u, SourceText("""
@@ -1578,9 +1583,9 @@ end
     @test isequal(inv1, derived_file_inventory(jw.runtime, u))
 end
 
-@testitem "signature record: derived struct arity equals struct_nargs over this package's own source" begin
+@testitem "signature record: struct parameters are its fields over this package's own source" begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: _struct_signature, _arity_of, MethodArity
+    using JuliaWorkspaces: _struct_signature, _is_unknown_type, MethodArity
     using JuliaWorkspaces: CSTParser, StaticLint
 
     # Every struct anywhere in a file, not just the top-level ones, so structs
@@ -1604,29 +1609,37 @@ end
         cst = CSTParser.parse(read(path, String), true)
         for d in each_struct!(CSTParser.EXPR[], cst)
             nstructs[] += 1
-            expected = MethodArity(StaticLint.struct_nargs(d)...)
-            got = _arity_of(_struct_signature(d))
-            got == expected && continue
+            sig = _struct_signature(d)
+            # The arity is `struct_nargs`' own answer. The parameters are the
+            # FIELDS — an independent count of them here, since a field list that
+            # silently gained the inner constructors (or the docstrings) would feed
+            # every consumer of `field_names`-shaped data a phantom field. Types
+            # stay withheld: a constructor carries no type opinion.
+            body = (d.args !== nothing && length(d.args) >= 3) ? d.args[3] : nothing
+            nfields = body isa CSTParser.EXPR && body.args !== nothing ?
+                count(a -> !CSTParser.isstringliteral(a) && !CSTParser.defines_function(a), body.args) : 0
+            expected = sig.shape_unknown ? 0 : nfields
+            (length(sig.params) == expected && all(p -> _is_unknown_type(p.type), sig.params)) && continue
             text = try
                 first(string(CSTParser.to_codeobject(d)), 200)
             catch
                 "<unrenderable>"
             end
             push!(mismatches, string(relpath(path, srcdir), ": ", text,
-                                     "\n      struct_nargs -> ", expected,
-                                     "\n      _arity_of    -> ", got))
+                                     "\n      fields -> ", expected,
+                                     "\n      params -> ", sig.params))
         end
     end
 
     # Guard against a vacuous pass (a broken walk finding nothing to compare).
     @test nstructs[] > 100
-    isempty(mismatches) || println("\n", length(mismatches), " struct arity mismatches:\n",
+    isempty(mismatches) || println("\n", length(mismatches), " struct parameter mismatches:\n",
                                    join(mismatches, "\n"))
     @test isempty(mismatches)
 end
 
 @testitem "signature record: struct signatures on hand-written shapes" begin
-    using JuliaWorkspaces: _struct_signature, _arity_of, _is_unknown_type
+    using JuliaWorkspaces: _struct_signature, _is_unknown_type
     using JuliaWorkspaces: MethodArity, SigParam, SigTypeVar, ParamType
     using JuliaWorkspaces: CSTParser, StaticLint
 
@@ -1643,8 +1656,7 @@ end
         return first(out)
     end
     sigof(src) = _struct_signature(structof(src))
-    arity(src) = _arity_of(sigof(src))
-    oracle(src) = MethodArity(StaticLint.struct_nargs(structof(src))...)
+    arity(src) = sigof(src).arity
 
     inf = typemax(Int)
     unknown = ParamType()
@@ -1669,12 +1681,13 @@ end
                   doc_only_body, inner_same, inner_differing, inner_splat, inner_kws,
                   parametric, parametric_bounded, const_field, atomic_field]
 
-    # The gate: the derived arity reproduces `struct_nargs` for every shape.
+    # The gate: whatever the arity says, the parameters are the fields and carry no
+    # type opinion — nothing here may grow a type or a synthetic slot.
     for src in all_shapes
-        @test arity(src) == oracle(src)
+        @test all(p -> _is_unknown_type(p.type) && p.role === :positional, sigof(src).params)
     end
 
-    # Arm 3: one parameter per field, named, with the type opinion withheld.
+    # One parameter per field, named, with the type opinion withheld.
     @test arity(plain) == MethodArity(2, 2, Symbol[], false)
     @test sigof(plain).params ==
         [SigParam("a", unknown, :positional), SigParam("b", unknown, :positional)]
@@ -1690,39 +1703,40 @@ end
         [SigParam("a", unknown, :positional), SigParam("b", unknown, :positional)]
     @test sigof(atomic_field).params == [SigParam("a", unknown, :positional)]
 
-    # Arm 1: a macro-wrapped struct may gain arbitrary constructors, so its
-    # shape is unknown — unlike a method, this needs no environment to tell.
+    # A macro-wrapped struct may gain arbitrary constructors, so its shape is
+    # unknown — unlike a method, this needs no environment to tell — and it
+    # records no fields at all.
     @test sigof(macro_wrapped).shape_unknown
     @test arity(macro_wrapped) == MethodArity(0, inf, Symbol[], true)
+    @test isempty(sigof(macro_wrapped).params)
     @test sigof(kwdef).shape_unknown
     @test arity(kwdef) == MethodArity(0, inf, Symbol[], true)
     # A doc wrapper adds no constructors, so it is not that macro.
     @test !sigof(documented).shape_unknown
     @test arity(documented) == MethodArity(1, 1, Symbol[], false)
 
-    # An empty body answers permissively but claims no keyword splat, which is
-    # why it is a vararg parameter and not `shape_unknown`.
+    # An empty body accepts any count but claims no keyword splat, which is why it
+    # is not `shape_unknown`. It has no fields, so it has no parameters either —
+    # the permissive count lives in the arity alone.
     for src in (empty_body, doc_only_body)
         @test !sigof(src).shape_unknown
-        @test sigof(src).params == [SigParam("", unknown, :vararg)]
+        @test isempty(sigof(src).params)
         @test arity(src) == MethodArity(0, inf, Symbol[], false)
     end
 
-    # Arm 2: the union of the inner constructors' ranges.
+    # Inner constructors are alternative methods, so the arity is the union of
+    # their ranges — and no longer describes the field list, which stays the
+    # fields. This is exactly why a struct record is never judged on its types.
     @test arity(inner_same) == MethodArity(1, 1, Symbol[], false)
-    @test sigof(inner_same).params == [SigParam("", unknown, :positional)]
+    @test sigof(inner_same).params == [SigParam("x", unknown, :positional)]
     @test arity(inner_differing) == MethodArity(2, 4, Symbol[], false)
-    @test sigof(inner_differing).params ==
-        [SigParam("", unknown, :positional), SigParam("", unknown, :positional),
-         SigParam("", unknown, :optional), SigParam("", unknown, :optional)]
+    @test sigof(inner_differing).params == [SigParam("x", unknown, :positional)]
     @test arity(inner_splat) == MethodArity(0, inf, Symbol[], false)
-    @test sigof(inner_splat).params == [SigParam("", unknown, :vararg)]
+    @test sigof(inner_splat).params == [SigParam("x", unknown, :positional)]
     @test arity(inner_kws) == MethodArity(1, 2, [:k, :j], true)
     @test sigof(inner_kws).kwargs ==
         [SigParam("k", unknown, :keyword), SigParam("j", unknown, :keyword)]
     @test sigof(inner_kws).kwsplat
-    # The field itself is not a parameter once inner constructors exist.
-    @test length(sigof(inner_same).params) == 1
 
     # The struct's own type parameters become the record's type variables.
     @test sigof(parametric).where_vars == [SigTypeVar("T", unknown)]
@@ -1735,7 +1749,7 @@ end
 @testitem "signature record: every callable inventory item carries one, and it derives the right arity" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_file_inventory, derived_item_positions, TextFile, SourceText,
-        MethodArity, _arity_of
+        MethodArity
     using JuliaWorkspaces: CSTParser, StaticLint
     using JuliaWorkspaces.URIs2: URI, filepath2uri
 
@@ -1804,10 +1818,10 @@ end
             end
             if it.method_sig === nothing
                 push!(bad, string(basename(string(u)), ": ", it.name, " (", it.kind, ") has no method_sig"))
-            elseif _arity_of(it.method_sig) != expected
+            elseif it.method_sig.arity != expected
                 push!(bad, string(basename(string(u)), ": ", it.name, " (", it.kind, ")",
-                                  "\n      oracle    -> ", expected,
-                                  "\n      _arity_of -> ", _arity_of(it.method_sig)))
+                                  "\n      oracle -> ", expected,
+                                  "\n      arity  -> ", it.method_sig.arity))
             end
         end
     end
@@ -1822,8 +1836,8 @@ end
     @test isempty(bad)
 end
 
-@testitem "signature record: a struct's synthesised parameter list is bounded" begin
-    using JuliaWorkspaces: _struct_signature, _arity_of, MethodArity, SigParam, ParamType
+@testitem "signature record: a huge Vararg bound costs a count, not a parameter list" begin
+    using JuliaWorkspaces: _struct_signature, MethodArity, SigParam, ParamType
     using JuliaWorkspaces: CSTParser, StaticLint
 
     function structof(src)
@@ -1840,45 +1854,31 @@ end
     end
     sigof(src) = _struct_signature(structof(src))
     oracle(src) = MethodArity(StaticLint.struct_nargs(structof(src))...)
-    inf = typemax(Int)
 
-    # A literal `Vararg{T,N}` bound in an inner constructor sets the range, so the
-    # spelled-out synthesis would be N entries long inside a cached value.
+    # A literal `Vararg{T,N}` bound in an inner constructor sets the arity's range.
+    # Spelling that range out as one parameter per accepted argument is what used to
+    # make `Vararg{Int,2000000}` cost 203 MB for a single cached struct record; the
+    # range now lives in the counted `arity`, so N never sizes anything.
     spread(n) = "struct S; x; S() = new(); S(a::Vararg{Int,$n}) = new(); end"
     required(n) = "struct S; x; S(a::Vararg{Int,$n}) = new(); end"
 
-    # Just under the threshold: still the exact range, and still small.
-    under = sigof(spread(254))
-    @test _arity_of(under) == MethodArity(0, 254, Symbol[], false)
-    @test _arity_of(under) == oracle(spread(254))
-    @test length(under.params) == 254
-    @test Base.summarysize(under) < 100_000
-
-    # Just over it: the range degrades to unbounded, which accepts strictly more.
-    over = sigof(spread(255))
-    @test _arity_of(over) == MethodArity(0, inf, Symbol[], false)
-    @test over.params == [SigParam("", ParamType(), :vararg)]
-
-    # Likewise when the REQUIRED count alone is too large to spell out.
-    many = sigof(required(2000))
-    @test _arity_of(many) == MethodArity(0, inf, Symbol[], false)
-    @test many.params == [SigParam("", ParamType(), :vararg)]
-
-    # The clamp is memory, so pin memory: a record that used to cost tens of
-    # megabytes is now a handful of bytes.
-    for src in (spread(255), required(2000), spread(200_000), required(200_000))
+    for src in (spread(254), spread(255), required(2000), spread(200_000), required(200_000))
         s = sigof(src)
+        # Exactly the counted range — no clamping, so nothing over-accepts either.
+        @test s.arity == oracle(src)
+        # One parameter for the one field, whatever the range says.
+        @test s.params == [SigParam("x", ParamType(), :positional)]
         @test Base.summarysize(s) < 5_000
-        # Never narrower than what `struct_nargs` admits: only ever more permissive.
-        o, d = oracle(src), _arity_of(sigof(src))
-        @test d.minargs <= o.minargs && d.maxargs >= o.maxargs
     end
+
+    @test sigof(spread(200_000)).arity == MethodArity(0, 200_000, Symbol[], false)
+    @test sigof(required(2000)).arity == MethodArity(2000, 2000, Symbol[], false)
 end
 
 @testitem "arity: an anonymous `::Vararg` is variadic on both the count and record sides" begin
     using JuliaWorkspaces
     using JuliaWorkspaces: derived_file_inventory, TextFile, SourceText, MethodArity,
-        _arity_of, _method_signature
+        _method_signature
     using JuliaWorkspaces.URIs2: URI
     const SL = JuliaWorkspaces.StaticLint
     const CP = JuliaWorkspaces.CSTParser
@@ -1898,16 +1898,13 @@ end
         ("f(::Vararg{Int,2}) = 1",       MethodArity(2, 2, Symbol[], false)),
     )
         @test oracle(src) == expected
-        @test _arity_of(sigof(src)) == expected
-        # the record must agree with the count side, which is what the whole
-        # signature record rests on
-        @test _arity_of(sigof(src)) == oracle(src)
+        @test sigof(src).arity == expected
     end
 
     # the bound spellings were already correct and must not move
     for src in ("f(x, y::Vararg{Int}) = 1", "f(x, ys...) = 1", "f(x, y::Vararg{Int,3}) = 1",
                 "f(x, ::Int) = 1", "f(x::Int, y) = 1")
-        @test _arity_of(sigof(src)) == oracle(src)
+        @test sigof(src).arity == oracle(src)
     end
 
     # an anonymous `::Vararg` now reaches the `:vararg` role, which is what makes
