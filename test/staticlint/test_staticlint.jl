@@ -599,6 +599,64 @@ end
     @test CSTParser.valof(sup("struct MyS <: Number end")) == "Number"
 end
 
+@testitem "_super answers nothing when it has no information" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    cst, meta_dict, jw = parse_and_pass("struct S <: NoSuchSupertype end\n")
+    env = get_env(jw)
+    syms = env.symbols
+
+    # An operand the walk has no method for: ignorance, not the top of the lattice.
+    @test SL._super("not a type at all", syms, meta_dict) === nothing
+    @test SL._super(nothing, syms, meta_dict) === nothing
+
+    # A binding whose supertype expression carries no ref is equally unknown.
+    b = SL.refof(only(find_identifiers(cst, "S")), meta_dict)
+    @test b isa SL.Binding
+    @test SL._super(b, syms, meta_dict) === nothing
+
+    # A genuine lattice step is unchanged.
+    @test !isnothing(SL._super(syms[:Core][:Int64], syms, meta_dict))
+end
+
+@testitem "_issubtype separates a truncated walk from a finished one" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    _, meta_dict, jw = parse_and_pass("x = 1\n")
+    syms = get_env(jw).symbols
+    int, str, real = syms[:Core][:Int64], syms[:Core][:String], syms[:Core][:Real]
+
+    # Definite yes, and definite no: the walk reached `Any` with every step known.
+    @test SL._issubtype(int, real, syms, meta_dict) === true
+    @test SL._issubtype(int, str, syms, meta_dict) === false
+
+    # An operand with no supertype information: no verdict either way.
+    @test SL._issubtype("not a type at all", int, syms, meta_dict) === nothing
+
+    # `Any` on the right is always satisfied, whatever the left operand is.
+    @test SL._issubtype("not a type at all", syms[:Core][:Any], syms, meta_dict) === true
+end
+
+@testitem "_has_type_intersection propagates unknown" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    _, meta_dict, jw = parse_and_pass("x = 1\n")
+    syms = get_env(jw).symbols
+    int, str, real = syms[:Core][:Int64], syms[:Core][:String], syms[:Core][:Real]
+    unknown = "not a type at all"
+
+    # Either direction definitely holding is a definite yes.
+    @test SL._has_type_intersection(int, real, syms, meta_dict) === true
+    @test SL._has_type_intersection(real, int, syms, meta_dict) === true
+    # Both directions definitely failing is a definite no.
+    @test SL._has_type_intersection(int, str, syms, meta_dict) === false
+    # One unknown direction and no definite yes is unknown, in both orders.
+    @test SL._has_type_intersection(unknown, int, syms, meta_dict) === nothing
+    @test SL._has_type_intersection(int, unknown, syms, meta_dict) === nothing
+    # A definite yes wins over an unknown: `Any` on either side still matches.
+    @test SL._has_type_intersection(unknown, syms[:Core][:Any], syms, meta_dict) === true
+end
+
 @testitem "check_call struct constructor arity (#447)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
 

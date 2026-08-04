@@ -587,7 +587,7 @@ function _is_scalar_index(a::EXPR, state, scope)
         r.type !== nothing || return false
         store = getsymbols(state.env)
         (haskey(store, :Core) && haskey(store[:Core], :Number)) || return false
-        return _issubtype(r.type, store[:Core][:Number], store, meta_dict)
+        return _issubtype(r.type, store[:Core][:Number], store, meta_dict) === true
     end
     return false
 end
@@ -634,7 +634,7 @@ _infer_scalar_type(x, meta_dict) = nothing
 function _is_number(t, state)
     store = getsymbols(state.env)
     (haskey(store, :Core) && haskey(store[:Core], :Number)) || return false
-    return _issubtype(t, store[:Core][:Number], store, state.meta_dict)
+    return _issubtype(t, store[:Core][:Number], store, state.meta_dict) === true
 end
 
 function infer_eltype(x::EXPR, state)

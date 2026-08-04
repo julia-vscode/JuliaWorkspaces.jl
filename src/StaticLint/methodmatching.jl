@@ -280,19 +280,21 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::SymbolServer.
         else
             length(args) >= n_no_vararg || return false
         end
+        # Only a DEFINITE mismatch rules a method out. An unknown slot leaves the
+        # method a candidate — flagging on ignorance is a false positive.
         for i in 1:n_no_vararg
             t = method.sig[i][2]
-            _has_type_intersection(args[i], t, store, meta_dict) || return false
+            _has_type_intersection(args[i], t, store, meta_dict) === false && return false
         end
         for i in (n_no_vararg + 1):length(args)
-            _has_type_intersection(args[i], va.T, store, meta_dict) || return false
+            _has_type_intersection(args[i], va.T, store, meta_dict) === false && return false
         end
         return true
     end
     length(args) == nsig || return false
     for i in 1:length(args)
         t = method.sig[i][2]
-        _has_type_intersection(args[i], t, store, meta_dict) || return false
+        _has_type_intersection(args[i], t, store, meta_dict) === false && return false
     end
     return true
 end
@@ -404,11 +406,13 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
         nfixed = length(margs) - 1
         length(args) == nfixed + vararg_N || return false
         tail = vararg_T === nothing ? CoreTypes.Any : vararg_T
+        # Only a DEFINITE mismatch rules a method out. An unknown slot leaves the
+        # method a candidate — flagging on ignorance is a false positive.
         for i in 1:nfixed
-            _has_type_intersection(args[i], margs[i], store, meta_dict) || return false
+            _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
         end
         for i in (nfixed + 1):length(args)
-            _has_type_intersection(args[i], tail, store, meta_dict) || return false
+            _has_type_intersection(args[i], tail, store, meta_dict) === false && return false
         end
         return true
     end
@@ -427,7 +431,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
 
     if length(args) == length(margs) || (vararg && length(args) == length(margs) - 1)
         for i in 1:length(args)
-            _has_type_intersection(args[i], margs[i], store, meta_dict) || return false
+            _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
         end
         return true
     end

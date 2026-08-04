@@ -1,17 +1,33 @@
-function _issubtype(a, b, store, meta_dict)
+# The walk's recursion cap. `_super(::Binding)` can hand back another `Binding`,
+# so a mid-edit `struct A <: B` / `struct B <: A` would otherwise recurse until
+# the stack goes. Raise it if a real hierarchy ever runs deeper; Base's deepest
+# chains are single digits.
+const _MAX_SUPER_DEPTH = 32
+
+# `true`/`false`/`nothing`, where `nothing` means the walk ran out of
+# information. `false` is returned only when every step was definite, so a
+# caller may act on it; `nothing` licenses nothing.
+function _issubtype(a, b, store, meta_dict, depth=0)
     _isany(b) && return true
     _type_compare(a, b) && return true
+    depth >= _MAX_SUPER_DEPTH && return nothing
     sup_a = _super(a, store, meta_dict)
+    sup_a === nothing && return nothing
     _type_compare(sup_a, b) && return true
-    !_isany(sup_a) && return _issubtype(sup_a, b, store, meta_dict)
-    return false
+    _isany(sup_a) && return false
+    return _issubtype(sup_a, b, store, meta_dict, depth + 1)
 end
 
 function _has_type_intersection(a, b, store, meta_dict)
     # A bare `Union` datatype means "some union, members unknown" (e.g. the
     # binding type of a `x::Union{…}` declaration); it can't disprove a call.
     (_is_bare_union(a) || _is_bare_union(b)) && return true
-    return _issubtype(a, b, store, meta_dict) || _issubtype(b, a, store, meta_dict)
+    ab = _issubtype(a, b, store, meta_dict)
+    ab === true && return true
+    ba = _issubtype(b, a, store, meta_dict)
+    ba === true && return true
+    (ab === nothing || ba === nothing) && return nothing
+    return false
 end
 
 _isany(x::SymbolServer.FakeTypeName) = x.name == VarRef(VarRef(nothing, :Core), :Any)
@@ -61,16 +77,20 @@ _super(::SymbolServer.FakeTypeofBottom, store, meta_dict) = CoreTypes.Any
 @static if !(Vararg isa Type)
     _super(a::SymbolServer.FakeTypeofVararg, store, meta_dict) = CoreTypes.Any
 end
-_super(_, _, _) = CoreTypes.Any
+# No method for this operand — a `TreeRef`, a bare `EXPR`, a store lookup that
+# missed. `nothing` means "no information", which is NOT the same answer as
+# `Any`: reaching `Any` ends a walk with a verdict, running out of information
+# ends it with none.
+_super(_, _, _) = nothing
 
 function _super(b::Binding, store, meta_dict)
-    StaticLint.CoreTypes.isdatatype(b.type) || return store[:Core][:Any]
+    StaticLint.CoreTypes.isdatatype(b.type) || return nothing
     b.val isa Binding && return _super(b.val, store, meta_dict)
     sup = _super(b.val, store, meta_dict)
     if sup isa EXPR && StaticLint.hasref(sup, meta_dict)
         StaticLint.refof(sup, meta_dict)
     else
-        store[:Core][:Any]
+        nothing
     end
 end
 

@@ -782,7 +782,7 @@ function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_ar
         exp = _expected_arg_type(cand, s, nargs, store, meta_dict)
         exp === nothing && continue
         got = s <= length(inferred) ? inferred[s] : nothing
-        if !_has_type_intersection(got, exp, store, meta_dict)
+        if _has_type_intersection(got, exp, store, meta_dict) === false
             slot = s
             break
         end
@@ -881,7 +881,7 @@ function check_incorrect_iter_spec(x, body, env, meta_dict)
         elseif hasref(rng, meta_dict) && refof(rng, meta_dict) isa Binding && refof(rng, meta_dict).type !== nothing
             type = get_eventual_datatype(refof(rng, meta_dict).type, env)
             try
-                if type !== nothing && _issubtype(type, getsymbols(env)[:Core][:Number], env.symbols, meta_dict)
+                if type !== nothing && _issubtype(type, getsymbols(env)[:Core][:Number], env.symbols, meta_dict) === true
                     seterror!(x, IncorrectIterSpec, meta_dict)
                 end
             catch err
