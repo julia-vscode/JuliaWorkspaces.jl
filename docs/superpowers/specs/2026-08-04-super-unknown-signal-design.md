@@ -110,8 +110,8 @@ Eight, all inside this package; nothing outside JuliaWorkspaces calls these.
 
 | site | change | behaviour |
 |---|---|---|
-| `methodmatching.jl:285,288,295` (`sig_match_any`) | `… === false && return false` | **changes**: unknown no longer rules a method out |
-| `methodmatching.jl:408,411,430` (`match_method`) | as above | **changes**: same |
+| `methodmatching.jl:285,288,295` (`match_method(…::MethodStore…)`) | `… === false && return false` | **changes**: unknown no longer rules a store method out |
+| `methodmatching.jl:408,411,430` (`match_method(…::EXPR…)`) | as above | **changes**: same, for a workspace signature |
 | `checks.jl:785` (`describe_call_mismatch`) | name a slot only on `=== false` | **changes**: header-only rather than naming an unprovable slot |
 | `checks.jl:884` (`check_incorrect_iter_spec`) | `=== true` | identical: it only ever acted on `true` |
 | `type_inf.jl:590,637` (scalar-index, number tests) | `=== true` | identical: same reason |
