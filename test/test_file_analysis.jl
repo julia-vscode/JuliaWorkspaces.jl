@@ -2400,6 +2400,92 @@ end
     @test rec.comparisons >= 2 && rec.rule_outs == 1
 end
 
+@testitem "parity: bare identifier, closure callee flags a definite mismatch" setup=[FileAnalysisWS] begin
+    # Types live in the SAME file as the closure: the EXPR path resolves
+    # annotations through local bindings only — its cross-file hop is a
+    # later deferral and is NOT asserted here.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => """
+        abstract type MyAbs end
+        struct Own <: MyAbs end
+        struct Other end
+        function caller(v::Own, w::Other)
+            target(x::MyAbs) = 1
+            target(v)
+            target(w)
+        end
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity: bare identifier, same-file module-level callee flags a definite mismatch" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => """
+        abstract type MyAbs end
+        struct Own <: MyAbs end
+        struct Other end
+        target(x::MyAbs) = 1
+        good(v::Own) = target(v)
+        bad(w::Other) = target(w)
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity: bare identifier, store callee flags a definite mismatch" setup=[FileAnalysisWS] begin
+    # `iseven` has an `iseven(n::Real)` method (an ABSTRACT store param — the
+    # good arm must match through ancestry, not by luck), and every one of its
+    # methods (Missing/AbstractFloat/Real/Number) resolves cleanly in a
+    # stdlib-only env, so `Other`'s plain `Any` supertype rules all of them
+    # out. (`sin` was tried first: its store record set also includes
+    # LinearAlgebra-typed methods that this env can't resolve, which read as
+    # unknown rather than ruled out and left `bad` permanently unflagged.)
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => """
+        struct Other end
+        struct MyReal <: Real end
+        good(v::MyReal) = iseven(v)
+        bad(w::Other) = iseven(w)
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity: bare identifier, one-file root reports like a same-file module-level callee" setup=[FileAnalysisWS] begin
+    # The same source analysed as a project-less one-file root: the file IS
+    # its whole tree, so the record path must reach the same verdict. (True
+    # "no root" cannot be expressed through derived_file_analysis — a file
+    # outside every root produces no analysis at all, which is the silent
+    # end of the degradation map by construction.)
+    jw = ws_with(Dict(
+        B => """
+        abstract type MyAbs end
+        struct Own <: MyAbs end
+        struct Other end
+        target(x::MyAbs) = 1
+        good(v::Own) = target(v)
+        bad(w::Other) = target(w)
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, B, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
 @testitem "parity: the type phase declines wherever the record set is partial" setup=[FileAnalysisWS] begin
     # Every case here is correct code whose callee has methods, or keywords, the
     # signature records do not list. Exhausting the records would flag it.

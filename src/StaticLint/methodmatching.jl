@@ -18,12 +18,17 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
                 type = bindingof(arg, meta_dict).type
                 if type isa Binding && type.val isa SymbolServer.DataTypeStore
                     type = type.val
-                elseif type isa Binding && CoreTypes.isdatatype(type.type)
-                    # Bound through a typevar (the link's `.type` is the
-                    # `DataType` meta-type). A `where` clause may still give an
-                    # UPPER bound, and the method can only ever instantiate at a
-                    # subtype of it, so the bound is sound for ruling a call out.
-                    # `>:` gives a lower bound and licenses nothing.
+                elseif type isa Binding && CoreTypes.isdatatype(type.type) &&
+                       type.val isa EXPR && CSTParser.iswhere(parentof(type.val))
+                    # A genuine typevar binding (its `.val` sits in a `where`
+                    # clause) — NOT a real datatype's own binding, which also
+                    # carries `.type == DataType` but whose `.val` is the
+                    # struct/abstract/primitive declaration itself (handled by
+                    # the `return type` below via `_super`). A `where` clause
+                    # may still give an UPPER bound, and the method can only
+                    # ever instantiate at a subtype of it, so the bound is
+                    # sound for ruling a call out. `>:` gives a lower bound and
+                    # licenses nothing.
                     ub = store === nothing ? nothing : where_upper_bound_expr(type)
                     ub === nothing && return CoreTypes.Any
                     return _resolve_type_expr(ub, store, meta_dict)
