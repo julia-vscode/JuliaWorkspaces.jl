@@ -14,7 +14,7 @@ Spec: `docs/superpowers/specs/2026-08-04-super-unknown-signal-design.md`.
 
 - Branch: `sp/super-unknown-signal`, already created off `main` (`9ab7c24`). **Run every git command inside `/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces`** — it is a git submodule; running git from the julia-vscode root operates on the wrong repository.
 - Run Julia **only** through the julia-mcp tool (`mcp__julia__julia_eval`) with env `/home/pfitzseb/git/julia-vscode/scripts/environments/development`. Never spawn `julia` and never run `Pkg.test`.
-- Give every `julia_eval` a timeout of **600000 ms or more**. A timeout expiry kills the session and loses all state. The first test run that lints compiles for ~45 s.
+- `julia_eval`'s `timeout` is in **SECONDS** (default 60), not milliseconds. Give every call **600 or more**, and the full suite 3600. A timeout expiry kills the session and loses all state; the first test run that lints compiles for ~45 s.
 - Tests are `@testitem`s. **`@testitem` bodies need explicit imports** (`using JuliaWorkspaces: …`); the package's default `using`s do not apply inside them. `return` does not skip a `@testitem` body — gate with `if`/`else` if you ever need to.
 - Code comments in this repo are terse and **never reference plan or spec documents**. Do not add "see the spec" comments.
 - Editing a `struct` definition requires `julia_restart` before the next test run. This plan changes no structs, so no restart is needed.
@@ -80,7 +80,7 @@ end
 - [ ] **Step 2: Run it and confirm it fails**
 
 ```
-mcp__julia__julia_eval, env=/home/pfitzseb/git/julia-vscode/scripts/environments/development, timeout 600000:
+mcp__julia__julia_eval, env=/home/pfitzseb/git/julia-vscode/scripts/environments/development, timeout 600:
 
 using TestItemRunner
 TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces";
@@ -168,7 +168,7 @@ end
 - [ ] **Step 4: Run the three unit testitems and confirm they fail**
 
 ```
-mcp__julia__julia_eval, env=…/environments/development, timeout 600000:
+mcp__julia__julia_eval, env=…/environments/development, timeout 600:
 
 using TestItemRunner
 TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces";
@@ -312,7 +312,7 @@ Leave `_ancestry` (`type_inf.jl:415-426`) alone: it already breaks on a `nothing
 - [ ] **Step 9: Run the four testitems from Steps 1 and 3 and confirm they pass**
 
 ```
-mcp__julia__julia_eval, env=…/environments/development, timeout 600000:
+mcp__julia__julia_eval, env=…/environments/development, timeout 600:
 
 using TestItemRunner
 TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces";
@@ -327,7 +327,7 @@ Expected: PASS, all four.
 - [ ] **Step 10: Run every testitem that exercises method matching or inference**
 
 ```
-mcp__julia__julia_eval, env=…/environments/development, timeout 900000:
+mcp__julia__julia_eval, env=…/environments/development, timeout 900:
 
 using TestItemRunner
 TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces";
@@ -467,7 +467,7 @@ end
 - [ ] **Step 2: Run it**
 
 ```
-mcp__julia__julia_eval, env=…/environments/development, timeout 600000:
+mcp__julia__julia_eval, env=…/environments/development, timeout 600:
 
 using TestItemRunner
 TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces";
@@ -558,7 +558,7 @@ end
 - [ ] **Step 2: Run them**
 
 ```
-mcp__julia__julia_eval, env=…/environments/development, timeout 600000:
+mcp__julia__julia_eval, env=…/environments/development, timeout 600:
 
 using TestItemRunner
 TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces";
@@ -600,7 +600,7 @@ EOF
 - [ ] **Step 1: Run the whole suite in the background**
 
 ```
-mcp__julia__julia_eval, env=…/environments/development, timeout 3600000:
+mcp__julia__julia_eval, env=…/environments/development, timeout 3600:
 
 using TestItemRunner
 TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces"; verbose = true)
