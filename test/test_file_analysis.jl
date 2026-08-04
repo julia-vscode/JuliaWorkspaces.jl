@@ -2295,3 +2295,32 @@ end
     @test !isempty(nm.signatures)
     @test nm.has_unknown_shapes
 end
+
+@testitem "tree_resolve: workspace names, store names, unknowns" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: TypeRef, TYPE_ANY
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nstruct Own <: MyAbs end\n",
+        B => "caller() = 1\n",
+    ))
+    rt = jw.runtime
+    resolve = JuliaWorkspaces._tree_type_resolver(rt, ROOT)
+
+    own = resolve(TypeRef(["Own"]), ["MainPkg"])
+    @test own isa SL.TreeDataType && own.key == (["MainPkg"], "Own")
+    @test own.sup == TypeRef(["MyAbs"])
+
+    # Store name (Base is visible everywhere) → a store value the subtype
+    # walk understands.
+    int = resolve(TypeRef(["Int"]), ["MainPkg"])
+    @test int !== nothing && !(int isa SL.TreeDataType)
+    # Qualified store name.
+    @test resolve(TypeRef(["Base", "AbstractString"]), ["MainPkg"]) !== nothing
+    # Unknown → nothing, silently.
+    @test resolve(TypeRef(["NoSuchName"]), ["MainPkg"]) === nothing
+    # The walk crosses tree → store: Own <: MyAbs <: Any ends definitely.
+    myabs = resolve(TypeRef(["MyAbs"]), ["MainPkg"])
+    @test SL._issubtype(own, myabs, nothing, nothing) === true
+end

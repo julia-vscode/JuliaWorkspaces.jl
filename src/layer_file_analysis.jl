@@ -677,6 +677,108 @@ end
 _store_extended_in_workspace(rt, root, env, func_ref) =
     !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
 
+# Item lookup for a resolved name: scan the declaring file's inventory for the
+# `ItemRef`'s id. Only the inventory is read — never a sibling's analysis —
+# and inventories are small.
+function _inventory_item(rt, ref::ItemRef)
+    for item in derived_file_inventory(rt, ref.file).items
+        item.id == ref.id && return item
+    end
+    return nothing
+end
+
+# The env value a written module path + name denotes, as a comparison operand:
+# `VarRef` aliases followed, and a constructor `FunctionStore` reduced to the
+# datatype it extends (`Base.Int` → `Core.Int`) so the subtype walk has a
+# nominal type to work with. `nothing` when the path names nothing.
+function _store_type_value(env, module_path::Vector{String}, name::String)
+    val = _resolve_qualified_store(env, module_path, Symbol(name))
+    val === nothing && return nothing
+    dt = StaticLint.get_eventual_datatype(val, env)
+    return dt === nothing ? val : dt
+end
+
+"""
+    _tree_type_resolver(rt, root) -> Function
+
+The leaf resolver for the type names in signature records: a `TypeRef` plus
+the module path that wrote it → a `TreeDataType` (a workspace datatype), an
+env store value (an external name), or `nothing` (unknown — which rules
+nothing out downstream).
+
+Names resolve through the id-free visible-names face plus the per-name
+`derived_visible_item`, the same split (and the same invalidation contract)
+the rest of this file's resolution context uses. A module-kinded name is
+followed to the module it denotes — cross-root for a workspace package — so
+a `TreeDataType`'s own supertype continues to resolve in the root that
+declared it.
+"""
+function _tree_type_resolver(rt, root)
+    project_uri = derived_project_uri_for_root(rt, root)
+    env = project_uri === nothing ? derived_stdlib_only_env(rt) : derived_environment(rt, project_uri)
+
+    function resolve_in(r::URI, t, defined_in::Vector{String})
+        t isa TypeRef || return nothing
+        # Every unannotated slot carries this, and it can end a walk on its
+        # own: answer it before touching a query.
+        t == TYPE_ANY && return StaticLint.CoreTypes.Any
+        isempty(t.path) && return nothing
+        head = t.path[1]
+        rest = t.path[2:end]
+
+        vn = get(derived_module_visible_names_idfree(rt, r, defined_in), head, nothing)
+        if vn === nothing
+            # A fully-qualified env path (`Base.AbstractString`), or a bare
+            # name from the module's implicit `using Base`/`using Core` —
+            # which the visible-names face never lists.
+            isempty(rest) || return _store_type_value(env, t.path[1:end - 1], t.path[end])
+            im = _implicit_member(rt, r, defined_in, head)
+            im === nothing && return nothing
+            return StaticLint.get_eventual_datatype(first(im), env)
+        end
+
+        if isempty(rest)
+            if vn.kind === :external_symbol
+                return _store_type_value(env, vn.origin_module, head)
+            end
+            _is_datatype_kind(vn.kind) || return nothing
+            item_ref = derived_visible_item(rt, r, defined_in, head)
+            item_ref === nothing && return nothing
+            item = _inventory_item(rt, item_ref)
+            item === nothing && return nothing
+            item.supertype === nothing && return nothing   # not a datatype after all
+            # `origin_module` is the DECLARING module for a tree-declared name
+            # and the ORIGIN module for an imported one — either way the module
+            # the nominal key is qualified by, and the one the declared
+            # supertype's own names resolve in. `_method_items_root`'s question,
+            # asked for a datatype: which root's tree owns that module path.
+            sup_root = _method_items_root(rt, r, vn.origin_module)
+            return StaticLint.TreeDataType((vn.origin_module, item.name), item.supertype,
+                (tt, di) -> resolve_in(sup_root, tt, di))
+        end
+
+        # Qualified, and the head is visible: a module of some workspace tree,
+        # or an env module bound by a whole-module `using`/`import`.
+        if vn.kind === :module
+            target = _tree_module_target(rt, r, StaticLint.TreeRef(head, :module, nothing, vn.origin_module))
+            target === nothing && return nothing
+            return resolve_in(target[1], TypeRef(rest), target[2])
+        end
+        vn.kind === :external_symbol || return nothing
+        # The binding may be a MEMBER of `origin_module` (a submodule brought in
+        # by a wildcard `using`) or `origin_module` ITSELF (a whole-module
+        # binding, possibly aliased: `import Base.Iterators as It`). Deeper path
+        # first, as everywhere else this ambiguity is resolved.
+        for base in (vcat(vn.origin_module, [head]), vn.origin_module)
+            v = _store_type_value(env, vcat(base, rest[1:end - 1]), rest[end])
+            v === nothing || return v
+        end
+        return nothing
+    end
+
+    return (t, defined_in) -> resolve_in(root, t, defined_in)
+end
+
 """
     derived_file_analysis(rt, root::URI, file::URI) -> FileAnalysis
 
