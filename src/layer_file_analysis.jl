@@ -536,7 +536,7 @@ function _call_cross_file_arities(rt, root, path, call, meta_dict)
     # A function-local callee fully shadows any same-named global, so its method
     # set is exactly its own — describe from the local candidates, not the global
     # name's cross-file arities (mirrors `check_call`'s gate).
-    func_ref isa StaticLint.Binding && StaticLint._is_local_callee_binding(func_ref, meta_dict) && return nothing
+    func_ref isa StaticLint.Binding && StaticLint._is_function_local_binding(func_ref, meta_dict) && return nothing
     nm = CSTParser.get_name(call)
     (nm isa CSTParser.EXPR && StaticLint.isidentifier(nm)) || return nothing
     name = StaticLint.valofid(nm)
@@ -553,6 +553,16 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
     # `describe_call_mismatch`'s method-set enumeration (mirrors the
     # `tree_in_scope` closure `derived_file_analysis` passes to `check_all`).
     tree_in_scope = root === nothing ? nothing : (x -> _in_scope_module_syms(rt, root, vcat(path, _in_file_module_names(x, meta_dict))))
+
+    # The argument-side type bridge the type phase matched with, so a message
+    # names the types the flag was actually made against rather than the `Any`
+    # the legacy `Binding.type` slot falls back to.
+    tree_callsite_type = if root === nothing
+        nothing
+    else
+        resolver = _tree_type_resolver(rt, root)
+        (t, x) -> resolver(t, vcat(path, _in_file_module_names(x, meta_dict)))
+    end
 
     # Names the project declares as dependencies, for the UnresolvedImport
     # message split (same computation as the whole-closure pass; empty
@@ -602,8 +612,8 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
                 # otherwise from the local candidates (store/local methods).
                 ar = _call_cross_file_arities(rt, root, path, err[2], meta_dict)
                 detail = ar !== nothing ?
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar, tree_in_scope) :
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; tree_in_scope)
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar, tree_in_scope, tree_callsite_type) :
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; tree_in_scope, tree_callsite_type)
                 detail !== nothing && (description = detail)
             end
             severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
@@ -697,6 +707,15 @@ function _store_type_value(env, module_path::Vector{String}, name::String)
     dt = StaticLint.get_eventual_datatype(val, env)
     return dt === nothing ? val : dt
 end
+
+# Can `name` reach the module at `path` from somewhere the signature index does
+# not walk — the implicit `using Base`/`using Core`, or any import statement that
+# binds it? Then a definition of `name` here is an EXTENSION, and the records
+# hold only this workspace's share of its methods (`import Base: length` plus
+# `length(::MyType) = …`, the shape every package uses).
+_name_reaches_from_outside(rt, root, path::Vector{String}, name::String) =
+    _member_may_come_from_imports(rt, root, path, name) ||
+    _implicit_member(rt, root, path, name) !== nothing
 
 """
     _tree_type_resolver(rt, root) -> Function
@@ -915,7 +934,30 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # hover/signatures/references' `_in_scope_syms_at`, but reuses the already-known
     # per-file `path` instead of re-deriving it from `x`'s URI.
     tree_in_scope = x -> _in_scope_module_syms(rt, root, vcat(path, _in_file_module_names(x, meta_dict)))
-    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
+    # The TYPE opinion on such a callee: its cross-file signature records
+    # (`tree_signatures`), whose type names resolve at the leaf through
+    # `tree_signature_resolver` — in the module that WROTE each signature, which
+    # is where its names were visible.
+    tree_signatures = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        nm = derived_method_signatures(rt, root, p, name)
+        # A name that also reaches this module from OUTSIDE its tree carries
+        # methods no record lists — the workspace definitions are extensions of
+        # it — so the set is an under-approximation whatever its own markers say.
+        if !isempty(nm.signatures) && _name_reaches_from_outside(rt, root, p, name)
+            return NameMethods(nm.signatures, true, nm.has_forward_decl)
+        end
+        return nm
+    end
+    tree_signature_resolver = _tree_type_resolver(rt, root)
+    # The same resolver asked at the CALL SITE instead — the argument side, whose
+    # type names are written here. Separate closure because the two sides resolve
+    # in different modules and only the record side carries its own.
+    tree_callsite_type = (t, x) ->
+        tree_signature_resolver(t, vcat(path, _in_file_module_names(x, meta_dict)))
+    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict,
+        tree_visible, tree_extended, tree_arities, tree_in_scope,
+        tree_signatures, tree_signature_resolver, tree_callsite_type)
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file

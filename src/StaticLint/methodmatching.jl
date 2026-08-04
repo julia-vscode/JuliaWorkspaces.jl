@@ -86,10 +86,27 @@ function where_upper_bound_expr(b::Binding)
 end
 
 # Extract the name from a kwarg in a `:parameters` block. The entry may be a
-# bare identifier (sig form `f(a; p)`), a kwarg with default (`p = v`), or a
-# typed decl (`p::T`). Bare identifiers have no `.args`.
+# bare identifier (sig form `f(a; p)`), a kwarg with default (`p = v`), a typed
+# decl (`p::T`), or both (`p::T = v`). Bare identifiers have no `.args`.
 function _kw_name(x::EXPR)
-    x.args !== nothing && !isempty(x.args) ? x.args[1] : x
+    n = x.args !== nothing && !isempty(x.args) ? x.args[1] : x
+    return isdeclaration(n) && n.args !== nothing && !isempty(n.args) ? n.args[1] : n
+end
+
+# Index of a call's first argument: past the callee, and past a `:parameters`
+# block when the call has one.
+_first_arg_index(call::EXPR) =
+    length(call.args) > 1 && headof(call.args[2]) === :parameters ? 3 : 2
+
+# The call's POSITIONAL argument expressions, in the order `call_arg_types`
+# types them — the two must stay index-aligned.
+function positional_args(call::EXPR)
+    out = EXPR[]
+    call.args === nothing && return out
+    for i = _first_arg_index(call):length(call.args)
+        CSTParser.iskwarg(call.args[i]) || push!(out, call.args[i])
+    end
+    return out
 end
 
 function call_arg_types(call::EXPR, ismethod, meta_dict, store=nothing)
@@ -99,21 +116,13 @@ function call_arg_types(call::EXPR, ismethod, meta_dict, store=nothing)
         for i = 1:length(call.args[2].args)
             push!(kws, _kw_name(call.args[2].args[i]))
         end
-        for i = 3:length(call.args)
-            if CSTParser.iskwarg(call.args[i])
-                push!(kws, call.args[i].args[1])
-            else
-                push!(types, arg_type(call.args[i], ismethod, meta_dict, store))
-            end
-        end
-    else
-        for i = 2:length(call.args)
-            if CSTParser.iskwarg(call.args[i])
-                # `f(a, b, kw = v)` — kwarg without semicolon.
-                push!(kws, call.args[i].args[1])
-            else
-                push!(types, arg_type(call.args[i], ismethod, meta_dict, store))
-            end
+    end
+    for i = _first_arg_index(call):length(call.args)
+        if CSTParser.iskwarg(call.args[i])
+            # `f(a, b, kw = v)` — kwarg without semicolon.
+            push!(kws, call.args[i].args[1])
+        else
+            push!(types, arg_type(call.args[i], ismethod, meta_dict, store))
         end
     end
     types, kws
@@ -282,10 +291,40 @@ struct SigDescriptor
     vararg_pad::Any
     vararg_N::Union{Nothing,Int}
     kws::Vector{Any}
+    # `; kwargs...` — the method takes any keyword, so no keyword rules it out.
+    kwsplat::Bool
 end
+SigDescriptor(fixed, opts, has_vararg, pad, N, kws) =
+    SigDescriptor(fixed, opts, has_vararg, pad, N, kws, false)
+
+"""
+    MatchRecorder
+
+Observation hook for the matching engine: `comparisons` counts the candidates
+examined, `rule_outs` the definite mismatches among them. Set
+`_match_recorder[]` to record, back to `nothing` to stop; unset costs one `Ref`
+load per candidate.
+"""
+mutable struct MatchRecorder
+    comparisons::Int
+    rule_outs::Int
+end
+MatchRecorder() = MatchRecorder(0, 0)
+
+const _match_recorder = Ref{Union{Nothing,MatchRecorder}}(nothing)
 
 function match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict)
-    !isempty(kws) && isempty(d.kws) && return false
+    res = _match_descriptor(args, kws, d, store, meta_dict)
+    r = _match_recorder[]
+    if r !== nothing
+        r.comparisons += 1
+        res || (r.rule_outs += 1)
+    end
+    return res
+end
+
+function _match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict)
+    !isempty(kws) && isempty(d.kws) && !d.kwsplat && return false
 
     # Only a DEFINITE mismatch rules a method out. An unknown slot leaves the
     # method a candidate — flagging on ignorance is a false positive.

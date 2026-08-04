@@ -2368,3 +2368,69 @@ end
     @test ab isa SL.TreeDataType && ab.key == (["WP", "Sub"], "Ab")
     @test SL._issubtype(reexported, ab, nothing, nothing) === true
 end
+
+@testitem "parity: bare identifier, sibling-file callee flags a definite mismatch" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => """
+        abstract type MyAbs end
+        struct Own <: MyAbs end
+        struct Other end
+        target(x::MyAbs) = 1
+        """,
+        B => """
+        good(v::Own) = target(v)
+        bad(w::Other) = target(w)
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    msgs = [d.message for d in fa.diagnostics]
+    flagged = filter(m -> occursin("method call error", m) || occursin("No method matching", m), msgs)
+    @test length(flagged) == 1   # `bad` flags, `good` does not
+    # The one flag names the argument's own type, not the `Any` the legacy
+    # binding-type slot falls back to for a sibling-file annotation.
+    @test occursin("target(::Other)", only(flagged))
+    # Both calls were really compared against the record, and only one was ruled out.
+    @test rec.comparisons >= 2 && rec.rule_outs == 1
+end
+
+@testitem "parity: the type phase declines wherever the record set is partial" setup=[FileAnalysisWS] begin
+    # Every case here is correct code whose callee has methods, or keywords, the
+    # signature records do not list. Exhausting the records would flag it.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    # A workspace overload of a Base function: the records hold the workspace's
+    # share of `length`'s methods only.
+    @test isempty(callflags("import Base: length\nstruct D end\nlength(d::D) = 1\n",
+                            "caller(v::Vector) = length(v)\n"))
+
+    # `; kwargs...` accepts any keyword.
+    @test isempty(callflags("struct T end\ng(x::T; kwargs...) = 2\n",
+                            "caller(v::T) = g(v; anything=1)\n"))
+
+    # A keyword declared with a type and a default is still a keyword.
+    @test isempty(callflags("struct T end\nf(x::T, y::Int; define::Bool=true) = 1\n",
+                            "caller(v::T) = f(v, 1; define=false)\n"))
+
+    # A type parameter can bind a VALUE, so a typevar argument types nothing.
+    @test isempty(callflags("struct P{Q} end\nd!(b::Bool) = 1\n",
+                            "caller(p::P{Q}) where {Q} = d!(Q)\n"))
+
+    # A datatype's records model the field constructor, not its keyword form.
+    @test isempty(callflags("Base.@kwdef struct FS\n    inc::Int = 1\n    exc::Int = 2\nend\n",
+                            "mk() = FS(; inc=3, exc=4)\n"))
+end

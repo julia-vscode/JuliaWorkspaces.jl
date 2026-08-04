@@ -4737,6 +4737,10 @@ end
     @test s.typevars == Dict{String,JuliaWorkspaces.TypeExpr}("T" => TypeRef(["Integer"]))
     @test s.kws == [:kw] && s.kwsplat
 
+    # A keyword's name survives an annotation, with or without a default —
+    # dropping it reads as "takes no keywords", which rules out every call.
+    @test ms("k(x; opt::Bool=true, req::Int, plain=1) = 1").kws == [:opt, :req, :plain]
+
     # Vararg spellings.
     @test ms("h(xs::Int...) = 1").vararg == VarargSpec(TypeRef(["Int"]), nothing)
     @test ms("h(a, ::Vararg{String}) = 1").vararg == VarargSpec(TypeRef(["String"]), nothing)

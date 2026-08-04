@@ -518,6 +518,26 @@ end
 # type, so its binding must stay a `DataType` rather than become a `Function`.
 resolves_to_datatype(store, env::ExternalEnv) = get_eventual_datatype(store, env) isa SymbolServer.DataTypeStore
 
+# The type expression of a binding's `::` declaration — a parameter, a
+# `local x::T`, an annotated assignment, an annotated splat — or `nothing` when
+# the value carries no annotation. Returned as written: `where`/curly/getfield
+# unwrapping is the caller's, since callers want different depths of it.
+function decl_annotation(b::Binding)
+    v = b.val
+    v isa EXPR || return nothing
+    if v.head isa EXPR && valof(v.head) == "::" && v.args !== nothing && length(v.args) == 2
+        return v.args[2]
+    elseif isassignment(v) && v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
+           v.args[1].args !== nothing && length(v.args[1].args) == 2
+        return v.args[1].args[2]
+    elseif CSTParser.issplat(v) && v.args !== nothing && length(v.args) >= 1 &&
+           v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
+           v.args[1].args !== nothing && length(v.args[1].args) == 2
+        return v.args[1].args[2]
+    end
+    return nothing
+end
+
 # Per-file traversal mode only: does `b`'s declaration carry an explicit `::`
 # type annotation that resolved through the module tree (a `TreeRef`)? The
 # legacy `Binding.type` slot can't carry a TreeRef, so `infer_type_decl`
@@ -527,20 +547,8 @@ resolves_to_datatype(store, env::ExternalEnv) = get_eventual_datatype(store, env
 # struct's real fields as missing references). Mirrors the annotation
 # unwrapping in `infer_type_decl` (curly / getfield forms).
 function declared_type_is_tree_backed(b::Binding, meta_dict)
-    v = b.val
-    v isa EXPR || return false
-    t = if v.head isa EXPR && valof(v.head) == "::" && v.args !== nothing && length(v.args) == 2
-        v.args[2]
-    elseif isassignment(v) && v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
-           v.args[1].args !== nothing && length(v.args[1].args) == 2
-        v.args[1].args[2]
-    elseif CSTParser.issplat(v) && v.args !== nothing && length(v.args) >= 1 &&
-           v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
-           v.args[1].args !== nothing && length(v.args[1].args) == 2
-        v.args[1].args[2]
-    else
-        return false
-    end
+    t = decl_annotation(b)
+    t === nothing && return false
     if iscurly(t) && t.args !== nothing && length(t.args) >= 1
         t = t.args[1]
     end

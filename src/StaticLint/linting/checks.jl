@@ -121,13 +121,13 @@ LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
 # decline — the lost true-positive direction (a genuinely method-less
 # module-level function) is sanctioned conservatism of the per-file
 # architecture.
-function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing)
+function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing, tree_signatures=nothing, tree_resolve=nothing, tree_callsite_type=nothing)
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
     is_test_throws_macrocall(x, env, meta_dict) && return
 
     # Do checks
-    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
+    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope, tree_signatures, tree_resolve, tree_callsite_type)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
     opts.constif && check_if_conds(x, meta_dict)
@@ -144,7 +144,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
 
     if x.args !== nothing
         for i in 1:length(x.args)
-            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
+            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope, tree_signatures, tree_resolve, tree_callsite_type)
         end
     end
 end
@@ -369,21 +369,27 @@ end
 is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} = true
 is_something_with_methods(x) = false
 
-# A function-LOCAL callee binding — a closure or parameter defined inside a
-# function/macro body — as opposed to a module/file top-level definition. A local
-# fully shadows any same-named global, so its method set is exactly its own; the
-# cross-file `tree_arities` gate (which reasons about module-level names whose
-# methods may span sibling files) must not apply, or a call to the local
-# false-flags against the global's arity.
-_is_local_callee_binding(b, meta_dict) = false
-function _is_local_callee_binding(b::Binding, meta_dict)
+# A callee that is a datatype, i.e. a constructor call.
+_is_datatype_callee(r::TreeRef) = r.kind === :struct || r.kind === :mutable_struct
+_is_datatype_callee(b::Binding) = CoreTypes.isdatatype(b.type) ||
+    (b.val isa EXPR && CSTParser.defines_datatype(b.val))
+_is_datatype_callee(_) = false
+
+# A function-LOCAL binding — defined inside a function/macro body — as opposed to
+# a module/file top-level definition. A local fully shadows any same-named global,
+# so a callee's method set is exactly its own: the cross-file `tree_arities` gate
+# (which reasons about module-level names whose methods may span sibling files)
+# must not apply, or a call to the local false-flags against the global's arity.
+# For the same reason a function-local DATATYPE must not be resolved by name.
+_is_function_local_binding(b, meta_dict) = false
+function _is_function_local_binding(b::Binding, meta_dict)
     b.val isa EXPR || return false
     p = parentof(b.val)
     p isa EXPR || return false
     return maybe_get_parent_fexpr(p, x -> CSTParser.defines_function(x) || CSTParser.defines_macro(x)) !== nothing
 end
 
-function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing)
+function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing, tree_signatures=nothing, tree_resolve=nothing, tree_callsite_type=nothing)
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
@@ -403,7 +409,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
         # tree-visible (methods may span sibling files), OR a `TreeRef` to a
         # function/macro/struct defined only in sibling files.
         if tree_visible !== nothing &&
-           ((func_ref isa Binding && !_is_local_callee_binding(func_ref, meta_dict)) ||
+           ((func_ref isa Binding && !_is_function_local_binding(func_ref, meta_dict)) ||
             (func_ref isa TreeRef && func_ref.kind in (:function, :macro, :struct, :mutable_struct)))
             name = CSTParser.get_name(x)
             if name isa EXPR && isidentifier(name)
@@ -430,7 +436,27 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                         if !isempty(arities) || store !== nothing
                             cc = call_nargs(x)
                             if any(a -> compare_f_call(a, cc), arities)
-                                # matches a workspace overload's arity
+                                # Matches a workspace overload's arity. The
+                                # positional TYPES are a separate opinion, from
+                                # the signature records — and only when the
+                                # record set is COMPLETE, since exhausting an
+                                # under-approximation proves nothing. A
+                                # store-backed name keeps the permissive answer:
+                                # its store methods are not in the records, and
+                                # neither are a datatype's inner/keyword
+                                # constructors (the records carry the default
+                                # field constructor only).
+                                if tree_signatures !== nothing && tree_resolve !== nothing &&
+                                   store === nothing && !_is_datatype_callee(func_ref)
+                                    nm = tree_signatures(n, x)
+                                    if !isempty(nm.signatures) && !nm.has_unknown_shapes
+                                        args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
+                                        tree_callsite_type === nothing ||
+                                            (args = tree_arg_operands(x, args, meta_dict, tree_callsite_type))
+                                        any(ls -> match_method(args, kws, ls, tree_resolve, getsymbols(env), meta_dict), nm.signatures) ||
+                                            seterror!(x, IncorrectCallArgs, meta_dict)
+                                    end
+                                end
                             elseif store !== nothing
                                 # Match against the store's own methods; decline
                                 # (no flag) if we can't resolve a scope for them.
@@ -606,6 +632,7 @@ function _format_type(@nospecialize(t))
     s = t === nothing ? "Any" :
         t isa SymbolServer.DataTypeStore ? string(t.name) :
         t isa Binding ? (t.name isa EXPR ? valofid(t.name) : string(t.name)) :
+        t isa TreeDataType ? t.key[2] :
         string(t)
     s === nothing && (s = "Any")
     startswith(s, "Core.") ? s[6:end] : s
@@ -720,7 +747,7 @@ argument, the inferred type, and the expected type). Returns `nothing` when no
 specific reason is derivable (splatted call, unusual callee shape), so the caller
 keeps the generic wording.
 """
-function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_arities=nothing, tree_in_scope=nothing)
+function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_arities=nothing, tree_in_scope=nothing, tree_callsite_type=nothing)
     call_has_splat(call) && return nothing
     # `cand_arities` (cross-file arity set, from `derived_method_arities`) drives
     # the arg-count / keyword reason for a callee whose method set spans files —
@@ -736,6 +763,8 @@ function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_ar
     act_min, act_max, act_kws = call_nargs(call)
     nargs = act_min # no splat ⇒ min == max
     inferred, _ = call_arg_types(call, false, meta_dict, store)
+    tree_callsite_type === nothing ||
+        (inferred = tree_arg_operands(call, inferred, meta_dict, tree_callsite_type))
 
     header = string("No method matching `", name, "(",
         join((string("::", _format_type(t)) for t in inferred), ", "),
