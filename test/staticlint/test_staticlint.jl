@@ -4759,3 +4759,46 @@ end
     @test SL.declared_supertype(CSTParser.parse("struct Other end")) == TYPE_ANY
     @test SL.declared_supertype(CSTParser.parse("abstract type A <: B.C end")) == TypeRef(["B", "C"])
 end
+
+@testitem "record matching: resolution at the leaf with a stub resolver" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: TypeRef, TypeVarRef, UnknownType, TYPE_ANY, SigSlot,
+        MethodSignature, LocatedSignature
+    const SL = JuliaWorkspaces.StaticLint
+    const SS = JuliaWorkspaces.SymbolServer
+
+    # A tiny workspace universe: Own <: MyAbs <: Any, Other <: Any.
+    types = Dict(
+        "MyAbs" => (sup = TYPE_ANY,),
+        "Own"   => (sup = TypeRef(["MyAbs"]),),
+        "Other" => (sup = TYPE_ANY,),
+    )
+    function resolver(t::TypeRef, defined_in)
+        length(t.path) == 1 || return nothing
+        t.path == ["Core", "Any"] && return SL.CoreTypes.Any
+        haskey(types, t.path[1]) || return nothing
+        SL.TreeDataType((["MainPkg"], t.path[1]), types[t.path[1]].sup, resolver)
+    end
+
+    own   = resolver(TypeRef(["Own"]), ["MainPkg"])
+    myabs = resolver(TypeRef(["MyAbs"]), ["MainPkg"])
+    other = resolver(TypeRef(["Other"]), ["MainPkg"])
+
+    @test SL._issubtype(own, myabs, nothing, nothing) === true
+    @test SL._issubtype(other, myabs, nothing, nothing) === false
+    @test SL._has_type_intersection(other, myabs, nothing, nothing) === false
+    # Unreadable supertype: unknown, not a verdict.
+    dangling = SL.TreeDataType((["MainPkg"], "X"), nothing, resolver)
+    @test SL._has_type_intersection(dangling, myabs, nothing, nothing) === nothing
+
+    sig = MethodSignature([SigSlot(TypeRef(["MyAbs"]), false)], nothing,
+        Dict{String,JuliaWorkspaces.TypeExpr}(), Symbol[], false)
+    ls = LocatedSignature(["MainPkg"], sig)
+    @test SL.match_method(Any[own], Any[], ls, resolver, nothing, nothing) === true
+    @test SL.match_method(Any[other], Any[], ls, resolver, nothing, nothing) === false
+    # An UnknownType slot never rules out.
+    usig = MethodSignature([SigSlot(UnknownType(), false)], nothing,
+        Dict{String,JuliaWorkspaces.TypeExpr}(), Symbol[], false)
+    @test SL.match_method(Any[other], Any[], LocatedSignature(["MainPkg"], usig),
+        resolver, nothing, nothing) === true
+end
