@@ -4543,3 +4543,83 @@ end
     # it. (Both ids: `f`'s own binding, and `println` reached via the root scope.)
     @test check_resolved("f() = println(1)") == [true, true]
 end
+
+@testitem "the rule-out check never contradicts real subtyping" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # The check is only sound if it never rules out a pair that really is a
+    # subtype. Julia's own `<:` decides which pairs those are, so the
+    # expectations cannot drift from the language. Deep ancestries are in here
+    # on purpose: they are what a truncated `_super` walk gets wrong.
+    concrete = [(:Int8, Int8), (:Int64, Int64), (:UInt8, UInt8),
+                (:Float32, Float32), (:Float64, Float64),
+                (:Bool, Bool), (:Char, Char), (:String, String),
+                (:Symbol, Symbol), (:Nothing, Nothing),
+                (:Dict, Dict), (:Set, Set), (:Array, Array), (:UnitRange, UnitRange),
+                (:ArgumentError, ArgumentError), (:BoundsError, BoundsError),
+                (:Rational, Rational), (:Complex, Complex)]
+    bounds = [(:Real, Real), (:Signed, Signed), (:Unsigned, Unsigned),
+              (:Integer, Integer), (:AbstractFloat, AbstractFloat), (:Number, Number),
+              (:AbstractString, AbstractString), (:AbstractChar, AbstractChar),
+              (:AbstractDict, AbstractDict), (:AbstractSet, AbstractSet),
+              (:AbstractArray, AbstractArray), (:DenseArray, DenseArray),
+              (:AbstractRange, AbstractRange), (:Exception, Exception),
+              (:Function, Function), (:Tuple, Tuple)]
+
+    _, meta_dict, jw = parse_and_pass("x = 1\n")
+    syms = get_env(jw).symbols
+    # `Core` then `Base`, which is the order a bare name is in scope under, so a
+    # row never has to hardcode which of the two defines its type (`DenseArray`
+    # is `Core`'s, `AbstractRange` is `Base`'s).
+    function lookup(n)
+        for m in (:Core, :Base)
+            haskey(syms, m) && haskey(syms[m], n) && return syms[m][n]
+        end
+        return nothing
+    end
+
+    cres = [(n, t, lookup(n)) for (n, t) in concrete]
+    bres = [(n, t, lookup(n)) for (n, t) in bounds]
+    # Nothing below is vacuous through a missing entry or through `Any`.
+    @test all(p -> p[3] !== nothing && !SL._isany(p[3]), cres)
+    @test all(p -> p[3] !== nothing && !SL._isany(p[3]), bres)
+
+    # The tally lives in a function because a `@testitem` body is evaluated at
+    # module scope, where assigning to an outer name from inside a `for` is an
+    # ambiguous soft-scope assignment.
+    function tally()
+        checked = 0        # pairs where `<:` holds and the check must stay silent
+        ruled_out = 0      # pairs where `<:` fails and the check rules out
+        false_ruleouts = String[]
+        for (cn, ct, cv) in cres, (bn, bt, bv) in bres
+            verdict = SL._has_type_intersection(cv, bv, syms, meta_dict)
+            if ct <: bt
+                checked += 1
+                verdict === false && push!(false_ruleouts, "$cn <: $bn")
+            elseif verdict === false
+                ruled_out += 1
+            end
+        end
+        return checked, ruled_out, false_ruleouts
+    end
+    checked, ruled_out, false_ruleouts = tally()
+
+    @test isempty(false_ruleouts)
+    # Floors, so a table that silently stops producing pairs fails loudly
+    # instead of passing on nothing.
+    @test checked >= 25
+    # ...and the negative direction, which a check that answered `nothing`
+    # for everything would fail while still passing the property above.
+    @test ruled_out >= 150
+
+    # The deep ancestries, named, so a regression says which walk broke.
+    pair(cn, bn) = SL._has_type_intersection(
+        cres[findfirst(p -> p[1] === cn, cres)][3],
+        bres[findfirst(p -> p[1] === bn, bres)][3], syms, meta_dict)
+    @test pair(:Int8, :Signed) === true
+    @test pair(:Int8, :Number) === true
+    @test pair(:Dict, :AbstractDict) === true
+    @test pair(:ArgumentError, :Exception) === true
+    @test pair(:UnitRange, :AbstractRange) === true
+    @test pair(:Float64, :AbstractFloat) === true
+end
