@@ -267,37 +267,79 @@ function bounded_vararg_N(arg)
     return tryparse(Int, N_expr.val)
 end
 
-function match_method(args::Vector{Any}, kws::Vector{Any}, method::SymbolServer.MethodStore, store, meta_dict)
-    !isempty(kws) && isempty(method.kws) && return false
-    nsig = length(method.sig)
-    if nsig > 0 && last(method.sig)[2] isa SymbolServer.FakeTypeofVararg
-        va = last(method.sig)[2]
-        n_no_vararg = nsig - 1
-        # Bounded `Vararg{T,N}` consumes exactly N args; unbounded `Vararg{T}`
-        # and `Vararg{T,N} where N` accept any count.
-        if isdefined(va, :N) && va.N isa Integer
-            length(args) == n_no_vararg + va.N || return false
-        else
-            length(args) >= n_no_vararg || return false
+"""
+    SigDescriptor
+
+A callable signature reduced to what alignment needs. `fixed` includes the
+vararg slot's own type as its LAST element whenever `has_vararg` and
+`vararg_N === nothing` (the unbounded/parametric forms) — this is what lets a
+single formula reproduce both the store and EXPR bodies.
+"""
+struct SigDescriptor
+    fixed::Vector{Any}
+    opts::Vector{Any}
+    has_vararg::Bool
+    vararg_pad::Any
+    vararg_N::Union{Nothing,Int}
+    kws::Vector{Any}
+end
+
+function match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict)
+    !isempty(kws) && isempty(d.kws) && return false
+
+    # Only a DEFINITE mismatch rules a method out. An unknown slot leaves the
+    # method a candidate — flagging on ignorance is a false positive.
+    if d.vararg_N !== nothing
+        nfixed = length(d.fixed) - 1
+        length(args) == nfixed + d.vararg_N || return false
+        for i in 1:nfixed
+            _has_type_intersection(args[i], d.fixed[i], store, meta_dict) === false && return false
         end
-        # Only a DEFINITE mismatch rules a method out. An unknown slot leaves the
-        # method a candidate — flagging on ignorance is a false positive.
-        for i in 1:n_no_vararg
-            t = method.sig[i][2]
-            _has_type_intersection(args[i], t, store, meta_dict) === false && return false
-        end
-        for i in (n_no_vararg + 1):length(args)
-            _has_type_intersection(args[i], va.T, store, meta_dict) === false && return false
+        for i in (nfixed + 1):length(args)
+            _has_type_intersection(args[i], d.vararg_pad, store, meta_dict) === false && return false
         end
         return true
     end
-    length(args) == nsig || return false
-    for i in 1:length(args)
-        t = method.sig[i][2]
-        _has_type_intersection(args[i], t, store, meta_dict) === false && return false
+
+    margs = copy(d.fixed)
+    if length(margs) < length(args)
+        for i in 1:min(length(d.opts), length(args) - length(margs))
+            push!(margs, d.opts[i])
+        end
+        if d.has_vararg
+            for _ in 1:(length(args) - length(margs))
+                push!(margs, d.vararg_pad)
+            end
+        end
     end
-    return true
+    if length(args) == length(margs) || (d.has_vararg && length(args) == length(margs) - 1)
+        for i in 1:length(args)
+            _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
+        end
+        return true
+    end
+    return false
 end
+
+function lower_descriptor(method::SymbolServer.MethodStore)
+    fixed = Any[last(p) for p in method.sig]
+    has_vararg = false
+    pad = CoreTypes.Any
+    N = nothing
+    if !isempty(fixed) && last(fixed) isa SymbolServer.FakeTypeofVararg
+        va = last(fixed)
+        has_vararg = true
+        pad = va.T
+        if isdefined(va, :N) && va.N isa Integer
+            N = va.N
+        end
+        fixed[end] = va.T
+    end
+    return SigDescriptor(fixed, Any[], has_vararg, pad, N, Vector{Any}(method.kws))
+end
+
+match_method(args::Vector{Any}, kws::Vector{Any}, method::SymbolServer.MethodStore, store, meta_dict) =
+    match_descriptor(args, kws, lower_descriptor(method), store, meta_dict)
 
 # True for a `Union{A,B,…}` type-position EXPR (at least one member).
 _is_union_curly(t) =
@@ -353,6 +395,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
     margs, mopts, mkws = [], [], []
     vararg = false
     vararg_N = nothing
+    vararg_T = nothing
     if CSTParser.defines_struct(method)
         for i in 1:length(method.args[3].args)
             arg = method.args[3].args[i]
@@ -398,44 +441,9 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
 
         margs, mopts, mkws = method_arg_types(sig, meta_dict, store)
     end
-    !isempty(kws) && isempty(mkws) && return false
-
-    # Bounded `Vararg{T,N}`: require exactly nfixed + N positional args and
-    # match the trailing slots against `T`.
-    if vararg_N !== nothing
-        nfixed = length(margs) - 1
-        length(args) == nfixed + vararg_N || return false
-        tail = vararg_T === nothing ? CoreTypes.Any : vararg_T
-        # Only a DEFINITE mismatch rules a method out. An unknown slot leaves the
-        # method a candidate — flagging on ignorance is a false positive.
-        for i in 1:nfixed
-            _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
-        end
-        for i in (nfixed + 1):length(args)
-            _has_type_intersection(args[i], tail, store, meta_dict) === false && return false
-        end
-        return true
-    end
-
-    if length(margs) < length(args)
-        for i in 1:min(length(mopts), length(args) - length(margs))
-            push!(margs, mopts[i])
-        end
-        if vararg
-            pad = vararg_T === nothing ? CoreTypes.Any : vararg_T
-            for _ in 1:length(args) - length(margs)
-                push!(margs, pad)
-            end
-        end
-    end
-
-    if length(args) == length(margs) || (vararg && length(args) == length(margs) - 1)
-        for i in 1:length(args)
-            _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
-        end
-        return true
-    end
-    return false
+    pad = vararg_T === nothing ? CoreTypes.Any : vararg_T
+    d = SigDescriptor(margs, mopts, vararg, pad, vararg_N, mkws)
+    return match_descriptor(args, kws, d, store, meta_dict)
 end
 
 function refof_call_func(x, meta_dict)
