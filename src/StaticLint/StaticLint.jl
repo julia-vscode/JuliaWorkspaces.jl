@@ -149,6 +149,7 @@ include("bindings.jl")
 include("scope.jl")
 include("subtypes.jl")
 include("methodmatching.jl")
+include("signature_reader.jl")
 include("traverse.jl")
 
 const LARGE_FILE_LIMIT = 2_000_000 # bytes

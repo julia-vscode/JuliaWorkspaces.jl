@@ -4666,3 +4666,38 @@ end
     @test spec_error("x = 1\nfor i in x\nend\n") === SL.IncorrectIterSpec
     @test spec_error("x = \"s\"\nfor i in x\nend\n") === nothing
 end
+
+@testitem "where_var_and_bound reads each where-clause entry shape" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: CSTParser
+    const SL = JuliaWorkspaces.StaticLint
+
+    # Parse a method def and pick where-clause entries off the sig EXPR.
+    function where_entries(src)
+        cst = CSTParser.parse(src)
+        sig = CSTParser.get_sig(cst)
+        entries = CSTParser.EXPR[]
+        while CSTParser.iswhere(sig)
+            append!(entries, sig.args[2:end])
+            sig = sig.args[1]
+        end
+        entries
+    end
+
+    e = only(where_entries("f(x::T) where T = 1"))
+    @test SL.where_var_and_bound(e) == ("T", nothing)
+
+    e = only(where_entries("f(x::T) where T <: Integer = 1"))
+    name, ub = SL.where_var_and_bound(e)
+    @test name == "T"
+    @test CSTParser.isidentifier(ub) && SL.valofid(ub) == "Integer"
+
+    e = only(where_entries("f(x::T) where Int <: T <: Integer = 1"))
+    name, ub = SL.where_var_and_bound(e)
+    @test name == "T"
+    @test SL.valofid(ub) == "Integer"
+
+    # Lower bound licenses nothing.
+    e = only(where_entries("f(x::T) where T >: Int = 1"))
+    @test SL.where_var_and_bound(e) == ("T", nothing)
+end
