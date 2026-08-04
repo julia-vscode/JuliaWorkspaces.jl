@@ -177,7 +177,7 @@ syntactically certain, so it can end a supertype walk with a verdict.
 """
 function declared_supertype(x::EXPR)
     sup = _super(x, nothing, nothing)
-    sup === nothing && return TYPE_ANY
+    (sup === nothing || sup === CoreTypes.Any) && return TYPE_ANY
     sup isa EXPR || return UnknownType()
     return lower_type_expr(sup, Set{String}())
 end

@@ -625,6 +625,20 @@ end
     @test !isnothing(SL._super(syms[:Core][:Int64], syms, meta_dict))
 end
 
+@testitem "a datatype with no <: clause has supertype Any, definitely" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: CSTParser
+    const SL = JuliaWorkspaces.StaticLint
+
+    x = CSTParser.parse("struct Other end")
+    @test SL._super(x, nothing, nothing) == SL.CoreTypes.Any
+    x = CSTParser.parse("abstract type A end")
+    @test SL._super(x, nothing, nothing) == SL.CoreTypes.Any
+    # An explicit clause still returns the clause EXPR.
+    x = CSTParser.parse("struct Own <: MyAbs end")
+    @test SL._super(x, nothing, nothing) isa CSTParser.EXPR
+end
+
 @testitem "_issubtype separates a truncated walk from a finished one" setup=[shared_static_lint] begin
     SL = JuliaWorkspaces.StaticLint
 

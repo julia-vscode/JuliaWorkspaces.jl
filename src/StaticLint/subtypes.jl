@@ -93,23 +93,31 @@ function _super(b::Binding, store, meta_dict, depth=0)
         return _super(b.val, store, meta_dict, depth + 1)
     end
     sup = _super(b.val, store, meta_dict)
-    if sup isa EXPR && StaticLint.hasref(sup, meta_dict)
-        StaticLint.refof(sup, meta_dict)
-    else
-        nothing
-    end
+    sup isa EXPR || return sup === nothing ? nothing : sup
+    StaticLint.hasref(sup, meta_dict) ? StaticLint.refof(sup, meta_dict) : nothing
 end
 
-function _super(x::EXPR, store, meta_dict)::Union{EXPR,Nothing}
-    if x.head === :struct
-        _super(x.args[2], store, meta_dict)
-    elseif x.head === :abstract || x.head === :primitive
-        _super(x.args[1], store, meta_dict)
+function _super(x::EXPR, store, meta_dict)
+    if x.head === :struct || x.head === :abstract || x.head === :primitive
+        slot = x.head === :struct ? x.args[2] : x.args[1]
+        sup = _super_decl_slot(slot)
+        # No `<:` clause: the parent is `Any` by language semantics — a
+        # definite answer that can end a walk with a verdict.
+        return sup === nothing ? CoreTypes.Any : sup
     elseif CSTParser.issubtypedecl(x)
-        x.args[2]
+        return x.args[2]
     elseif CSTParser.isbracketed(x)
-        _super(x.args[1], store, meta_dict)
+        return _super(x.args[1], store, meta_dict)
     end
+    return nothing
+end
+
+# The `<:` RHS inside a datatype head's name slot, `nothing` when absent.
+function _super_decl_slot(x)
+    x isa EXPR || return nothing
+    CSTParser.issubtypedecl(x) && return x.args[2]
+    CSTParser.isbracketed(x) && return _super_decl_slot(x.args[1])
+    return nothing
 end
 
 function subtypes(T::Binding)
