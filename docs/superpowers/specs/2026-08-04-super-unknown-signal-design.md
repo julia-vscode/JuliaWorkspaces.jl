@@ -182,3 +182,24 @@ an expectation that can drift.
 - **An explicit trilean enum.** Self-documenting, but a new vocabulary type in a file
   that otherwise traffics only in store values, for no gain over `nothing` once every
   site handles it explicitly.
+
+## What shipped
+
+`_super` answers `nothing` on its catch-all and on both ignorance legs of the
+`Binding` method; `_issubtype` and `_has_type_intersection` are three-valued with
+a depth cap of 32; the six `match_method` sites and the message renderer act on a
+definite `false`, and the two Number-shaped sites on a definite `true`.
+
+Evidence: the false positive in the spec's opening is removed end to end
+(`test/test_file_analysis.jl`), the three-valued mechanics are pinned by unit
+tests, and the property test crosses 18 concrete types with 16 abstract bounds
+— 34 subtype pairs, none ruled out, 254 correct rule-outs.
+
+Full suite: 5990 passed, 0 failed, 7 broken (pre-existing `@test_broken`
+assertions, unrelated to this change), 1 errored — the dev environment's Runic
+formatting check, which cannot load the `Runic` package outside `Pkg.test`. The
+run also ends with a non-zero exit from `TestItemRunner`'s trailing "Test setup
+FooSetup is not defined" complaint, raised by a testdata fixture that
+deliberately declares a setup with no matching `@testsetup`; both are known-benign
+and neither is a regression. No diagnostic sweep was run, by decision; the
+coverage that buys and the coverage it forgoes are stated under "The gate".
