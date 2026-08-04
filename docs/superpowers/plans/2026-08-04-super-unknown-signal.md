@@ -390,31 +390,35 @@ The unit tests in Task 1 cover the three-valued mechanics; this covers the prope
     # subtype. Julia's own `<:` decides which pairs those are, so the
     # expectations cannot drift from the language. Deep ancestries are in here
     # on purpose: they are what a truncated `_super` walk gets wrong.
-    concrete = [(:Core, :Int8, Int8), (:Core, :Int64, Int64), (:Core, :UInt8, UInt8),
-                (:Core, :Float32, Float32), (:Core, :Float64, Float64),
-                (:Core, :Bool, Bool), (:Core, :Char, Char), (:Core, :String, String),
-                (:Core, :Symbol, Symbol), (:Core, :Nothing, Nothing),
-                (:Base, :Dict, Dict), (:Base, :Set, Set),
-                (:Core, :Array, Array), (:Base, :UnitRange, UnitRange),
-                (:Core, :ArgumentError, ArgumentError),
-                (:Core, :BoundsError, BoundsError),
-                (:Base, :Rational, Rational), (:Base, :Complex, Complex)]
-    bounds = [(:Core, :Real, Real), (:Core, :Signed, Signed),
-              (:Core, :Unsigned, Unsigned), (:Core, :Integer, Integer),
-              (:Core, :AbstractFloat, AbstractFloat), (:Core, :Number, Number),
-              (:Core, :AbstractString, AbstractString),
-              (:Core, :AbstractChar, AbstractChar),
-              (:Base, :AbstractDict, AbstractDict), (:Base, :AbstractSet, AbstractSet),
-              (:Core, :AbstractArray, AbstractArray), (:Base, :DenseArray, DenseArray),
-              (:Base, :AbstractRange, AbstractRange), (:Core, :Exception, Exception),
-              (:Core, :Function, Function), (:Core, :Tuple, Tuple)]
+    concrete = [(:Int8, Int8), (:Int64, Int64), (:UInt8, UInt8),
+                (:Float32, Float32), (:Float64, Float64),
+                (:Bool, Bool), (:Char, Char), (:String, String),
+                (:Symbol, Symbol), (:Nothing, Nothing),
+                (:Dict, Dict), (:Set, Set), (:Array, Array), (:UnitRange, UnitRange),
+                (:ArgumentError, ArgumentError), (:BoundsError, BoundsError),
+                (:Rational, Rational), (:Complex, Complex)]
+    bounds = [(:Real, Real), (:Signed, Signed), (:Unsigned, Unsigned),
+              (:Integer, Integer), (:AbstractFloat, AbstractFloat), (:Number, Number),
+              (:AbstractString, AbstractString), (:AbstractChar, AbstractChar),
+              (:AbstractDict, AbstractDict), (:AbstractSet, AbstractSet),
+              (:AbstractArray, AbstractArray), (:DenseArray, DenseArray),
+              (:AbstractRange, AbstractRange), (:Exception, Exception),
+              (:Function, Function), (:Tuple, Tuple)]
 
     _, meta_dict, jw = parse_and_pass("x = 1\n")
     syms = get_env(jw).symbols
-    lookup(m, n) = haskey(syms, m) && haskey(syms[m], n) ? syms[m][n] : nothing
+    # `Core` then `Base`, which is the order a bare name is in scope under, so a
+    # row never has to hardcode which of the two defines its type (`DenseArray`
+    # is `Core`'s, `AbstractRange` is `Base`'s).
+    function lookup(n)
+        for m in (:Core, :Base)
+            haskey(syms, m) && haskey(syms[m], n) && return syms[m][n]
+        end
+        return nothing
+    end
 
-    cres = [(n, t, lookup(m, n)) for (m, n, t) in concrete]
-    bres = [(n, t, lookup(m, n)) for (m, n, t) in bounds]
+    cres = [(n, t, lookup(n)) for (n, t) in concrete]
+    bres = [(n, t, lookup(n)) for (n, t) in bounds]
     # Nothing below is vacuous through a missing entry or through `Any`.
     @test all(p -> p[3] !== nothing && !SL._isany(p[3]), cres)
     @test all(p -> p[3] !== nothing && !SL._isany(p[3]), bres)
