@@ -936,7 +936,10 @@ Salsa.@derived function derived_method_signatures_index(rt, root)
     unknown = Set{Tuple{Vector{String},String}}()
     fwd = Set{Tuple{Vector{String},String}}()
 
-    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
+    # Widened past the walk's default binding kinds: `:macro_declared` rows
+    # never carry a signature, but they must still reach the `unknown` marker.
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
+                                 kinds=(_BINDING_ITEM_KINDS..., :macro_declared)) do F, item, loc
         resolved = isempty(item.qualifier) ? loc :
             _resolve_extension_qualifier(modpaths, loc, item.qualifier)
         (resolved === nothing || resolved ∉ modpaths) && return

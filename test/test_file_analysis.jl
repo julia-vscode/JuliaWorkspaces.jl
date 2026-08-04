@@ -2251,7 +2251,7 @@ end
 end
 
 @testitem "signature index: per-name sets with completeness markers" setup=[FileAnalysisWS] begin
-    using JuliaWorkspaces: TypeRef, LocatedSignature
+    using JuliaWorkspaces: LocatedSignature
 
     jw = ws_with(Dict(
         ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
@@ -2281,4 +2281,17 @@ end
     ))
     after = JuliaWorkspaces.derived_method_signatures(jw2.runtime, ROOT, ["MainPkg"], "target")
     @test before == after
+end
+
+@testitem "signature index: a macro-declared name still marks has_unknown_shapes" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "@deprecate oldname newname\n",
+        B => "oldname(x) = 1\n",
+    ))
+    rt = jw.runtime
+
+    nm = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "oldname")
+    @test !isempty(nm.signatures)
+    @test nm.has_unknown_shapes
 end
