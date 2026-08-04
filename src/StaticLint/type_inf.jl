@@ -296,8 +296,8 @@ infer_destructuring_type(binding, rb, meta_dict, depth=0; state=nothing) = nothi
 
 # A `const Alias = <type>` binding: a datatype-typed binding whose `val` is a
 # plain assignment rather than a `struct`/`abstract`/`primitive` definition. Its
-# own supertype chain dead-ends at `Any` (`_super` can't walk an assignment), so
-# it must never stand in as a resolved type — resolve it through `_resolve_type_alias`
+# own supertype chain dead-ends at `nothing` (`_super` can't walk an assignment),
+# so it must never stand in as a resolved type — resolve it through `_resolve_type_alias`
 # or drop it.
 _is_type_alias(b::Binding) =
     b.val isa EXPR && isassignment(b.val) && length(b.val.args) == 2 && CoreTypes.isdatatype(b.type)
@@ -305,7 +305,7 @@ _is_type_alias(b::Binding) =
 # A `const Alias = T` / `const Alias = T{...}` type alias: follow the RHS to the
 # datatype it names, so a `::Alias` annotation narrows to the real type (method
 # matching, field completion) instead of the opaque alias binding (whose type is
-# the `DataType` meta-type and whose supertype chain dead-ends at `Any`). Returns
+# the `DataType` meta-type and whose supertype chain dead-ends at `nothing`). Returns
 # the aliased `DataTypeStore` / datatype `Binding`, or `nothing` when `b` isn't
 # such an alias, or when its base type can't be resolved (external package not in
 # the env, unresolved cross-file name). `depth` guards against `const A = B;

@@ -106,7 +106,7 @@ Base's deepest chains run to single digits.
 
 ### 4. The call sites
 
-Eight, all inside this package; nothing outside JuliaWorkspaces calls these.
+Ten, all inside this package; nothing outside JuliaWorkspaces calls these.
 
 | site | change | behaviour |
 |---|---|---|
@@ -171,6 +171,10 @@ an expectation that can drift.
   unblocked.
 - **The `Lo<:T<:Hi` local-path miss** (no binding for the middle identifier of a
   `:comparison`) is upstream of everything here and unaffected.
+- **`_lookup(…; cont=false)` in the `DataTypeStore`/`FakeTypeName` legs of `_super`.**
+  A supertype stored as a re-export `VarRef` now truncates to `nothing` where it
+  previously reached a (coincidentally correct) `false`; the direction is safe, and
+  `cont=true` would recover those rule-outs.
 
 ## Rejected alternatives
 

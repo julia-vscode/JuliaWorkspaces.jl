@@ -1,12 +1,15 @@
-# The walk's recursion cap. `_super(::Binding)` can hand back another `Binding`,
-# so a mid-edit `struct A <: B` / `struct B <: A` would otherwise recurse until
-# the stack goes. Raise it if a real hierarchy ever runs deeper; Base's deepest
-# chains are single digits.
+# The walk's recursion cap, threaded through both `_issubtype` and
+# `_super(::Binding)`: a mid-edit `struct A <: B` / `struct B <: A`, or a
+# `Binding` whose `val` is another `Binding` in a cycle, would otherwise
+# recurse until the stack goes. Raise it if a real hierarchy ever runs deeper;
+# Base's deepest chains are single digits.
 const _MAX_SUPER_DEPTH = 32
 
 # `true`/`false`/`nothing`, where `nothing` means the walk ran out of
 # information. `false` is returned only when every step was definite, so a
-# caller may act on it; `nothing` licenses nothing.
+# caller may act on it; `nothing` licenses nothing — except the `FakeTypeofBottom`
+# and `FakeUnion` legs of `_super`, which assert `Any` outright rather than
+# having walked there.
 function _issubtype(a, b, store, meta_dict, depth=0)
     _isany(b) && return true
     _type_compare(a, b) && return true
@@ -83,9 +86,12 @@ end
 # ends it with none.
 _super(_, _, _) = nothing
 
-function _super(b::Binding, store, meta_dict)
+function _super(b::Binding, store, meta_dict, depth=0)
     StaticLint.CoreTypes.isdatatype(b.type) || return nothing
-    b.val isa Binding && return _super(b.val, store, meta_dict)
+    if b.val isa Binding
+        depth >= _MAX_SUPER_DEPTH && return nothing
+        return _super(b.val, store, meta_dict, depth + 1)
+    end
     sup = _super(b.val, store, meta_dict)
     if sup isa EXPR && StaticLint.hasref(sup, meta_dict)
         StaticLint.refof(sup, meta_dict)

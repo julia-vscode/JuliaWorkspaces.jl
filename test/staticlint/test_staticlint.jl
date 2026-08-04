@@ -610,6 +610,12 @@ end
     @test SL._super("not a type at all", syms, meta_dict) === nothing
     @test SL._super(nothing, syms, meta_dict) === nothing
 
+    # A binding whose `.type` isn't a datatype — a plain value — is unknown too.
+    xcst, xmeta_dict, _ = parse_and_pass("x = 1\n")
+    xb = SL.refof(only(find_identifiers(xcst, "x")), xmeta_dict)
+    @test xb isa SL.Binding
+    @test SL._super(xb, syms, xmeta_dict) === nothing
+
     # A binding whose supertype expression carries no ref is equally unknown.
     b = SL.refof(only(find_identifiers(cst, "S")), meta_dict)
     @test b isa SL.Binding

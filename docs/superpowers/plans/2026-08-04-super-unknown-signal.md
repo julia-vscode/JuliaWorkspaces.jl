@@ -4,7 +4,7 @@
 
 **Goal:** Make `_super`'s "I have no information" answer distinguishable from "this type's supertype is `Any`", so the subtyping check stops reporting a truncated walk as a proven mismatch.
 
-**Architecture:** `_super` returns `nothing` where it has no information. `_issubtype` and `_has_type_intersection` become three-valued (`true` / `false` / `nothing`) with Kleene propagation, and `false` is returned only when every step of the walk was definite. All eight call sites are then given the direction that is safe for the question they ask: the rule-out sites (`match_method`, the message renderer) act only on a definite `false`, and the "is this a Number" sites act only on a definite `true`.
+**Architecture:** `_super` returns `nothing` where it has no information. `_issubtype` and `_has_type_intersection` become three-valued (`true` / `false` / `nothing`) with Kleene propagation, and `false` is returned only when every step of the walk was definite. All ten call sites are then given the direction that is safe for the question they ask: the rule-out sites (`match_method`, the message renderer) act only on a definite `false`, and the "is this a Number" sites act only on a definite `true`.
 
 **Tech Stack:** Julia. `src/StaticLint/` (a vendored StaticLint inside JuliaWorkspaces), CSTParser, SymbolServer store types, TestItemRunner for tests.
 
@@ -23,7 +23,7 @@ Spec: `docs/superpowers/specs/2026-08-04-super-unknown-signal-design.md`.
 
 ---
 
-### Task 1: The three-valued contract and all eight call sites
+### Task 1: The three-valued contract and all ten call sites
 
 The contract change is atomic: once `_issubtype` can return `nothing`, every caller that puts it in a boolean position throws. Core and call sites therefore land together.
 
@@ -649,7 +649,7 @@ EOF
 
 ## Self-review
 
-**Spec coverage.** Every section maps to a task: §Design/1 (`_super` legs) → Task 1 Step 5; §Design/2 (Kleene) → Task 1 Step 6; §Design/3 (depth cap) → Task 1 Step 6's `_MAX_SUPER_DEPTH`; §Design/4 (eight call sites) → Task 1 Steps 7–8; §Testing items 1–3 → Task 1 Step 3; item 4 (property test) → Task 2; item 5 (end-to-end) → Task 1 Step 1; item 6 (regression floor) → Task 3. §Residuals needs no task by construction — `FakeTypeofBottom` and the `Lo<:T<:Hi` miss are explicitly left alone, and Task 1 Step 5 names the legs not to touch.
+**Spec coverage.** Every section maps to a task: §Design/1 (`_super` legs) → Task 1 Step 5; §Design/2 (Kleene) → Task 1 Step 6; §Design/3 (depth cap) → Task 1 Step 6's `_MAX_SUPER_DEPTH`; §Design/4 (ten call sites) → Task 1 Steps 7–8; §Testing items 1–3 → Task 1 Step 3; item 4 (property test) → Task 2; item 5 (end-to-end) → Task 1 Step 1; item 6 (regression floor) → Task 3. §Residuals needs no task by construction — `FakeTypeofBottom` and the `Lo<:T<:Hi` miss are explicitly left alone, and Task 1 Step 5 names the legs not to touch.
 
 **Placeholders.** The only angle-bracketed values are in Task 4 Step 2, where the instruction is to fill them from the runs and the step says so; no step defers a decision or omits code.
 
