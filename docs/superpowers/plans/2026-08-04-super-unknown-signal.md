@@ -44,7 +44,12 @@ The contract change is atomic: once `_issubtype` can return `nothing`, every cal
 
 - [ ] **Step 1: Write the end-to-end test for the false positive being removed**
 
-This is the behavioural claim of the whole task, and it must be seen failing before anything is changed. `Own` is declared in the calling file, its abstract supertype `MyAbs` one file over, and the parameter is the store type `Integer` that `MyAbs` descends from — so the walk has to cross from the workspace into the store, which is exactly where it truncates today. The callee is a **closure**, because a module-level callee is tree-visible and `check_call` answers those from the cross-file arity index without ever reaching `match_method`.
+This is the behavioural claim of the whole task, and it must be seen failing before anything is changed. `Own` is declared in the calling file, its abstract supertype `MyAbs` one file over, and the parameter is the store type `Integer` that `MyAbs` descends from — so the walk has to cross from the workspace into the store, which is exactly where it truncates today.
+
+Two things about the fixture are load-bearing and neither is obvious:
+
+- **The callee is a closure.** A module-level callee is tree-visible, and `check_call` answers those from the cross-file arity index without ever reaching `match_method`.
+- **The argument is a typed parameter (`v::Own`), not a constructor call (`Own()`).** `arg_type`'s non-method branch resolves a reference through `refof(...).type` but falls through to `CoreTypes.Any` for a call — and `Any` on either side makes `_has_type_intersection` answer `true` immediately, so a `h(Own())` fixture never reaches the walk at all and passes even unfixed.
 
 Append to `test/test_file_analysis.jl`:
 
@@ -53,15 +58,16 @@ Append to `test/test_file_analysis.jl`:
     # `Own <: MyAbs <: Integer` with `MyAbs` in a sibling: a real subtype whose
     # supertype walk dead-ends at a `TreeRef`. Ruling the call out would be a
     # false positive on correct code. The callee is a closure on purpose — a
-    # module-level one is answered by the cross-file arity check instead.
+    # module-level one is answered by the cross-file arity check instead — and
+    # the argument is a typed parameter, since a constructor call's type is `Any`.
     jw = ws_with(Dict(
         ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
         A => "abstract type MyAbs <: Integer end\n",
         B => """
         struct Own <: MyAbs end
-        function caller()
+        function caller(v::Own)
             h(x::Integer) = 1
-            return h(Own())
+            return h(v)
         end
         """,
     ))
@@ -83,17 +89,17 @@ TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/Julia
 
 Expected: FAIL — one `Test Failed` on the `@test !any(...)` line, because the truncated chain currently produces a "Possible method call error" / "No method matching" diagnostic.
 
-**If it PASSES instead**, the local path is not being reached on this fixture. Do not delete the test and do not proceed on faith — replace its body's last two lines with the operand-level assertion of the same claim, which reaches the primitive directly:
+**If it PASSES instead**, the comparison is not being reached and the test would prove nothing either way. Do not delete it and do not proceed on faith: add this operand-level assertion *alongside* the diagnostic one, in the same testitem, and report which of the two carried the red phase. It reaches the primitive directly, so it fails today whatever `check_call` decides.
 
 ```julia
     cst, meta_dict, _ = run_per_file_pass(jw, ROOT, B)
-    env = JuliaWorkspaces.derived_stdlib_only_env(jw.runtime)
-    syms = SL.getsymbols(env)
-    own = SL.refof(only(find_identifiers(cst, "Own")), meta_dict)
-    @test SL._has_type_intersection(own, syms[:Core][:Integer], syms, meta_dict) !== false
+    syms = SL.getsymbols(JuliaWorkspaces.derived_stdlib_only_env(jw.runtime))
+    # `find_identifiers` finds every occurrence — the declaration and the use —
+    # so take the declaring one rather than asserting there is only one.
+    ownref = SL.refof(first(find_identifiers(cst, "Own")), meta_dict)
+    @test ownref isa SL.Binding
+    @test SL._has_type_intersection(ownref, syms[:Core][:Integer], syms, meta_dict) !== false
 ```
-
-and record in the task's commit message that the diagnostic-level path is arity-gated on this shape.
 
 - [ ] **Step 3: Write the unit tests for the new `_super` contract**
 
