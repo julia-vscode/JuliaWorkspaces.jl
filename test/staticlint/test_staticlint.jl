@@ -4634,8 +4634,8 @@ end
     SL = JuliaWorkspaces.StaticLint
 
     # Both operands fully resolved and provably disjoint: the check must still
-    # flag, or the unknown-signal work would have bought its silence by
-    # switching the type comparison off.
+    # flag. An unknown operand suppresses the diagnostic, so this pins that a
+    # KNOWN mismatch is not suppressed along with it.
     cst, meta_dict, _ = parse_and_pass("""
     function outer()
         h(x::Int) = x
