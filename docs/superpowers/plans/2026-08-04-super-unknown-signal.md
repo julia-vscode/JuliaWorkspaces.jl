@@ -563,7 +563,7 @@ mcp__julia__julia_eval, env=…/environments/development, timeout 600000:
 using TestItemRunner
 TestItemRunner.run_tests("/home/pfitzseb/git/julia-vscode/scripts/packages/JuliaWorkspaces";
     filter = ti -> occursin("definite mismatch still rules", ti.name) ||
-                   occursin("unresolved iteration operand", ti.name), verbose = true)
+                   occursin("iterating over a resolved type", ti.name), verbose = true)
 ```
 
 Expected: PASS both.
