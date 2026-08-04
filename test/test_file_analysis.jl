@@ -2298,7 +2298,8 @@ end
 
 @testitem "tree_resolve: workspace names, store names, unknowns" setup=[FileAnalysisWS] begin
     using JuliaWorkspaces
-    using JuliaWorkspaces: TypeRef, TYPE_ANY
+    using JuliaWorkspaces: TypeRef
+    const SS = JuliaWorkspaces.SymbolServer
 
     jw = ws_with(Dict(
         ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
@@ -2312,15 +2313,58 @@ end
     @test own isa SL.TreeDataType && own.key == (["MainPkg"], "Own")
     @test own.sup == TypeRef(["MyAbs"])
 
-    # Store name (Base is visible everywhere) → a store value the subtype
-    # walk understands.
+    # Store name (Base is visible everywhere) → a store value the subtype walk
+    # understands: the DATATYPE, not the constructor `FunctionStore` `Base.Int`
+    # actually holds.
     int = resolve(TypeRef(["Int"]), ["MainPkg"])
-    @test int !== nothing && !(int isa SL.TreeDataType)
-    # Qualified store name.
-    @test resolve(TypeRef(["Base", "AbstractString"]), ["MainPkg"]) !== nothing
+    @test int isa SS.DataTypeStore
+    # Qualified store name — `Base.AbstractString` is a `VarRef` alias in the
+    # store, and an unfollowed alias compares against nothing.
+    @test resolve(TypeRef(["Base", "AbstractString"]), ["MainPkg"]) isa SS.DataTypeStore
     # Unknown → nothing, silently.
     @test resolve(TypeRef(["NoSuchName"]), ["MainPkg"]) === nothing
     # The walk crosses tree → store: Own <: MyAbs <: Any ends definitely.
     myabs = resolve(TypeRef(["MyAbs"]), ["MainPkg"])
     @test SL._issubtype(own, myabs, nothing, nothing) === true
+end
+
+@testitem "tree_resolve: a re-exported package type keys on where it is declared" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: TypeRef, JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # `T` is declared in WP's SUBMODULE and re-exported by WP, so the two
+    # spellings bind it under different modules (`WP` vs `WP.Sub`). Keying a
+    # `TreeDataType` on the binding module would give one type two keys — and a
+    # definite `false` between a type and itself.
+    main_project = "name = \"MainP\"\nuuid = \"b2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    wp_project = "name = \"WP\"\nuuid = \"c2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsptype/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsptype/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsptype/Main/src/MainP.jl"),
+        SourceText("module MainP\nusing WP\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///wsptype/WP/Project.toml"), SourceText(wp_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsptype/WP/src/WP.jl"),
+        SourceText("module WP\ninclude(\"sub.jl\")\nusing .Sub\nexport T, Ab\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///wsptype/WP/src/sub.jl"),
+        SourceText("module Sub\nabstract type Ab end\nstruct T <: Ab end\nexport T, Ab\nend\n", "julia")))
+
+    main_root = URI("file:///wsptype/Main/src/MainP.jl")
+    resolve = JuliaWorkspaces._tree_type_resolver(jw.runtime, main_root)
+
+    reexported = resolve(TypeRef(["T"]), ["MainP"])
+    qualified = resolve(TypeRef(["WP", "Sub", "T"]), ["MainP"])
+    @test reexported isa SL.TreeDataType && qualified isa SL.TreeDataType
+    @test reexported.key == (["WP", "Sub"], "T")
+    @test reexported.key == qualified.key
+    @test SL._has_type_intersection(reexported, qualified, nothing, nothing) === true
+
+    # The supertype walk starts in the DECLARING module, so `Ab` resolves the
+    # same way from either spelling.
+    ab = resolve(TypeRef(["Ab"]), ["MainP"])
+    @test ab isa SL.TreeDataType && ab.key == (["WP", "Sub"], "Ab")
+    @test SL._issubtype(reexported, ab, nothing, nothing) === true
 end

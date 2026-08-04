@@ -715,6 +715,10 @@ declared it.
 """
 function _tree_type_resolver(rt, root)
     project_uri = derived_project_uri_for_root(rt, root)
+    # `root`'s env, used for every store lookup including those made while
+    # resolving in a deved package's root: a package's own env can only add
+    # names, so reading the consumer's costs at worst an unknown, never a
+    # wrong answer.
     env = project_uri === nothing ? derived_stdlib_only_env(rt) : derived_environment(rt, project_uri)
 
     function resolve_in(r::URI, t, defined_in::Vector{String})
@@ -734,6 +738,11 @@ function _tree_type_resolver(rt, root)
             isempty(rest) || return _store_type_value(env, t.path[1:end - 1], t.path[end])
             im = _implicit_member(rt, r, defined_in, head)
             im === nothing && return nothing
+            # A failed wildcard `using` brings in names nothing here can
+            # enumerate, so the hit may really be that module's type, not
+            # Base's — decline rather than answer wrongly (the same guard, in
+            # the same order, as `_get_field`'s implicit fallback).
+            derived_module_unresolved_wildcard_using(rt, r, defined_in) && return nothing
             return StaticLint.get_eventual_datatype(first(im), env)
         end
 
@@ -747,14 +756,20 @@ function _tree_type_resolver(rt, root)
             item = _inventory_item(rt, item_ref)
             item === nothing && return nothing
             item.supertype === nothing && return nothing   # not a datatype after all
-            # `origin_module` is the DECLARING module for a tree-declared name
-            # and the ORIGIN module for an imported one — either way the module
-            # the nominal key is qualified by, and the one the declared
-            # supertype's own names resolve in. `_method_items_root`'s question,
-            # asked for a datatype: which root's tree owns that module path.
-            sup_root = _method_items_root(rt, r, vn.origin_module)
-            return StaticLint.TreeDataType((vn.origin_module, item.name), item.supertype,
-                (tt, di) -> resolve_in(sup_root, tt, di))
+            # Nominal identity is the DECLARING module, which `origin_module`
+            # only reports for a name reached directly: a re-exported one
+            # (`using .Sub` in a package, then `using ThatPackage`) binds under
+            # the re-exporting module, and keying on that would give one type
+            # two keys — a definite `false` between a type and itself. The
+            # declaring path is the item's own: its file's splice path in the
+            # root that owns the binding path (`_method_items_root`'s question,
+            # asked for a datatype), extended by its in-file module path. That
+            # root is also where the declared supertype's names resolve.
+            decl_root = _method_items_root(rt, r, vn.origin_module)
+            fp = derived_file_module_path(rt, decl_root, item_ref.file)
+            decl_path = fp === nothing ? vn.origin_module : vcat(fp, item.parent_module)
+            return StaticLint.TreeDataType((decl_path, item.name), item.supertype,
+                (tt, di) -> resolve_in(decl_root, tt, di))
         end
 
         # Qualified, and the head is visible: a module of some workspace tree,
