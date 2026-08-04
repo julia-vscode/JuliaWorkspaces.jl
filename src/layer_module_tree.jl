@@ -216,8 +216,10 @@ end
     _build_tree_structure(rt, root::URI) -> (builders, file_modules)
 
 Pass 1 of `derived_module_tree`: splices `root`'s (transitive) include closure
-into a per-root module structure, per the normative splicing semantics (see
-the milestone design doc / task brief). Returns the raw mutable builders
+into a per-root module structure, reproducing Julia's textual-splice semantics:
+an `include` is an in-place expansion at the point it appears, so a name's
+position in the splice order is what decides which definition wins. Returns the
+raw mutable builders
 (keyed by absolute module path) and the `file → absolute splice path` map;
 `derived_module_tree` freezes the builders into plain-data `ModuleNode`s.
 

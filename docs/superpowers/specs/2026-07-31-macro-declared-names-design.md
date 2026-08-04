@@ -1,9 +1,8 @@
 # Macro-declared names: recording and confirming names a macro mints
 
-*2026-07-31 — spec. Derived from `docs/design/2026-07-31-module-inventory-and-resolution.md`,
-which holds the analysis and the alternatives that were rejected. Revised after
-review; the review's findings are folded in, and the record shape changed as a
-result.*
+*2026-07-31 — spec. Revised after review; the review's findings are folded in,
+and the record shape changed as a result. The broader inventory-and-resolution
+analysis it was derived from has since been removed as stale.*
 
 ## Problem
 
