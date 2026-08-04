@@ -2249,3 +2249,36 @@ end
     # Forward declaration: no signature, no arity — shape data absent, kind present.
     @test byname["f"].method_sig === nothing && byname["f"].arity === nothing
 end
+
+@testitem "signature index: per-name sets with completeness markers" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: TypeRef, LocatedSignature
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "target(x::MyAbs) = 1\nabstract type MyAbs end\nfunction fwd end\n",
+        B => "target(x::MyAbs, y) = 2\n",
+    ))
+    rt = jw.runtime
+
+    nm = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+    @test length(nm.signatures) == 2
+    @test all(ls -> ls.defined_in == ["MainPkg"], nm.signatures)
+    @test !nm.has_unknown_shapes && !nm.has_forward_decl
+
+    fwd = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "fwd")
+    @test isempty(fwd.signatures) && fwd.has_forward_decl
+
+    # Unknown name → the empty, marker-free answer.
+    miss = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "nope")
+    @test miss == JuliaWorkspaces.EMPTY_NAME_METHODS
+
+    # Moving a method between files leaves the per-name value ==.
+    before = nm
+    jw2 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nfunction fwd end\n",
+        B => "target(x::MyAbs) = 1\ntarget(x::MyAbs, y) = 2\n",
+    ))
+    after = JuliaWorkspaces.derived_method_signatures(jw2.runtime, ROOT, ["MainPkg"], "target")
+    @test before == after
+end

@@ -903,6 +903,65 @@ Salsa.@derived function derived_method_arities_index(rt, root)
     return result
 end
 
+"""
+    derived_method_signatures(rt, root, path, name) -> NameMethods
+
+The signature records of every method of `name` at module `path`, plus the
+completeness markers. Projection of one per-root node — a single lookup.
+"""
+Salsa.@derived function derived_method_signatures(rt, root, path, name)
+    @debug "derived_method_signatures" root=root path=path name=name
+
+    return get(derived_method_signatures_index(rt, root), (path, name), EMPTY_NAME_METHODS)
+end
+
+# Callable kinds whose items participate in the signature set. `:macro_declared`
+# rows are names minted by a macro — shape unknown by construction.
+_is_callable_kind(kind::Symbol) =
+    kind in (:function, :macro, :struct, :mutable_struct, :const, :global, :assignment)
+
+"""
+    derived_method_signatures_index(rt, root) -> Dict{Tuple{Vector{String},String},NameMethods}
+
+Sibling of [`derived_method_arities_index`](@ref): same walk, same keying,
+carrying type records instead of counts. Kept as a separate node so a
+type-only edit invalidates this index while the arity index backdates.
+"""
+Salsa.@derived function derived_method_signatures_index(rt, root)
+    @debug "derived_method_signatures_index" root=root
+
+    tree = derived_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    sigs = Dict{Tuple{Vector{String},String},Set{LocatedSignature}}()
+    unknown = Set{Tuple{Vector{String},String}}()
+    fwd = Set{Tuple{Vector{String},String}}()
+
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root])) do F, item, loc
+        resolved = isempty(item.qualifier) ? loc :
+            _resolve_extension_qualifier(modpaths, loc, item.qualifier)
+        (resolved === nothing || resolved ∉ modpaths) && return
+        key = (resolved, item.name)
+        if item.method_sig !== nothing
+            push!(get!(() -> Set{LocatedSignature}(), sigs, key),
+                LocatedSignature(loc, item.method_sig))
+        elseif item.kind === :macro_declared
+            push!(unknown, key)
+        elseif item.kind in (:function, :macro) && item.arity === nothing
+            push!(fwd, key)
+        elseif _is_callable_kind(item.kind) && item.arity !== nothing
+            # A callable with a count but no readable signature.
+            push!(unknown, key)
+        end
+    end
+
+    result = Dict{Tuple{Vector{String},String},NameMethods}()
+    for key in union(keys(sigs), unknown, fwd)
+        result[key] = NameMethods(get(() -> Set{LocatedSignature}(), sigs, key),
+            key in unknown, key in fwd)
+    end
+    return result
+end
+
 const ExternalExtension = @NamedTuple{qualifier::Vector{String}, signature::Union{Nothing,String}, ref::ItemRef}
 
 # Names imported for UNQUALIFIED extension: `import Base: relpath` (or an import
