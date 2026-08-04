@@ -39,7 +39,12 @@ extension of an already-existing name elsewhere). `signature` is a normalized
 `field_names` is populated for structs. `arity`, when non-`nothing`, is the
 callable's `MethodArity` (argument-count shape) computed from the defining EXPR —
 plain data (so it backdates), used by the cross-file argument-count check for
-methods whose full set spans files.
+methods whose full set spans files. `method_sig` is the syntactic
+`MethodSignature` for a `:function`/`:macro` item, or the default-constructor
+record for a `:struct`/`:mutable_struct` item with no inner constructor;
+`nothing` when the shape is unknown, absent, or (for a struct with inner
+constructors) not tracked here. `supertype` is the declared parent
+`TypeExpr` for datatype items, `nothing` otherwise.
 
 `order` is dense and monotone in source order, and exists so the module tree can
 recover Julia's textual-splice semantics; `id` identifies the declaring statement
@@ -62,14 +67,21 @@ const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
     # written at the call site. Identity is confirmed later, in
     # layer_visibility.jl, which needs the spelling to know what to confirm.
     declared_by::Union{Nothing,MacroSpelling}
+    # Syntactic signature record for callables (`nothing` = shape unknown or
+    # not a callable) and declared parent for datatypes. Unresolved names,
+    # per this file's plain-data firewall.
+    method_sig::Union{Nothing,MethodSignature}
+    supertype::Union{Nothing,TypeExpr}
 end
 
 # Back-compat constructors: non-callable items (assignments, consts, enums, …)
 # carry no arity, and only `:macro_declared` rows carry a spelling.
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing, nothing, nothing)
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing, nothing, nothing)
+InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by) =
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, nothing, nothing)
 
 "An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
 `alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
@@ -744,7 +756,9 @@ function _classify_assignment!(acc, x, order, id, parent_module, kind_override, 
         name = _symbol_name(CSTParser.get_name(x))
         if name !== nothing
             qualifier = _item_qualifier(CSTParser.get_name(x))
-            push!(acc.items, InventoryItem(order, id,name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
+            push!(acc.items, InventoryItem(order, id,name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module,
+                (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing),
+                nothing, StaticLint.method_signature(x), nothing))
         end
     elseif CSTParser.iscurly(x.args[1])
         # Typealias: `Vector{T} = ...` — name comes from the curly's base
@@ -839,7 +853,9 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             name = "@" * name
         end
         qualifier = _item_qualifier(CSTParser.get_name(x))
-        push!(acc.items, InventoryItem(order, id,name, qualifier, kind, _render_sig(x), String[], parent_module, (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing)))
+        push!(acc.items, InventoryItem(order, id,name, qualifier, kind, _render_sig(x), String[], parent_module,
+            (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing),
+            nothing, StaticLint.method_signature(x), nothing))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
         name = _item_name(CSTParser.get_name(x))
@@ -877,7 +893,17 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             field_names = String[]
         end
         arity = CSTParser.defines_struct(x) ? MethodArity(StaticLint.struct_nargs(x)...) : nothing
-        push!(acc.items, InventoryItem(order, id,name, String[], kind, nothing, field_names, parent_module, arity))
+        # One all-Unknown slot per field for the default constructor — only
+        # when no inner constructor is present (an inner constructor's own
+        # signature isn't tracked here; `arity` alone carries the count).
+        ctor_sig = if CSTParser.defines_struct(x) && !any(CSTParser.defines_function, x.args[3].args)
+            MethodSignature([SigSlot(UnknownType(), false) for _ in field_names],
+                nothing, Dict{String,TypeExpr}(), Symbol[], false)
+        else
+            nothing
+        end
+        push!(acc.items, InventoryItem(order, id,name, String[], kind, nothing, field_names, parent_module, arity,
+            nothing, ctor_sig, StaticLint.declared_supertype(x)))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;
         # curly lhs → :assignment (typealias); plain identifier lhs → :assignment

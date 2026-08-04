@@ -2214,3 +2214,38 @@ end
     @test !any(d -> occursin("method matching", d.message) ||
                     occursin("method call error", d.message), fa.diagnostics)
 end
+
+@testitem "inventory: items carry method signatures and supertypes" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: TypeRef, UnknownType, TYPE_ANY, SigSlot
+
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        abstract type MyAbs end
+        struct Own <: MyAbs
+            a
+            b::Int
+        end
+        struct Other end
+        target(x::MyAbs) = 1
+        function f end
+        end
+        """,
+    ))
+    inv = JuliaWorkspaces.derived_file_inventory(jw.runtime, ROOT)
+    byname = Dict(i.name => i for i in inv.items)
+
+    @test byname["MyAbs"].supertype == TYPE_ANY
+    @test byname["Own"].supertype == TypeRef(["MyAbs"])
+    @test byname["Other"].supertype == TYPE_ANY
+
+    # Struct constructor: one all-Unknown slot per field (count opinion only).
+    @test byname["Own"].method_sig !== nothing
+    @test [sl.type for sl in byname["Own"].method_sig.slots] == [UnknownType(), UnknownType()]
+
+    @test byname["target"].method_sig !== nothing
+    @test byname["target"].method_sig.slots[1].type == TypeRef(["MyAbs"])
+
+    # Forward declaration: no signature, no arity — shape data absent, kind present.
+    @test byname["f"].method_sig === nothing && byname["f"].arity === nothing
+end
