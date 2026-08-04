@@ -423,18 +423,25 @@ The unit tests in Task 1 cover the three-valued mechanics; this covers the prope
     @test all(p -> p[3] !== nothing && !SL._isany(p[3]), cres)
     @test all(p -> p[3] !== nothing && !SL._isany(p[3]), bres)
 
-    checked = 0            # pairs where `<:` holds and the check must stay silent
-    ruled_out = 0          # pairs where `<:` fails and the check rules out
-    false_ruleouts = String[]
-    for (cn, ct, cv) in cres, (bn, bt, bv) in bres
-        verdict = SL._has_type_intersection(cv, bv, syms, meta_dict)
-        if ct <: bt
-            checked += 1
-            verdict === false && push!(false_ruleouts, "$cn <: $bn")
-        elseif verdict === false
-            ruled_out += 1
+    # The tally lives in a function because a `@testitem` body is evaluated at
+    # module scope, where assigning to an outer name from inside a `for` is an
+    # ambiguous soft-scope assignment.
+    function tally()
+        checked = 0        # pairs where `<:` holds and the check must stay silent
+        ruled_out = 0      # pairs where `<:` fails and the check rules out
+        false_ruleouts = String[]
+        for (cn, ct, cv) in cres, (bn, bt, bv) in bres
+            verdict = SL._has_type_intersection(cv, bv, syms, meta_dict)
+            if ct <: bt
+                checked += 1
+                verdict === false && push!(false_ruleouts, "$cn <: $bn")
+            elseif verdict === false
+                ruled_out += 1
+            end
         end
+        return checked, ruled_out, false_ruleouts
     end
+    checked, ruled_out, false_ruleouts = tally()
 
     @test isempty(false_ruleouts)
     # Floors, so a table that silently stops producing pairs fails loudly
