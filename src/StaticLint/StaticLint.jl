@@ -5,6 +5,9 @@ import ..derived_julia_legacy_syntax_tree
 import ..derived_include_dict
 import ..ItemRef
 import ..MethodArity
+import ..TypeExpr, ..TypeRef, ..TypeUnionExpr, ..TypeVarRef, ..UnknownType,
+    ..TYPE_ANY, ..SigSlot, ..VarargSpec, ..MethodSignature, ..LocatedSignature,
+    ..NameMethods
 
 using AutoHashEquals: @auto_hash_equals
 
