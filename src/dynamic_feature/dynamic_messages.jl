@@ -32,6 +32,27 @@ end
 
 const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey}
 
+"""
+    DJPIdentity
+
+The *project* a work item is about, with the content hash deliberately dropped.
+
+Every `DJPKey` embeds the hash of the Project.toml/Manifest.toml it was
+scheduled for, so editing a project produces an endless supply of keys that no
+hash-keyed failure memo has ever seen. Failure budgets are therefore kept per
+identity: "this project, for this kind of work" rather than "this project at
+this exact content".
+
+`kind` and `package` are part of the identity on purpose — a failed standalone
+project must not exhaust the test environment for the same folder, and a failed
+test env for one package must not exhaust its sibling's.
+"""
+const DJPIdentity = @NamedTuple{kind::Symbol, path::String, package::String}
+
+_djp_identity(k::WatchEnvironmentKey)        = (kind=:watch_environment,         path=k.project_path, package="")
+_djp_identity(k::WatchTestEnvironmentKey)    = (kind=:watch_test_environment,    path=k.project_path, package=k.package_name)
+_djp_identity(k::CreateStandaloneProjectKey) = (kind=:create_standalone_project, path=k.package_path, package="")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Reactor messages (in_channel)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -64,6 +85,14 @@ end
 
 """Request an orderly shutdown of the reactor."""
 struct ShutdownMsg <: DynamicReactorMessage end
+
+"""
+Forget all failure bookkeeping, so previously-failed projects are attempted
+again on the next reconcile. Queued rather than applied directly because the
+reactor task owns `failed_projects`/`failure_attempts`. See
+[`retry_failed_dynamic_projects!`](@ref).
+"""
+struct ResetFailuresMsg <: DynamicReactorMessage end
 
 """
 Reconcile the set of running/required dynamic processes.

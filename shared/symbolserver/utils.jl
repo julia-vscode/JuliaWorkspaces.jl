@@ -622,9 +622,7 @@ function get_file_from_cloud(manifest, uuid, environment_path, depot_dir, cache_
 
     @debug "Replacing PLACEHOLDER with:" pkg_src
     modify_dirs(cache.val, f -> modify_dir(f, r"^PLACEHOLDER", pkg_src))
-    open(file, "w") do io
-        CacheStore.write(io, cache)
-    end
+    write_cache_atomic(cache, file)
 
     @debug "Successfully downloaded, scrubbed and saved $(name)"
     return true
@@ -737,14 +735,24 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
     return m
 end
 
-function write_cache(uuid, pkg::Package, outpath)
+"""
+    write_cache_atomic(pkg::Package, outpath) -> String
+
+Serialize `pkg` to `outpath` without ever leaving a torn file there.
+
+Every `.jstore` write goes through here. Writing in place would leave a
+truncated cache behind whenever the writer dies mid-write (host crash, Ctrl+C,
+OOM, a killed indexer child), and a truncated cache is indistinguishable from a
+corrupt one to every reader. Instead: write to a unique temp file in the
+destination directory, then rename atomically, so a shared store under parallel
+indexing can only ever see the old file or the new one (last writer wins,
+intact). `mktemp` rather than a `getpid()`-based name: containerized workers all
+run as PID 1 in their own namespace, so a PID-based temp would collide and one
+rename would hit ENOENT.
+"""
+function write_cache_atomic(pkg::Package, outpath)
     dir = dirname(outpath)
     mkpath(dir)
-    @info "Writing cache for $(pkg.name) ($uuid) to disc."
-    # Write to a unique temp file, then rename atomically so a shared store under
-    # parallel indexing can't tear a cache (last writer wins, intact). mktemp (not
-    # a getpid()-based name): containerized workers all run as PID 1 in their own
-    # namespace, so a PID-based temp would collide and one rename would hit ENOENT.
     tmp, io = mktemp(dir; cleanup = false)
     try
         CacheStore.write(io, pkg)
@@ -755,7 +763,12 @@ function write_cache(uuid, pkg::Package, outpath)
         isfile(tmp) && rm(tmp; force=true)
         rethrow()
     end
-    outpath
+    return outpath
+end
+
+function write_cache(uuid, pkg::Package, outpath)
+    @info "Writing cache for $(pkg.name) ($uuid) to disc."
+    return write_cache_atomic(pkg, outpath)
 end
 
 """
