@@ -1,6 +1,6 @@
 @testitem "signature records: structural equality and Set semantics" begin
     using JuliaWorkspaces: TypeRef, TypeUnionExpr, TypeVarRef, UnknownType,
-        SigSlot, VarargSpec, MethodSignature, LocatedSignature, NameMethods, TYPE_ANY
+        SigSlot, VarargSpec, MethodSignature, LocatedSignature, NameMethods, TYPE_ANY, TypeExpr
 
     # Vector-carrying records must compare by content, not identity.
     @test TypeRef(["Base", "Int"]) == TypeRef(["Base", "Int"])
@@ -12,7 +12,7 @@
           TypeUnionExpr([TypeRef(["Int"]), UnknownType()])
 
     sig(t) = MethodSignature([SigSlot(t, false)], nothing,
-        Dict{String,JuliaWorkspaces.TypeExpr}(), Symbol[], false)
+        Dict{String,TypeExpr}(), Symbol[], false)
     @test sig(TypeRef(["Own"])) == sig(TypeRef(["Own"]))
     @test sig(TypeRef(["Own"])) != sig(TypeRef(["Other"]))
 
