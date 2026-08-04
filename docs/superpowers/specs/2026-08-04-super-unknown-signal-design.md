@@ -188,7 +188,7 @@ an expectation that can drift.
 `_super` answers `nothing` on its catch-all and on both ignorance legs of the
 `Binding` method; `_issubtype` and `_has_type_intersection` are three-valued with
 a depth cap of 32; the six `match_method` sites and the message renderer act on a
-definite `false`, and the two Number-shaped sites on a definite `true`.
+definite `false`, and the three Number-shaped sites on a definite `true`.
 
 Evidence: the false positive in the spec's opening is removed end to end
 (`test/test_file_analysis.jl`), the three-valued mechanics are pinned by unit
