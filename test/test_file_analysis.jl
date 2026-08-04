@@ -2192,3 +2192,25 @@ end
     @test length(xs) == 2
     @test all(x -> SL.hasbinding(x, fa.meta) || SL.hasref(x, fa.meta), xs)
 end
+
+@testitem "file analysis: a chain that leaves this file rules nothing out" setup=[FileAnalysisWS] begin
+    # `Own <: MyAbs <: Integer` with `MyAbs` in a sibling: a real subtype whose
+    # supertype walk dead-ends at a `TreeRef`. Ruling the call out would be a
+    # false positive on correct code. The callee is a closure on purpose — a
+    # module-level one is answered by the cross-file arity check instead — and
+    # the argument is a typed parameter, since a constructor call's type is `Any`.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs <: Integer end\n",
+        B => """
+        struct Own <: MyAbs end
+        function caller(v::Own)
+            h(x::Integer) = 1
+            return h(v)
+        end
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("method matching", d.message) ||
+                    occursin("method call error", d.message), fa.diagnostics)
+end

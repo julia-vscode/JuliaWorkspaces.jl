@@ -599,6 +599,70 @@ end
     @test CSTParser.valof(sup("struct MyS <: Number end")) == "Number"
 end
 
+@testitem "_super answers nothing when it has no information" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    cst, meta_dict, jw = parse_and_pass("struct S <: NoSuchSupertype end\n")
+    env = get_env(jw)
+    syms = env.symbols
+
+    # An operand the walk has no method for: ignorance, not the top of the lattice.
+    @test SL._super("not a type at all", syms, meta_dict) === nothing
+    @test SL._super(nothing, syms, meta_dict) === nothing
+
+    # A binding whose `.type` isn't a datatype — a plain value — is unknown too.
+    xcst, xmeta_dict, _ = parse_and_pass("x = 1\n")
+    xb = SL.refof(only(find_identifiers(xcst, "x")), xmeta_dict)
+    @test xb isa SL.Binding
+    @test SL._super(xb, syms, xmeta_dict) === nothing
+
+    # A binding whose supertype expression carries no ref is equally unknown.
+    b = SL.refof(only(find_identifiers(cst, "S")), meta_dict)
+    @test b isa SL.Binding
+    @test SL._super(b, syms, meta_dict) === nothing
+
+    # A genuine lattice step is unchanged.
+    @test !isnothing(SL._super(syms[:Core][:Int64], syms, meta_dict))
+end
+
+@testitem "_issubtype separates a truncated walk from a finished one" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    _, meta_dict, jw = parse_and_pass("x = 1\n")
+    syms = get_env(jw).symbols
+    int, str, real = syms[:Core][:Int64], syms[:Core][:String], syms[:Core][:Real]
+
+    # Definite yes, and definite no: the walk reached `Any` with every step known.
+    @test SL._issubtype(int, real, syms, meta_dict) === true
+    @test SL._issubtype(int, str, syms, meta_dict) === false
+
+    # An operand with no supertype information: no verdict either way.
+    @test SL._issubtype("not a type at all", int, syms, meta_dict) === nothing
+
+    # `Any` on the right is always satisfied, whatever the left operand is.
+    @test SL._issubtype("not a type at all", syms[:Core][:Any], syms, meta_dict) === true
+end
+
+@testitem "_has_type_intersection propagates unknown" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    _, meta_dict, jw = parse_and_pass("x = 1\n")
+    syms = get_env(jw).symbols
+    int, str, real = syms[:Core][:Int64], syms[:Core][:String], syms[:Core][:Real]
+    unknown = "not a type at all"
+
+    # Either direction definitely holding is a definite yes.
+    @test SL._has_type_intersection(int, real, syms, meta_dict) === true
+    @test SL._has_type_intersection(real, int, syms, meta_dict) === true
+    # Both directions definitely failing is a definite no.
+    @test SL._has_type_intersection(int, str, syms, meta_dict) === false
+    # One unknown direction and no definite yes is unknown, in both orders.
+    @test SL._has_type_intersection(unknown, int, syms, meta_dict) === nothing
+    @test SL._has_type_intersection(int, unknown, syms, meta_dict) === nothing
+    # A definite yes wins over an unknown: `Any` on either side still matches.
+    @test SL._has_type_intersection(unknown, syms[:Core][:Any], syms, meta_dict) === true
+end
+
 @testitem "check_call struct constructor arity (#447)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
 
@@ -4484,4 +4548,121 @@ end
     # A bare exported Base name really resolves through that seeding — the point of
     # it. (Both ids: `f`'s own binding, and `println` reached via the root scope.)
     @test check_resolved("f() = println(1)") == [true, true]
+end
+
+@testitem "the rule-out check never contradicts real subtyping" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # The check is only sound if it never rules out a pair that really is a
+    # subtype. Julia's own `<:` decides which pairs those are, so the
+    # expectations cannot drift from the language. Deep ancestries are in here
+    # on purpose: they are what a truncated `_super` walk gets wrong.
+    concrete = [(:Int8, Int8), (:Int64, Int64), (:UInt8, UInt8),
+                (:Float32, Float32), (:Float64, Float64),
+                (:Bool, Bool), (:Char, Char), (:String, String),
+                (:Symbol, Symbol), (:Nothing, Nothing),
+                (:Dict, Dict), (:Set, Set), (:Array, Array), (:UnitRange, UnitRange),
+                (:ArgumentError, ArgumentError), (:BoundsError, BoundsError),
+                (:Rational, Rational), (:Complex, Complex)]
+    bounds = [(:Real, Real), (:Signed, Signed), (:Unsigned, Unsigned),
+              (:Integer, Integer), (:AbstractFloat, AbstractFloat), (:Number, Number),
+              (:AbstractString, AbstractString), (:AbstractChar, AbstractChar),
+              (:AbstractDict, AbstractDict), (:AbstractSet, AbstractSet),
+              (:AbstractArray, AbstractArray), (:DenseArray, DenseArray),
+              (:AbstractRange, AbstractRange), (:Exception, Exception),
+              (:Function, Function), (:Tuple, Tuple)]
+
+    _, meta_dict, jw = parse_and_pass("x = 1\n")
+    syms = get_env(jw).symbols
+    # `Core` then `Base`, which is the order a bare name is in scope under, so a
+    # row never has to hardcode which of the two defines its type (`DenseArray`
+    # is `Core`'s, `AbstractRange` is `Base`'s).
+    function lookup(n)
+        for m in (:Core, :Base)
+            haskey(syms, m) && haskey(syms[m], n) && return syms[m][n]
+        end
+        return nothing
+    end
+
+    cres = [(n, t, lookup(n)) for (n, t) in concrete]
+    bres = [(n, t, lookup(n)) for (n, t) in bounds]
+    # Nothing below is vacuous through a missing entry or through `Any`.
+    @test all(p -> p[3] !== nothing && !SL._isany(p[3]), cres)
+    @test all(p -> p[3] !== nothing && !SL._isany(p[3]), bres)
+
+    # The tally lives in a function because a `@testitem` body is evaluated at
+    # module scope, where assigning to an outer name from inside a `for` is an
+    # ambiguous soft-scope assignment.
+    function tally()
+        checked = 0        # pairs where `<:` holds and the check must stay silent
+        ruled_out = 0      # pairs where `<:` fails and the check rules out
+        false_ruleouts = String[]
+        for (cn, ct, cv) in cres, (bn, bt, bv) in bres
+            verdict = SL._has_type_intersection(cv, bv, syms, meta_dict)
+            if ct <: bt
+                checked += 1
+                verdict === false && push!(false_ruleouts, "$cn <: $bn")
+            elseif verdict === false
+                ruled_out += 1
+            end
+        end
+        return checked, ruled_out, false_ruleouts
+    end
+    checked, ruled_out, false_ruleouts = tally()
+
+    @test isempty(false_ruleouts)
+    # Floors, so a table that silently stops producing pairs fails loudly
+    # instead of passing on nothing.
+    @test checked >= 25
+    # ...and the negative direction, which a check that answered `nothing`
+    # for everything would fail while still passing the property above.
+    @test ruled_out >= 150
+
+    # The deep ancestries, named, so a regression says which walk broke.
+    pair(cn, bn) = SL._has_type_intersection(
+        cres[findfirst(p -> p[1] === cn, cres)][3],
+        bres[findfirst(p -> p[1] === bn, bres)][3], syms, meta_dict)
+    @test pair(:Int8, :Signed) === true
+    @test pair(:Int8, :Number) === true
+    @test pair(:Dict, :AbstractDict) === true
+    @test pair(:ArgumentError, :Exception) === true
+    @test pair(:UnitRange, :AbstractRange) === true
+    @test pair(:Float64, :AbstractFloat) === true
+end
+
+@testitem "a definite mismatch still rules a call out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # Both operands fully resolved and provably disjoint: the check must still
+    # flag. An unknown operand suppresses the diagnostic, so this pins that a
+    # KNOWN mismatch is not suppressed along with it.
+    cst, meta_dict, _ = parse_and_pass("""
+    function outer()
+        h(x::Int) = x
+        return h("a string")
+    end
+    """)
+    call = find_first(cst, x -> SL.iscall(x) && SL.valofid(SL.CSTParser.get_name(x)) == "h" &&
+                                length(x.args) == 2)
+    @test call !== nothing
+    @test SL.errorof(call, meta_dict) === SL.IncorrectCallArgs
+end
+
+@testitem "iterating over a resolved type still reads its type" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # `check_incorrect_iter_spec` flags iterating over a Number, and reaches
+    # `_issubtype` only through the last branch: a bound name whose type
+    # resolved. Both directions must survive the three-valued return — a proven
+    # Number still flags, a proven non-Number still does not. The error is set
+    # on the RANGE SPEC (`i in x`), not on the `:for`.
+    spec_error(src) = begin
+        cst, meta_dict, _ = parse_and_pass(src)
+        forx = find_first(cst, x -> SL.headof(x) === :for)
+        @assert forx !== nothing && forx.args !== nothing
+        SL.errorof(forx.args[1], meta_dict)
+    end
+
+    @test spec_error("x = 1\nfor i in x\nend\n") === SL.IncorrectIterSpec
+    @test spec_error("x = \"s\"\nfor i in x\nend\n") === nothing
 end
