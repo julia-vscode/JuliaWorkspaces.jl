@@ -300,6 +300,9 @@ function _get_workspace_symbols(runtime, query::String)
             # (`@testitem`/`@testset`/…); the old bindingof walk collected no
             # binding for those, so they are not workspace symbols.
             it.kind === :opaque_macrocall && continue
+            # `:opaque_eval` rows bind no name at all — they mark a module whose
+            # API a run-time definition may extend.
+            it.kind === :opaque_eval && continue
             # A modelled macro's generated names: three rows share the declaring
             # statement's range, so listing them triples the outline entry. They
             # are also unconfirmed at this layer — nothing may treat them as

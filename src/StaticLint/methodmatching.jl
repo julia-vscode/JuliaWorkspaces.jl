@@ -114,7 +114,12 @@ function call_arg_types(call::EXPR, ismethod, meta_dict, store=nothing)
     call.args === nothing && return types, kws
     if length(call.args) > 1 && headof(call.args[2]) === :parameters
         for i = 1:length(call.args[2].args)
-            push!(kws, _kw_name(call.args[2].args[i]))
+            p = call.args[2].args[i]
+            # `f(x; kws...)` passes an unknown — possibly empty — keyword set,
+            # which can rule nothing out. Recording the splat's own name would
+            # read as passing a keyword called `kws`.
+            !ismethod && CSTParser.issplat(p) && continue
+            push!(kws, _kw_name(p))
         end
     end
     for i = _first_arg_index(call):length(call.args)
@@ -323,41 +328,38 @@ function match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor,
     return res
 end
 
+# The parameter type each of `n` positional arguments lands on, in order: the
+# required slots, then as many optional slots as the call fills, then the vararg
+# pad for whatever is left. `nothing` when `n` cannot fit the signature at all.
+# The vararg pad is NOT one of `fixed` — a defaulted slot always precedes it, so
+# a descriptor that carried the pad among the fixed slots would compare every
+# optional argument against the vararg's element type.
+function _align_args(d::SigDescriptor, n::Int)
+    nfixed = length(d.fixed)
+    if d.vararg_N !== nothing
+        nopt = n - d.vararg_N - nfixed
+        (nopt < 0 || nopt > length(d.opts)) && return nothing
+        return Any[d.fixed; d.opts[1:nopt]; fill(d.vararg_pad, d.vararg_N)]
+    end
+    n < nfixed && return nothing
+    nopt = min(length(d.opts), n - nfixed)
+    nva = n - nfixed - nopt
+    nva > 0 && !d.has_vararg && return nothing
+    return Any[d.fixed; d.opts[1:nopt]; fill(d.vararg_pad, nva)]
+end
+
 function _match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict)
     !isempty(kws) && isempty(d.kws) && !d.kwsplat && return false
 
+    margs = _align_args(d, length(args))
+    margs === nothing && return false
+
     # Only a DEFINITE mismatch rules a method out. An unknown slot leaves the
     # method a candidate — flagging on ignorance is a false positive.
-    if d.vararg_N !== nothing
-        nfixed = length(d.fixed) - 1
-        length(args) == nfixed + d.vararg_N || return false
-        for i in 1:nfixed
-            _has_type_intersection(args[i], d.fixed[i], store, meta_dict) === false && return false
-        end
-        for i in (nfixed + 1):length(args)
-            _has_type_intersection(args[i], d.vararg_pad, store, meta_dict) === false && return false
-        end
-        return true
+    for i in eachindex(args)
+        _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
     end
-
-    margs = copy(d.fixed)
-    if length(margs) < length(args)
-        for i in 1:min(length(d.opts), length(args) - length(margs))
-            push!(margs, d.opts[i])
-        end
-        if d.has_vararg
-            for _ in 1:(length(args) - length(margs))
-                push!(margs, d.vararg_pad)
-            end
-        end
-    end
-    if length(args) == length(margs) || (d.has_vararg && length(args) == length(margs) - 1)
-        for i in 1:length(args)
-            _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
-        end
-        return true
-    end
-    return false
+    return true
 end
 
 function lower_descriptor(method::SymbolServer.MethodStore)
@@ -372,7 +374,7 @@ function lower_descriptor(method::SymbolServer.MethodStore)
         if isdefined(va, :N) && va.N isa Integer
             N = va.N
         end
-        fixed[end] = va.T
+        pop!(fixed)   # the vararg slot is the pad, not a fixed parameter
     end
     return SigDescriptor(fixed, Any[], has_vararg, pad, N, Vector{Any}(method.kws))
 end
@@ -479,6 +481,8 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
         end
 
         margs, mopts, mkws = method_arg_types(sig, meta_dict, store)
+        # The trailing vararg slot is the pad, not a fixed parameter.
+        vararg && !isempty(margs) && pop!(margs)
     end
     pad = vararg_T === nothing ? CoreTypes.Any : vararg_T
     d = SigDescriptor(margs, mopts, vararg, pad, vararg_N, mkws)

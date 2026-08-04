@@ -53,9 +53,6 @@ function lower_descriptor(ls::LocatedSignature, resolver)
     has_vararg = sig.vararg !== nothing
     pad = has_vararg ? res(sig.vararg.eltype) : CoreTypes.Any
     N = has_vararg ? sig.vararg.count : nothing
-    if has_vararg
-        push!(fixed, pad)   # engine convention: vararg slot rides last in `fixed`
-    end
     return SigDescriptor(fixed, opts, has_vararg, pad, N, Vector{Any}(sig.kws), sig.kwsplat)
 end
 
@@ -86,6 +83,9 @@ function _type_name_segments(t)
     return segs
 end
 
+# Inventory item kinds that declare a datatype — the `TreeRef` kinds a type
+# name, or a constructor callee, can carry. One list, so a callee and an
+# annotation can never disagree about what a datatype is.
 const _TREE_DATATYPE_KINDS = (:struct, :mutable_struct, :abstract, :primitive, :enum)
 
 # Does the annotation `t` name a datatype DECLARED IN THE WORKSPACE (this file

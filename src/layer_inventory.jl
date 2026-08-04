@@ -469,9 +469,41 @@ Salsa.@derived function derived_file_inventory(rt, uri)
     acc = (items=InventoryItem[], imports=InventoryImport[], exports=InventoryExport[],
            includes=InventoryInclude[], modules=InventoryModule[])
     _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+        before = (length(acc.items), length(acc.imports), length(acc.exports),
+                  length(acc.includes), length(acc.modules))
         _classify_item!(acc, x, order, id, copy(parent_module), offset, include_targets_by_offset, include_records)
+        after = (length(acc.items), length(acc.imports), length(acc.exports),
+                 length(acc.includes), length(acc.modules))
+        # A statement the classifier read nothing out of, which can still define
+        # names when it runs (`for T in (...); @eval f(::$T) = 1; end`). The row
+        # binds no name — it marks its module as one whose declared API this file
+        # only partially describes, so a consumer that reasons by EXHAUSTING a
+        # name's records knows not to.
+        before == after && _may_define_by_evaluation(x) &&
+            push!(acc.items, InventoryItem(order, id, "", String[], :opaque_eval,
+                nothing, String[], copy(parent_module)))
     end
     return FileInventory(acc.items, acc.imports, acc.exports, acc.includes, acc.modules)
+end
+
+# Could running `x` define a name? True for an `eval` of any spelling — the
+# `@eval`/`Base.@eval` macro, an `eval`/`Core.eval` call, `include_string` —
+# anywhere in the statement, so the loop around one counts too. Deliberately not
+# "any unreadable statement": a top-level `println` defines nothing, and reading
+# it as opaque would withhold every type opinion in its module.
+function _may_define_by_evaluation(x::CSTParser.EXPR)
+    nm = CSTParser.ismacrocall(x) && x.args !== nothing && !isempty(x.args) ?
+        _macro_name_string(x.args[1]) : nothing
+    (nm !== nothing && (nm == "@eval" || endswith(nm, ".@eval"))) && return true
+    if CSTParser.isidentifier(x)
+        v = StaticLint.valofid(x)
+        (v == "eval" || v == "include_string") && return true
+    end
+    x.args === nothing && return false
+    for a in x.args
+        a isa CSTParser.EXPR && _may_define_by_evaluation(a) && return true
+    end
+    return false
 end
 
 _render_sig(x) = try

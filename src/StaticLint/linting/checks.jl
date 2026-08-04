@@ -370,7 +370,7 @@ is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,Symb
 is_something_with_methods(x) = false
 
 # A callee that is a datatype, i.e. a constructor call.
-_is_datatype_callee(r::TreeRef) = r.kind === :struct || r.kind === :mutable_struct
+_is_datatype_callee(r::TreeRef) = r.kind in _TREE_DATATYPE_KINDS
 _is_datatype_callee(b::Binding) = CoreTypes.isdatatype(b.type) ||
     (b.val isa EXPR && CSTParser.defines_datatype(b.val))
 _is_datatype_callee(_) = false

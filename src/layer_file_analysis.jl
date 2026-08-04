@@ -546,7 +546,7 @@ function _call_cross_file_arities(rt, root, path, call, meta_dict)
     return derived_method_arities(rt, root, p, name)
 end
 
-function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[])
+function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[], type_resolver=nothing)
     diagnostics = Diagnostic[]
 
     # In-scope external/workspace module set at a call site, for
@@ -556,13 +556,10 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
 
     # The argument-side type bridge the type phase matched with, so a message
     # names the types the flag was actually made against rather than the `Any`
-    # the legacy `Binding.type` slot falls back to.
-    tree_callsite_type = if root === nothing
-        nothing
-    else
-        resolver = _tree_type_resolver(rt, root)
-        (t, x) -> resolver(t, vcat(path, _in_file_module_names(x, meta_dict)))
-    end
+    # the legacy `Binding.type` slot falls back to. The analysis passes its own
+    # resolver in — building a second one would repeat every leaf query.
+    tree_callsite_type = type_resolver === nothing ? nothing :
+        ((t, x) -> type_resolver(t, vcat(path, _in_file_module_names(x, meta_dict))))
 
     # Names the project declares as dependencies, for the UnresolvedImport
     # message split (same computation as the whole-closure pass; empty
@@ -968,7 +965,8 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # `state.resolveonly`, so this can only run after the pass).
     StaticLint.mark_unresolved_imports!(cst, env, meta_dict)
 
-    diagnostics = _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root, path)
+    diagnostics = _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root, path,
+        tree_signature_resolver)
 
     # Extract outbound BEFORE the store strip: the strip rewrites env-store
     # module refs into TreeRef stand-ins, which must not be counted as

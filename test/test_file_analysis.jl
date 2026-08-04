@@ -2433,4 +2433,43 @@ end
     # A datatype's records model the field constructor, not its keyword form.
     @test isempty(callflags("Base.@kwdef struct FS\n    inc::Int = 1\n    exc::Int = 2\nend\n",
                             "mk() = FS(; inc=3, exc=4)\n"))
+
+    # Methods defined by evaluated code leave no item behind, so the module's
+    # record sets describe only part of its API.
+    @test isempty(callflags("struct O end\nfor T in (Int, Float64)\n    @eval f(x::\$T) = 1\nend\nf(x::O) = 2\n",
+                            "caller() = f(3)\n"))
+
+    # A keyword splat passes an unknown — possibly empty — keyword set.
+    @test isempty(callflags("struct O end\nf(x::O) = 1\n",
+                            "caller(v::O, kw) = f(v; kw...)\n"))
+    # Same at a store-backed callee, which reads the call's keywords the same way.
+    @test isempty(callflags("struct O end\nnoop(x::O) = 1\n",
+                            "caller(kw) = sin(1; kw...)\n"))
+end
+
+@testitem "parity: optional slots align before the vararg pad" setup=[FileAnalysisWS] begin
+    # `f(a, b="x", xs::T...)`: a call that fills the optional slot must compare
+    # it against the OPTIONAL's type, not the vararg's element type.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test isempty(callflags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\n",
+                            "caller() = f9(1, \"y\")\n"))
+    @test isempty(callflags("f10(a::Int, b::String=\"x\", xs::Vararg{Float64,2}) = 1\n",
+                            "caller() = f10(1, \"y\", 1.0, 2.0)\n"))
+    # The same alignment in the legacy path, where the callee is a local closure
+    # matched against its own definition EXPR.
+    @test isempty(callflags("struct Z end\n",
+                            "function caller()\n    g(a::Int, b::String=\"x\", xs::Float64...) = 1\n    g(1, \"y\")\nend\n"))
+
+    # Still ruled out when the optional slot genuinely does not fit.
+    @test length(callflags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\n",
+                           "caller() = f9(1, 2.0, 3.0)\n")) == 1
 end
