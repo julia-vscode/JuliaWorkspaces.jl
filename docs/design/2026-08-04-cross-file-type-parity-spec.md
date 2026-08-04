@@ -74,9 +74,11 @@ Per method, from the definition as written:
 - `typevars` — name → upper-bound `TypeExpr` for the method's `where` clause.
 - `kws`, `kwsplat` — keyword names and splat flag, presence only, mirroring
   `MethodArity`.
-- `defined_in` — the defining module's path. Usually equal to the index key's
-  module path, but not for qualified extensions (`Base.foo(x::MyT) = …` written
-  in `MyPkg`): the record is keyed under the extension target, while its
+- `defined_in` — the defining module's path, attached at *index* time (a file's
+  inventory only knows its file-relative `parent_module`; the spliced module
+  path is known to the index walk). Usually equal to the index key's module
+  path, but not for qualified extensions (`Base.foo(x::MyT) = …` written in
+  `MyPkg`): the record is keyed under the extension target, while its
   annotations must resolve in the module that wrote them.
 
 Arity bounds (`minargs`/`maxargs`) are derivable from `slots` and `vararg`.
@@ -98,7 +100,10 @@ instead it marks the name shape-unknown (next section).
 
 Struct/mutable/abstract/primitive `InventoryItem`s gain
 `supertype::TypeExpr` — the declared parent as written (`TypeRef` for
-`<: Base.Number`), `UnknownType` when absent or unreadable. This is the fact
+`<: Base.Number`); a declaration with *no* `<:` clause records `Any`
+(`TypeRef(["Core", "Any"])`), which is syntactically certain, not unknown —
+treating it as unknown would make every plain struct unrulable-out.
+`UnknownType` only when the declaration is unreadable. This is the fact
 that lets the ancestry walk leave the current file: today 55% of annotated
 parameters name a workspace-declared type and are unreachable.
 
