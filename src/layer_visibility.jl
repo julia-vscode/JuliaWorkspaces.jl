@@ -78,8 +78,13 @@ end
 # stay env-free. Reading the TREE from here is fine — no tree consumes this — but
 # reading VISIBILITY from here would close the resolution cycle. Do not.
 
-# `Base` and `Core` are in scope in every module without an import.
-const _IMPLICIT_MACRO_OWNERS = (["Base"], ["Core"])
+# Is this rule's owner a module that needs no import to be in scope? Asks
+# `StaticLint.IMPLICIT_SCOPE_MODULES` — the same list `semantic_pass` seeds the root
+# scope from — rather than restating it. Only a top-level module can be implicitly
+# in scope, and whether a given module actually HAS that scope is a separate
+# question (`derived_module_is_bare`).
+_is_implicitly_in_scope(owner::Vector{String}) =
+    length(owner) == 1 && Symbol(owner[1]) in StaticLint.IMPLICIT_SCOPE_MODULES
 
 # The import of `path`'s own module that could bring `spelling` in, or `nothing`.
 # Only this module's imports count: Julia does not inherit an enclosing module's
@@ -140,8 +145,13 @@ function _macro_owner_confirmed(rt, root::URI, path::Vector{String}, spelling::M
         return false
     end
 
-    if owner in _IMPLICIT_MACRO_OWNERS
-        # No import needed; a qualifier, if written, must still be the owner.
+    # An implicitly-scoped owner needs no import — but only in a module that HAS the
+    # implicit scope. A `baremodule` gets no `using Base`, so neither `@deprecate` nor
+    # `Base` itself is in scope there; falling through to the import requirement below
+    # is what then makes `baremodule T; using Base; @deprecate …` work by construction
+    # rather than by accident.
+    if _is_implicitly_in_scope(owner) && !derived_module_is_bare(rt, root, path)
+        # A qualifier, if written, must still be the owner.
         isempty(spelling.qualifier) || spelling.qualifier == owner || return false
         return _env_provides_macro(rt, root, owner, spelling.name)
     end
@@ -253,6 +263,146 @@ function _resolve_external_module(rt, root, path::Vector{String})
         store = nxt
     end
     return store
+end
+
+"""
+    _implicit_member(rt, root, path::Vector{String}, name::String)
+
+The member `name` of the tree module at `path` that comes from its implicit
+`using Base`/`using Core`, as `(value, provider_path)` — or `nothing` when neither
+provides it. The provider comes back with the value because a consumer recording
+`origin_module` cannot recover it from a bare store value, and re-deriving it would
+mean scanning `exportednames` twice.
+
+Only *exported* names count: `using` brings in exports, so a `public`-but-not-exported
+name like `Base.Filesystem` is unreachable as `Foo.Filesystem` — mirroring
+`SymbolServer.maybe_getfield`, which gates its `used_modules` walk the same way. A
+`baremodule` has no implicit `using` and so has no such members at all.
+
+Modules are tried in `StaticLint.IMPLICIT_SCOPE_MODULES` order, first match wins.
+The order IS observable — `Base.vals[:Int]` is the constructor `FunctionStore` while
+`Core.vals[:Int]` is the `DataTypeStore` — and `Base` first is what reproduces bare
+resolution, which reaches the same `FunctionStore` through the root scope's `Base`
+store. Consumers reach the datatype through `get_eventual_datatype`, which follows
+`.extends`, either way.
+
+A module-valued member is returned as its plain-data `TreeRef` stand-in, never as a
+`ModuleStore`: per-file meta must stay Salsa-pure, and the `:external_module` TreeRef
+is the shape `qualified_module_target` already resolves, so `Foo.Threads.nthreads()`
+continues past `Threads` exactly as it does in single-file mode.
+"""
+function _implicit_member(rt, root, path::Vector{String}, name::String)
+    derived_module_is_bare(rt, root, path) && return nothing
+    sym = Symbol(name)
+    # Resolved once, not per candidate: every module in the list is top-level, so
+    # `_resolve_external_module`'s segment walk would only repeat this lookup.
+    env = _resolve_env(rt, root)
+    syms = StaticLint.getsymbols(env)
+    for m in StaticLint.IMPLICIT_SCOPE_MODULES
+        store = get(syms, m, nothing)
+        store isa SymbolServer.ModuleStore || continue
+        # The canonical export predicate, the same one the `used_modules` walk this
+        # mirrors uses. Its own `haskey` comes first, so the O(1) `vals` probe still
+        # rejects most misses before the O(n) `exportednames` scan.
+        StaticLint.isexportedby(sym, store) || continue
+        val = StaticLint.maybe_lookup(store.vals[sym], env)
+        val === nothing && continue
+        # Allocated only for the answer, never for a candidate that declines.
+        mpath = [String(m)]
+        val isa SymbolServer.ModuleStore &&
+            return (StaticLint.TreeRef(name, :external_module, nothing, mpath), mpath)
+        return (val, mpath)
+    end
+    return nothing
+end
+
+# Whether `member_name` could be a member the module at `path` got from its OWN
+# imports. `_member_lookup`'s miss gate is `derived_module_names`, which is
+# DECLARED names only, so an import-bound member (`module Outer; using ..Inner:
+# parse; end`, then `Outer.parse`) reaches the implicit-scope fallback and would
+# mis-resolve to `Base.parse`. Declining there restores the pre-existing
+# `:unknown` — no hover/goto, but honest.
+#
+# Answered off `derived_module_imports` — a per-module projection of the module
+# tree — and deliberately NOT off `derived_module_visible_names`, which would
+# re-enter an in-progress query (the same constraint `_target_bring_ins`'
+# re-export branch documents). Two cases, both conservative:
+#
+# - an explicit symbol list binds this name: the member is the ORIGIN's, and
+#   following it there is exactly the visibility recursion we cannot make here;
+# - a wildcard `using` whose target's EXPORT LIST contains this name: same, and
+#   the export list is what a wildcard `using` brings in.
+#
+# A whole-module `import X` binds just the one name `X` (or its alias), so only
+# that name is withheld.
+function _member_may_come_from_imports(rt, root, path::Vector{String}, member_name::String)
+    for ri in derived_module_imports(rt, root, path)
+        if isempty(ri.symbols)
+            if ri.kind === :using
+                _wildcard_could_bring_in(rt, root, ri.target, member_name) && return true
+            else
+                bound = ri.alias !== nothing ? ri.alias :
+                    isempty(ri.target.path) ? nothing : last(ri.target.path)
+                bound == member_name && return true
+            end
+        else
+            for sym in ri.symbols
+                (sym.alias !== nothing ? sym.alias : sym.name) == member_name && return true
+            end
+        end
+    end
+    return false
+end
+
+# Could a wildcard `using` of `target` bring in `member_name`? The export list
+# answers it, and each sort's list is read exactly where `_target_bring_ins`
+# reads it, so the two cannot disagree about what the statement brings in.
+#
+# Cycle-free by construction: only the TREE and the env are consulted, never
+# `derived_module_visible_names` — which is why a `:workspace_package` target is
+# gated on the package's own `derived_module_exports` alone, and not on the
+# cross-root visible names `_target_bring_ins` additionally intersects. That is
+# the conservative direction: a name exported but not actually resolvable there
+# is withheld, exactly as before.
+#
+# `true` whenever the list cannot be trusted — an unresolvable target, or a store
+# with no exports at all, which is the shape an unindexable package gets
+# (`"could not be indexed"`, empty `vals`). Every genuinely indexed module has
+# exports, so reading emptiness as "unknown" rather than "brings in nothing"
+# costs nothing real and keeps a failed index from silently answering for Base.
+function _wildcard_could_bring_in(rt, root, target::ImportTarget, member_name::String)
+    if target.sort === :tree
+        return member_name in derived_module_exports(rt, root, target.path).exports
+    elseif target.sort === :workspace_package
+        entry = get(derived_workspace_package_roots(rt), target.path[1], nothing)
+        entry === nothing && return true
+        return member_name in derived_module_exports(rt, entry, target.path).exports
+    elseif target.sort === :external
+        store = _resolve_external_module(rt, root, target.path)
+        store === nothing && return true
+        isempty(store.exportednames) && return true
+        return StaticLint.isexportedby(Symbol(member_name), store)
+    else
+        # `:unresolved` — any name is possible. Resolvability is NOT re-attempted
+        # here: that walks `_visible_names_pass1`, which is the in-progress query.
+        return true
+    end
+end
+
+# `_member_lookup`'s answer for a member that came from the implicit scope, or its
+# `:unknown` answer when nothing did. `origin_module` is the PROVIDER, like the
+# `:external` branch's, so `resolve_treeref_store` can find the name in the env; a
+# module-valued member also gets an `:external` target so a chain can continue
+# through it.
+function _implicit_member_lookup(rt, root, tp::Vector{String}, member_name::String)
+    _member_may_come_from_imports(rt, root, tp, member_name) &&
+        return (:unknown, nothing, tp, nothing)
+    im = _implicit_member(rt, root, tp, member_name)
+    im === nothing && return (:unknown, nothing, tp, nothing)
+    val, prov = im
+    mt = val isa StaticLint.TreeRef ?
+        ImportTarget(:external, vcat(prov, [member_name])) : nothing
+    return (:external_symbol, nothing, prov, mt)
 end
 
 _tier(origin::Symbol) = origin === :declared ? 3 : origin === :import_binding ? 2 : 1
@@ -424,9 +574,14 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
         end
         names = derived_module_names(rt, root, tp)
         if !haskey(names, member_name)
+            # Two fallbacks meet here, and the order is fixed: a name a modelled macro
+            # declares IN THIS MODULE is a declaration of this module, so it beats the
+            # implicit `using Base` exactly as a written declaration would. The
+            # implicit scope answers only when nothing local does; it also supplies
+            # the `:unknown` answer when nothing answers at all.
             ref = get(derived_module_macro_declared_names(rt, root, tp), member_name, nothing)
-            ref === nothing && return (:unknown, nothing, tp, nothing)
-            return (:macro_declared, ref, tp, nothing)
+            ref === nothing || return (:macro_declared, ref, tp, nothing)
+            return _implicit_member_lookup(rt, root, tp, member_name)
         end
         mt = names[member_name] === :module ? ImportTarget(:tree, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_module_declared(rt, root, tp)[member_name], tp, mt)
@@ -441,9 +596,11 @@ function _member_lookup(rt, root, target::ImportTarget, member_name::String, vis
         end
         names = derived_module_names(rt, entry, tp)
         if !haskey(names, member_name)
+            # Same precedence as the `:tree` arm above, resolved against the package's
+            # own root: its macro-declared names first, then its implicit scope.
             ref = get(derived_module_macro_declared_names(rt, entry, tp), member_name, nothing)
-            ref === nothing && return (:unknown, nothing, tp, nothing)
-            return (:macro_declared, ref, tp, nothing)
+            ref === nothing || return (:macro_declared, ref, tp, nothing)
+            return _implicit_member_lookup(rt, entry, tp, member_name)
         end
         mt = names[member_name] === :module ? ImportTarget(:workspace_package, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_module_declared(rt, entry, tp)[member_name], tp, mt)

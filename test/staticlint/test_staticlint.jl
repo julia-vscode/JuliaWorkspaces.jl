@@ -4465,3 +4465,23 @@ end
         @test !sc.names["h"].is_public && !sc.names["h"].is_exported
     end
 end
+
+@testitem "IMPLICIT_SCOPE_MODULES is the root scope's module list" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: IMPLICIT_SCOPE_MODULES, scopeof, scopehasmodule
+
+    # The fact that `Base` and `Core` are reachable without an import is a property
+    # of the root scope `semantic_pass` seeds, so the list lives with it. Anything
+    # else answering for a name no import accounts for must read this, not restate it.
+    @test IMPLICIT_SCOPE_MODULES == (:Base, :Core)
+
+    # ...and the pass really does seed exactly these into the root scope.
+    cst, meta_dict = parse_and_pass("f(x) = x")
+    sc = scopeof(cst, meta_dict)
+    for m in IMPLICIT_SCOPE_MODULES
+        @test scopehasmodule(sc, m)
+    end
+
+    # A bare exported Base name really resolves through that seeding — the point of
+    # it. (Both ids: `f`'s own binding, and `println` reached via the root scope.)
+    @test check_resolved("f() = println(1)") == [true, true]
+end

@@ -196,7 +196,24 @@ function StaticLint._get_field(par::TreeModuleContext, arg, state, visited=Base.
     (name isa String && !isempty(name)) || return nothing
     visible = derived_module_visible_names_idfree(par.rt, par.root, par.path)
     vn = get(visible, name, nothing)
-    vn === nothing && return nothing
+    if vn === nothing
+        # Not a name the tree module declares or imports — but every non-bare module
+        # implicitly `using`s Base and Core, and those members are reachable as
+        # `Foo.println` / `Foo.Threads`. Consulted only on the miss, so a real
+        # declaration or import always wins (the visible-names face covers both).
+        # Precedence for any further fallback added here: the module's own confirmed
+        # macro-declared names come FIRST, the implicit scope SECOND.
+        # The provider path is for the import side; a use site only needs the value.
+        im = _implicit_member(par.rt, par.root, par.path, name)
+        im === nothing && return nothing
+        # The one case where the face's miss does NOT mean "no import accounts for
+        # this name": a wildcard `using` whose target didn't resolve brings in names
+        # nothing here can enumerate, so the hit above may really be that module's.
+        # Declining restores the plain miss rather than answering confidently —
+        # asked AFTER the lookup so a double miss pays nothing for the guard.
+        derived_module_unresolved_wildcard_using(par.rt, par.root, par.path) && return nothing
+        return first(im)
+    end
     if vn.kind === :module
         child = _denoted_tree_module_path(par, name, vn)
         child !== nothing && return TreeModuleContext(par.rt, par.root, child, par.item_cache)
@@ -255,9 +272,12 @@ end
 #   SIBLING file (`import JSON as J` there, `J.parse` here) is not
 #   recognizable from the TreeRef alone (name matches neither shape) and
 #   stays unresolved.
-# - `:external_module` — the post-strip stand-in shape (origin_module
-#   EXCLUDES the name); handled for completeness, unreachable during the
-#   pass (the strip runs after all resolution steps).
+# - `:external_module` — the stand-in shape for an env module (origin_module
+#   EXCLUDES the name). Reached DURING the pass: `_get_field`'s
+#   implicit-scope miss returns it for a module-valued Base/Core export, and
+#   this is the hop that continues `Foo.Threads.nthreads()` past `Threads`.
+#   Also what `_strip_module_stores!` rewrites module-store refs to, after
+#   all resolution steps.
 #
 # The returned `ModuleStore` is consumed transiently by `resolve_getfield`'s
 # ModuleStore arm and never stored (leaf member stores in refs are fine,
@@ -689,9 +709,9 @@ visible-names faces of the modules the file's names resolve through
 (`derived_module_visible_names_idfree`) plus one per-name
 `derived_visible_item` for each DISTINCT tree-declared name the file
 actually references, the per-module import-component selectors
-(`derived_module_exists`/`derived_module_declared_at`), the file's lint
-configuration, and the environment. Nothing in the analysis frame reads the
-whole `derived_module_tree` value. Consequences:
+(`derived_module_exists`/`derived_module_declared_at`/`derived_module_is_bare`),
+the file's lint configuration, and the environment. Nothing in the analysis
+frame reads the whole `derived_module_tree` value. Consequences:
 
 - A body edit in a SIBLING file: that file's inventory backdates → the
   module tree backdates → every selector backdates → this analysis is
