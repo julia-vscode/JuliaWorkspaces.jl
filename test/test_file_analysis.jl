@@ -2438,6 +2438,13 @@ end
     # record sets describe only part of its API.
     @test isempty(callflags("struct O end\nfor T in (Int, Float64)\n    @eval f(x::\$T) = 1\nend\nf(x::O) = 2\n",
                             "caller() = f(3)\n"))
+    # Same for a macro that expands to a definition without naming `eval`:
+    # nothing here can read `@gen`'s expansion.
+    @test isempty(callflags("struct O end\nmacro gen() :(genf(x::Int) = 1) end\n@gen\ngenf(x::O) = 2\n",
+                            "caller() = genf(1)\n"))
+    # …and when the macro takes arguments the classifier reads nothing out of.
+    @test isempty(callflags("struct O end\nmacro gen2(a) :(genf2(x::Int) = 1) end\n@gen2 whatever\ngenf2(x::O) = 2\n",
+                            "caller() = genf2(1)\n"))
 
     # A keyword splat passes an unknown — possibly empty — keyword set.
     @test isempty(callflags("struct O end\nf(x::O) = 1\n",
@@ -2445,6 +2452,32 @@ end
     # Same at a store-backed callee, which reads the call's keywords the same way.
     @test isempty(callflags("struct O end\nnoop(x::O) = 1\n",
                             "caller(kw) = sin(1; kw...)\n"))
+end
+
+@testitem "parity: an unreadable macro marks its module's records partial" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: derived_method_signatures, derived_file_inventory
+
+    # `@gen` expands to a method of `genf` that nothing here can see, so `genf`'s
+    # record set is an under-approximation and may rule nothing out — silence is
+    # the correct answer for EVERY call of it, matching and mismatching alike.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct O end\nmacro gen() :(genf(x::Int) = 1) end\n@gen\ngenf(x::O) = 2\n",
+        B => "caller() = genf(1)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("No method matching", d.message) ||
+                    occursin("method call error", d.message), fa.diagnostics)
+
+    nm = derived_method_signatures(jw.runtime, ROOT, ["MainPkg"], "genf")
+    @test !isempty(nm.signatures)
+    @test nm.has_unknown_shapes
+
+    # The marker binds no name, and the module's real items are untouched.
+    inv = derived_file_inventory(jw.runtime, A)
+    marks = filter(i -> i.kind === :opaque_eval, inv.items)
+    @test length(marks) == 1 && only(marks).name == ""
+    @test [i.name for i in inv.items if i.kind !== :opaque_eval] == ["O", "@gen", "genf"]
 end
 
 @testitem "parity: optional slots align before the vararg pad" setup=[FileAnalysisWS] begin
