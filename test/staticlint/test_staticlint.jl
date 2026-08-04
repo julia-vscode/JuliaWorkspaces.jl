@@ -4623,3 +4623,40 @@ end
     @test pair(:UnitRange, :AbstractRange) === true
     @test pair(:Float64, :AbstractFloat) === true
 end
+
+@testitem "a definite mismatch still rules a call out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # Both operands fully resolved and provably disjoint: the check must still
+    # flag, or the unknown-signal work would have bought its silence by
+    # switching the type comparison off.
+    cst, meta_dict, _ = parse_and_pass("""
+    function outer()
+        h(x::Int) = x
+        return h("a string")
+    end
+    """)
+    call = find_first(cst, x -> SL.iscall(x) && SL.valofid(SL.CSTParser.get_name(x)) == "h" &&
+                                length(x.args) == 2)
+    @test call !== nothing
+    @test SL.errorof(call, meta_dict) === SL.IncorrectCallArgs
+end
+
+@testitem "iterating over a resolved type still reads its type" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # `check_incorrect_iter_spec` flags iterating over a Number, and reaches
+    # `_issubtype` only through the last branch: a bound name whose type
+    # resolved. Both directions must survive the three-valued return — a proven
+    # Number still flags, a proven non-Number still does not. The error is set
+    # on the RANGE SPEC (`i in x`), not on the `:for`.
+    spec_error(src) = begin
+        cst, meta_dict, _ = parse_and_pass(src)
+        forx = find_first(cst, x -> SL.headof(x) === :for)
+        @assert forx !== nothing && forx.args !== nothing
+        SL.errorof(forx.args[1], meta_dict)
+    end
+
+    @test spec_error("x = 1\nfor i in x\nend\n") === SL.IncorrectIterSpec
+    @test spec_error("x = \"s\"\nfor i in x\nend\n") === nothing
+end
