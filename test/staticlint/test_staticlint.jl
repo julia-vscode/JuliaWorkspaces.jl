@@ -4701,3 +4701,47 @@ end
     e = only(where_entries("f(x::T) where T >: Int = 1"))
     @test SL.where_var_and_bound(e) == ("T", nothing)
 end
+
+@testitem "method_signature lowers definitions to records" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: CSTParser, TypeRef, TypeVarRef, UnknownType, TYPE_ANY,
+        SigSlot, VarargSpec
+    const SL = JuliaWorkspaces.StaticLint
+
+    ms(src) = SL.method_signature(CSTParser.parse(src))
+
+    s = ms("f(a, b::Own, c::Base.AbstractString) = 1")
+    @test [sl.type for sl in s.slots] ==
+        [TYPE_ANY, TypeRef(["Own"]), TypeRef(["Base", "AbstractString"])]
+    @test all(!sl.optional for sl in s.slots)
+    @test s.vararg === nothing && isempty(s.kws) && !s.kwsplat
+
+    # Parametric head; where-bound var; defaulted slot; kws.
+    s = ms("function g(v::Vector{Int}, t::T, n=1; kw=2, rest...) where T <: Integer end")
+    @test [sl.type for sl in s.slots] == [TypeRef(["Vector"]), TypeVarRef("T"), TYPE_ANY]
+    @test [sl.optional for sl in s.slots] == [false, false, true]
+    @test s.typevars == Dict{String,JuliaWorkspaces.TypeExpr}("T" => TypeRef(["Integer"]))
+    @test s.kws == [:kw] && s.kwsplat
+
+    # Vararg spellings.
+    @test ms("h(xs::Int...) = 1").vararg == VarargSpec(TypeRef(["Int"]), nothing)
+    @test ms("h(a, ::Vararg{String}) = 1").vararg == VarargSpec(TypeRef(["String"]), nothing)
+    @test ms("h(x::Vararg{Int,3}) = 1").vararg == VarargSpec(TypeRef(["Int"]), 3)
+    @test ms("h(xs...) = 1").vararg == VarargSpec(TYPE_ANY, nothing)
+    # The vararg slot is not also a positional slot.
+    @test isempty(ms("h(xs::Int...) = 1").slots)
+
+    # Union lowers member-wise; unreadable shapes lower to UnknownType.
+    s = ms("u(x::Union{Int,Own}) = 1")
+    @test s.slots[1].type == JuliaWorkspaces.TypeUnionExpr(
+        JuliaWorkspaces.TypeExpr[TypeRef(["Int"]), TypeRef(["Own"])])
+    @test ms("w(x::typeof(sin)) = 1").slots[1].type == UnknownType()
+
+    # Forward declaration has no signature.
+    @test ms("function f end") === nothing
+
+    # Datatype supertypes: explicit, and implicit Any.
+    @test SL.declared_supertype(CSTParser.parse("struct Own <: MyAbs end")) == TypeRef(["MyAbs"])
+    @test SL.declared_supertype(CSTParser.parse("struct Other end")) == TYPE_ANY
+    @test SL.declared_supertype(CSTParser.parse("abstract type A <: B.C end")) == TypeRef(["B", "C"])
+end
