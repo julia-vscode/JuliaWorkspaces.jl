@@ -1550,6 +1550,49 @@ end
     end
 end
 
+@testitem "a local NAMING a type may be reassigned" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidRedefofConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # A type's NAME resolves to its constructor `FunctionStore`, so a local
+    # holding one is a `DataType` — but it DEFINES no type, and reassigning it is
+    # ordinary code (the shape every ArgParse/DSL block uses).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            arg_type = String
+            arg_type = Int
+            arg_type
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    # Same for a workspace datatype, and at module level.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct S end
+        T = S
+        T = Int
+        """)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    # Redefining the type itself, or a `const`, still is an error.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct S end
+        S = 3
+        """)
+        @test has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        const C = String
+        C = Int
+        """)
+        @test has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+end
+
 @testitem "hoisting of inner constructors" setup=[shared_static_lint] begin
     let (cst, meta_dict, jw) = parse_and_pass("""
     struct ASDF
