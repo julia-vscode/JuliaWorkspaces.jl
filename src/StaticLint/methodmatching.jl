@@ -35,6 +35,12 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
                 end
                 return type
             end
+        elseif store !== nothing
+            # A nameless `::T` slot binds no name, so no Binding ever carries
+            # its type — the usual by-binding inference never runs for it.
+            # Read the annotation directly.
+            t = arg_decl_type(arg)
+            t !== nothing && return _resolve_type_expr(t, store, meta_dict)
         end
     else
         # A `where` typevar PASSED as an argument: its binding carries the
@@ -439,6 +445,10 @@ function _resolve_type_expr(t, store, meta_dict)
         return dt === nothing ? CoreTypes.Any : dt
     elseif r isa Binding && r.type isa Binding && r.type.val isa SymbolServer.DataTypeStore
         return r.type.val
+    elseif r isa Binding && CoreTypes.isdatatype(r.type)
+        # A workspace datatype's own binding (`struct`/`abstract`/`primitive`):
+        # its supertype chain is walkable directly through `_super(::Binding)`.
+        return r
     end
     return CoreTypes.Any
 end
