@@ -256,3 +256,30 @@ end
     msgs = diag_messages(jw)
     @test "Missing reference: whatever_name" in msgs
 end
+
+@testitem "end to end: default imports, explicit using, setups, and real missing refs" setup=[TestItemAnalysisWS] begin
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "full" setup=[TM, TS] begin
+            using MyPkg: ifn
+            efn()
+            ifn()
+            MyPkg.ifn()
+            TM.tmf()
+            sx
+            oops_undefined
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testmodule TM begin
+            tmf() = 1
+        end
+        @testsnippet TS begin
+            sx = 1
+        end
+        """))
+    msgs = diag_messages(jw)
+    missing_refs = filter(m -> startswith(m, "Missing reference:"), msgs)
+    @test missing_refs == ["Missing reference: oops_undefined"]
+end
