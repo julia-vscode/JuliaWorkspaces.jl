@@ -193,3 +193,26 @@ end
     @test !("Missing reference: efn" in msgs)
     @test "Missing reference: ifn" in msgs
 end
+
+@testitem "derived_test_setups indexes testmodules and testsnippets as plain data" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testmodule TM begin
+        tmf() = 1
+        const TC = 2
+        struct TS_t end
+    end
+    @testsnippet TS begin
+        sx = 1
+        sy, sz = 2, 3
+    end
+    """)
+    setups = JuliaWorkspaces.derived_test_setups(jw.runtime, PKG)
+    @test Set(keys(setups)) == Set([:TM, :TS])
+    @test setups[:TM].kind == :module
+    @test setups[:TM].file == TESTF
+    @test setups[:TM].bound_names == ["TC", "TS_t", "tmf"]
+    @test setups[:TS].kind == :snippet
+    @test setups[:TS].bound_names == ["sx", "sy", "sz"]
+    @test JuliaWorkspaces.derived_test_setup(jw.runtime, PKG, :TM) == setups[:TM]
+    @test JuliaWorkspaces.derived_test_setup(jw.runtime, PKG, :Nope) === nothing
+end
