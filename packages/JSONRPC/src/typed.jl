@@ -92,7 +92,11 @@ function dispatch_msg(x::JSONRPCEndpoint, dispatcher::MsgDispatcher, msg::Reques
                     if err isa JSONRPCError
                         send_error_response(x, msg, err.code, err.msg, err.data)
                     else
-                        send_error_response(x, msg, INTERNAL_ERROR, string("Error handling request: ", err), nothing)
+                        # `showerror`, not `string`/`show`: the latter renders an
+                        # exception as its constructor call (`ErrorException("…")`)
+                        # with the message escaped, so a multi-line cause arrives
+                        # at the peer as one unreadable line of `\n` literals.
+                        send_error_response(x, msg, INTERNAL_ERROR, string("Error handling request: ", sprint(showerror, err)), nothing)
                     end
                 end
 
@@ -175,7 +179,8 @@ macro message_dispatcher(name, body)
                                     if err isa JSONRPCError
                                         send_error_response(x, msg, err.code, err.msg, err.data)
                                     else
-                                        send_error_response(x, msg, INTERNAL_ERROR, string("Error handling request: ", err), nothing)
+                                        # `showerror`, not `string`/`show` — see dispatch_msg above.
+                                        send_error_response(x, msg, INTERNAL_ERROR, string("Error handling request: ", sprint(showerror, err)), nothing)
                                     end
                                 end
 

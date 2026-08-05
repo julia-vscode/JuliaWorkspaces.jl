@@ -392,6 +392,15 @@ Create an empty workspace. To build one directly from folders on disc, use
   0–100 range); a report with `percentage >= 100` ends that operation's bar.
 - `max_concurrent_djps::Int`: Maximum number of concurrently working dynamic
   child processes (`0` disables the limit). Defaults to 4.
+- `max_failure_attempts::Int`: How many terminal failures a project may
+  accumulate before the dynamic feature stops launching child processes for it
+  (`0` or less disables the bound). Defaults to
+  [`DEFAULT_MAX_FAILURE_ATTEMPTS`](@ref). See
+  [`retry_failed_dynamic_projects!`](@ref) to clear the budget.
+- `djp_request_timeout_seconds::Int`: How long a child process may take to
+  answer one indexing request before the work item is failed (`0` or less means
+  no deadline). Defaults to
+  [`DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS`](@ref).
 - `resolve_workspace_environments::Bool`: When `false`, no standalone package
   projects or test environments are created; only real project environments
   are watched. Defaults to `true`.
@@ -400,7 +409,7 @@ struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, resolve_workspace_environments::Bool=true)
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true)
         if store_path === nothing
             # Tie the local scratch store to the cache format version so a format
             # bump starts fresh instead of reading stale-format caches.
@@ -408,7 +417,7 @@ struct JuliaWorkspace
             store_path = Scratch.@get_scratch!(scratch_key)
         end
         need_dynamic_feature = dynamic != DynamicOff || symbolcache_download
-        dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, max_concurrent_djps=max_concurrent_djps) : nothing
+        dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, max_concurrent_djps=max_concurrent_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds) : nothing
         dynamic_feature === nothing || start(dynamic_feature)
 
         rt = Salsa.Runtime{SContext}(SContext(dynamic_feature, indirect_file_watch_callback))
@@ -426,37 +435,65 @@ struct JuliaWorkspace
     end
 end
 
-function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1)
+"""
+    _package_cache_path(store_path, name, uuid, version, git_tree_sha1) -> String
+
+On-disc location of one package's `.jstore` symbol cache. The single definition
+of the store layout: `_jstore_path` (dynamic_feature.jl) delegates here for a
+`MissingPackage`, so the reader and writer sides cannot drift apart.
+"""
+function _package_cache_path(store_path, name, uuid, version, git_tree_sha1)
     filename = replace(string(something(git_tree_sha1, version)), '+'=>'_')
-    cache_path = joinpath(store_path, uppercase(string(name)[1:1]), string(name), string(uuid), string(filename, ".jstore"))
+    return joinpath(store_path, uppercase(string(name)[1:1]), string(name), string(uuid), string(filename, ".jstore"))
+end
 
-    if isfile(cache_path)
-        # A stale/corrupt cache (e.g. an older serialization format left in the
-        # scratch store) is a miss, not a fatal error — the environment reindexes.
-        package_data = try
-            open(cache_path) do io
-                SymbolServer.CacheStore.read(io)
-            end
-        catch err
-            err isa SymbolServer.CacheStore.CacheCorruptedError || rethrow()
-            return nothing
+"""
+    _read_package_cache(cache_path, name, uuid) -> Union{SymbolServer.Package,Nothing}
+
+Read one `.jstore` and rebase its `PLACEHOLDER` source paths onto the package's
+actual location. Returns `nothing` when the file does not exist or cannot be
+read, which every caller treats as a plain cache miss.
+
+A corrupt cache (a truncated write from a killed indexer, a stale serialization
+format, a file torn by a host crash) is **deleted** rather than merely skipped:
+the miss then feeds the normal re-index path, so the store heals itself instead
+of failing identically on every future run. Only `CacheCorruptedError` is
+absorbed — anything else still propagates.
+"""
+function _read_package_cache(cache_path::String, name, uuid)
+    isfile(cache_path) || return nothing
+
+    package_data = try
+        open(cache_path) do io
+            SymbolServer.CacheStore.read(io)
         end
-
-        pkg_path = Base.locate_package(Base.PkgId(uuid, string(name)))
-
-        # TODO Reenable this
-        # if pkg_path === nothing || !isfile(pkg_path)
-        #     pkg_path = SymbolServer.get_pkg_path(Base.PkgId(uuid, pe_name), environment_path, ctx.dynamic_feature.depot_path)
-        # end
-
-        if pkg_path !== nothing
-            SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
+    catch err
+        err isa SymbolServer.CacheStore.CacheCorruptedError || rethrow()
+        @warn "Couldn't read cache file for $name, deleting." cache_path exception=(err,)
+        try
+            rm(cache_path; force=true)
+        catch rm_err
+            @debug "Failed to delete corrupt cache file" cache_path exception=(rm_err, catch_backtrace())
         end
-
-        return package_data
+        return nothing
     end
 
-    return nothing
+    pkg_path = Base.locate_package(Base.PkgId(uuid, string(name)))
+
+    # TODO Reenable this
+    # if pkg_path === nothing || !isfile(pkg_path)
+    #     pkg_path = SymbolServer.get_pkg_path(Base.PkgId(uuid, pe_name), environment_path, ctx.dynamic_feature.depot_path)
+    # end
+
+    if pkg_path !== nothing
+        SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
+    end
+
+    return package_data
+end
+
+function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1)
+    return _read_package_cache(_package_cache_path(store_path, name, uuid, version, git_tree_sha1), name, uuid)
 end
 
 """
@@ -553,7 +590,10 @@ function process_from_dynamic(jw::JuliaWorkspace)
         saw_result = true
 
         if msg isa FailedResult
-            @warn "DJP reported failure" msg.key
+            # The user-facing report was already emitted by the reactor, which
+            # still has the underlying exception; this is only the query side
+            # learning about it.
+            @debug "DJP reported failure" msg.key
             # `failed_projects` was already populated in the reactor. A failure
             # is treated as a terminal state for readiness (best-effort, with
             # whatever symbol caches exist) so `is_ready` doesn't stay false

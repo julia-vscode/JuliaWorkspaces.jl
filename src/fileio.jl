@@ -240,7 +240,7 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
 end
 
 """
-    workspace_from_folders(workspace_folders::Vector{String}; dynamic=DynamicOff, symbolcache_download=false, symbolcache_upstream=DEFAULT_SYMBOLCACHE_UPSTREAM)
+    workspace_from_folders(workspace_folders::Vector{String}; dynamic=DynamicOff, symbolcache_download=false, symbolcache_upstream=DEFAULT_SYMBOLCACHE_UPSTREAM, store_path=nothing, max_concurrent_djps=4, max_failure_attempts=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
 
 Create a new [`JuliaWorkspace`](@ref) and populate it by recursively reading
 every folder in `workspace_folders` from disc. This is the most convenient entry
@@ -253,14 +253,17 @@ point for analysing a project that lives on the local file system.
   symbol caches from `symbolcache_upstream` instead of indexing locally.
 - `symbolcache_upstream::String`: Upstream URL for symbol-cache downloads.
   Defaults to [`DEFAULT_SYMBOLCACHE_UPSTREAM`](@ref).
+- `store_path`, `max_concurrent_djps`, `max_failure_attempts`,
+  `djp_request_timeout_seconds`: forwarded verbatim to [`JuliaWorkspace`](@ref),
+  which documents them.
 
 # Returns
 - A [`JuliaWorkspace`](@ref) containing all files found under the given folders.
 """
-function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM)
+function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, store_path::Union{Nothing,String}=nothing, max_concurrent_djps::Int=4, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
     @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic symbolcache_download=symbolcache_download
 
-    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream)
+    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream, store_path=store_path, max_concurrent_djps=max_concurrent_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds)
 
     for folder in workspace_folders
         add_folder_from_disc!(jw, folder)

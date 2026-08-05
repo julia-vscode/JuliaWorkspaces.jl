@@ -30,6 +30,7 @@ export JuliaWorkspace,
     position_at,
     is_ready,
     wait_until_ready,
+    retry_failed_dynamic_projects!,
     get_update_channel,
     get_legacy_cst,
     get_roots_for_uri,
@@ -626,6 +627,45 @@ function get_test_env(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     derived_testenv(jw.runtime, uri)
+end
+
+"""
+    retry_failed_dynamic_projects!(jw::JuliaWorkspace)
+
+Forget every terminal dynamic-work failure, so projects that previously failed
+to index are attempted again on the next reconcile.
+
+The dynamic feature otherwise gives each project a bounded number of attempts
+(`max_failure_attempts`) and never forgets a failure on its own. That bound is
+what stops a deterministically unresolvable environment — an unsatisfiable test
+env, an unregistered dependency — from launching a fresh child process on every
+edit to its `Project.toml`. Hosts should wire this function to an explicit user
+action such as "restart language server" or "reindex", which is the intended way
+past the bound.
+
+No-op when the workspace has no dynamic feature.
+"""
+function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
+    @debug "retry_failed_dynamic_projects!"
+
+    df = jw.dynamic_feature
+    df === nothing && return
+
+    # `failed_projects`/`failure_attempts` are owned by the reactor task;
+    # clearing them from here directly would race it.
+    put!(df.in_channel, ResetFailuresMsg())
+
+    # Drop the query-side record too, so readiness gates that treat a failed key
+    # as settled re-open while the retry runs.
+    set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}())
+
+    # `_reconcile!` skips sending a message when the required set is unchanged,
+    # which it will be here — force one through.
+    empty!(df.last_required)
+    df.reconciled_once[] = false
+    _reconcile!(jw)
+
+    return
 end
 
 # Readiness

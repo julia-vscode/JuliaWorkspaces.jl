@@ -50,9 +50,80 @@ mutable struct DynamicJuliaProcess
     end
 end
 
-function index_project(djp::DynamicJuliaProcess, store_path::String)
-    JSONRPC.send(
-        djp.endpoint,
+# Thrown when a child does not answer an index request within its deadline. A
+# distinct type so the failure handler can say "timed out" rather than reporting
+# a bare cancellation, which is also what a deliberate `kill(djp)` produces.
+struct DJPRequestTimeoutException <: Exception
+    key::DJPKey
+    method::String
+    timeout_seconds::Int
+end
+
+function Base.showerror(io::IO, e::DJPRequestTimeoutException)
+    print(io, "DJPRequestTimeoutException: the indexing child process did not answer `",
+        e.method, "` within ", e.timeout_seconds, "s")
+end
+
+"""
+    _send_djp_request(djp, timeout_seconds, request_type, params)
+
+Send one request to a child indexing process and wait for its answer under a
+deadline.
+
+Without a deadline this wait is unbounded: a child that neither answers,
+terminates, nor throws holds its launch slot *and* keeps the work item pending
+forever, so `is_ready` never becomes true and a one-shot host such as
+`julialint` blocks with no further output. `timeout_seconds <= 0` restores the
+old unbounded behaviour.
+
+The deadline is a `CancellationTokenSource` timer linked with the DJP's own
+cancellation token, so an explicit `kill(djp)` unblocks the wait through the
+same path. The combined token is passed as `client_token` (what actually stops
+us waiting, `JSONRPC.send_request`) and as `server_token` (sends
+`\$/cancelRequest` to the child — currently advisory, since the child's handler
+does blocking `Pkg` work and ignores its token, but correct for when it becomes
+cooperative).
+
+Cancellation surfaces as a thrown exception, which the caller already converts
+into a `ProcessIndexFailedMsg`; that handler kills the child, frees the slot and
+completes the work item, so no teardown is needed here.
+"""
+function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, request_type, params)
+    djp_token = CancellationTokens.get_token(djp.cancellation_source)
+
+    if timeout_seconds <= 0
+        return JSONRPC.send(djp.endpoint, request_type, params;
+            client_token=djp_token, server_token=djp_token)
+    end
+
+    timeout_source = CancellationTokens.CancellationTokenSource(timeout_seconds)
+    timeout_token = CancellationTokens.get_token(timeout_source)
+    combined_source = CancellationTokens.CancellationTokenSource(timeout_token, djp_token)
+    combined_token = CancellationTokens.get_token(combined_source)
+
+    try
+        return JSONRPC.send(djp.endpoint, request_type, params;
+            client_token=combined_token, server_token=combined_token)
+    catch err
+        # Distinguish "the child ran out of time" from "someone killed the DJP".
+        if err isa CancellationTokens.OperationCanceledException &&
+                CancellationTokens.is_cancellation_requested(timeout_token) &&
+                !CancellationTokens.is_cancellation_requested(djp_token)
+            throw(DJPRequestTimeoutException(djp.key, request_type.method, timeout_seconds))
+        end
+        rethrow()
+    finally
+        # `close` is `cancel`, which also stops the timer; neither source feeds
+        # anything but this one request, so cancelling them here is safe.
+        close(combined_source)
+        close(timeout_source)
+    end
+end
+
+function index_project(djp::DynamicJuliaProcess, store_path::String, timeout_seconds::Int=0)
+    _send_djp_request(
+        djp,
+        timeout_seconds,
         JuliaDynamicAnalysisProtocol.index_project_request_type,
         JuliaDynamicAnalysisProtocol.IndexProjectParams(
             djp.project_path,
@@ -62,9 +133,10 @@ function index_project(djp::DynamicJuliaProcess, store_path::String)
     )
 end
 
-function create_standalone_project(djp::DynamicJuliaProcess, store_path::String, project_dir::String)
-    JSONRPC.send(
-        djp.endpoint,
+function create_standalone_project(djp::DynamicJuliaProcess, store_path::String, project_dir::String, timeout_seconds::Int=0)
+    _send_djp_request(
+        djp,
+        timeout_seconds,
         JuliaDynamicAnalysisProtocol.create_standalone_project_request_type,
         JuliaDynamicAnalysisProtocol.CreateStandaloneProjectParams(
             djp.project_path,
@@ -329,6 +401,27 @@ Downloading a cached index avoids having to index a package locally.
 """
 const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://julia-symbolcache.org"
 
+"""
+    DEFAULT_MAX_FAILURE_ATTEMPTS
+
+Terminal failures tolerated per work-item identity before the reactor stops
+launching children for it. Two, so the first genuine fix to a broken
+Project.toml still gets a fresh attempt, while a deterministically unresolvable
+project (an unsatisfiable test env, an unregistered dependency) stops costing a
+child process per edit.
+"""
+const DEFAULT_MAX_FAILURE_ATTEMPTS = 2
+
+"""
+    DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS
+
+How long a child indexing process may take to answer one request. Generous —
+indexing a large environment from cold legitimately takes minutes — but finite,
+because an unbounded wait turns a wedged child into a wedged host: the work item
+stays pending forever and `is_ready` never becomes true.
+"""
+const DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS = 300
+
 # Identity of one package's symbol cache on disc.
 const PkgCacheKey = @NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}
 
@@ -340,7 +433,16 @@ struct DynamicFeature
     in_channel::Channel{DynamicReactorMessage}
     out_channel::Channel{DynamicResultMessage}
     procs::Dict{DJPKey,DynamicJuliaProcess}
+    # Exact keys (content hash included) that failed terminally. Never pruned by
+    # reconcile: a key that leaves and re-enters the required set must not get a
+    # fresh attempt at work that already failed for this exact content.
     failed_projects::Set{DJPKey}
+    # Terminal-failure count per content-hash-*independent* work-item identity.
+    # `failed_projects` alone cannot bound retries, because a project's content
+    # hash changes on every edit to its Project.toml/Manifest.toml — so a broken
+    # project would launch a fresh doomed child per keystroke. Cleared for an
+    # identity as soon as any of its items succeeds.
+    failure_attempts::Dict{DJPIdentity,Int}
     inflight::Set{DJPKey}
     # Keys whose work has fully completed (indexed / fast-laned). Under
     # DynamicIndexingOnly the process is killed but the key stays here so a
@@ -375,6 +477,15 @@ struct DynamicFeature
     # ── Launch concurrency cap ──
     # Maximum number of concurrently *working* child processes (<= 0: unlimited).
     max_concurrent_djps::Int
+    # ── Failure bounds ──
+    # Terminal failures tolerated per identity before further items for it are
+    # short-circuited without launching a child (<= 0: unlimited). The default
+    # leaves room for exactly one genuine "I fixed my Project.toml" retry;
+    # `retry_failed_dynamic_projects!` clears the budget for anything beyond.
+    max_failure_attempts::Int
+    # Seconds a child may take to answer one index request before the work item
+    # is failed (<= 0: no deadline). See `_send_djp_request`.
+    djp_request_timeout_seconds::Int
     # Keys ready to launch but over the cap; drained best-`_launch_priority`
     # first, insertion order as the final tiebreak.
     launch_queue::Vector{DJPKey}
@@ -394,7 +505,9 @@ struct DynamicFeature
     function DynamicFeature(djp_mode::DynamicMode, store_path::String;
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
             progress_callback::Union{Nothing,Function}=nothing,
-            max_concurrent_djps::Int=4, launcher::Function=_launch_process!)
+            max_concurrent_djps::Int=4, launcher::Function=_launch_process!,
+            max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS,
+            djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
         return new(
             djp_mode,
             store_path,
@@ -403,10 +516,11 @@ struct DynamicFeature
             Channel{DynamicReactorMessage}(Inf),
             Channel{DynamicResultMessage}(Inf),
             Dict{DJPKey,DynamicJuliaProcess}(),
-            Set{DJPKey}(),
-            Set{DJPKey}(),
-            Set{DJPKey}(),
-            Set{DJPKey}(),
+            Set{DJPKey}(),          # failed_projects
+            Dict{DJPIdentity,Int}(),  # failure_attempts
+            Set{DJPKey}(),          # inflight
+            Set{DJPKey}(),          # done
+            Set{DJPKey}(),          # last_required
             Set{PkgCacheKey}(),
             Set{PkgCacheKey}(),
             Threads.Atomic{Int}(0),
@@ -417,6 +531,8 @@ struct DynamicFeature
             Dict{DJPKey,Int}(),
             dynamic_controller_fsm("dynamic_controller"),
             max_concurrent_djps,
+            max_failure_attempts,
+            djp_request_timeout_seconds,
             Vector{DJPKey}(),
             Set{DJPKey}(),
             launcher,
@@ -576,12 +692,10 @@ function _get_missing_packages(project_path::String, store_path::String)
     return missing
 end
 
-# Store-relative `.jstore` path for a missing package, matching the layout
-# `_get_missing_packages` and `_download_single_cache` build inline.
-function _jstore_path(pkg::MissingPackage, store_path::String)
-    filename = replace(string(something(pkg.git_tree_sha1, pkg.version)), '+'=>'_')
-    joinpath(store_path, uppercase(pkg.name[1:1]), pkg.name, string(pkg.uuid), string(filename, ".jstore"))
-end
+# Store-relative `.jstore` path for a missing package. Delegates to
+# `_package_cache_path` (types.jl) so the reader and writer sides cannot drift.
+_jstore_path(pkg::MissingPackage, store_path::String) =
+    _package_cache_path(store_path, pkg.name, pkg.uuid, pkg.version, pkg.git_tree_sha1)
 
 # Drop packages whose sibling tombstone says local caching was already tried and
 # failed for this exact version under the current indexer/Julia and hasn't
@@ -655,10 +769,7 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
             SymbolServer.modify_dirs(cache.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", pkg_src))
         end
 
-        mkpath(dest_dir)
-        open(dest_filepath, "w") do io
-            SymbolServer.CacheStore.write(io, cache)
-        end
+        SymbolServer.write_cache_atomic(cache, dest_filepath)
 
         @info "Successfully downloaded cache" name=name version=version
         SymbolServer.delete_tombstone(SymbolServer.tombstone_path(dest_filepath))
@@ -757,6 +868,90 @@ function _complete_work_item!(df::DynamicFeature, key::DJPKey)
     return true
 end
 
+# ─── Failure reporting ──────────────────────────────────────────────────────
+#
+# Most dynamic-work failures are not bugs in this package: they are real `Pkg`
+# problems in the project being analysed (an unsatisfiable test environment, an
+# unregistered local dependency, a half-installed package in the depot). The
+# user needs one line saying which environment could not be resolved and why —
+# not the child's stack trace nested inside an exception message nested inside
+# the parent's own stack trace, which reads as "the tool is broken". The full
+# detail stays available at debug level.
+
+# The first line of the underlying cause. The child wraps every failure as
+# "Failed to index <what>: <cause>" (JuliaDynamicAnalysisProcess), where <what>
+# duplicates the path/package the key already carries, so strip it back off.
+function _failure_reason(err)
+    raw = strip(sprint(showerror, err))
+    m = match(r"Failed to index [^\n]*?: (.*)"s, raw)
+    reason = m === nothing ? raw : strip(m[1])
+    line = first(eachsplit(reason, '\n'))
+    text = isempty(line) ? raw : String(line)
+    # Pkg's messages routinely end in ':' because a detail tree followed; that
+    # tree is gone here, so close the sentence instead of dangling.
+    return rstrip(text, [':', '.', ' ']) * "."
+end
+
+# Our own timeout carries no useful nested cause; skip the generic unwrapping.
+_failure_reason(err::DJPRequestTimeoutException) =
+    "the indexing child process did not answer `$(err.method)` within $(err.timeout_seconds)s."
+
+function _failure_subject(key::DJPKey)
+    if key isa WatchTestEnvironmentKey
+        return "the test environment of package '$(key.package_name)' at $(key.project_path)"
+    elseif key isa WatchEnvironmentKey
+        return "the environment at $(key.project_path)"
+    else
+        return "a standalone project for the package at $(key.package_path)"
+    end
+end
+
+# The single user-facing sentence for one terminal dynamic-work failure.
+function _humanize_djp_failure(key::DJPKey, err)
+    return string(
+        "Failed to resolve ", _failure_subject(key), ": ", _failure_reason(err),
+        " Missing-reference checks are degraded in that scope; ",
+        "enable debug logging for the full error.",
+    )
+end
+
+# ─── Failure bookkeeping ────────────────────────────────────────────────────
+#
+# Two gates, both reactor-owned, neither pruned by reconcile:
+#
+#   1. `failed_projects` — this exact key (content hash included) already
+#      failed, so re-attempting it would repeat identical work.
+#   2. `failure_attempts` — this *project* has burned its budget. Needed because
+#      the content hash changes on every edit to a Project.toml/Manifest.toml,
+#      so gate 1 alone lets a broken project launch a fresh doomed child per
+#      keystroke, and lets a key that oscillates in and out of the required set
+#      re-launch indefinitely.
+#
+# An exhausted key is still *dispatched* — its handler must emit `FailedResult`
+# so `input_failed_dynamic_keys` records it, which is what lets the readiness
+# gates in `derived_file_env_ready` stop waiting. Skipping it in the reconcile
+# spawn loop instead would suppress diagnostics for those files forever.
+
+# Whether work for `key` must not be attempted again.
+function _is_exhausted(df::DynamicFeature, key::DJPKey)
+    key in df.failed_projects && return true
+    df.max_failure_attempts <= 0 && return false
+    return get(df.failure_attempts, _djp_identity(key), 0) >= df.max_failure_attempts
+end
+
+# Record one terminal failure against both gates.
+function _record_failure!(df::DynamicFeature, key::DJPKey)
+    push!(df.failed_projects, key)
+    id = _djp_identity(key)
+    df.failure_attempts[id] = get(df.failure_attempts, id, 0) + 1
+    return
+end
+
+# A success restores the project's full budget, so a transient failure (a
+# crashed child, a flaky download) doesn't count against it for the session.
+_clear_failure_budget!(df::DynamicFeature, key::DJPKey) =
+    delete!(df.failure_attempts, _djp_identity(key))
+
 # Transition a freshly-created DJP into its supervised `start` task.
 function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     transition!(djp.fsm, DynamicProcessStarting; reason="launching")
@@ -768,7 +963,8 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
         # failures outside it (e.g. the process spawn throwing because the Julia
         # binary can't be executed), which would otherwise die silently with the
         # task and leave the work item inflight forever.
-        @error "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
+        # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
+        @debug "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err))
     end
     return
@@ -912,7 +1108,7 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
     key = msg.key
     push!(df.inflight, key)
 
-    if key in df.failed_projects
+    if _is_exhausted(df, key)
         @warn "Skipping previously failed project" key
         put!(df.out_channel, FailedResult(key))
         _complete_work_item!(df, key)
@@ -941,7 +1137,8 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
         missing_pkgs = _drop_tombstoned(missing_pkgs, df.store_path)
         put!(df.in_channel, EnvironmentPrepDoneMsg(key, !isempty(missing_pkgs)))
     catch err
-        @error "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
+        # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
+        @debug "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -972,6 +1169,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
     if !msg.still_missing
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
+        _clear_failure_budget!(df, key)
         _complete_work_item!(df, key)
         # This fast lane never occupies a launch slot, so it cannot rely on
         # `_free_slot!` to drain queued refreshes. Without this, the last
@@ -988,6 +1186,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         @info "$(_short_path(key.project_path)) not fully resolved, but local indexing is disabled"
         put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
         push!(df.done, key)
+        _clear_failure_budget!(df, key)
         _complete_work_item!(df, key)
         _drain_launch_queue!(df)
     end
@@ -999,7 +1198,7 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
     key = msg.key
     push!(df.inflight, key)
 
-    if key in df.failed_projects
+    if _is_exhausted(df, key)
         @warn "Skipping previously failed test environment" key
         put!(df.out_channel, FailedResult(key))
         _complete_work_item!(df, key)
@@ -1028,7 +1227,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
     key = msg.key
     push!(df.inflight, key)
 
-    if key in df.failed_projects
+    if _is_exhausted(df, key)
         @warn "Skipping previously failed standalone project" key
         put!(df.out_channel, FailedResult(key))
         _complete_work_item!(df, key)
@@ -1047,7 +1246,8 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
         fast_lane = usable && isempty(_drop_tombstoned(_get_missing_packages(dir, store_path), store_path))
         put!(df.in_channel, StandaloneProjectPrepDoneMsg(key, fast_lane))
     catch err
-        @error "Standalone project prep failed" key exception=(err, catch_backtrace())
+        # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
+        @debug "Standalone project prep failed" key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -1068,6 +1268,7 @@ function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
         dir = _standalone_project_dir_path(df, key)
         put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash))
         push!(df.done, key)
+        _clear_failure_budget!(df, key)
         _complete_work_item!(df, key)
         # A refresh needs a child process, which dynamic-off mode never runs;
         # the served (possibly stale) environment is all it gets.
@@ -1113,13 +1314,15 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
             # this dir in `CreateStandaloneProjectMsg`. Recomputing the
             # destructive prepare here — off the reactor — could `rm` a sibling
             # content-hash's dir that another child is resolving into.
-            create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key))
+            create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
         else
-            index_project(djp, df.store_path)
+            index_project(djp, df.store_path, df.djp_request_timeout_seconds)
         end
         put!(df.in_channel, ProcessIndexedMsg(key, result_dir))
     catch err
-        @error "Dynamic index request failed" key exception=(err, catch_backtrace())
+        # Internal detail: the user-facing report is emitted once, by the
+        # `ProcessIndexFailedMsg` handler.
+        @debug "Dynamic index request failed" key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -1199,6 +1402,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     # default) the process is kept alive in `df.procs` and only the reconcile
     # path may later kill it.
     push!(df.done, key)
+    _clear_failure_budget!(df, key)
     if df.djp_mode == DynamicIndexingOnly && djp !== nothing
         kill(djp)
         delete!(df.procs, key)
@@ -1218,7 +1422,8 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
     if key in df.refreshing
         # The served stale environment keeps working; do not poison
         # failed_projects over a refresh.
-        @warn "Background environment refresh failed" key exception=(msg.err,)
+        @warn "Background refresh of $(_failure_subject(key)) failed: $(_failure_reason(msg.err)) The previously served environment stays in use."
+        @debug "Background environment refresh failed" key exception=(msg.err,)
         delete!(df.refreshing, key)
         delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
@@ -1236,9 +1441,11 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         return false
     end
 
-    @error "DynamicJuliaProcess failed" key exception=(msg.err, catch_backtrace())
-    # Mark this project as failed so we don't retry with the same content hash.
-    push!(df.failed_projects, key)
+    @warn _humanize_djp_failure(key, msg.err)
+    @debug "DynamicJuliaProcess failed" key exception=(msg.err, catch_backtrace())
+    # Bar this exact key from ever being retried, and charge the project's
+    # failure budget so a re-keying edit can't buy unlimited fresh attempts.
+    _record_failure!(df, key)
     put!(df.out_channel, FailedResult(key))
 
     djp = get(df.procs, key, nothing)
@@ -1273,7 +1480,7 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     # died before its index request completed — treat as a failure.
     if key in df.inflight && state(djp.fsm) in (DynamicProcessStarting, DynamicProcessConnected, DynamicProcessIndexing)
         @warn "Dynamic process terminated unexpectedly" key
-        push!(df.failed_projects, key)
+        _record_failure!(df, key)
         put!(df.out_channel, FailedResult(key))
         try kill(djp) catch; end
         delete!(df.procs, key)
@@ -1285,6 +1492,13 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
 end
 
 # ─── Controller messages ────────────────────────────────────────────────────
+
+function handle!(df::DynamicFeature, ::ResetFailuresMsg)
+    @info "Clearing dynamic failure bookkeeping" n_keys=length(df.failed_projects) n_projects=length(df.failure_attempts)
+    empty!(df.failed_projects)
+    empty!(df.failure_attempts)
+    return false
+end
 
 function handle!(df::DynamicFeature, ::ShutdownMsg)
     @info "Shutting down dynamic feature, terminating $(length(df.procs)) process(es)"
@@ -1309,11 +1523,17 @@ Drive the set of running dynamic processes towards `msg.required`:
   * Processes whose key is no longer required are killed and forgotten. If such
     a process was still in flight, its work item is completed so the
     pending/progress accounting stays balanced.
-  * Completed (`done`) and `failed_projects` bookkeeping is pruned to the
-    required set, so a key that becomes required again later is re-spawned.
+  * Completed (`done`) bookkeeping is pruned to the required set, so a key that
+    becomes required again later is re-spawned. **Failure** bookkeeping
+    (`failed_projects`, `failure_attempts`) is deliberately *not* pruned:
+    forgetting a failure whenever its key leaves the required set is what let a
+    project oscillating in and out of `required` re-launch the same doomed child
+    forever. Use [`retry_failed_dynamic_projects!`](@ref) to clear it explicitly.
   * Each required key that is not already running, in flight, completed, or
     failed is dispatched to the appropriate work handler (which performs the
     fast-lane missing-package check and, when needed, launches a child process).
+    Keys that have exhausted their failure budget are still dispatched — their
+    handler short-circuits to a `FailedResult`, which readiness gating needs.
 
 This is the single place that starts and stops dynamic processes; nothing is
 triggered as a side effect of Salsa input reads any more.
@@ -1337,10 +1557,10 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
         end
     end
 
-    # Drop completion/failure bookkeeping for keys that are no longer required,
-    # so the same key becoming required again later re-spawns its work.
+    # Drop completion bookkeeping for keys that are no longer required, so the
+    # same key becoming required again later re-spawns its work. Failure
+    # bookkeeping is intentionally left alone — see the docstring.
     filter!(k -> k in required, df.done)
-    filter!(k -> k in required, df.failed_projects)
 
     # Queued-but-not-launched keys that are no longer required never launch;
     # balance their pending work items like the kill path above.
