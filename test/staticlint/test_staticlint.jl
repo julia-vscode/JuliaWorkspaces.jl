@@ -4940,3 +4940,31 @@ end
     @test margs !== nothing
     @test margs[end - 1] === fdt && margs[end] === fdt
 end
+
+@testitem "parity/keyword-name placement d: unreadable call kw gets no opinion" setup=[shared_static_lint] begin
+    using JuliaWorkspaces: CSTParser
+    SL = JuliaWorkspaces.StaticLint
+    d = SL.SigDescriptor(Any[], Any[], false, SL.CoreTypes.Any, nothing, Any[:k])
+    # A non-identifier node (a whole call EXPR standing in for an
+    # unreadable keyword name) can't be read by `_kw_name_str` -- it must
+    # get no opinion, not rule the candidate out.
+    unreadable = CSTParser.parse("f(1)")
+    @test SL._match_descriptor(Any[], Any[unreadable], d, nothing, nothing) === true
+    # A readable but wrong name is a genuine mismatch.
+    @test SL._match_descriptor(Any[], Any[:other], d, nothing, nothing) === false
+end
+
+@testitem "parity/keyword-name placement d: MethodStore kwsplat is not a declared name" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    # `Base.kwarg_decl` encodes a `; kwargs...` catch-all as a literal Symbol
+    # ending in `"..."` mixed into `MethodStore.kws`, not a separate flag --
+    # it must never be name-checked as the method's one declared keyword.
+    splat_m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[], Symbol[Symbol("kwargs...")], nothing)
+    @test SL.match_method(Any[], Any[:other], splat_m, nothing, nothing) === true
+    # A real declared keyword still rejects an unrelated name.
+    named_m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[], Symbol[:digits], nothing)
+    @test SL.match_method(Any[], Any[:other], named_m, nothing, nothing) === false
+end

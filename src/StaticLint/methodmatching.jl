@@ -110,6 +110,14 @@ function _kw_name(x::EXPR)
     return isdeclaration(n) && n.args !== nothing && !isempty(n.args) ? n.args[1] : n
 end
 
+# A keyword name as a `String`, regardless of which descriptor path produced
+# it: a `Symbol` (record and store descriptors) or an identifier `EXPR` (call
+# sites, and the EXPR-method descriptor). `nothing` for anything unreadable —
+# callers must treat that as no opinion, never as a name mismatch.
+_kw_name_str(x::Symbol) = String(x)
+_kw_name_str(x::EXPR) = isidentifier(x) ? valofid(x) : nothing
+_kw_name_str(x) = nothing
+
 # Index of a call's first argument: past the callee, and past a `:parameters`
 # block when the call has one.
 _first_arg_index(call::EXPR) =
@@ -152,10 +160,16 @@ end
 
 function method_arg_types(call::EXPR, meta_dict, store=nothing)
     types, opts, kws = [], [], []
-    call.args === nothing && return types, opts, kws
+    kwsplat = false
+    call.args === nothing && return types, opts, kws, kwsplat
     if length(call.args) > 1 && headof(call.args[2]) === :parameters
         for i = 1:length(call.args[2].args)
-            push!(kws, _kw_name(call.args[2].args[i]))
+            entry = call.args[2].args[i]
+            if CSTParser.issplat(entry)
+                kwsplat = true
+            else
+                push!(kws, _kw_name(entry))
+            end
         end
         for i = 3:length(call.args)
             if CSTParser.iskwarg(call.args[i])
@@ -173,7 +187,7 @@ function method_arg_types(call::EXPR, meta_dict, store=nothing)
             end
         end
     end
-    types, opts, kws
+    types, opts, kws, kwsplat
 end
 
 function find_methods(x::EXPR, store, meta_dict)
@@ -366,7 +380,22 @@ function _align_args(d::SigDescriptor, n::Int)
 end
 
 function _match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict)
-    !isempty(kws) && isempty(d.kws) && !d.kwsplat && return false
+    if !isempty(kws) && !d.kwsplat
+        ref = [_kw_name_str(k) for k in d.kws]
+        if !any(isnothing, ref)
+            # Every declared name is readable, so absence from `ref` is a
+            # genuine mismatch rather than a blind spot. A call kw we can't
+            # read gets no opinion — it neither confirms nor rules out.
+            refset = Set(ref)
+            for k in kws
+                n = _kw_name_str(k)
+                n === nothing && continue
+                n in refset || return false
+            end
+        end
+        # else: some declared kw is unreadable — the method may accept names
+        # we can't see, so name-checking is skipped for this candidate.
+    end
 
     margs = _align_args(d, length(args))
     margs === nothing && return false
@@ -377,6 +406,22 @@ function _match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor
         _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
     end
     return true
+end
+
+# `Base.kwarg_decl` encodes a `; kwargs...` catch-all as a literal Symbol
+# ending in `"..."` mixed into a `MethodStore`'s `kws` list, not a separate
+# flag. Splits it out so callers never name-check the splat itself.
+function _split_kwsplat(kws::Vector{Symbol})
+    out = Symbol[]
+    kwsplat = false
+    for kw in kws
+        if endswith(String(kw), "...")
+            kwsplat = true
+        else
+            push!(out, kw)
+        end
+    end
+    return out, kwsplat
 end
 
 function lower_descriptor(method::SymbolServer.MethodStore)
@@ -393,7 +438,8 @@ function lower_descriptor(method::SymbolServer.MethodStore)
         end
         pop!(fixed)   # the vararg slot is the pad, not a fixed parameter
     end
-    return SigDescriptor(fixed, Any[], has_vararg, pad, N, Vector{Any}(method.kws))
+    kws, kwsplat = _split_kwsplat(method.kws)
+    return SigDescriptor(fixed, Any[], has_vararg, pad, N, Vector{Any}(kws), kwsplat)
 end
 
 match_method(args::Vector{Any}, kws::Vector{Any}, method::SymbolServer.MethodStore, store, meta_dict) =
@@ -458,6 +504,7 @@ end
 
 function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, meta_dict)
     margs, mopts, mkws = [], [], []
+    mkwsplat = false
     vararg = false
     vararg_N = nothing
     vararg_T = nothing
@@ -504,12 +551,12 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
             end
         end
 
-        margs, mopts, mkws = method_arg_types(sig, meta_dict, store)
+        margs, mopts, mkws, mkwsplat = method_arg_types(sig, meta_dict, store)
         # The trailing vararg slot is the pad, not a fixed parameter.
         vararg && !isempty(margs) && pop!(margs)
     end
     pad = vararg_T === nothing ? CoreTypes.Any : vararg_T
-    d = SigDescriptor(margs, mopts, vararg, pad, vararg_N, mkws)
+    d = SigDescriptor(margs, mopts, vararg, pad, vararg_N, mkws, mkwsplat)
     return match_descriptor(args, kws, d, store, meta_dict)
 end
 

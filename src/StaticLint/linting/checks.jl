@@ -314,13 +314,8 @@ function func_nargs(m::SymbolServer.MethodStore)
             maxargs !== typemax(Int) && (maxargs += 1)
         end
     end
-    for kw in m.kws
-        if endswith(String(kw), "...")
-            kwsplat = true
-        else
-            push!(kws, kw)
-        end
-    end
+    kws, splat = _split_kwsplat(m.kws)
+    kwsplat |= splat
     return minargs, maxargs, kws, kwsplat
 end
 

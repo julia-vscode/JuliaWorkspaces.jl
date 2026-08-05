@@ -3091,20 +3091,11 @@ end
     @test isempty(callflags("f(a::Int, b::String=\"x\") = 1\n", "caller() = f(1)\n"))
 end
 
-@testitem "parity/keywords: presence-only gating, all placements agree" setup=[FileAnalysisWS] begin
+@testitem "parity/keywords: name-checked gating, all placements agree" setup=[FileAnalysisWS] begin
     function callflags(a::String, b::String)
         jw = ws_with(Dict(
             ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
             A => a, B => b))
-        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
-        return filter(d -> occursin("method call error", d.message) ||
-                           occursin("No method matching", d.message), fa.diagnostics)
-    end
-    function samefile_flags(src::String)
-        jw = ws_with(Dict(
-            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
-            B => src,
-        ))
         fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
         return filter(d -> occursin("method call error", d.message) ||
                            occursin("No method matching", d.message), fa.diagnostics)
@@ -3129,20 +3120,29 @@ end
     @test length(callflags("struct T end\nf(x::T) = 1", "c(v::T) = f(v; k=1)")) == 1
     # Cross-file: declared keyword → no flags
     @test isempty(callflags("struct T end\nf(x::T; k=1) = 1", "c(v::T) = f(v; k=2)"))
-    # Cross-file: wrong keyword name flags via MethodArity channel (compare_f_call name membership); record path gates on presence only
+    # Cross-file: wrong keyword name → 1 flag (MethodArity's name-membership gate)
     @test length(callflags("struct T end\nf(x::T; k=1) = 1", "c(v::T) = f(v; other=2)")) == 1
     # Cross-file: kwsplat accepts anything → no flags
     @test isempty(callflags("struct T end\nf(x::T; kws...) = 1", "c(v::T) = f(v; whatever=1)"))
 
-    # Closure placement: keyword passed to method with no declared keywords → 1 flag
-    @test length(closure_callflags("struct T end\nf(x::T) = 1\nfunction caller()\n  c(v::T) = f(v; k=1)\nend")) == 1
+    # Closure placement: `f` itself is nested inside `caller` — only `struct T`
+    # stays at module level — so this exercises the EXPR descriptor engine
+    # (_match_descriptor) exclusively, not the MethodArity/tree-arity channel.
+    # Keyword passed to method with no declared keywords → 1 flag
+    @test length(closure_callflags("struct T end\nfunction caller(v::T)\n  f(x::T) = 1\n  f(v; k=1)\nend")) == 1
     # Closure placement: declared keyword → no flags
-    @test isempty(closure_callflags("struct T end\nf(x::T; k=1) = 1\nfunction caller()\n  c(v::T) = f(v; k=2)\nend"))
-    # Closure placement: wrong keyword name flags via MethodArity channel (compare_f_call name membership); record path gates on presence only
-    @test length(closure_callflags("struct T end\nf(x::T; k=1) = 1\nfunction caller()\n  c(v::T) = f(v; other=2)\nend")) == 1
+    @test isempty(closure_callflags("struct T end\nfunction caller(v::T)\n  f(x::T; k=1) = 1\n  f(v; k=2)\nend"))
+    # Closure placement: wrong keyword name → 1 flag (the engine's own
+    # name-membership gate — this placement has no MethodArity channel to
+    # fall back on, so it pins the gate added to _match_descriptor itself)
+    @test length(closure_callflags("struct T end\nfunction caller(v::T)\n  f(x::T; k=1) = 1\n  f(v; other=2)\nend")) == 1
     # Closure placement: kwsplat accepts anything → no flags
-    @test isempty(closure_callflags("struct T end\nf(x::T; kws...) = 1\nfunction caller()\n  c(v::T) = f(v; whatever=1)\nend"))
+    @test isempty(closure_callflags("struct T end\nfunction caller(v::T)\n  f(x::T; kws...) = 1\n  f(v; whatever=1)\nend"))
 
     # One-file-root variant of first arm: keyword passed to method with no declared keywords → 1 flag
     @test length(oneroot_flags("struct T end\nf(x::T) = 1\nc(v::T) = f(v; k=1)")) == 1
+    # Store callee with a kw splat (`Base.ceil`'s `; digits, sigdigits, base`
+    # methods): a MethodStore's kwsplat entry must not be name-checked as its
+    # one declared keyword.
+    @test isempty(oneroot_flags("c(v::Float64) = ceil(v; digits=2)"))
 end
