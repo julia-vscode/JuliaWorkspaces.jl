@@ -92,8 +92,7 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     # DJP is still computing its project), fall back to a stdlib-only env so
     # that hover, completions, and env-independent `check_all` passes still
     # work for locally-defined symbols and stdlib names. Workspace-package
-    # discovery is skipped (it requires a real project), but test-setup
-    # discovery and the `check_all` loop still run.
+    # discovery is skipped (it requires a real project), but the `check_all` loop still runs.
     if project_uri === nothing
         # Use the Salsa-memoized stdlib-only env so that every consumer observes
         # the *same* env object. This matters because `SymbolServer` stores
