@@ -744,8 +744,18 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     cst = derived_julia_legacy_syntax_tree(rt, file)
     meta_dict = Dict{UInt64,StaticLint.Meta}()
 
+    # The enclosing package's name, for @testitem default-imports injection
+    # (TestItemRunner evaluates each testitem body with `using Test` and
+    # `using <PackageName>` in effect).
+    self_package_name = nothing
+    pkg_folder = derived_package_for_file(rt, file)
+    if pkg_folder !== nothing
+        pkg = derived_package(rt, pkg_folder)
+        pkg !== nothing && (self_package_name = pkg.name)
+    end
+
     ctx = TreeModuleContext(rt, root, path)
-    StaticLint.semantic_pass(file, cst, env, meta_dict, rt; module_context=ctx)
+    StaticLint.semantic_pass(file, cst, env, meta_dict, rt; module_context=ctx, self_package_name)
 
     # Cross-file wildcard-using suppression: if the module this file is
     # spliced into has a failed wildcard `using` ANYWHERE (typically in the

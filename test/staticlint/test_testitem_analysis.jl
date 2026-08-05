@@ -151,3 +151,31 @@ end
     @test !haskey(sc.modules, :MyPkg)
     @test haskey(sc.modules, :NotACtx)
 end
+
+@testitem "default_imports injects the package under test into @testitem scopes" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testitem "t" begin
+        efn()
+        ifn()
+        MyPkg.ifn()
+    end
+    """)
+    msgs = diag_messages(jw)
+    # exported name resolves bare
+    @test !("Missing reference: efn" in msgs)
+    # the package name itself resolves
+    @test !("Missing reference: MyPkg" in msgs)
+    # the internal name is flagged exactly once: the bare use. The qualified
+    # use resolves through the tree.
+    @test count(==("Missing reference: ifn"), msgs) == 1
+end
+
+@testitem "default_imports=false suppresses the package injection" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testitem "t" default_imports=false begin
+        efn()
+    end
+    """)
+    msgs = diag_messages(jw)
+    @test "Missing reference: efn" in msgs
+end

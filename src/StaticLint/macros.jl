@@ -457,19 +457,26 @@ function _handle_testitem(x::EXPR, state::Toplevel)
         # Inject the parent package module (simulating `using PackageName`)
         if state.self_package_name !== nothing
             pkg_sym = Symbol(state.self_package_name)
-            # Try SymbolServer env first (provides exported names for bare access)
             if haskey(symbols, pkg_sym)
+                # Indexed (env-backed) package store
                 item_scope.modules[pkg_sym] = symbols[pkg_sym]
                 _add_module_public_names!(item_scope, symbols[pkg_sym], state)
-            end
-            # Also check workspace_packages (provides CST-level Binding for qualified access)
-            if haskey(state.workspace_packages, state.self_package_name)
-                pkg_binding = state.workspace_packages[state.self_package_name]
-                item_scope.names[state.self_package_name] = pkg_binding
-                # If not already in modules from env, extract the module scope from the Binding
-                if !haskey(item_scope.modules, pkg_sym) && pkg_binding isa Binding
-                    if pkg_binding.val isa EXPR && CSTParser.defines_module(pkg_binding.val) && hasscope(pkg_binding.val, state.meta_dict)
-                        item_scope.modules[pkg_sym] = scopeof(pkg_binding.val, state.meta_dict)
+            else
+                # Workspace package: resolve through the module tree,
+                # cross-root. The binding's val is the plain-data module
+                # TreeRef (qualified `Pkg.x` goes through
+                # `qualified_module_target`); bare exported names resolve via
+                # an export-filtered context in scope.modules, which
+                # `strip_module_contexts!` removes before meta is frozen.
+                tctx = enclosing_tree_context(state.scope)
+                if tctx !== nothing
+                    wp = workspace_package_context(tctx, state.self_package_name)
+                    if wp !== nothing
+                        item_scope.names[state.self_package_name] =
+                            Binding(noname, context_tree_ref(wp), CoreTypes.Module, EXPR[])
+                        exps = context_exported_names(wp)
+                        exps !== nothing &&
+                            (item_scope.modules[pkg_sym] = ExportFilteredContext(wp, Set{String}(exps)))
                     end
                 end
             end
