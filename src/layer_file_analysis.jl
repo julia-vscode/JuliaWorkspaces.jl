@@ -319,10 +319,15 @@ end
 # leak the handle or another file's objects into meta. The binding's val is
 # the context's plain-data `TreeRef` (leaf components that resolve directly
 # to a TreeRef take the GENERIC `_mark_import_arg`, which stores them the
-# same way — `Binding.val` admits `TreeRef`). No `scope.modules` entry is
-# added for `using`: a `using` statement is necessarily module-toplevel, so
-# its bring-ins are already part of this module's
-# `derived_module_visible_names` — the seeded context covers them.
+# same way — `Binding.val` admits `TreeRef`).
+#
+# For `using` at module toplevel no `scope.modules` entry is needed: the
+# bring-ins are part of the module's `derived_module_visible_names` face and
+# the seeded `:__tree__` context covers them. A `using` anywhere else (a
+# `@testitem`/`@testset` body — those macrocalls are opaque to the
+# inventory) has no face to lean on, so its exported names are materialized
+# as an export-filtered context on the current scope; the wrapper holds a
+# runtime handle and is removed by `strip_module_contexts!` before freezing.
 function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged, meta_dict)
     CSTParser.is_id_or_macroname(arg) || return
     if StaticLint.bindingof(arg, meta_dict) === nothing
@@ -330,7 +335,16 @@ function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged
         StaticLint.getmeta(arg, meta_dict).binding = StaticLint.Binding(arg, _context_tree_ref(par), StaticLint.CoreTypes.Module, [])
         StaticLint.setref!(arg, StaticLint.bindingof(arg, meta_dict), meta_dict)
     end
-    if !usinged
+    if usinged
+        if !StaticLint.is_module_toplevel_scope(state.scope)
+            exps = StaticLint.context_exported_names(par)
+            if exps !== nothing
+                nm = StaticLint.valofid(arg)
+                nm !== nothing && StaticLint.add_to_imported_modules(
+                    state.scope, Symbol(nm), StaticLint.ExportFilteredContext(par, Set{String}(exps)))
+            end
+        end
+    else
         # import binds the name in the current scope — except under `as`,
         # where only the alias is bound (matching `_mark_import_arg`)
         if !(CSTParser.parentof(arg) isa CSTParser.EXPR && CSTParser.parentof(CSTParser.parentof(arg)) isa CSTParser.EXPR && CSTParser.headof(CSTParser.parentof(CSTParser.parentof(arg))) === :as)

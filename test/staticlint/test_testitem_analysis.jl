@@ -179,3 +179,17 @@ end
     msgs = diag_messages(jw)
     @test "Missing reference: efn" in msgs
 end
+
+@testitem "using the package inside a @testitem brings in its exports" setup=[TestItemAnalysisWS] begin
+    # default_imports=false so this passes only if the explicit `using` works
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testitem "t" default_imports=false begin
+        using MyPkg
+        efn()
+        ifn()
+    end
+    """)
+    msgs = diag_messages(jw)
+    @test !("Missing reference: efn" in msgs)
+    @test "Missing reference: ifn" in msgs
+end

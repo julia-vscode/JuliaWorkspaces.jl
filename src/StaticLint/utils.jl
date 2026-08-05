@@ -229,6 +229,13 @@ is_toplevel_scope(s::Scope) = is_toplevel_scope(s.expr)
 # placement and call-signature checking operate within the testitem boundary.
 is_toplevel_scope(x::EXPR) = CSTParser.defines_module(x) || headof(x) === :file || _is_testitem_scope_macrocall(x)
 
+# Is `s` the scope of a module's top level (a file's root scope or a
+# `module`/`baremodule` scope)? Distinguishes places where a `using`'s
+# bring-ins are part of the module's visible-names face from places where
+# they are not (e.g. a `@testitem` body).
+is_module_toplevel_scope(s::Scope) =
+    s.expr isa EXPR && (headof(s.expr) === :file || CSTParser.defines_module(s.expr))
+
 # Only testitem-family macrocalls (@testitem/@testmodule/@testsnippet) act as
 # top-level scopes. Other macrocalls that build scopes (e.g. `@eval`, `@deprecate`)
 # must NOT be treated as top-level, otherwise bindings hoisted by `interpret_eval`
