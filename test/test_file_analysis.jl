@@ -2606,6 +2606,8 @@ end
 end
 
 @testitem "parity/qualified: workspace-module-qualified annotation" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: TypeRef
+
     jw = ws_with(Dict(
         ROOT => """
         module MainPkg
@@ -2623,4 +2625,18 @@ end
     flagged = filter(d -> occursin("method call error", d.message) ||
                           occursin("No method matching", d.message), fa.diagnostics)
     @test length(flagged) == 1
+
+    # Whitebox: `flagged == 1` alone does not distinguish a real match from an
+    # indeterminate wave-through — `_issubtype`/`_has_type_intersection` treat
+    # `nothing` as "not ruled out", so a regression that broke ONLY the
+    # module-descent supertype resolution would leave `good` silently
+    # indeterminate while `bad` still flags on its own annotation, and the
+    # count would stay green. Resolve both names directly and assert a
+    # DEFINITE subtype relation, plus the key equality the descent must reach.
+    resolve = JuliaWorkspaces._tree_type_resolver(jw.runtime, ROOT)
+    own = resolve(TypeRef(["Own"]), ["MainPkg"])
+    myabs = resolve(TypeRef(["Inner", "MyAbs"]), ["MainPkg"])
+    @test own isa SL.TreeDataType && myabs isa SL.TreeDataType
+    @test myabs.key == (["MainPkg", "Inner"], "MyAbs")
+    @test SL._issubtype(own, myabs, nothing, nothing) === true
 end
