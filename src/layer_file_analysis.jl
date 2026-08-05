@@ -919,9 +919,9 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # `tree_arities` lets the method-call lint check a tree-visible workspace
     # callee's ARGUMENT COUNT against its full cross-file method set (the local
     # `func_ref` sees only this file's methods). Plain-data arities from the
-    # inventory — no dependency on sibling analyses. The positional TYPES of such
-    # a callee are not checked: the records carry no type opinion, so a call whose
-    # count matches is accepted.
+    # inventory — no dependency on sibling analyses. The count opinion is decided
+    # here, independently of the TYPE opinion (`tree_signatures` below), so the
+    # two invalidate separately.
     tree_arities = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
         derived_method_arities(rt, root, p, name)
