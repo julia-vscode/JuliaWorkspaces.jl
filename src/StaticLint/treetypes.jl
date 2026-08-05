@@ -15,6 +15,44 @@ _type_compare(a::TreeDataType, b::TreeDataType) = a.key == b.key
 _type_compare(a::TreeDataType, b::_NominalType) = false
 _type_compare(a::_NominalType, b::TreeDataType) = false
 
+"""
+    ResolvedUnion
+
+A `Union{…}` annotation with every member already resolved to a comparison
+operand (store value or `TreeDataType`). Member-wise tri-state: intersecting
+any member is `true`; ruled out only when EVERY member is definitely ruled out.
+"""
+struct ResolvedUnion
+    members::Vector{Any}
+end
+
+# Member-wise tri-state: an indeterminate member blocks a `false`, never a
+# `true` from another member. `ResolvedUnion` needs no `_super`/`_type_compare`
+# — these methods are more specific than the generic `_has_type_intersection`,
+# so a union never reaches the nominal walk.
+function _has_type_intersection(a, b::ResolvedUnion, store, meta_dict)
+    saw_unknown = false
+    for m in b.members
+        r = _has_type_intersection(a, m, store, meta_dict)
+        r === true && return true
+        r === nothing && (saw_unknown = true)
+    end
+    return saw_unknown ? nothing : false
+end
+_has_type_intersection(a::ResolvedUnion, b, store, meta_dict) =
+    _has_type_intersection(b, a, store, meta_dict)
+# Both operands unions: explicit method avoids the dispatch ambiguity between
+# the two legs above.
+function _has_type_intersection(a::ResolvedUnion, b::ResolvedUnion, store, meta_dict)
+    saw_unknown = false
+    for m in a.members
+        r = _has_type_intersection(m, b, store, meta_dict)
+        r === true && return true
+        r === nothing && (saw_unknown = true)
+    end
+    return saw_unknown ? nothing : false
+end
+
 function _super(a::TreeDataType, store, meta_dict)
     a.sup === nothing && return nothing
     a.sup == TYPE_ANY && return CoreTypes.Any
@@ -32,12 +70,10 @@ function resolve_record_type(t::TypeExpr, sig::MethodSignature, defined_in, reso
     elseif t isa TypeUnionExpr
         isempty(t.members) && return CoreTypes.Any
         members = [resolve_record_type(m, sig, defined_in, resolver, fuel - 1) for m in t.members]
-        # `FakeUnion` member comparison only understands store operands; a
-        # tree member inside one would rule out falsely. Until unions get
-        # their own parity row, a mixed union carries no opinion.
-        all(m -> m isa SymbolServer.DataTypeStore || m isa SymbolServer.FakeTypeName, members) ||
-            return CoreTypes.Any
-        return _fake_union(members)
+        any(m -> m === CoreTypes.Any || m === nothing, members) && return CoreTypes.Any
+        all(m -> m isa SymbolServer.DataTypeStore || m isa SymbolServer.FakeTypeName, members) &&
+            return _fake_union(members)      # store-only unions keep the store shape
+        return ResolvedUnion(members)
     elseif t isa TypeRef
         r = resolver(t, defined_in)
         return r === nothing ? CoreTypes.Any : r

@@ -2822,6 +2822,17 @@ end
         target(w, 1)
     end
     """)) == 1
+
+    @test length(flagged("""
+    struct P end
+    struct Q end
+    struct Other end
+    function caller(v::P, w::Other)
+        target(x::Union{P,Q}) = 1
+        target(v)
+        target(w)
+    end
+    """)) == 1
 end
 
 @testitem "parity/shapes: same-file module-level callee flags each shape's definite mismatch" setup=[FileAnalysisWS] begin
@@ -2857,6 +2868,15 @@ end
     good(v::Own) = target(v, 1)
     bad(w::Other) = target(w, 1)
     """)) == 1
+
+    @test length(flagged("""
+    struct P end
+    struct Q end
+    struct Other end
+    target(x::Union{P,Q}) = 1
+    good(v::P) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
 end
 
 @testitem "parity/shapes: one-file root reports like a same-file module-level callee" setup=[FileAnalysisWS] begin
@@ -2889,4 +2909,46 @@ end
     good(v::Own) = target(v, 1)
     bad(w::Other) = target(w, 1)
     """)) == 1
+
+    @test length(flagged("""
+    struct P end
+    struct Q end
+    struct Other end
+    target(x::Union{P,Q}) = 1
+    good(v::P) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+end
+
+@testitem "parity/union: workspace members rule out member-wise, sibling callee" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct P end\nstruct Q end\nstruct Other end\ntarget(x::Union{P,Q}) = 1\n",
+        B => "good(v::P) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "resolve_record_type: a mixed union keeps member opinions" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: TypeRef, TypeUnionExpr, MethodSignature, SigSlot, TypeExpr
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\nend\n",
+        A => "struct P end\nstruct Other end\n",
+    ))
+    resolve = JuliaWorkspaces._tree_type_resolver(jw.runtime, ROOT)
+    sig = MethodSignature([SigSlot(TypeUnionExpr(TypeExpr[TypeRef(["P"]), TypeRef(["Int"])]), false)],
+        nothing, Dict{String,TypeExpr}(), Symbol[], false)
+    u = SL.resolve_record_type(sig.slots[1].type, sig, ["MainPkg"], resolve)
+    @test u isa SL.ResolvedUnion && length(u.members) == 2
+    # A real store, not `nothing`: one member (`Int`) is a genuine env type, and
+    # ruling it out needs `_super` to walk its ACTUAL supertype chain.
+    env = JuliaWorkspaces.derived_stdlib_only_env(jw.runtime)
+    store = SL.getsymbols(env)
+    other = resolve(TypeRef(["Other"]), ["MainPkg"])
+    @test SL._has_type_intersection(other, u, store, nothing) === false
+    p = resolve(TypeRef(["P"]), ["MainPkg"])
+    @test SL._has_type_intersection(p, u, store, nothing) === true
 end

@@ -4889,3 +4889,19 @@ end
     # bad: a workspace struct with supertype Any is definitely ruled out
     @test SL.match_method(Any[other, SS.FakeTypeName(Int)], Any[], m, syms, meta_dict) === false
 end
+
+@testitem "parity/union placement d: MethodStore FakeUnion slot rules out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    cst, meta_dict, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    intdt = SL.get_eventual_datatype(syms[:Base][:Int], get_env(jw))
+    other = SL.bindingof(cst.args[1], meta_dict)
+    m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[:x => SS.FakeUnion(SS.FakeTypeName(Int), SS.FakeTypeName(String))],
+        Symbol[], nothing)
+    # good: an Int argument matches one member of the union
+    @test SL.match_method(Any[intdt], Any[], m, syms, meta_dict) === true
+    # bad: a workspace struct with supertype Any is ruled out against every member
+    @test SL.match_method(Any[other], Any[], m, syms, meta_dict) === false
+end

@@ -431,7 +431,10 @@ function _resolve_type_expr(t, store, meta_dict)
     if _is_union_curly(t)
         # A call matches a `Union{…}` slot if it matches any member, so keep the
         # members rather than collapsing to the `Union` datatype (which drops them).
-        return _fake_union([_resolve_type_expr(t.args[i], store, meta_dict) for i in 2:length(t.args)])
+        members = [_resolve_type_expr(t.args[i], store, meta_dict) for i in 2:length(t.args)]
+        all(m -> m isa SymbolServer.DataTypeStore || m isa SymbolServer.FakeTypeName, members) &&
+            return _fake_union(members)      # store-only unions keep the store shape
+        return ResolvedUnion(members)
     end
     if iscurly(t) && length(t.args) >= 1
         t = t.args[1]
