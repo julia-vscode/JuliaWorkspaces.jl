@@ -15,6 +15,20 @@ _type_compare(a::TreeDataType, b::TreeDataType) = a.key == b.key
 _type_compare(a::TreeDataType, b::_NominalType) = false
 _type_compare(a::_NominalType, b::TreeDataType) = false
 
+# A `TreeDataType` reached mid-walk (via a resolved `TreeRef`) against a
+# same-file datatype `Binding`: the two domains have no shared identity to
+# compare, so without this the walk sails past a real match to `Any` and
+# rules it out. Compare by NAME only — deliberately permissive, since a
+# same-name type in an unrelated module would wrongly compare equal too. That
+# false `true` only ever keeps a candidate alive (the safe direction); it can
+# never manufacture a `false` this walk wouldn't otherwise reach honestly.
+function _type_compare(a::TreeDataType, b::Binding)
+    isidentifier(b.name) || return false
+    n = valofid(b.name)
+    n !== nothing && a.key[2] == n
+end
+_type_compare(a::Binding, b::TreeDataType) = _type_compare(b, a)
+
 """
     ResolvedUnion
 
@@ -30,23 +44,23 @@ end
 # `true` from another member. `ResolvedUnion` needs no `_super`/`_type_compare`
 # — these methods are more specific than the generic `_has_type_intersection`,
 # so a union never reaches the nominal walk.
-function _has_type_intersection(a, b::ResolvedUnion, store, meta_dict)
+function _has_type_intersection(a, b::ResolvedUnion, store, meta_dict, resolver=nothing)
     saw_unknown = false
     for m in b.members
-        r = _has_type_intersection(a, m, store, meta_dict)
+        r = _has_type_intersection(a, m, store, meta_dict, resolver)
         r === true && return true
         r === nothing && (saw_unknown = true)
     end
     return saw_unknown ? nothing : false
 end
-_has_type_intersection(a::ResolvedUnion, b, store, meta_dict) =
-    _has_type_intersection(b, a, store, meta_dict)
+_has_type_intersection(a::ResolvedUnion, b, store, meta_dict, resolver=nothing) =
+    _has_type_intersection(b, a, store, meta_dict, resolver)
 # Both operands unions: explicit method avoids the dispatch ambiguity between
 # the two legs above.
-function _has_type_intersection(a::ResolvedUnion, b::ResolvedUnion, store, meta_dict)
+function _has_type_intersection(a::ResolvedUnion, b::ResolvedUnion, store, meta_dict, resolver=nothing)
     saw_unknown = false
     for m in a.members
-        r = _has_type_intersection(m, b, store, meta_dict)
+        r = _has_type_intersection(m, b, store, meta_dict, resolver)
         r === true && return true
         r === nothing && (saw_unknown = true)
     end
@@ -93,7 +107,7 @@ function lower_descriptor(ls::LocatedSignature, resolver)
 end
 
 match_method(args::Vector{Any}, kws::Vector{Any}, ls::LocatedSignature, resolver, store, meta_dict) =
-    match_descriptor(args, kws, lower_descriptor(ls, resolver), store, meta_dict)
+    match_descriptor(args, kws, lower_descriptor(ls, resolver), store, meta_dict, resolver)
 
 # `x::Sub.Own` → ["Sub", "Own"], `x::Vector{T} where T` → ["Vector"]; `nothing`
 # for anything that isn't a (possibly qualified) name.
@@ -123,6 +137,12 @@ end
 # name, or a constructor callee, can carry. One list, so a callee and an
 # annotation can never disagree about what a datatype is.
 const _TREE_DATATYPE_KINDS = (:struct, :mutable_struct, :abstract, :primitive, :enum)
+
+# A `TreeRef` as a comparison operand: its datatype, resolved in the module
+# that binds it. `nothing` for non-datatype kinds and failed resolution. The
+# one conversion helper, so a `TreeRef` can never be resolved two ways.
+_treeref_operand(r::TreeRef, resolver) =
+    r.kind in _TREE_DATATYPE_KINDS ? resolver(TypeRef([r.name]), r.origin_module) : nothing
 
 # Does the annotation `t` name a datatype DECLARED IN THE WORKSPACE (this file
 # or, through the tree, a sibling)? A `where` typevar, a type alias, a store

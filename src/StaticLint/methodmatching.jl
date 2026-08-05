@@ -1,4 +1,21 @@
-function arg_type(arg, ismethod, meta_dict, store=nothing)
+# The comparison operand for a `::T` annotation `t` whose head names a
+# workspace datatype resolved (cross-file) to a `TreeRef`, or `nothing` when it
+# doesn't. Unwraps `where`/curly to the head first, as `_names_workspace_datatype`
+# does — the same idiom used wherever an annotation's own ref stands in for a
+# type `Binding.type` can't carry.
+function _annotation_treeref_operand(t, meta_dict, resolver)
+    while iswhere(t) && t.args !== nothing && !isempty(t.args)
+        t = t.args[1]
+    end
+    if iscurly(t) && t.args !== nothing && !isempty(t.args)
+        t = t.args[1]
+    end
+    r = is_getfield_w_quotenode(t) ? refof_maybe_getfield(t, meta_dict) :
+        (isidentifier(t) ? refof(t, meta_dict) : nothing)
+    r isa TreeRef ? _treeref_operand(r, resolver) : nothing
+end
+
+function arg_type(arg, ismethod, meta_dict, store=nothing, resolver=nothing)
     # Strip `@nospecialize` and `x...` wrappers — the binding/type info
     # lives on the inner expression in both cases. unwrap_nospecialize handles
     # a bare `@nospecialize` (no inner arg) safely.
@@ -11,7 +28,7 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
         # datatype, dropping the members. Resolve the members directly so
         # subtyping keeps working (needs `store` for member lookup).
         if store !== nothing && isdeclaration(arg) && length(arg.args) >= 2 && _is_union_curly(arg.args[2])
-            return _resolve_type_expr(arg.args[2], store, meta_dict)
+            return _resolve_type_expr(arg.args[2], store, meta_dict, resolver)
         end
         if hasbinding(arg, meta_dict)
             if bindingof(arg, meta_dict) isa Binding && bindingof(arg, meta_dict).type !== nothing
@@ -31,7 +48,7 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
                     # licenses nothing.
                     ub = store === nothing ? nothing : where_upper_bound_expr(type)
                     ub === nothing && return CoreTypes.Any
-                    return _resolve_type_expr(ub, store, meta_dict)
+                    return _resolve_type_expr(ub, store, meta_dict, resolver)
                 end
                 return type
             end
@@ -40,7 +57,14 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
             # its type — the usual by-binding inference never runs for it.
             # Read the annotation directly.
             t = arg_decl_type(arg)
-            t !== nothing && return _resolve_type_expr(t, store, meta_dict)
+            t !== nothing && return _resolve_type_expr(t, store, meta_dict, resolver)
+        end
+        # A NAMED slot's annotation resolved (cross-file) to a `TreeRef`:
+        # `Binding.type` can't carry one, so the by-binding path above fell
+        # through with no type. Read the annotation's own ref directly.
+        if resolver !== nothing && isdeclaration(arg) && length(arg.args) >= 2
+            dt = _annotation_treeref_operand(arg.args[2], meta_dict, resolver)
+            dt === nothing || return dt
         end
     else
         # A `where` typevar PASSED as an argument: its binding carries the
@@ -70,6 +94,20 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
             return CoreTypes.Array
         elseif isquotedsymbol(arg)
             return SymbolServer.stdlibs[:Core][:Symbol]
+        end
+        # `arg` refs a binding whose OWN declaration annotation resolved
+        # (cross-file) to a `TreeRef` — the same gap as the method side, one
+        # hop removed: the by-ref path above fell through with no type
+        # because `Binding.type` can't carry the TreeRef its declaration read.
+        if resolver !== nothing && hasref(arg, meta_dict)
+            b = refof(arg, meta_dict)
+            if b isa Binding
+                t = decl_annotation(b)
+                if t !== nothing
+                    dt = _annotation_treeref_operand(t, meta_dict, resolver)
+                    dt === nothing || return dt
+                end
+            end
         end
     end
     # VarRef(VarRef(nothing, :Core), :Any)
@@ -134,7 +172,7 @@ function positional_args(call::EXPR)
     return out
 end
 
-function call_arg_types(call::EXPR, ismethod, meta_dict, store=nothing)
+function call_arg_types(call::EXPR, ismethod, meta_dict, store=nothing, resolver=nothing)
     types, kws = [], []
     call.args === nothing && return types, kws
     if length(call.args) > 1 && headof(call.args[2]) === :parameters
@@ -152,13 +190,13 @@ function call_arg_types(call::EXPR, ismethod, meta_dict, store=nothing)
             # `f(a, b, kw = v)` — kwarg without semicolon.
             push!(kws, call.args[i].args[1])
         else
-            push!(types, arg_type(call.args[i], ismethod, meta_dict, store))
+            push!(types, arg_type(call.args[i], ismethod, meta_dict, store, resolver))
         end
     end
     types, kws
 end
 
-function method_arg_types(call::EXPR, meta_dict, store=nothing)
+function method_arg_types(call::EXPR, meta_dict, store=nothing, resolver=nothing)
     types, opts, kws = [], [], []
     kwsplat = false
     call.args === nothing && return types, opts, kws, kwsplat
@@ -173,17 +211,17 @@ function method_arg_types(call::EXPR, meta_dict, store=nothing)
         end
         for i = 3:length(call.args)
             if CSTParser.iskwarg(call.args[i])
-                push!(opts, arg_type(call.args[i].args[1], true, meta_dict, store))
+                push!(opts, arg_type(call.args[i].args[1], true, meta_dict, store, resolver))
             else
-                push!(types, arg_type(call.args[i], true, meta_dict, store))
+                push!(types, arg_type(call.args[i], true, meta_dict, store, resolver))
             end
         end
     else
         for i = 2:length(call.args)
             if CSTParser.iskwarg(call.args[i])
-                push!(opts, arg_type(call.args[i].args[1], true, meta_dict, store))
+                push!(opts, arg_type(call.args[i].args[1], true, meta_dict, store, resolver))
             else
-                push!(types, arg_type(call.args[i], true, meta_dict, store))
+                push!(types, arg_type(call.args[i], true, meta_dict, store, resolver))
             end
         end
     end
@@ -349,8 +387,8 @@ MatchRecorder() = MatchRecorder(0, 0)
 
 const _match_recorder = Ref{Union{Nothing,MatchRecorder}}(nothing)
 
-function match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict)
-    res = _match_descriptor(args, kws, d, store, meta_dict)
+function match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict, resolver=nothing)
+    res = _match_descriptor(args, kws, d, store, meta_dict, resolver)
     r = _match_recorder[]
     if r !== nothing
         r.comparisons += 1
@@ -379,7 +417,7 @@ function _align_args(d::SigDescriptor, n::Int)
     return Any[d.fixed; d.opts[1:nopt]; fill(d.vararg_pad, nva)]
 end
 
-function _match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict)
+function _match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor, store, meta_dict, resolver=nothing)
     if !isempty(kws) && !d.kwsplat
         ref = [_kw_name_str(k) for k in d.kws]
         if !any(isnothing, ref)
@@ -403,7 +441,7 @@ function _match_descriptor(args::Vector{Any}, kws::Vector{Any}, d::SigDescriptor
     # Only a DEFINITE mismatch rules a method out. An unknown slot leaves the
     # method a candidate — flagging on ignorance is a false positive.
     for i in eachindex(args)
-        _has_type_intersection(args[i], margs[i], store, meta_dict) === false && return false
+        _has_type_intersection(args[i], margs[i], store, meta_dict, resolver) === false && return false
     end
     return true
 end
@@ -473,11 +511,11 @@ end
 # type used by `_has_type_intersection`. A type name often `refof`s to its
 # constructor `FunctionStore`; we follow `extends` back to the `DataTypeStore`.
 # Falls back to `CoreTypes.Any` if resolution fails.
-function _resolve_type_expr(t, store, meta_dict)
+function _resolve_type_expr(t, store, meta_dict, resolver=nothing)
     if _is_union_curly(t)
         # A call matches a `Union{…}` slot if it matches any member, so keep the
         # members rather than collapsing to the `Union` datatype (which drops them).
-        members = [_resolve_type_expr(t.args[i], store, meta_dict) for i in 2:length(t.args)]
+        members = [_resolve_type_expr(t.args[i], store, meta_dict, resolver) for i in 2:length(t.args)]
         all(m -> m isa SymbolServer.DataTypeStore || m isa SymbolServer.FakeTypeName, members) &&
             return _fake_union(members)      # store-only unions keep the store shape
         return ResolvedUnion(members)
@@ -498,11 +536,14 @@ function _resolve_type_expr(t, store, meta_dict)
         # A workspace datatype's own binding (`struct`/`abstract`/`primitive`):
         # its supertype chain is walkable directly through `_super(::Binding)`.
         return r
+    elseif r isa TreeRef && resolver !== nothing
+        dt = _treeref_operand(r, resolver)
+        return dt === nothing ? CoreTypes.Any : dt
     end
     return CoreTypes.Any
 end
 
-function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, meta_dict)
+function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, meta_dict, resolver=nothing)
     margs, mopts, mkws = [], [], []
     mkwsplat = false
     vararg = false
@@ -517,12 +558,12 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
                 # alternative methods, not conjunctive requirements.
                 for arg in method.args[3].args
                     if defines_function(arg)
-                        match_method(args, kws, arg, store, meta_dict) && return true
+                        match_method(args, kws, arg, store, meta_dict, resolver) && return true
                     end
                 end
                 return false
             end
-            push!(margs, arg_type(arg, true, meta_dict, store))
+            push!(margs, arg_type(arg, true, meta_dict, store, resolver))
         end
     else
         # `rem_wheres_decls` strips outer `where` clauses (so parametric
@@ -543,7 +584,7 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
                 vararg = true
                 ty = last_arg.args[2]
                 if iscurly(ty) && length(ty.args) >= 2
-                    vararg_T = _resolve_type_expr(ty.args[2], store, meta_dict)
+                    vararg_T = _resolve_type_expr(ty.args[2], store, meta_dict, resolver)
                 end
             end
             if CSTParser.issplat(last_arg)
@@ -551,13 +592,13 @@ function match_method(args::Vector{Any}, kws::Vector{Any}, method::EXPR, store, 
             end
         end
 
-        margs, mopts, mkws, mkwsplat = method_arg_types(sig, meta_dict, store)
+        margs, mopts, mkws, mkwsplat = method_arg_types(sig, meta_dict, store, resolver)
         # The trailing vararg slot is the pad, not a fixed parameter.
         vararg && !isempty(margs) && pop!(margs)
     end
     pad = vararg_T === nothing ? CoreTypes.Any : vararg_T
     d = SigDescriptor(margs, mopts, vararg, pad, vararg_N, mkws, mkwsplat)
-    return match_descriptor(args, kws, d, store, meta_dict)
+    return match_descriptor(args, kws, d, store, meta_dict, resolver)
 end
 
 function refof_call_func(x, meta_dict)

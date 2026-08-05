@@ -530,7 +530,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
                                    store === nothing && !_is_datatype_callee(func_ref)
                                     nm = tree.signatures(n, x)
                                     if !isempty(nm.signatures) && !nm.has_unknown_shapes
-                                        args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
+                                        args, kws = call_arg_types(x, false, meta_dict, getsymbols(env), tree.resolve)
                                         tree.callsite_type === nothing ||
                                             (args = tree_arg_operands(x, args, meta_dict, tree.callsite_type))
                                         any(ls -> match_method(args, kws, ls, tree.resolve, getsymbols(env), meta_dict), nm.signatures) ||
@@ -586,7 +586,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
         func_ref === nothing && return
         if func_has_no_methods(func_ref, meta_dict)
             seterror!(x, FunctionHasNoMethods, meta_dict)
-        elseif !sig_match_any(func_ref, x, call_counts, tls, env, meta_dict, tree.in_scope)
+        elseif !sig_match_any(func_ref, x, call_counts, tls, env, meta_dict, tree.in_scope, tree.resolve)
             seterror!(x, IncorrectCallArgs, meta_dict)
         end
     end
@@ -632,7 +632,7 @@ function func_has_no_methods(func_ref, meta_dict)
     return true
 end
 
-function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing)
+function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing, resolver=nothing)
     in_scope = tree_in_scope === nothing ? nothing : tree_in_scope(x)
     # we can't statically determine how many arguments a splat will take up
     if call_has_splat(x)
@@ -650,9 +650,9 @@ function call_has_splat(x::EXPR)
     return false
 end
 
-function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing)
+function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing, resolver=nothing)
     if func_ref.val isa SymbolServer.FunctionStore || func_ref.val isa SymbolServer.DataTypeStore
-        match = sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict, tree_in_scope)
+        match = sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict, tree_in_scope, resolver)
         match && return true
     end
 
@@ -671,19 +671,19 @@ function sig_match_any(func_ref::Binding, x, call_counts, tls::Scope, env::Exter
     # tolerate any arity. Such defs fall through to the refs/get_method path
     # below, matching upstream behaviour.
     if has_at_least_one_method && !(parentof(func_ref.val) isa EXPR && CSTParser.ismacrocall(parentof(func_ref.val)))
-        sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict, tree_in_scope) && return true
+        sig_match_any(func_ref.val, x, call_counts, tls, env, meta_dict, tree_in_scope, resolver) && return true
     end
 
     for r in func_ref.refs
         method = get_method(r)
         method === nothing && continue
         has_at_least_one_method = true
-        sig_match_any(method, x, call_counts, tls, env, meta_dict, tree_in_scope) && return true
+        sig_match_any(method, x, call_counts, tls, env, meta_dict, tree_in_scope, resolver) && return true
     end
     return !has_at_least_one_method
 end
 
-function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing)
+function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing, resolver=nothing)
     if CSTParser.defines_function(func) || CSTParser.defines_struct(func)
         # Macro-wrapped definitions can rewrite arity/constructors at expansion
         # time (`@kwdef` structs, `@kernel` functions, …). For unknown macros we
@@ -699,8 +699,8 @@ function sig_match_any(func::EXPR, x, call_counts, tls::Scope, env::ExternalEnv,
             m_counts = CSTParser.defines_struct(func) ? struct_nargs(func, env, meta_dict) : func_nargs(func, env, meta_dict)
             compare_f_call(m_counts, call_counts) && return true
         else
-            args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
-            match_method(args, kws, func, getsymbols(env), meta_dict) && return true
+            args, kws = call_arg_types(x, false, meta_dict, getsymbols(env), resolver)
+            match_method(args, kws, func, getsymbols(env), meta_dict, resolver) && return true
         end
         return false
     end
@@ -782,7 +782,7 @@ _cand_nargs(m::EXPR, env, meta_dict) =
 # `nargs` positional arguments, or `nothing` when it can't be pinned down
 # (untyped arg, splat/vararg element, out of range) — matching `match_method`'s
 # leniency so a mismatch is only ever asserted where the matcher rejected it.
-function _expected_arg_type(m::SymbolServer.MethodStore, i::Int, nargs::Int, store, meta_dict)
+function _expected_arg_type(m::SymbolServer.MethodStore, i::Int, nargs::Int, store, meta_dict, resolver=nothing)
     sig = m.sig
     n = length(sig)
     n == 0 && return nothing
@@ -793,7 +793,7 @@ function _expected_arg_type(m::SymbolServer.MethodStore, i::Int, nargs::Int, sto
     end
     i <= n ? sig[i][2] : nothing
 end
-function _expected_arg_type(m::EXPR, i::Int, nargs::Int, store, meta_dict)
+function _expected_arg_type(m::EXPR, i::Int, nargs::Int, store, meta_dict, resolver=nothing)
     sig = CSTParser.rem_wheres_decls(CSTParser.get_sig(m))
     (sig isa EXPR && sig.args !== nothing) || return nothing
     decls = EXPR[]
@@ -806,7 +806,7 @@ function _expected_arg_type(m::EXPR, i::Int, nargs::Int, store, meta_dict)
     a = decls[i]
     (issplat(a) || is_explicit_vararg_decl(a)) && return nothing
     (isdeclaration(a) && length(a.args) >= 2) || return nothing
-    return _resolve_type_expr(a.args[2], store, meta_dict)
+    return _resolve_type_expr(a.args[2], store, meta_dict, resolver)
 end
 
 # Render the arity constraint of a set of `func_nargs`-style tuples for a message.
@@ -834,7 +834,7 @@ argument, the inferred type, and the expected type). Returns `nothing` when no
 specific reason is derivable (splatted call, unusual callee shape), so the caller
 keeps the generic wording.
 """
-function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_arities=nothing, tree_in_scope=nothing, tree_callsite_type=nothing)
+function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_arities=nothing, tree_in_scope=nothing, tree_callsite_type=nothing, tree_resolve=nothing)
     call_has_splat(call) && return nothing
     # `cand_arities` (cross-file arity set, from `derived_method_arities`) drives
     # the arg-count / keyword reason for a callee whose method set spans files —
@@ -849,7 +849,7 @@ function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_ar
 
     act_min, act_max, act_kws = call_nargs(call)
     nargs = act_min # no splat ⇒ min == max
-    inferred, _ = call_arg_types(call, false, meta_dict, store)
+    inferred, _ = call_arg_types(call, false, meta_dict, store, tree_resolve)
     tree_callsite_type === nothing ||
         (inferred = tree_arg_operands(call, inferred, meta_dict, tree_callsite_type))
 
@@ -895,16 +895,16 @@ function describe_call_mismatch(call::EXPR, env::ExternalEnv, meta_dict; cand_ar
     cand = distinct[1]
     slot = 0
     for s in 1:nargs
-        exp = _expected_arg_type(cand, s, nargs, store, meta_dict)
+        exp = _expected_arg_type(cand, s, nargs, store, meta_dict, tree_resolve)
         exp === nothing && continue
         got = s <= length(inferred) ? inferred[s] : nothing
-        if _has_type_intersection(got, exp, store, meta_dict) === false
+        if _has_type_intersection(got, exp, store, meta_dict, tree_resolve) === false
             slot = s
             break
         end
     end
     if slot > 0
-        exp = _expected_arg_type(cand, slot, nargs, store, meta_dict)
+        exp = _expected_arg_type(cand, slot, nargs, store, meta_dict, tree_resolve)
         got = slot <= length(inferred) ? inferred[slot] : nothing
         return string(header, " At argument ", slot, ": expected `",
             _format_type(exp), "`, got `", _format_type(got), "`.")

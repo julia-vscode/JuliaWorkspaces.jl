@@ -609,8 +609,8 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
                 # otherwise from the local candidates (store/local methods).
                 ar = _call_cross_file_arities(rt, root, path, err[2], meta_dict)
                 detail = ar !== nothing ?
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar, tree_in_scope, tree_callsite_type) :
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; tree_in_scope, tree_callsite_type)
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar, tree_in_scope, tree_callsite_type, tree_resolve=type_resolver) :
+                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; tree_in_scope, tree_callsite_type, tree_resolve=type_resolver)
                 detail !== nothing && (description = detail)
             end
             severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)

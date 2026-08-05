@@ -10,24 +10,31 @@ const _MAX_SUPER_DEPTH = 32
 # caller may act on it; `nothing` licenses nothing — except the `FakeTypeofBottom`
 # and `FakeUnion` legs of `_super`, which assert `Any` outright rather than
 # having walked there.
-function _issubtype(a, b, store, meta_dict, depth=0)
+function _issubtype(a, b, store, meta_dict, depth=0, resolver=nothing)
     _isany(b) && return true
     _type_compare(a, b) && return true
     depth >= _MAX_SUPER_DEPTH && return nothing
     sup_a = _super(a, store, meta_dict)
     sup_a === nothing && return nothing
+    # The mid-walk case: a same-file datatype's OWN supertype clause names a
+    # sibling-file type, so `_super(::Binding)` hands back the raw `TreeRef`
+    # it read off the `<:` clause. Convert before comparing/recursing.
+    if sup_a isa TreeRef && resolver !== nothing
+        sup_a = _treeref_operand(sup_a, resolver)
+        sup_a === nothing && return nothing
+    end
     _type_compare(sup_a, b) && return true
     _isany(sup_a) && return false
-    return _issubtype(sup_a, b, store, meta_dict, depth + 1)
+    return _issubtype(sup_a, b, store, meta_dict, depth + 1, resolver)
 end
 
-function _has_type_intersection(a, b, store, meta_dict)
+function _has_type_intersection(a, b, store, meta_dict, resolver=nothing)
     # A bare `Union` datatype means "some union, members unknown" (e.g. the
     # binding type of a `x::Union{…}` declaration); it can't disprove a call.
     (_is_bare_union(a) || _is_bare_union(b)) && return true
-    ab = _issubtype(a, b, store, meta_dict)
+    ab = _issubtype(a, b, store, meta_dict, 0, resolver)
     ab === true && return true
-    ba = _issubtype(b, a, store, meta_dict)
+    ba = _issubtype(b, a, store, meta_dict, 0, resolver)
     ba === true && return true
     (ab === nothing || ba === nothing) && return nothing
     return false

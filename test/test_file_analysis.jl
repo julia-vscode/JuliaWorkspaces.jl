@@ -2480,6 +2480,72 @@ end
     @test length(flagged) == 1
 end
 
+@testitem "parity: closure callee resolves sibling-file types through the records" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nstruct Own <: MyAbs end\nstruct Other end\n",
+        B => """
+        function caller(v::Own, w::Other)
+            target(x::MyAbs) = 1
+            target(v)
+            target(w)
+        end
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1   # `target(w)` flags, `target(v)` does not
+    @test occursin("target(::Other)", only(flagged).message)
+    # `target(v)`'s match short-circuits in `sig_match_any(::Binding)`'s direct
+    # check; `target(w)`'s mismatch does not, so it falls through to the
+    # `.refs` loop and is compared (and ruled out) a second time.
+    @test rec.comparisons >= 2 && rec.rule_outs == 2
+end
+
+@testitem "parity: closure callee needs the mid-walk hop, not just call-side resolution" setup=[FileAnalysisWS] begin
+    # `Own`'s own supertype (`OtherAbs`) is unrelated to `MyAbs` — ruling this
+    # out needs `_super` to walk PAST `Own`'s immediate supertype and hit the
+    # sibling-file `TreeRef` mid-chain (`OtherAbs`), not merely the call-side
+    # annotation read: a fixture built only from directly cross-file/same-file
+    # annotations can't tell the mid-walk hop apart from a plain "not ruled
+    # out" (both read as "no flag"). Confirmed by temporarily disabling the
+    # `sup_a isa TreeRef` conversion in `_issubtype`: this fixture drops to 0
+    # flags, while the earlier (non-discriminating) mid-walk fixture does not
+    # change either way.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nabstract type OtherAbs end\n",
+        B => """
+        struct Own <: OtherAbs end
+        function caller(v::Own)
+            target(x::MyAbs) = 1
+            target(v)
+        end
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("target(::Own)", only(flagged).message)
+    # The one call's mismatch never short-circuits (see the comment above), so
+    # it is compared, and ruled out, twice.
+    @test rec.comparisons >= 1 && rec.rule_outs == 2
+end
+
 @testitem "parity: bare identifier, same-file module-level callee flags a definite mismatch" setup=[FileAnalysisWS] begin
     jw = ws_with(Dict(
         ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
