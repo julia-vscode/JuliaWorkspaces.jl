@@ -953,8 +953,10 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     tree_callsite_type = (t, x) ->
         tree_signature_resolver(t, vcat(path, _in_file_module_names(x, meta_dict)))
     StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict,
-        tree_visible, tree_extended, tree_arities, tree_in_scope,
-        tree_signatures, tree_signature_resolver, tree_callsite_type)
+        StaticLint.TreeContext(;
+            visible = tree_visible, extended = tree_extended, arities = tree_arities,
+            in_scope = tree_in_scope, signatures = tree_signatures,
+            resolve = tree_signature_resolver, callsite_type = tree_callsite_type))
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file

@@ -109,6 +109,23 @@ LintOptions(::Colon) = LintOptions(fill(true, length(default_options))...)
 LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
     LintOptions(something.(options, default_options)...)
 
+"""
+    TreeContext
+
+Per-file mode's tree-side capabilities, bundled. Every field is `nothing` in
+whole-closure mode; a check that needs one degrades to its pre-tree behavior
+when it is absent.
+"""
+Base.@kwdef struct TreeContext
+    visible::Union{Nothing,Function} = nothing
+    extended::Union{Nothing,Function} = nothing
+    arities::Union{Nothing,Function} = nothing
+    in_scope::Union{Nothing,Function} = nothing
+    signatures::Union{Nothing,Function} = nothing
+    resolve::Union{Nothing,Function} = nothing
+    callsite_type::Union{Nothing,Function} = nothing
+end
+
 # `tree_visible` (per-file traversal mode only, `nothing` in the
 # whole-closure pass): a `(name::String, x::EXPR) -> Bool` predicate over
 # the tree-context visible names AT THE CALL SITE `x` (the site matters:
@@ -121,13 +138,13 @@ LintOptions(options::Vararg{Union{Bool,Nothing},length(default_options)}) =
 # decline — the lost true-positive direction (a genuinely method-less
 # module-level function) is sanctioned conservatism of the per-file
 # architecture.
-function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing, tree_signatures=nothing, tree_resolve=nothing, tree_callsite_type=nothing)
+function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContext())
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
     is_test_throws_macrocall(x, env, meta_dict) && return
 
     # Do checks
-    opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope, tree_signatures, tree_resolve, tree_callsite_type)
+    opts.call && check_call(x, env, meta_dict, tree)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
     opts.constif && check_if_conds(x, meta_dict)
@@ -144,7 +161,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
 
     if x.args !== nothing
         for i in 1:length(x.args)
-            check_all(x.args[i], opts, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope, tree_signatures, tree_resolve, tree_callsite_type)
+            check_all(x.args[i], opts, env, meta_dict, tree)
         end
     end
 end
@@ -449,7 +466,7 @@ function _is_function_local_binding(b::Binding, meta_dict)
     return maybe_get_parent_fexpr(p, x -> CSTParser.defines_function(x) || CSTParser.defines_macro(x)) !== nothing
 end
 
-function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_extended=nothing, tree_arities=nothing, tree_in_scope=nothing, tree_signatures=nothing, tree_resolve=nothing, tree_callsite_type=nothing)
+function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContext())
     if iscall(x)
         parentof(x) isa EXPR && headof(parentof(x)) === :do && return # TODO: add number of args specified in do block.
         length(x.args) == 0 && return
@@ -468,21 +485,21 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
         # A tree-visible workspace callee — a local `Binding` whose name is also
         # tree-visible (methods may span sibling files), OR a `TreeRef` to a
         # function/macro/struct defined only in sibling files.
-        if tree_visible !== nothing &&
+        if tree.visible !== nothing &&
            ((func_ref isa Binding && !_is_function_local_binding(func_ref, meta_dict)) ||
             (func_ref isa TreeRef && func_ref.kind in (:function, :macro, :struct, :mutable_struct)))
             name = CSTParser.get_name(x)
             if name isa EXPR && isidentifier(name)
                 n = valofid(name)
-                if n !== nothing && tree_visible(n, x)
+                if n !== nothing && tree.visible(n, x)
                     # The local `func_ref` sees only THIS file's methods of a
                     # tree-visible name, but the tree knows all of them. Check the
                     # argument count against the full cross-file arity set
                     # (`tree_arities`); a positional TYPE check of a cross-file
                     # callee is deferred (needs sibling analyses). Splatted calls
                     # have an unknowable arity — skip.
-                    if tree_arities !== nothing && !call_has_splat(x)
-                        arities = tree_arities(n, x)
+                    if tree.arities !== nothing && !call_has_splat(x)
+                        arities = tree.arities(n, x)
                         # An unqualified import of a store function/type
                         # (`import Base: show`) binds a `Binding` whose `.val` is
                         # the store: its method set is the workspace overloads
@@ -514,14 +531,14 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                                 # methods to any function in any module, so a
                                 # sound marker would have to withhold every type
                                 # opinion everywhere. The blind spot is accepted.
-                                if tree_signatures !== nothing && tree_resolve !== nothing &&
+                                if tree.signatures !== nothing && tree.resolve !== nothing &&
                                    store === nothing && !_is_datatype_callee(func_ref)
-                                    nm = tree_signatures(n, x)
+                                    nm = tree.signatures(n, x)
                                     if !isempty(nm.signatures) && !nm.has_unknown_shapes
                                         args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
-                                        tree_callsite_type === nothing ||
-                                            (args = tree_arg_operands(x, args, meta_dict, tree_callsite_type))
-                                        any(ls -> match_method(args, kws, ls, tree_resolve, getsymbols(env), meta_dict), nm.signatures) ||
+                                        tree.callsite_type === nothing ||
+                                            (args = tree_arg_operands(x, args, meta_dict, tree.callsite_type))
+                                        any(ls -> match_method(args, kws, ls, tree.resolve, getsymbols(env), meta_dict), nm.signatures) ||
                                             seterror!(x, IncorrectCallArgs, meta_dict)
                                     end
                                 end
@@ -529,7 +546,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                                 # Match against the store's own methods; decline
                                 # (no flag) if we can't resolve a scope for them.
                                 tls = retrieve_toplevel_scope(x, meta_dict)
-                                if tls isa Scope && !iterate_over_ss_methods(store, tls, env, m -> compare_f_call(func_nargs(m), cc); in_scope = tree_in_scope === nothing ? nothing : tree_in_scope(x))
+                                if tls isa Scope && !iterate_over_ss_methods(store, tls, env, m -> compare_f_call(func_nargs(m), cc); in_scope = tree.in_scope === nothing ? nothing : tree.in_scope(x))
                                     seterror!(x, IncorrectCallArgs, meta_dict)
                                 end
                             else
@@ -548,8 +565,8 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
         # in the env store's method set, so this file sees only a partial set —
         # decline rather than false-positive. `tree_extended` (per-file mode only)
         # confirms `func_ref` is the function actually extended.
-        if tree_extended !== nothing && (func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore)
-            tree_extended(func_ref, x) && return
+        if tree.extended !== nothing && (func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore)
+            tree.extended(func_ref, x) && return
         end
 
         # The mirror image of that gate: a workspace `Base.axes(::Axis, d) = …`
@@ -574,7 +591,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
         func_ref === nothing && return
         if func_has_no_methods(func_ref, meta_dict)
             seterror!(x, FunctionHasNoMethods, meta_dict)
-        elseif !sig_match_any(func_ref, x, call_counts, tls, env, meta_dict, tree_in_scope)
+        elseif !sig_match_any(func_ref, x, call_counts, tls, env, meta_dict, tree.in_scope)
             seterror!(x, IncorrectCallArgs, meta_dict)
         end
     end
