@@ -508,6 +508,22 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
                         store = func_ref isa Binding &&
                             (func_ref.val isa SymbolServer.FunctionStore || func_ref.val isa SymbolServer.DataTypeStore) ?
                             func_ref.val : nothing
+                        # One `tree.signatures` fetch serves this branch and the type
+                        # phase below.
+                        nm = tree.signatures === nothing ? nothing : tree.signatures(n, x)
+                        outside = store === nothing && nm !== nothing && tree.reaches_outside !== nothing &&
+                            tree.reaches_outside(n, x)
+                        # Definite emptiness: nothing anywhere in the tree defines a
+                        # method, only a bare forward declaration — the count phase
+                        # below can't reach this (it requires an arity or a store;
+                        # this case has neither). Mirrors whole-closure's
+                        # `func_has_no_methods`, and survives the declaration moving
+                        # to a sibling file.
+                        if nm !== nothing && store === nothing && isempty(nm.signatures) && nm.has_forward_decl &&
+                           !nm.has_unknown_shapes && !outside
+                            seterror!(x, FunctionHasNoMethods, meta_dict)
+                            return
+                        end
                         if !isempty(arities) || store !== nothing
                             cc = call_nargs(x)
                             # Shared between the count and type phases below — one
@@ -559,8 +575,6 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
                                 # not `tree.resolve`: an extension's `defined_in`
                                 # may name a deved dependency's own module path,
                                 # unreachable by a resolver started at this root.
-                                nm = tree.signatures(n, x)
-                                outside = store === nothing && tree.reaches_outside !== nothing && tree.reaches_outside(n, x)
                                 nm_ext = store !== nothing && tree.ext_records !== nothing ?
                                     tree.ext_records(store, x) : nothing
                                 ext_sigs = nm_ext === nothing ? () : nm_ext.signatures

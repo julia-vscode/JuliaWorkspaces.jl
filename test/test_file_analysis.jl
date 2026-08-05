@@ -3511,3 +3511,75 @@ end
     # one declared keyword.
     @test isempty(oneroot_flags("c(v::Float64) = ceil(v; digits=2)"))
 end
+
+@testitem "parity: a forward-declared function with no methods flags, cross-file" setup=[FileAnalysisWS] begin
+    function flagsof(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return [d.message for d in fa.diagnostics]
+    end
+    # sibling forward declaration, no methods anywhere: flag
+    @test any(m -> occursin("no methods", m), flagsof("function f end\n", "c() = f()\n"))
+    # a real method anywhere unflags it — here, beside the declaration
+    @test !any(m -> occursin("no methods", m), flagsof("function f end\nf(x) = x\n", "c() = f(1)\n"))
+end
+
+@testitem "parity: a forward-declared function with no methods flags, same-file and one-file-root" setup=[FileAnalysisWS] begin
+    # Same-file placement: declaration and call share one file.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "function f end\nc() = f()\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test any(d -> occursin("no methods", d.message), fa.diagnostics)
+
+    # One-file-root: no separate root/include indirection — the file is its
+    # own whole tree.
+    jw2 = ws_with(Dict(B => "function f end\nc() = f()\n"))
+    fa2 = JuliaWorkspaces.derived_file_analysis(jw2.runtime, B, B)
+    @test any(d -> occursin("no methods", d.message), fa2.diagnostics)
+end
+
+@testitem "parity: the no-methods verdict survives moving the forward declaration to a sibling file" setup=[FileAnalysisWS] begin
+    root_src = "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n"
+    function flags_at(a::String, b::String, callfile)
+        jw = ws_with(Dict(ROOT => root_src, A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, callfile)
+        return [d.message for d in fa.diagnostics]
+    end
+
+    # Declaration in a.jl, call in b.jl.
+    @test any(m -> occursin("no methods", m), flags_at("function f end\n", "c() = f()\n", B))
+    # Declaration MOVED to b.jl, call moved to a.jl — same verdict.
+    @test any(m -> occursin("no methods", m), flags_at("c() = f()\n", "function f end\n", A))
+end
+
+@testitem "parity: an unknown-shaped name beside a forward decl is not definitely empty" setup=[FileAnalysisWS] begin
+    # `oldname` gets both a forward declaration (`function oldname end`, kind
+    # :function with no arity) and a macro-declared row for the same key
+    # (`@deprecate` mints an :macro_declared item, which the index marks
+    # `has_unknown_shapes` regardless of confirmation — see the analogous
+    # "signature index: a macro-declared name still marks has_unknown_shapes"
+    # test). The union is incomplete, so the definite-emptiness verdict must
+    # decline even though the signature set is literally empty.
+    #
+    # A full diagnostic fixture cannot distinguish this from the pre-fix
+    # behavior: with no arity and no store, the count phase never runs either
+    # way, so the call is silent both before and after this feature — pinning
+    # the index answer and the gate's own predicate is the only way to assert
+    # the `has_unknown_shapes` branch actually does the excluding.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "@deprecate oldname newname\n",
+        B => "function oldname end\n",
+    ))
+    nm = JuliaWorkspaces.derived_method_signatures(jw.runtime, ROOT, ["MainPkg"], "oldname")
+    @test isempty(nm.signatures)
+    @test nm.has_forward_decl
+    @test nm.has_unknown_shapes
+    # The gate's own predicate (checks.jl): definite emptiness requires
+    # `!has_unknown_shapes`, so this NameMethods must not satisfy it.
+    @test !(isempty(nm.signatures) && nm.has_forward_decl && !nm.has_unknown_shapes)
+end
