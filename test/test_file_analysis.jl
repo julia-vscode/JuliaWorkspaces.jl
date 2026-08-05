@@ -3029,6 +3029,12 @@ end
     # A `where` typevar passed as an argument may bind a value: no opinion — and
     # the DECISION must use the same operand the message reports.
     @test isempty(flags("module T2\nf(x::NamedTuple{an}, y::NamedTuple{bn}) where {an,bn} = Base.merge_names(an, bn)\nend\n"))
+
+    # `using Base: UUID` binds the name locally; a constructor call through the
+    # imported name is the store type it stands for, not the import binding.
+    @test isempty(flags("module U\nusing Base: PkgId, UUID\nf() = PkgId(UUID(42), \"x\")\ng(x::Base.UUID) = x\nh() = g(UUID(42))\nend\n"))
+    @test isempty(flags("module U2\nimport Base: UUID\ng(x::UUID) = x\nh() = g(UUID(42))\nend\n"))
+    @test length(flags("module U3\nusing Base: UUID, Dict\ng(x::Base.UUID) = x\nbad() = g(Dict(1=>2))\nend\n")) == 1
 end
 
 @testitem "parity: an anonymous constructor's methods are not indexed" setup=[FileAnalysisWS] begin

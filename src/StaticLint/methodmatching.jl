@@ -538,6 +538,11 @@ function _resolve_type_expr(t, store, meta_dict, resolver=nothing)
         return dt === nothing ? CoreTypes.Any : dt
     elseif r isa Binding && r.type isa Binding && r.type.val isa SymbolServer.DataTypeStore
         return r.type.val
+    elseif r isa Binding && r.val isa SymbolServer.DataTypeStore
+        # `using Base: UUID` binds the name locally, but the operand is the store
+        # type the import stands for — the binding itself carries no supertype
+        # chain, so returning it would rule out every call it types.
+        return r.val
     elseif r isa Binding && CoreTypes.isdatatype(r.type)
         # A workspace datatype's own binding (`struct`/`abstract`/`primitive`):
         # its supertype chain is walkable directly through `_super(::Binding)`.
