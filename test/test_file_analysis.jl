@@ -3675,3 +3675,44 @@ end
     @test length(callflags("struct W\n    @weird a, b\n    c::Int\nend\n", "mk() = W(1)\n")) == 1
     @test isempty(callflags("struct W\n    @weird a, b\n    c::Int\nend\n", "mk() = W(1, 2)\n"))
 end
+
+@testitem "record-arm: TypeRef resolution never contradicts the store verdicts" setup=[FileAnalysisWS] begin
+    # Same name table as "the rule-out check never contradicts real subtyping"
+    # (test/staticlint/test_staticlint.jl); the two tables must not drift —
+    # same floors, same pairs.
+    concrete = ["Int8","Int64","UInt8","Float32","Float64","Bool","Char","String",
+                "Symbol","Nothing","Dict","Set","Array","UnitRange","ArgumentError",
+                "BoundsError","Rational","Complex"]
+    bounds = ["Real","Signed","Unsigned","Integer","AbstractFloat","Number",
+              "AbstractString","AbstractChar","AbstractDict","AbstractSet",
+              "AbstractArray","DenseArray","AbstractRange","Exception","Function","Tuple"]
+    using JuliaWorkspaces: TypeRef
+    jw = ws_with(Dict(ROOT => "module MainPkg\nend\n"))
+    resolve = JuliaWorkspaces._tree_type_resolver(jw.runtime, ROOT)
+    # project-less root: the resolver and this lookup share the stdlib-only env
+    env = JuliaWorkspaces.derived_stdlib_only_env(jw.runtime)
+    syms = SL.getsymbols(env)
+    function lookup(n)   # the store-side operand, as the store pin builds it
+        for m in (:Core, :Base)
+            haskey(syms, m) && haskey(syms[m], Symbol(n)) && return syms[m][Symbol(n)]
+        end
+        return nothing
+    end
+    function tally()
+        mismatches = String[]
+        resolved = 0
+        for c in concrete, b in bounds
+            rc = resolve(TypeRef([c]), ["MainPkg"]); rb = resolve(TypeRef([b]), ["MainPkg"])
+            sc = lookup(c); sb = lookup(b)
+            (rc === nothing || rb === nothing || sc === nothing || sb === nothing) && continue
+            resolved += 1
+            SL._has_type_intersection(rc, rb, syms, Dict{UInt64,SL.Meta}()) ===
+                SL._has_type_intersection(sc, sb, syms, Dict{UInt64,SL.Meta}()) ||
+                push!(mismatches, "$c vs $b")
+        end
+        return resolved, mismatches
+    end
+    resolved, mismatches = tally()
+    @test isempty(mismatches)
+    @test resolved >= 250    # floor against silent vacuity (18×16 = 288 pairs)
+end
