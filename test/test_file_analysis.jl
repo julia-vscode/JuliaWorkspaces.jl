@@ -2733,3 +2733,160 @@ end
     @test myabs.key == (["MainPkg", "Inner"], "MyAbs")
     @test SL._issubtype(own, myabs, nothing, nothing) === true
 end
+
+@testitem "parity/parametric: head-only comparison, sibling callee" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct Other end\ntarget(x::Vector{Int}) = 1\n",
+        B => """
+        good(v::Vector{String}) = target(v)   # heads equal; type args are a non-goal
+        bad(w::Other) = target(w)
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("target(::Other)", only(flagged).message)
+    @test rec.comparisons >= 2 && rec.rule_outs == 1
+end
+
+@testitem "parity/inner-where: `Vector{T} where T` annotation is its head" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct Other end\ntarget(x::Vector{T} where T) = 1\n",
+        B => "good(v::Vector{Int}) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity/dispatch-only: a nameless `::T` slot still types" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nstruct Own <: MyAbs end\nstruct Other end\ntarget(::MyAbs, y::Int) = 1\n",
+        B => "good(v::Own) = target(v, 1)\nbad(w::Other) = target(w, 1)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity/shapes: closure callee flags each shape's definite mismatch" setup=[FileAnalysisWS] begin
+    # Types stay in the SAME file as the closure in every shape below; the
+    # cross-file hop for a closure callee is a later deferral, not asserted here.
+    function flagged(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test length(flagged("""
+    struct Other end
+    function caller(v::Vector{String}, w::Other)
+        target(x::Vector{Int}) = 1
+        target(v)
+        target(w)
+    end
+    """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    function caller(v::Vector{Int}, w::Other)
+        target(x::Vector{T} where T) = 1
+        target(v)
+        target(w)
+    end
+    """)) == 1
+
+    @test length(flagged("""
+    abstract type MyAbs end
+    struct Own <: MyAbs end
+    struct Other end
+    function caller(v::Own, w::Other)
+        target(::MyAbs, y::Int) = 1
+        target(v, 1)
+        target(w, 1)
+    end
+    """)) == 1
+end
+
+@testitem "parity/shapes: same-file module-level callee flags each shape's definite mismatch" setup=[FileAnalysisWS] begin
+    function flagged(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test length(flagged("""
+    struct Other end
+    target(x::Vector{Int}) = 1
+    good(v::Vector{String}) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    target(x::Vector{T} where T) = 1
+    good(v::Vector{Int}) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    abstract type MyAbs end
+    struct Own <: MyAbs end
+    struct Other end
+    target(::MyAbs, y::Int) = 1
+    good(v::Own) = target(v, 1)
+    bad(w::Other) = target(w, 1)
+    """)) == 1
+end
+
+@testitem "parity/shapes: one-file root reports like a same-file module-level callee" setup=[FileAnalysisWS] begin
+    function flagged(src::String)
+        jw = ws_with(Dict(B => src))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, B, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test length(flagged("""
+    struct Other end
+    target(x::Vector{Int}) = 1
+    good(v::Vector{String}) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    target(x::Vector{T} where T) = 1
+    good(v::Vector{Int}) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    abstract type MyAbs end
+    struct Own <: MyAbs end
+    struct Other end
+    target(::MyAbs, y::Int) = 1
+    good(v::Own) = target(v, 1)
+    bad(w::Other) = target(w, 1)
+    """)) == 1
+end

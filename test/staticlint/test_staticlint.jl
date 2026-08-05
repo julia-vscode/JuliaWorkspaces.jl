@@ -4849,3 +4849,43 @@ end
     @test SL.match_method(Any[other], Any[], LocatedSignature(["MainPkg"], usig),
         resolver, nothing, nothing) === true
 end
+
+# The inner-`where` shape (`Vector{T} where T`) has no distinct MethodStore
+# spelling — the store pre-resolves it to the same parametric head as
+# `Vector{Int}` — so it needs no placement-d row of its own.
+
+@testitem "parity/parametric placement d: MethodStore parametric head rules out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    cst, meta_dict, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    vec = syms[:Base][:Vector]          # DataTypeStore behind the constructor
+    vecdt = SL.get_eventual_datatype(vec, get_env(jw))
+    other = SL.bindingof(cst.args[1], meta_dict)
+    m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[:x => SS.FakeTypeName(Vector{Int})], Symbol[], nothing)
+    # good: a Vector argument matches the Vector{Int} slot through the head
+    @test SL.match_method(Any[vecdt], Any[], m, syms, meta_dict) === true
+    # bad: a workspace struct with supertype Any is definitely ruled out
+    @test SL.match_method(Any[other], Any[], m, syms, meta_dict) === false
+end
+
+@testitem "parity/dispatch-only placement d: MethodStore nameless slot rules out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    cst, meta_dict, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    fdt = SL.get_eventual_datatype(syms[:Base][:AbstractFloat], get_env(jw))
+    other = SL.bindingof(cst.args[1], meta_dict)
+    # A real method (`iseven(::Missing)`) spells its nameless slot
+    # `Symbol("#unused#")`, not `Symbol("")` -- `Base.method_argnames` names an
+    # anonymous parameter that way, and the crawler carries it through as-is.
+    m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[Symbol("#unused#") => SS.FakeTypeName(AbstractFloat),
+                      :y => SS.FakeTypeName(Int)],
+        Symbol[], nothing)
+    # good: an AbstractFloat descendant matches the nameless slot through its head
+    @test SL.match_method(Any[fdt, SS.FakeTypeName(Int)], Any[], m, syms, meta_dict) === true
+    # bad: a workspace struct with supertype Any is definitely ruled out
+    @test SL.match_method(Any[other, SS.FakeTypeName(Int)], Any[], m, syms, meta_dict) === false
+end
