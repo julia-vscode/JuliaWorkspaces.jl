@@ -2833,6 +2833,15 @@ end
         target(w)
     end
     """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    function caller(v::Float64, w::Other)
+        target(x::T) where {T <: Real} = 1
+        target(v)
+        target(w)
+    end
+    """)) == 1
 end
 
 @testitem "parity/shapes: same-file module-level callee flags each shape's definite mismatch" setup=[FileAnalysisWS] begin
@@ -2877,6 +2886,13 @@ end
     good(v::P) = target(v)
     bad(w::Other) = target(w)
     """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    target(x::T) where {T <: Real} = 1
+    good(v::Float64) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
 end
 
 @testitem "parity/shapes: one-file root reports like a same-file module-level callee" setup=[FileAnalysisWS] begin
@@ -2918,6 +2934,13 @@ end
     good(v::P) = target(v)
     bad(w::Other) = target(w)
     """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    target(x::T) where {T <: Real} = 1
+    good(v::Float64) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
 end
 
 @testitem "parity/union: workspace members rule out member-wise, sibling callee" setup=[FileAnalysisWS] begin
@@ -2951,4 +2974,59 @@ end
     @test SL._has_type_intersection(other, u, store, nothing) === false
     p = resolve(TypeRef(["P"]), ["MainPkg"])
     @test SL._has_type_intersection(p, u, store, nothing) === true
+end
+
+@testitem "parity/where: an upper-bounded typevar rules out, sibling callee" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct Other end\ntarget(x::T) where {T <: Real} = 1\n",
+        B => "good(v::Float64) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("target(::Other)", only(flagged).message)
+    @test rec.comparisons >= 2 && rec.rule_outs == 1
+end
+
+@testitem "parity/where: a lower bound or unbounded typevar licenses nothing" setup=[FileAnalysisWS] begin
+    # A lower bound (`T >: Int`) constrains the typevar from below, giving no
+    # upper bound to rule a call out with; an unbounded `where T` gives none
+    # either. These are reader facts about the record-side `where_var_and_bound`
+    # (via `resolve_record_type`), not a new placement — sibling-file only.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        rec = SL.MatchRecorder()
+        SL._match_recorder[] = rec
+        fa = try
+            JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        finally
+            SL._match_recorder[] = nothing
+        end
+        flagged = filter(d -> occursin("method call error", d.message) ||
+                             occursin("No method matching", d.message), fa.diagnostics)
+        return flagged, rec
+    end
+
+    flagged, rec = callflags("struct Other end\ntarget(x::T) where {T >: Int} = 1\n",
+                             "callit(w::Other) = target(w)\n")
+    @test isempty(flagged)
+    # Silence must come from a declined comparison, not a candidate the pass
+    # never reached.
+    @test rec.comparisons >= 1 && rec.rule_outs == 0
+
+    flagged, rec = callflags("struct Other end\ntarget(x::T) where T = 1\n",
+                             "callit(w::Other) = target(w)\n")
+    @test isempty(flagged)
+    @test rec.comparisons >= 1 && rec.rule_outs == 0
 end

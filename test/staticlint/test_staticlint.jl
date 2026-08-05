@@ -4905,3 +4905,19 @@ end
     # bad: a workspace struct with supertype Any is ruled out against every member
     @test SL.match_method(Any[other], Any[], m, syms, meta_dict) === false
 end
+
+@testitem "parity/where placement d: MethodStore FakeTypeVar upper bound rules out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    cst, meta_dict, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    fdt = SL.get_eventual_datatype(syms[:Base][:Float64], get_env(jw))
+    other = SL.bindingof(cst.args[1], meta_dict)
+    m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[:x => SS.FakeTypeVar(:T, SS.FakeTypeName(Union{}), SS.FakeTypeName(Real))],
+        Symbol[], nothing)
+    # good: a Float64 argument matches through the typevar's upper bound
+    @test SL.match_method(Any[fdt], Any[], m, syms, meta_dict) === true
+    # bad: a workspace struct with supertype Any is definitely ruled out
+    @test SL.match_method(Any[other], Any[], m, syms, meta_dict) === false
+end
