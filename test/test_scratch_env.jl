@@ -36,7 +36,11 @@
     @test isempty(project.targets)
 
     @static if VERSION >= v"1.11"
-        @test project.sources["Bare"]["path"] == dir
+        # `EnvCache` realpaths the project file, so the recorded path is the
+        # resolved form — `/private/var/...` on macOS, the long profile name on
+        # Windows — never the raw `mktempdir()` string.
+        @test isabspath(project.sources["Bare"]["path"])
+        @test realpath(project.sources["Bare"]["path"]) == realpath(dir)
     end
 
     @test _snapshot(dir) == before
@@ -68,7 +72,8 @@ end
 
     written = Pkg.Types.read_manifest(joinpath(env_dir, "Manifest.toml"))
     entry = written[Base.UUID(uuid)]
-    @test entry.path == dir
+    @test isabspath(entry.path)
+    @test realpath(entry.path) == realpath(dir)
     @test entry.version == v"0.1.0"
     # The rest of the pinned graph survives, so the test env resolves against
     # exactly the versions the user has.
