@@ -62,6 +62,9 @@ end
 
 StaticLint.context_tree_ref(ctx::TreeModuleContext) = _context_tree_ref(ctx)
 
+StaticLint.context_exported_names(ctx::TreeModuleContext) =
+    derived_module_exports(ctx.rt, ctx.root, ctx.path).exports
+
 # The names of the modules DECLARED IN the analyzed file that enclose `x`,
 # outermost-first, read off the scope chain (works after
 # `strip_module_contexts!` — module nesting survives the handle strip).

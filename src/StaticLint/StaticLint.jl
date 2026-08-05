@@ -91,6 +91,30 @@ context type.
 function qualified_module_target end
 
 """
+    context_exported_names(ctx) -> Union{Nothing,Vector{String}}
+
+The names the module denoted by `ctx` exports, or `nothing` when unknown.
+Interface for `AbstractModuleContext` implementations (the concrete method
+for the tree-backed context lives in layer_file_analysis.jl).
+"""
+context_exported_names(@nospecialize(_)) = nothing
+
+"""
+    ExportFilteredContext(inner, names)
+
+A module-context wrapper with `using` semantics: resolves a name through
+`inner` only when the name is in `names` (the target's export list). Used to
+inject a workspace package's exported names into a `@testitem` scope (or any
+non-module-toplevel `using` site) without over-resolving internal names.
+Holds `inner`'s runtime handle, so it must be stripped before meta is frozen
+(`strip_module_contexts!` removes any `AbstractModuleContext` value).
+"""
+struct ExportFilteredContext{C<:AbstractModuleContext} <: AbstractModuleContext
+    inner::C
+    names::Set{String}
+end
+
+"""
     workspace_package_context(ctx::AbstractModuleContext, name::String) -> Union{Nothing,AbstractModuleContext}
 
 The (cross-root) context of the workspace package named `name`, or `nothing`
@@ -465,15 +489,18 @@ Remove every `:__tree__ => AbstractModuleContext` entry from the scopes
 stored in `meta_dict` (the per-file pass seeds them on the root scope and on
 each in-file module scope). Called at the end of a `semantic_pass` run in
 per-file mode so no runtime handle remains reachable from the returned meta.
-Only context values are removed — a user module that happens to be named
-`__tree__` (a `Scope`/`ModuleStore` value) is left alone.
+Remove every `AbstractModuleContext` value from the scopes stored in `meta_dict`,
+under any key — the per-file pass seeds `:__tree__`, and testitem injection adds
+package-named entries.
 """
 function strip_module_contexts!(meta_dict::Dict{UInt64,Meta})
     for m in values(meta_dict)
         s = m.scope
         s isa Scope || continue
         s.modules isa Dict || continue
-        get(s.modules, :__tree__, nothing) isa AbstractModuleContext && delete!(s.modules, :__tree__)
+        for (k, v) in collect(s.modules)
+            v isa AbstractModuleContext && delete!(s.modules, k)
+        end
     end
     return
 end

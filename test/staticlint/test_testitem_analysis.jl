@@ -128,3 +128,26 @@ end
     msgs = diag_messages(jw)
     @test "Missing reference: leaked_name" in msgs
 end
+
+@testitem "context_exported_names reads a workspace package's export list" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="")
+    ctx = JuliaWorkspaces.TreeModuleContext(jw.runtime, ENTRY, ["MyPkg"])
+    @test SL.context_exported_names(ctx) == ["efn"]
+end
+
+@testitem "strip_module_contexts! removes contexts under any key" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="")
+    ctx = JuliaWorkspaces.TreeModuleContext(jw.runtime, ENTRY, ["MyPkg"])
+    wrapped = SL.ExportFilteredContext(ctx, Set(["efn"]))
+
+    fake = CST.parse("x = 1")
+    md = Dict{UInt64,SL.Meta}()
+    SL.setscope!(fake, SL.Scope(fake), md)
+    sc = SL.scopeof(fake, md)
+    sc.modules = Dict{Symbol,Any}(:__tree__ => ctx, :MyPkg => wrapped, :NotACtx => 1)
+
+    SL.strip_module_contexts!(md)
+    @test !haskey(sc.modules, :__tree__)
+    @test !haskey(sc.modules, :MyPkg)
+    @test haskey(sc.modules, :NotACtx)
+end

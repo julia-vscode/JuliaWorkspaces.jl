@@ -155,6 +155,14 @@ function resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
     return resolved
 end
 
+function resolve_ref_from_module(x1::EXPR, ctx::ExportFilteredContext, state::TraverseState)::Bool
+    isidentifier(x1) || return false
+    n = valofid(x1)
+    n === nothing && return false
+    n in ctx.names || return false
+    return resolve_ref_from_module(x1, ctx.inner, state)
+end
+
 # Searches a module store for a binding/variable that matches the reference `x1`.
 function resolve_ref_from_module(x1::EXPR, m::SymbolServer.ModuleStore, state::TraverseState)::Bool
     meta_dict = state.meta_dict
