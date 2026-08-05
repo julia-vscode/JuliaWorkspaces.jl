@@ -935,19 +935,18 @@ Salsa.@derived function derived_method_signatures_index(rt, root)
     sigs = Dict{Tuple{Vector{String},String},Set{LocatedSignature}}()
     unknown = Set{Tuple{Vector{String},String}}()
     fwd = Set{Tuple{Vector{String},String}}()
-    # Modules holding a construct that defines names only when it runs: every
-    # name keyed there is an under-approximation, whatever its own rows say.
-    opaque = Set{Vector{String}}()
 
     # Widened past the walk's default binding kinds: `:macro_declared` rows
-    # never carry a signature, but they must still reach the `unknown` marker,
-    # and `:opaque_eval` rows mark their whole module.
+    # never carry a signature, but they must still reach the `unknown` marker.
+    #
+    # Methods a module defines only when it RUNS — through `eval`, or a macro
+    # nothing here can expand — are invisible to these records and deliberately
+    # unmarked. A marker cannot be scoped soundly: such code can add methods to
+    # any function in any module, so honouring it would mean withholding every
+    # type opinion everywhere rather than in one module. The blind spot is
+    # accepted instead.
     _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
-                                 kinds=(_BINDING_ITEM_KINDS..., :macro_declared, :opaque_eval)) do F, item, loc
-        if item.kind === :opaque_eval
-            loc in modpaths && push!(opaque, loc)
-            return
-        end
+                                 kinds=(_BINDING_ITEM_KINDS..., :macro_declared)) do F, item, loc
         resolved = isempty(item.qualifier) ? loc :
             _resolve_extension_qualifier(modpaths, loc, item.qualifier)
         (resolved === nothing || resolved ∉ modpaths) && return
@@ -968,7 +967,7 @@ Salsa.@derived function derived_method_signatures_index(rt, root)
     result = Dict{Tuple{Vector{String},String},NameMethods}()
     for key in union(keys(sigs), unknown, fwd)
         result[key] = NameMethods(get(() -> Set{LocatedSignature}(), sigs, key),
-            key in unknown || key[1] in opaque, key in fwd)
+            key in unknown, key in fwd)
     end
     return result
 end

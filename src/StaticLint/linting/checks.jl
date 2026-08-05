@@ -506,6 +506,14 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
                                 # neither are a datatype's inner/keyword
                                 # constructors (the records carry the default
                                 # field constructor only).
+                                #
+                                # Methods defined only when the code RUNS — by
+                                # `eval`, or by a macro nothing here can expand —
+                                # are invisible to the records and are NOT marked
+                                # as making them incomplete: such code can add
+                                # methods to any function in any module, so a
+                                # sound marker would have to withhold every type
+                                # opinion everywhere. The blind spot is accepted.
                                 if tree_signatures !== nothing && tree_resolve !== nothing &&
                                    store === nothing && !_is_datatype_callee(func_ref)
                                     nm = tree_signatures(n, x)

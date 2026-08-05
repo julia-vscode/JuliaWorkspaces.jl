@@ -171,9 +171,6 @@ of a `:file` CST in pre-order: the file's direct children, plus — for
 `module`/`baremodule` declarations — the module node itself and then the
 children of its body block (never the bodies of functions, structs, etc.).
 
-An ARGUMENT-LESS macrocall (`@gen`) has nothing to descend into, so it is
-visited as itself — the only shape where a transparent macrocall reaches `f`.
-
 `order` is sequential in visit order and is what the module tree sorts on to
 recover textual-splice semantics. `id` is the statement's identity, which is
 what `ItemRef` carries; both are minted once per statement, so every record a
@@ -343,8 +340,7 @@ function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, alloc::_It
         _walk_if_chain!(f, item, parent_module, item_offset, alloc)
     elseif CSTParser.headof(item) === :block
         _walk_transparent_block!(f, item, parent_module, item_offset, alloc)
-    elseif CSTParser.ismacrocall(item) && !_is_enum_macro(item) &&
-           !_is_isolated_scope_macrocall(item) && _has_macro_args(item)
+    elseif CSTParser.ismacrocall(item) && !_is_enum_macro(item) && !_is_isolated_scope_macrocall(item)
         _walk_macrocall!(f, item, parent_module, item_offset, alloc)
     else
         order, id = _mint_ids!(alloc, item, parent_module)
@@ -366,13 +362,6 @@ function _walk_one!(f, a, parent_module::Vector{String}, offset::Int, alloc::_It
     end
     return nothing
 end
-
-# Does a macrocall have arguments for the walker to descend into? `@gen` alone
-# has none (`args` is just the name and the parameters placeholder), so there is
-# nothing to read it out of and the statement is visited as ITSELF. Syntactic on
-# purpose: both walks over a file must take this branch identically, or the ids
-# they mint drift apart.
-_has_macro_args(mc::CSTParser.EXPR) = mc.args !== nothing && length(mc.args) >= 3
 
 # Macros whose bodies are ISOLATED from the enclosing module scope in the
 # analysis — StaticLint's `is_scope_introducing_macrocall` (`@testitem`,
@@ -406,10 +395,10 @@ end
 # Offsets come from CSTParser's source-order child iteration (`for c in x`
 # interleaves args and trivia in source order), which stays correct for the
 # call form `@foo(a, b)` where paren/comma TRIVIA sit between the args —
-# summing arg fullspans alone would drift there. Callers gate on
-# `_has_macro_args`, so `args` holds at least one argument here.
+# summing arg fullspans alone would drift there.
 function _walk_macrocall!(f, mc::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, alloc::_ItemIdAllocator)
     margs = mc.args
+    (margs === nothing || length(margs) < 3) && return nothing
     child_offset = offset
     for c in mc
         if any(j -> margs[j] === c, 3:length(margs))
@@ -480,55 +469,9 @@ Salsa.@derived function derived_file_inventory(rt, uri)
     acc = (items=InventoryItem[], imports=InventoryImport[], exports=InventoryExport[],
            includes=InventoryInclude[], modules=InventoryModule[])
     _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
-        before = (length(acc.items), length(acc.imports), length(acc.exports),
-                  length(acc.includes), length(acc.modules))
         _classify_item!(acc, x, order, id, copy(parent_module), offset, include_targets_by_offset, include_records)
-        after = (length(acc.items), length(acc.imports), length(acc.exports),
-                 length(acc.includes), length(acc.modules))
-        # A statement the classifier read nothing out of, which can still define
-        # names when it runs: an `eval` under a loop, or the argument of a macro
-        # whose expansion is unknown here. The row binds no name — it marks its
-        # module as one whose declared API this file only partially describes,
-        # so a consumer that reasons by EXHAUSTING a name's records knows not to.
-        before == after && (_may_define_by_evaluation(x) || _is_unread_macro_argument(x)) &&
-            push!(acc.items, InventoryItem(order, id, "", String[], :opaque_eval,
-                nothing, String[], copy(parent_module)))
     end
     return FileInventory(acc.items, acc.imports, acc.exports, acc.includes, acc.modules)
-end
-
-# Is `x` an argument of a macrocall the walker descended into? Then whatever the
-# classifier failed to read out of it is not the statement's whole story: the
-# macro expands to something else entirely, and that something can define names.
-# The modelled macros (`_macro_declaration_rule`) are excluded — their generated
-# names are already recorded, name by name, as `:macro_declared` rows.
-function _is_unread_macro_argument(x::CSTParser.EXPR)
-    p = CSTParser.parentof(x)
-    (p isa CSTParser.EXPR && CSTParser.ismacrocall(p) && p.args !== nothing) || return false
-    any(j -> p.args[j] === x, 3:length(p.args)) || return false
-    mname = _macro_name_string(p.args[1])
-    mname === nothing && return true
-    return _macro_declaration_rule(mname) === nothing
-end
-
-# Could running `x` define a name? True for an `eval` of any spelling — the
-# `@eval`/`Base.@eval` macro, an `eval`/`Core.eval` call, `include_string` —
-# anywhere in the statement, so the loop around one counts too. Deliberately not
-# "any unreadable statement": a top-level `println` defines nothing, and reading
-# it as opaque would withhold every type opinion in its module.
-function _may_define_by_evaluation(x::CSTParser.EXPR)
-    nm = CSTParser.ismacrocall(x) && x.args !== nothing && !isempty(x.args) ?
-        _macro_name_string(x.args[1]) : nothing
-    (nm !== nothing && (nm == "@eval" || endswith(nm, ".@eval"))) && return true
-    if CSTParser.isidentifier(x)
-        v = StaticLint.valofid(x)
-        (v == "eval" || v == "include_string") && return true
-    end
-    x.args === nothing && return false
-    for a in x.args
-        a isa CSTParser.EXPR && _may_define_by_evaluation(a) && return true
-    end
-    return false
 end
 
 _render_sig(x) = try
@@ -1041,18 +984,13 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
                     mname === nothing || push!(acc.items, InventoryItem(order, id,mname, String[], :enum_member, nothing, String[], parent_module))
                 end
             end
-        elseif _is_isolated_scope_macrocall(x)
-            # The macros whose bodies are isolated from the enclosing scope:
-            # nothing inside them binds here, so the row stands in for the whole
-            # statement and names the macro.
+        else
+            # Only the isolated-scope macros (`_is_isolated_scope_macrocall`)
+            # still reach this arm — the walker descends into every other
+            # macrocall transparently, so their contents were classified as
+            # ordinary items and no opaque row is emitted for them.
             mname = _macro_name_string(x.args[1])
             push!(acc.items, InventoryItem(order, id,something(mname, ""), String[], :opaque_macrocall, nothing, String[], parent_module))
-        else
-            # The walker descends into every other macrocall, so the only one
-            # that reaches here is an ARGUMENT-LESS `@gen` — nothing to read, and
-            # an unknown macro's expansion may define anything. Same opaque row
-            # as a run-time `eval`: it binds no name, it marks the module.
-            push!(acc.items, InventoryItem(order, id, "", String[], :opaque_eval, nothing, String[], parent_module))
         end
     end
     return

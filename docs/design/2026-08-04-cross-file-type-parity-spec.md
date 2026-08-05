@@ -368,3 +368,13 @@ mostly vocabulary and fixtures.
   index** — non-goals per the goals doc.
 - **Store→tree ancestry** (a store type whose supertype is a workspace type)
   cannot occur in valid Julia environments and is not modeled.
+- **Methods defined when the code runs** — by `eval`, or by a macro nothing in
+  the analysis can expand — are invisible to the signature records, so a name
+  whose only other methods are recorded reads as complete and a call the
+  invisible method serves is ruled out. Deliberately NOT marked: such code can
+  define methods for any function, and bindings in any module, so a sound marker
+  would have to disable type analysis globally rather than for one module, which
+  is unacceptable. The blind spot is accepted, exactly as the pre-existing arity
+  channel already accepts it; two `@test_broken` pins in
+  `test/test_file_analysis.jl` ("parity: methods defined when the code runs are
+  not indexed") fail loudly if either form ever starts resolving.
