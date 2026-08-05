@@ -878,15 +878,6 @@ diagnostics are suppressed here: while a root has no project (e.g. a loose
 file during the LS-startup no-active-project window), every real-package
 import would otherwise flash a "Failed to resolve …" false positive. Once a
 project is active, `new == old` again.
-
-Test-setup parity: `semantic_pass` no longer takes a `test_setups` kwarg at
-all. `setup=[...]` names now resolve through the plain-data
-`test_setup_info(ctx, name)` interface (`TreeModuleContext` method in this
-file, backed by `derived_test_setup`), reached via `enclosing_tree_context` —
-so only the per-file pass (which seeds a `:__tree__` module context) resolves
-them; the whole-closure pass (`derived_static_lint_diagnostics_for_root`,
-which never seeds one) does not. See `src/StaticLint/macros.jl`'s
-`_handle_testitem`.
 """
 Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     @debug "derived_new_static_lint_diagnostics" uri=uri
