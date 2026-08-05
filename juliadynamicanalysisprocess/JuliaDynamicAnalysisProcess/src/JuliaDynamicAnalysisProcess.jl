@@ -5,6 +5,7 @@ import Sockets, Pkg
 include("pkg_imports.jl")
 include("../../../shared/julia_dynamic_analysis_process_protocol.jl")
 include("symbolserver.jl")
+include("scratch_env.jl")
 
 struct JuliaDynamicAnalysisProcessState
     endpoint::JSONRPC.JSONRPCEndpoint
@@ -32,10 +33,20 @@ end
 
 function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProjectParams, state::JuliaDynamicAnalysisProcessState, token)
     try
-        Pkg.activate(params.projectPath)
+        if params.package !== nothing && CAN_MIRROR_ENV
+            # `TestEnv.activate` instantiates whatever environment is active, which
+            # would create a `Manifest.toml` in the user's folder. Give it a scratch
+            # mirror of the environment instead.
+            Pkg.activate(materialize_scratch_env(params.projectPath, params.package))
 
-        if params.package!==nothing
-            TestEnv.activate(params.package);
+            TestEnv.activate(params.package)
+        else
+            # Either there is no test environment to build, or this Julia is too
+            # old to mirror one. Reading an environment never writes to it, so
+            # indexing the project where it lies is safe; on the old-Julia path
+            # test files lose their test-only dependencies, which is the lesser
+            # harm compared to writing into the user's folder.
+            Pkg.activate(params.projectPath)
         end
 
         SymbolServer.get_store(params.storePath, progress_reporter(state))
