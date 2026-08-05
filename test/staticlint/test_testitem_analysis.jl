@@ -102,3 +102,29 @@ end
     msgs = diag_messages(jw)
     @test !any(m -> m == "Missing reference: nested_undefined_name", msgs)
 end
+
+@testitem "test macro names are not missing references" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testitem "t" begin
+    end
+    @testmodule TM begin
+    end
+    @testsnippet TS begin
+    end
+    """)
+    msgs = diag_messages(jw)
+    @test !("Missing reference: @testitem" in msgs)
+    @test !("Missing reference: @testmodule" in msgs)
+    @test !("Missing reference: @testsnippet" in msgs)
+end
+
+@testitem "@testmodule bodies do not leak bindings into the file scope" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testmodule TM begin
+        leaked_name = 1
+    end
+    leaked_name
+    """)
+    msgs = diag_messages(jw)
+    @test "Missing reference: leaked_name" in msgs
+end

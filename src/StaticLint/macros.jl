@@ -335,6 +335,17 @@ _is_testitem_macro(x) = isidentifier(x) && valofid(x) == "@testitem"
 _is_testmodule_macro(x) = isidentifier(x) && valofid(x) == "@testmodule"
 _is_testsnippet_macro(x) = isidentifier(x) && valofid(x) == "@testsnippet"
 
+# The testitem-family macros are recognized syntactically (the defining
+# package is usually not in the analysis environment), so their macro-name
+# identifiers can never resolve through the env. Give them a benign ref so
+# they are not reported as missing references.
+function _mark_test_macro_name!(x::EXPR, meta_dict)
+    x.args === nothing && return
+    length(x.args) >= 1 || return
+    hasref(x.args[1], meta_dict) || setref!(x.args[1], Binding(noname, nothing, nothing, EXPR[]), meta_dict)
+    return
+end
+
 # Symbolics/ModelingToolkit variable-defining macros. Matched by name (like the
 # TestItems macros above) so they work even when the defining package isn't
 # indexed; these names are distinctive enough that false matches are unlikely.
@@ -379,7 +390,7 @@ function _parse_testitem_kwargs(x::EXPR)
     setup_names = Symbol[]
     body = nothing
 
-    # args layout: args[1]=@testitem, args[2]=name_string, args[3..end]=kwargs and body
+    # args layout: args[1]=@testitem, args[2]=NOTHING line-info placeholder, args[3]=name_string, args[4..end]=kwargs and body
     x.args === nothing && return (default_imports, setup_names, body)
     for i in 3:length(x.args)
         arg = x.args[i]
@@ -419,6 +430,7 @@ referenced via `setup=[...]` are also injected.
 """
 function _handle_testitem(x::EXPR, state::Toplevel)
     meta_dict = state.meta_dict
+    _mark_test_macro_name!(x, meta_dict)
     default_imports, setup_names, body = _parse_testitem_kwargs(x)
 
     body === nothing && return
@@ -503,14 +515,15 @@ in the parent scope so other code can reference it.
 """
 function _handle_testmodule(x::EXPR, state::Toplevel)
     meta_dict = state.meta_dict
+    _mark_test_macro_name!(x, meta_dict)
 
-    # args layout: args[1]=@testmodule, args[2]=Name, args[3]=begin...end
+    # args layout: args[1]=@testmodule, args[2]=NOTHING line-info placeholder,
+    # args[3]=Name, args[4:end] contain the begin...end block
     x.args === nothing && return
-    length(x.args) < 3 && return
-
-    name_expr = x.args[2]
+    length(x.args) < 4 && return
+    name_expr = x.args[3]
     body = nothing
-    for i in 3:length(x.args)
+    for i in 4:length(x.args)
         if x.args[i] isa EXPR && headof(x.args[i]) === :block
             body = x.args[i]
             break
@@ -555,6 +568,7 @@ snippet body_exprs are separately stored in `test_setups` and inlined into each
 """
 function _handle_testsnippet(x::EXPR, state::Toplevel)
     meta_dict = state.meta_dict
+    _mark_test_macro_name!(x, meta_dict)
 
     # Create an isolating scope — bindings created during traversal stay here
     setscope!(x, Scope(x), meta_dict)
