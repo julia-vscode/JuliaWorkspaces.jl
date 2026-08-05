@@ -165,6 +165,42 @@ the origin module path.
     origin_module::Vector{String}
 end
 
+"""
+    TestSetupInfo
+
+Plain-data description of a `@testmodule` or `@testsnippet` a `@testitem`
+references via `setup=[...]`: `kind` is `:module`/`:snippet`, `names` the
+names the setup binds at its top level. Produced by the
+`test_setup_info(ctx, name)` interface (backed by a Salsa query outside
+StaticLint); safe to reach from frozen meta.
+"""
+struct TestSetupInfo
+    kind::Symbol
+    names::Set{String}
+end
+
+"""
+    TestSetupModuleRef
+
+The `Binding.val` for a `@testmodule` name injected into a `@testitem` scope:
+qualified members (`Foo.x`) resolve against `members`. Plain data — member
+misses are NOT flagged (the set is not enumerable in general; see
+`should_mark_missing_getfield_ref`).
+"""
+struct TestSetupModuleRef
+    name::String
+    members::Set{String}
+end
+
+"""
+    test_setup_info(ctx, name::Symbol) -> Union{Nothing,TestSetupInfo}
+
+The test setup registered under `name` for the package the analyzed file
+belongs to, or `nothing`. Interface for `AbstractModuleContext`
+implementations (concrete method in layer_file_analysis.jl).
+"""
+test_setup_info(@nospecialize(_), ::Symbol) = nothing
+
 include("coretypes.jl")
 include("bindings.jl")
 include("scope.jl")
@@ -229,28 +265,6 @@ function Base.hash(a::ExternalEnv, h::UInt)
     return hash(a.project_deps, hash(x, h))
 end
 
-"""
-    TestSetupInfo
-
-Holds pre-computed semantic information for a `@testmodule` or `@testsnippet`
-declaration. Used by `handle_macro` to resolve `setup=[...]` references in
-`@testitem` macros.
-
-- `kind`: `:module` for `@testmodule`, `:snippet` for `@testsnippet`
-- `binding`: For modules, the `Binding` of the module definition (injected into scope.modules).
-             For snippets, `nothing` (snippet body is inlined directly).
-- `body_exprs`: The CSTParser EXPR nodes of the setup's body block. For snippets,
-                these are `process_EXPR`'d directly in the `@testitem`'s scope. For modules,
-                this is `nothing` (the module binding handles it).
-- `scope`: For modules, the `Scope` of the module. For snippets, `nothing`.
-"""
-struct TestSetupInfo
-    kind::Symbol  # :module or :snippet
-    binding::Union{Nothing,Binding}
-    body_exprs::Union{Nothing,Vector{EXPR}}
-    scope::Union{Nothing,Scope}
-end
-
 getsymbols(env::ExternalEnv) = env.symbols
 getsymbolextendeds(env::ExternalEnv) = env.extended_methods
 
@@ -272,7 +286,6 @@ mutable struct Toplevel{RT} <: TraverseState
     resolveonly::Vector{EXPR}
     env::ExternalEnv
     workspace_packages::Dict{String,Any}
-    test_setups::Dict{Symbol,TestSetupInfo}
     self_package_name::Union{Nothing,String}
     # Whether `followinclude` traverses into included files (the whole-closure
     # pass) or returns immediately (the per-file traversal mode, where included
@@ -287,7 +300,7 @@ end
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
 Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, runtime) =
-    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, true, 0, meta_dict, runtime, ReboundBindings())
+    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, nothing, true, 0, meta_dict, runtime, ReboundBindings())
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -434,11 +447,11 @@ loop resolves non-local names through the module tree, after file-local
 scopes and the Base/Core stores — and includes are NOT followed
 (`follow_includes = false`; included files' names come from the tree).
 """
-function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing)
+function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing)
     root_modules = Dict{Symbol,Any}(m => env.symbols[m] for m in IMPLICIT_SCOPE_MODULES)
     module_context !== nothing && (root_modules[:__tree__] = module_context)
     setscope!(cst, Scope(nothing, cst, Dict(), root_modules, nothing), meta_dict)
-    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, module_context === nothing, 0, meta_dict, rt, ReboundBindings())
+    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, self_package_name, module_context === nothing, 0, meta_dict, rt, ReboundBindings())
     process_EXPR(cst, state)
     _unify_rebound_types!(state)
     unique!(state.delayed)

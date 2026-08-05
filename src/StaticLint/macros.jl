@@ -101,8 +101,9 @@ function handle_macro(x::EXPR, state)
         elseif _is_testsnippet_macro(x.args[1]) && state isa Toplevel
             # @testsnippet body will be inlined into each @testitem that references it.
             # Create an isolating scope so the declaration-site traversal doesn't leak
-            # bindings into the parent scope. The body_exprs are separately stored in
-            # test_setups and process_EXPR'd in each @testitem's scope.
+            # bindings into the parent scope. Its bound names are separately indexed
+            # (test_setup_info) and injected as synthetic bindings into each
+            # @testitem's scope.
             _handle_testsnippet(x, state)
         elseif _is_symbolics_vardef_macro(x.args[1])
             # Symbolics/ModelingToolkit @variables / @parameters / @constants
@@ -486,28 +487,26 @@ function _handle_testitem(x::EXPR, state::Toplevel)
         end
     end
 
-    # Resolve setup=[...] references from pre-computed test_setups registry.
-    # Snippet body_exprs are from other files' CSTs (not children of this macrocall),
-    # so they must be process_EXPR'd here — traverse won't reach them.
-    s0 = state.scope
-    state.scope = item_scope
-    for setup_name in setup_names
-        if haskey(state.test_setups, setup_name)
-            setup_info = state.test_setups[setup_name]
-            if setup_info.kind === :module && setup_info.binding !== nothing
-                # Module: inject into scope.modules so `using .ModuleName` works
-                item_scope.modules[setup_name] = setup_info.scope !== nothing ? setup_info.scope : setup_info.binding
-                # Also add as a named binding so bare `ModuleName.x` resolves
-                item_scope.names[string(setup_name)] = setup_info.binding
-            elseif setup_info.kind === :snippet && setup_info.body_exprs !== nothing
-                # Snippet: inline the body expressions into this scope
-                for expr in setup_info.body_exprs
-                    process_EXPR(expr, state)
+    # Resolve setup=[...] references through the plain-data setup index
+    # (test_setup_info interface). Testmodules bind their name — members
+    # resolve via TestSetupModuleRef; snippet names are injected directly
+    # (TestItemRunner splices snippet code into the testitem body).
+    tctx = enclosing_tree_context(state.scope)
+    if tctx !== nothing
+        for setup_name in setup_names
+            info = test_setup_info(tctx, setup_name)
+            info === nothing && continue
+            if info.kind === :module
+                item_scope.names[String(setup_name)] =
+                    Binding(noname, TestSetupModuleRef(String(setup_name), info.names), CoreTypes.Module, EXPR[])
+            elseif info.kind === :snippet
+                for n in info.names
+                    haskey(item_scope.names, n) ||
+                        (item_scope.names[n] = Binding(noname, nothing, nothing, EXPR[]))
                 end
             end
         end
     end
-    state.scope = s0
 
     # NOTE: We intentionally do NOT call process_EXPR(body, state) here.
     # The body will be processed by the standard traverse() in process_EXPR,
@@ -573,8 +572,8 @@ Handle a `@testsnippet Name begin ... end` macrocall.
 
 Creates an isolating scope so the declaration-site traversal (by the standard
 `traverse` in `process_EXPR`) doesn't leak bindings into the parent scope. The
-snippet body_exprs are separately stored in `test_setups` and inlined into each
-`@testitem`'s scope.
+snippet's bound names are separately indexed (`test_setup_info`) and injected
+as synthetic bindings into each `@testitem`'s scope.
 """
 function _handle_testsnippet(x::EXPR, state::Toplevel)
     meta_dict = state.meta_dict

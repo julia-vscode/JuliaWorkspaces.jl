@@ -149,7 +149,7 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
         end
     end
 
-    StaticLint.semantic_pass(uri, cst, env, meta_dict, rt; workspace_packages, test_setups, self_package_name)
+    StaticLint.semantic_pass(uri, cst, env, meta_dict, rt; workspace_packages)
 
     for file in closure
         cst2 = derived_julia_legacy_syntax_tree(rt, file)
@@ -334,91 +334,25 @@ end
 """
     derived_test_setup_bindings(rt, package_folder_uri)
 
-Pre-compute `TestSetupInfo` for all `@testmodule` and `@testsnippet`
-declarations across all files in a package. Returns
-`Dict{Symbol, StaticLint.TestSetupInfo}`.
-
-For `@testmodule`: runs a lightweight semantic analysis on the module body
-to produce a `Scope` and `Binding`.
-
-For `@testsnippet`: stores the body EXPR nodes for later inline processing.
-No semantic analysis is run — the snippet will be analyzed in-context when
-inlined into each `@testitem`.
+DEAD STUB (Task 7): always returns an empty `Dict`. `@testmodule`/
+`@testsnippet` resolution now goes through the plain-data
+`test_setup_info`/`derived_test_setup` index (`src/layer_test_setups.jl`,
+`src/layer_file_analysis.jl`), not through this whole-closure-pass helper.
+Kept only so its (now dead) call site in the old pipeline keeps compiling;
+Task 8 deletes both.
 """
 Salsa.@derived function derived_test_setup_bindings(rt, package_folder_uri)
     @debug "derived_test_setup_bindings" package_folder_uri=package_folder_uri
 
-    result = Dict{Symbol, StaticLint.TestSetupInfo}()
-
-    # Collect all files in this package
-    all_files = derived_all_julia_files(rt)
-
-    package_folder_path = lowercase(uri2filepath(package_folder_uri))
-
-    for uri in all_files
-        file_path = lowercase(uri2filepath(uri))
-        # Only scan files that belong to this package
-        startswith(file_path, package_folder_path) || continue
-
-        cst = derived_julia_legacy_syntax_tree(rt, uri)
-        modules, snippets = _find_test_macros_in_cst(cst)
-
-        # Process @testmodule declarations
-        for mod_expr in modules
-            mod_expr.args === nothing && continue
-            length(mod_expr.args) < 3 && continue
-            name_expr = mod_expr.args[2]
-            CSTParser.isidentifier(name_expr) || continue
-            # str_value also covers var"..." names, where valof is nothing
-            mod_name_str = CSTParser.str_value(name_expr)
-            mod_name_str isa AbstractString || continue
-            mod_name = Symbol(mod_name_str)
-
-            body = _get_body_block(mod_expr)
-            body === nothing && continue
-
-            # Create a scope for the module and run a lightweight semantic pass
-            meta_dict = Dict{UInt64, StaticLint.Meta}()
-            StaticLint.ensuremeta(cst, meta_dict)
-            StaticLint.ensuremeta(mod_expr, meta_dict)
-
-            mod_scope = StaticLint.Scope(nothing, mod_expr, Dict{String,StaticLint.Binding}(), Dict{Symbol,Any}(), nothing)
-
-            # Get the environment for this file to populate Base/Core in the module scope
-            project_uri = derived_project_uri_for_root(rt, uri)
-            if project_uri !== nothing
-                env = derived_environment(rt, project_uri)
-                mod_scope.modules = Dict{Symbol,Any}()
-                mod_scope.modules[:Base] = env.symbols[:Base]
-                mod_scope.modules[:Core] = env.symbols[:Core]
-            end
-
-            binding = StaticLint.Binding(name_expr, mod_expr, nothing, CSTParser.EXPR[], true)
-            StaticLint.setscope!(mod_expr, mod_scope, meta_dict)
-
-            result[mod_name] = StaticLint.TestSetupInfo(:module, binding, nothing, mod_scope)
-        end
-
-        # Process @testsnippet declarations
-        for snip_expr in snippets
-            snip_expr.args === nothing && continue
-            length(snip_expr.args) < 3 && continue
-            name_expr = snip_expr.args[2]
-            CSTParser.isidentifier(name_expr) || continue
-            # str_value also covers var"..." names, where valof is nothing
-            snip_name_str = CSTParser.str_value(name_expr)
-            snip_name_str isa AbstractString || continue
-            snip_name = Symbol(snip_name_str)
-
-            body = _get_body_block(snip_expr)
-            body === nothing && continue
-
-            body_exprs = _collect_body_exprs(body)
-            result[snip_name] = StaticLint.TestSetupInfo(:snippet, nothing, body_exprs, nothing)
-        end
-    end
-
-    return result
+    # Dead: `TestSetupInfo` is now the plain-data (kind, names) struct produced
+    # by `derived_test_setup`/`test_setup_info` (src/layer_test_setups.jl,
+    # src/layer_file_analysis.jl); the EXPR-carrying construction this function
+    # used to do no longer compiles against that struct and is unused now that
+    # `semantic_pass` no longer takes a `test_setups` kwarg. Kept as a no-op
+    # stub (rather than deleted outright) so the surrounding call site in
+    # `derived_file_meta_and_diagnostics` doesn't need touching here; full
+    # removal is Task 8's job.
+    return Dict{Symbol, StaticLint.TestSetupInfo}()
 end
 
 """

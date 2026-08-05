@@ -216,3 +216,43 @@ end
     @test JuliaWorkspaces.derived_test_setup(jw.runtime, PKG, :TM) == setups[:TM]
     @test JuliaWorkspaces.derived_test_setup(jw.runtime, PKG, :Nope) === nothing
 end
+
+@testitem "setup testmodules and testsnippets inject into @testitem scopes cross-file" setup=[TestItemAnalysisWS] begin
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TM, TS] begin
+            TM.tmf()
+            TM.not_a_member()
+            sx
+            totally_undefined
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testmodule TM begin
+            tmf() = 1
+        end
+        @testsnippet TS begin
+            sx = 1
+        end
+        """))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: TM" in msgs)
+    @test !("Missing reference: tmf" in msgs)
+    # member sets are not enumerable in general (macros, usings inside the
+    # setup) — unknown members must NOT be flagged
+    @test !("Missing reference: not_a_member" in msgs)
+    @test !("Missing reference: sx" in msgs)
+    # ordinary missing refs in the same body still fire
+    @test "Missing reference: totally_undefined" in msgs
+end
+
+@testitem "unknown setup names inject nothing" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testitem "t" default_imports=false setup=[NoSuchSetup] begin
+        whatever_name
+    end
+    """)
+    msgs = diag_messages(jw)
+    @test "Missing reference: whatever_name" in msgs
+end

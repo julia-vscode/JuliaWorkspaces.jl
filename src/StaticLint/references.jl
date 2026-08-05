@@ -357,6 +357,8 @@ function resolve_getfield(x::EXPR, b::Binding, state::TraverseState)::Bool
         # there): an import-bound module name (`import .Sib` + `Sib.f()`)
         # stores its tree target as plain data — continue through it.
         resolved = resolve_getfield(x, b.val, state)
+    elseif b.val isa TestSetupModuleRef
+        resolved = resolve_getfield(x, b.val, state)
     elseif b.val isa SymbolServer.ModuleStore || (b.val isa EXPR && CSTParser.defines_module(b.val))
         resolved = resolve_getfield(x, b.val, state)
     elseif b.type isa Binding
@@ -408,6 +410,18 @@ function resolve_getfield(x::EXPR, tr::TreeRef, state::TraverseState)::Bool
     # stores its plain-data stand-in — never a runtime handle in meta.
     setref!(x, cand, meta_dict)
     return true
+end
+
+function resolve_getfield(x::EXPR, tm::TestSetupModuleRef, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
+    hasref(x, meta_dict) && return true
+    CSTParser.is_id_or_macroname(x) || return false
+    n = valofid(x)
+    if n !== nothing && n in tm.members
+        setref!(x, TreeRef(n, :test_setup_member, nothing, [tm.name]), meta_dict)
+        return true
+    end
+    return false
 end
 
 function is_overloaded(val::SymbolServer.SymStore, scope::Scope)

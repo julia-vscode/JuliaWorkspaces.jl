@@ -1289,6 +1289,11 @@ function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
             # a module, we should know this.
             return true
         elseif lhsref isa Binding
+            if lhsref.val isa TestSetupModuleRef
+                # @testmodule member sets are not enumerable in general
+                # (macro-generated names, usings inside the setup) — never flag.
+                return false
+            end
             if lhsref.val isa Binding
                 lhsref = lhsref.val
             end

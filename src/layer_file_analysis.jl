@@ -65,6 +65,17 @@ StaticLint.context_tree_ref(ctx::TreeModuleContext) = _context_tree_ref(ctx)
 StaticLint.context_exported_names(ctx::TreeModuleContext) =
     derived_module_exports(ctx.rt, ctx.root, ctx.path).exports
 
+# ctx.root is the analyzed file's root; for test files the root IS the file,
+# and for src files it is the package entry — both live under the package
+# folder, which keys the setup index.
+function StaticLint.test_setup_info(ctx::TreeModuleContext, name::Symbol)
+    pkg_folder = derived_package_for_file(ctx.rt, ctx.root)
+    pkg_folder === nothing && return nothing
+    s = derived_test_setup(ctx.rt, pkg_folder, name)
+    s === nothing && return nothing
+    return StaticLint.TestSetupInfo(s.kind, Set{String}(s.bound_names))
+end
+
 # The names of the modules DECLARED IN the analyzed file that enclose `x`,
 # outermost-first, read off the scope chain (works after
 # `strip_module_contexts!` — module nesting survives the handle strip).
@@ -868,13 +879,14 @@ file during the LS-startup no-active-project window), every real-package
 import would otherwise flash a "Failed to resolve …" false positive. Once a
 project is active, `new == old` again.
 
-Test-setup parity: the whole-closure pass feeds `derived_test_setup_bindings`
-into `semantic_pass(...; test_setups=…)`; the per-file pass
-(`derived_file_analysis`) passes none. This is behavior-identical TODAY
-because test-setup detection has a verified pre-existing off-by-one (the
-`args[2]` line-info placeholder — setups are never recognized on this
-lineage). Do NOT fix the off-by-one here: it re-opens the stale-EXPR channel;
-it is a ledgered follow-up.
+Test-setup parity: `semantic_pass` no longer takes a `test_setups` kwarg at
+all. `setup=[...]` names now resolve through the plain-data
+`test_setup_info(ctx, name)` interface (`TreeModuleContext` method in this
+file, backed by `derived_test_setup`), reached via `enclosing_tree_context` —
+so only the per-file pass (which seeds a `:__tree__` module context) resolves
+them; the whole-closure pass (`derived_static_lint_diagnostics_for_root`,
+which never seeds one) does not. See `src/StaticLint/macros.jl`'s
+`_handle_testitem`.
 """
 Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     @debug "derived_new_static_lint_diagnostics" uri=uri
