@@ -2313,13 +2313,23 @@ end
 end
 
 @testitem "backdating: moving a method between files leaves the signature set equal" setup=[FileAnalysisWS] begin
+    # A real cross-file caller (in a third file, `C`) so the diagnostic being
+    # asserted unchanged is an actual definite-mismatch method-call flag, not
+    # just C's self-contained lint hints. `target(:sym)` types as `Symbol`,
+    # which intersects neither `Int` nor `String` — a definite rule-out.
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+
+    C = URI("file:///t/src/c.jl")
     jw = ws_with(Dict(
-        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\ninclude(\"c.jl\")\nend\n",
         A => "target(x::Int) = 1\ntarget(x::String) = 2\n",
         B => "\n",
+        C => "good() = target(1)\nbad() = target(:sym)\n",
     ))
     rt = jw.runtime
     before = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+    c_before = mm(JuliaWorkspaces.derived_file_analysis(rt, ROOT, C))
+    @test length(c_before) == 1
 
     JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("target(x::Int) = 1\n", "julia")))
     JuliaWorkspaces.update_file!(jw, TextFile(B, SourceText("target(x::String) = 2\n", "julia")))
@@ -2327,16 +2337,20 @@ end
     after = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
     @test after == before
 
-    # And the diagnostic set of an unrelated caller is unchanged: recompute
-    # from cold on an identical second workspace and compare.
+    # C's own flag (unrelated to the move — its calls never resolve through
+    # A or B directly) survives the move unchanged.
+    c_after = mm(JuliaWorkspaces.derived_file_analysis(rt, ROOT, C))
+    @test c_after == c_before
+
+    # And matches a from-cold rebuild of the already-moved state.
     jw2 = ws_with(Dict(
-        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\ninclude(\"c.jl\")\nend\n",
         A => "target(x::Int) = 1\n",
         B => "target(x::String) = 2\n",
+        C => "good() = target(1)\nbad() = target(:sym)\n",
     ))
-    fa_inc = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
-    fa_cold = JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B)
-    @test [d.message for d in fa_inc.diagnostics] == [d.message for d in fa_cold.diagnostics]
+    c_cold = mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, C))
+    @test c_cold == c_after
 end
 
 @testitem "tree_resolve: workspace names, store names, unknowns" setup=[FileAnalysisWS] begin
