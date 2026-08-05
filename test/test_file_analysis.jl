@@ -3026,6 +3026,42 @@ end
                                  "caller() = genf(1)\n"))
 end
 
+@testitem "parity: a relative function import splits the method set across keys" setup=[FileAnalysisWS] begin
+    # `import ..f` binds `f` through the semantic pass, but the module tree
+    # classifies a non-module trailing segment `:unresolved`, so the arity and
+    # signature indices key a local `f(::T) = ...` extension under the CHILD
+    # module while the provider's methods stay under the parent's key. The
+    # outside-reach marker makes the TYPE phase decline for such a name; the
+    # COUNT phase has no such guard, so a call served only by the provider's
+    # method false-flags on arity. Same split for the colon spelling.
+    function flags(mainsrc::String, childsrc::String)
+        jw = ws_with(Dict(ROOT => mainsrc, A => childsrc))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, A)
+        return filter(d -> occursin("No method matching", d.message) ||
+                           occursin("method call error", d.message), fa.diagnostics)
+    end
+
+    # `g()` is served by the parent's `f(::Int, ::Int)`; the child key only
+    # holds `f(::String)`.
+    @test_broken isempty(flags(
+        "module MainPkg\nf(x::Int, y::Int) = 1\ninclude(\"a.jl\")\nend\n",
+        "module Child\nimport ..f\nf(x::String) = 2\ng() = f(1, 2)\nend\n"))
+    # Colon form against a provider submodule: same split, same false flag.
+    @test_broken isempty(flags(
+        "module MainPkg\nmodule Prov\nf(x::Int, y::Int) = 1\nexport f\nend\ninclude(\"a.jl\")\nend\n",
+        "module Child\nusing ..Prov: f\nf(x::String) = 2\ng() = f(1, 2)\nend\n"))
+    # Control: the import binding itself resolves — a bare use of the imported
+    # name is neither a missing ref nor a method-call flag. If this arm ever
+    # fails, the pins above have rotted into silence-by-unresolved-name.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\nf(x::Int) = 1\ninclude(\"a.jl\")\nend\n",
+        A => "module Child\nimport ..f\ng() = f(1)\nend\n"))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, A)
+    @test isempty([d for d in fa.diagnostics if occursin("No method matching", d.message) ||
+                       occursin("method call error", d.message) ||
+                       occursin("Missing reference", d.message)])
+end
+
 @testitem "parity: real-corpus operand defects never rule a call out" setup=[FileAnalysisWS] begin
     # Every fixture here is correct code from the 80-package corpus sweep,
     # reduced; each was ruled out by an argument the decision path typed wrongly.
