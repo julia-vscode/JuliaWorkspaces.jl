@@ -384,6 +384,9 @@ Parse keyword arguments from a `@testitem` macrocall. Returns:
 - `default_imports::Bool` (default `true`)
 - `setup_names::Vector{Symbol}` (default empty)
 - `body::Union{Nothing,EXPR}` — the `begin...end` block, if found.
+
+Note: Inside a macrocall, keyword arguments parse as ASSIGNMENT nodes (not :kw),
+so detection checks both iskwarg and isassignment node kinds.
 """
 function _parse_testitem_kwargs(x::EXPR)
     default_imports = true
@@ -395,11 +398,11 @@ function _parse_testitem_kwargs(x::EXPR)
     for i in 3:length(x.args)
         arg = x.args[i]
         arg === nothing && continue
-        if iskwarg(arg) && arg.args !== nothing && length(arg.args) >= 2
+        if (iskwarg(arg) || isassignment(arg)) && arg.args !== nothing && length(arg.args) >= 2
             kwname = arg.args[1]
             kwval = arg.args[2]
             if isidentifier(kwname) && valof(kwname) == "default_imports"
-                if isidentifier(kwval) && valof(kwval) == "false"
+                if kwval isa EXPR && (headof(kwval) === :FALSE || (isidentifier(kwval) && valof(kwval) == "false"))
                     default_imports = false
                 end
             elseif isidentifier(kwname) && valof(kwname) == "setup"
