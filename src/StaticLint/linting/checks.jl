@@ -369,6 +369,66 @@ end
 is_something_with_methods(x::T) where T <: Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore} = true
 is_something_with_methods(x) = false
 
+# Does `b` hold nothing but QUALIFIED extensions of a name another module owns
+# (`Base.axes(A::Axis, d) = …`)? Then its method set is the workspace's share of
+# that generic, never the whole of it. A qualifier that names a WORKSPACE module
+# says no: those methods are all in the workspace, and the tree gates already
+# reason about them.
+function _extends_external_generic(b::Binding, env::ExternalEnv, meta_dict)
+    b.val isa EXPR || return false
+    _is_external_qualified_method(b.val, env, meta_dict) && return true
+    for r in b.refs
+        m = get_method(r)
+        m isa EXPR && _is_external_qualified_method(m, env, meta_dict) && return true
+    end
+    return false
+end
+
+function _is_external_qualified_method(m::EXPR, env::ExternalEnv, meta_dict)
+    (CSTParser.defines_function(m) || CSTParser.defines_macro(m)) || return false
+    sig = CSTParser.get_sig(m)
+    sig isa EXPR || return false
+    sig = CSTParser.rem_wheres_decls(sig)
+    (sig isa EXPR && iscall(sig) && sig.args !== nothing && !isempty(sig.args)) || return false
+    callee = sig.args[1]
+    is_getfield_w_quotenode(callee) || return false
+    rhs = rhs_of_getfield(callee)
+    rhs isa EXPR || return false
+    # `Base.:*(a, b) = …` names an operator, and `Base.$op(…) = …` (inside an
+    # `@eval`) names nothing readable — `valofid` assumes an identifier and
+    # would throw on either.
+    name = isidentifier(rhs) ? valofid(rhs) : (isoperator(rhs) ? valof(rhs) : nothing)
+    name === nothing && return false
+    mod = _external_module_store(callee.args[1], env, meta_dict)
+    mod isa SymbolServer.ModuleStore || return false
+    val = maybe_lookup(get(mod.vals, Symbol(name), nothing), env)
+    return val isa SymbolServer.FunctionStore || val isa SymbolServer.DataTypeStore
+end
+
+# The env `ModuleStore` a qualifier denotes, or `nothing` when it is not an
+# external module (a workspace module resolves through the tree instead). Both
+# spellings the two traversal modes produce are accepted: the store value itself,
+# and per-file mode's `TreeRef` stand-in — whose denoted path is its
+# `origin_module`, or that path extended by its own name, so both are tried
+# (deeper first, as everywhere else this ambiguity is resolved).
+function _external_module_store(q, env::ExternalEnv, meta_dict)
+    q isa EXPR || return nothing
+    r = hasref(q, meta_dict) ? refof(q, meta_dict) : nothing
+    r isa SymbolServer.ModuleStore && return r
+    r isa Binding && r.val isa SymbolServer.ModuleStore && return r.val
+    (r isa TreeRef && (r.kind === :external_module || r.kind === :external_symbol)) || return nothing
+    for path in (vcat(r.origin_module, [r.name]), r.origin_module)
+        isempty(path) && continue
+        store = get(getsymbols(env), Symbol(path[1]), nothing)
+        for i in 2:length(path)
+            store isa SymbolServer.ModuleStore || break
+            store = maybe_lookup(get(store.vals, Symbol(path[i]), nothing), env)
+        end
+        store isa SymbolServer.ModuleStore && return store
+    end
+    return nothing
+end
+
 # A callee that is a datatype, i.e. a constructor call.
 _is_datatype_callee(r::TreeRef) = r.kind in _TREE_DATATYPE_KINDS
 _is_datatype_callee(b::Binding) = CoreTypes.isdatatype(b.type) ||
@@ -483,6 +543,13 @@ function check_call(x, env::ExternalEnv, meta_dict, tree_visible=nothing, tree_e
         if tree_extended !== nothing && (func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore)
             tree_extended(func_ref, x) && return
         end
+
+        # The mirror image of that gate: a workspace `Base.axes(::Axis, d) = …`
+        # STEALS the ref for `Base.axes(…)` calls, so the callee is a local
+        # `Binding` holding only the workspace's SHARE of Base's generic. The
+        # owner's own methods live in the env store, unreachable from this
+        # binding, so a call the owner serves must not be ruled out against it.
+        func_ref isa Binding && _extends_external_generic(func_ref, env, meta_dict) && return
 
         if is_something_with_methods(func_ref) && !(func_ref isa Binding && func_ref.val isa EXPR && func_ref.val.head === :macro)
             # intentionally empty
@@ -1466,10 +1533,24 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
     end
 end
 
+# Does `b` merely NAME a datatype (`arg_type = String`, `Alias = MyStruct`)
+# rather than define one? Assigning a type to a local is ordinary code and may be
+# repeated, so such a binding is not a constant whose redefinition is invalid.
+# Every spelling of the right-hand side counts: a store datatype, the constructor
+# `FunctionStore` a type's NAME resolves to, a binding for either, or a workspace
+# declaration. Only reached for a binding whose type is already a datatype, so a
+# non-type right-hand side cannot get here.
 function is_mask_binding_of_datatype(b::Binding, meta_dict)
     # the `isa Binding` guard keeps the `.val` accesses off ref types without
     # that field (e.g. a per-file-mode TreeRef)
-    b.val isa EXPR && CSTParser.isassignment(b.val) && (rhsref = refof(b.val.args[2], meta_dict)) !== nothing && (rhsref isa SymbolServer.DataTypeStore || (rhsref isa Binding && ((rhsref.val isa EXPR && rhsref.val isa SymbolServer.DataTypeStore) || (rhsref.val isa EXPR && CSTParser.defines_datatype(rhsref.val)))))
+    (b.val isa EXPR && CSTParser.isassignment(b.val) &&
+        b.val.args !== nothing && length(b.val.args) >= 2) || return false
+    rhsref = refof(b.val.args[2], meta_dict)
+    rhsref === nothing && return false
+    (rhsref isa SymbolServer.DataTypeStore || rhsref isa SymbolServer.FunctionStore) && return true
+    rhsref isa Binding || return false
+    (rhsref.val isa SymbolServer.DataTypeStore || rhsref.val isa SymbolServer.FunctionStore) && return true
+    return rhsref.val isa EXPR && CSTParser.defines_datatype(rhsref.val)
 end
 
 # check whether a and b are in all the same :if blocks and in the same branches

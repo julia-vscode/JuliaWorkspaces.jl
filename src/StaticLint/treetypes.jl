@@ -121,19 +121,13 @@ an alias) or drops it to `Any` (sibling file, since `Binding.type` cannot carry
 a `TreeRef`); against a `TreeDataType` parameter the first compares unequal and
 then walks to `Any` — a definite `false` between a type and itself — and the
 second carries no opinion at all. Anything that does not translate keeps the
-operand it had — except a `where` typevar passed as an argument, which is
-widened to `Any` (see `_is_where_typevar_ref`).
+operand it had.
 """
 function tree_arg_operands(x::EXPR, args::Vector{Any}, meta_dict, callsite_type)
     exprs = positional_args(x)
     length(exprs) == length(args) || return args
     out = args
     for i in eachindex(args)
-        if _is_where_typevar_ref(exprs[i], meta_dict)
-            out === args && (out = copy(args))
-            out[i] = CoreTypes.Any
-            continue
-        end
         segs = _workspace_datatype_segments(args[i], exprs[i], meta_dict)
         segs === nothing && continue
         dt = callsite_type(TypeRef(segs), x)
@@ -144,10 +138,11 @@ function tree_arg_operands(x::EXPR, args::Vector{Any}, meta_dict, callsite_type)
     return out
 end
 
-# Is `arg` a reference to one of the enclosing signature's `where` variables? The
-# pass types every such reference `DataType`, but a type parameter can bind a
-# VALUE (`GenericDomTree{IsPostDom}` with `IsPostDom::Bool`), and which it is
-# cannot be read here — so it carries no opinion rather than a wrong one.
+# Is `arg` a reference to one of the enclosing signature's `where` variables? A
+# type parameter can bind a VALUE (`GenericDomTree{IsPostDom}` with
+# `IsPostDom::Bool`) as easily as a type, and which it is cannot be read here.
+# `arg_type` answers `Any` for these, so every consumer — decision and message
+# alike — sees the same unknown.
 function _is_where_typevar_ref(arg, meta_dict)
     (arg isa EXPR && isidentifier(arg)) || return false
     b = refof(arg, meta_dict)

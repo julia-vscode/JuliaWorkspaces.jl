@@ -351,3 +351,49 @@ end
     @test letscope.names["b"].type === nothing
     @test letscope.names["z"].type === Foo   # sanity: RHS really is Foo
 end
+
+@testitem "literal width: hex digits, not characters" begin
+    using JuliaWorkspaces: CSTParser
+    using JuliaWorkspaces.StaticLint: infer_literal_type, CoreTypes
+
+    lit(s) = infer_literal_type(CSTParser.parse(s))
+
+    # `_` groups digits; it is not one. `0x4000_0001` is a UInt32 in Julia, and
+    # typing it UInt64 makes every call passing it a definite mismatch.
+    @test lit("0x4000_0001") === CoreTypes.UInt32
+    @test lit("0x0000_0007") === CoreTypes.UInt32
+    @test lit("0x1_2") === CoreTypes.UInt8
+    @test lit("0xff_ff") === CoreTypes.UInt16
+
+    # Widths without separators are unchanged.
+    @test lit("0xff") === CoreTypes.UInt8
+    @test lit("0xfff") === CoreTypes.UInt16
+    @test lit("0xffffffff") === CoreTypes.UInt32
+    @test lit("0x1_0000_0000") === CoreTypes.UInt64
+
+    # Past UInt64 the store has no handle: no opinion beats a wrong one.
+    @test lit("0x1_0000_0000_0000_0000") === nothing
+
+    # Other literals are unaffected by separators.
+    @test lit("1_000_000") === CoreTypes.Int
+    @test lit("1_0.5") === CoreTypes.Float64
+end
+
+@testitem "a local bound to a type name holds a DataType" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: scopeof, CoreTypes
+
+    cst, meta_dict = parse_and_pass("""
+    function f()
+        T = Float64
+        S = sin
+        T, S
+    end
+    """)
+    fscope = scopeof(cst.args[1], meta_dict)
+    # A type's NAME binds its constructor `FunctionStore`; what the local holds is
+    # the type. Reading it as a `Function` makes it a definite mismatch for every
+    # `::Type{…}` slot.
+    @test fscope.names["T"].type === CoreTypes.DataType
+    # A genuine function value is still a Function.
+    @test fscope.names["S"].type === CoreTypes.Function
+end

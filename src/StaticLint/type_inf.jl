@@ -130,6 +130,13 @@ function _resolve_constructor_datatype(callname, scope, state)
     return nothing
 end
 
+# The type of a name that holds a store value on an assignment's right-hand side.
+# A TYPE's name binds its constructor `FunctionStore` (`T = Float64`), and what
+# the local holds is the type — `DataType`, not `Function`. Reading it as a
+# function makes it a definite mismatch for every `::Type{…}`/`::DataType` slot.
+_rhs_store_type(val::SymbolServer.FunctionStore, state) =
+    resolves_to_datatype(val, state.env) ? CoreTypes.DataType : CoreTypes.Function
+
 function infer_type_assignment_rhs(binding, state, scope)
     meta_dict = state.meta_dict
     lhs = binding.val.args[1]
@@ -227,7 +234,7 @@ function infer_type_assignment_rhs(binding, state, scope)
                 if refof_rhs.val isa SymbolServer.GenericStore && refof_rhs.val.typ isa SymbolServer.FakeTypeName
                     settype!(binding, maybe_lookup(refof_rhs.val.typ.name, state))
                 elseif refof_rhs.val isa SymbolServer.FunctionStore
-                    settype!(binding, CoreTypes.Function)
+                    settype!(binding, _rhs_store_type(refof_rhs.val, state))
                 elseif refof_rhs.val isa SymbolServer.DataTypeStore
                     settype!(binding, CoreTypes.DataType)
                 else
@@ -242,12 +249,12 @@ function infer_type_assignment_rhs(binding, state, scope)
                 if store isa SymbolServer.DataTypeStore
                     settype!(binding, CoreTypes.DataType)
                 elseif store isa SymbolServer.FunctionStore
-                    settype!(binding, CoreTypes.Function)
+                    settype!(binding, _rhs_store_type(store, state))
                 end
             elseif refof_rhs isa SymbolServer.GenericStore && refof_rhs.typ isa SymbolServer.FakeTypeName
                 settype!(binding, maybe_lookup(refof_rhs.typ.name, state))
             elseif refof_rhs isa SymbolServer.FunctionStore
-                settype!(binding, CoreTypes.Function)
+                settype!(binding, _rhs_store_type(refof_rhs, state))
             elseif refof_rhs isa SymbolServer.DataTypeStore
                 settype!(binding, CoreTypes.DataType)
             end
@@ -605,14 +612,22 @@ function infer_literal_type(x::EXPR)
     h = headof(x)
     h === :INTEGER && return CoreTypes.Int
     if h === :HEXINT
-        return if length(x.val) < 5
+        # A hex literal's width is set by its DIGIT count. `_` separators are not
+        # digits (`0x4000_0001` is a `UInt32`, not a `UInt64`) and neither is the
+        # `0x` prefix. Past 16 digits the literal is `UInt128` or wider, which
+        # this store has no handle for — no opinion beats a wrong one.
+        x.val isa String || return nothing
+        n = count(!isequal('_'), x.val) - 2
+        return if n <= 2
             CoreTypes.UInt8
-        elseif length(x.val) < 7
+        elseif n <= 4
             CoreTypes.UInt16
-        elseif length(x.val) < 11
+        elseif n <= 8
             CoreTypes.UInt32
-        else
+        elseif n <= 16
             CoreTypes.UInt64
+        else
+            nothing
         end
     end
     h === :FLOAT && return CoreTypes.Float64

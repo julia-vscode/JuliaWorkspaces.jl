@@ -2623,6 +2623,42 @@ end
     @test [i.name for i in inv.items if i.kind !== :opaque_eval] == ["O", "@gen", "genf"]
 end
 
+@testitem "parity: real-corpus operand defects never rule a call out" setup=[FileAnalysisWS] begin
+    # Every fixture here is correct code from the 80-package corpus sweep,
+    # reduced; each was ruled out by an argument the decision path typed wrongly.
+    # The control beside it must still flag, or the fix has only silenced things.
+    function flags(src::String)
+        jw = ws_with(Dict(ROOT => src))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, ROOT)
+        return filter(d -> occursin("No method matching", d.message) ||
+                           occursin("method call error", d.message), fa.diagnostics)
+    end
+
+    # A hex literal's width comes from its DIGIT count: `0x4000_0001` is UInt32.
+    @test isempty(flags("module P\nhasleaf(l::UInt32) = true\nf() = (leaf = 0x4000_0001; hasleaf(leaf))\ng() = hasleaf(0x0000_0007)\nend\n"))
+    @test length(flags("module P\nhasleaf(l::UInt32) = true\nh() = hasleaf(0x0000_0000_0000_0007)\nend\n")) == 1
+
+    # A local bound to a type NAME holds a type, so it matches a `::Type{…}` slot.
+    @test isempty(flags("module Q\nP(::Type{Float64}) = 1\nQ2(::DataType) = 1\nR(::Type) = 1\nb() = (T = Float64; P(T))\nc() = (T = Float64; Q2(T))\nd() = (T = Float64; R(T))\nend\n"))
+    @test length(flags("module Q\nP(::Type{Float64}) = 1\nbad() = (T = \"s\"; P(T))\nend\n")) == 1
+
+    # An anonymous `(::Type{T})(…)` constructor serves every matching type, so no
+    # constructor set in the closure is complete while one exists.
+    @test isempty(flags("module R\nabstract type Cenum{T<:Integer} end\n(::Type{T})(x::Cenum{T2}) where {T<:Integer,T2<:Integer} = T(x)\nf(x::Cenum) = Integer(x)\nend\n"))
+    # A callable-object method names one concrete type and marks nothing.
+    @test length(flags("module R\nstruct Fn end\n(f::Fn)(x::Int) = 1\nstruct Foo end\ng(x::Foo) = Integer(x)\nend\n")) == 1
+
+    # A qualified extension binds the workspace's SHARE of another module's
+    # generic; the owner's own methods are not in that binding.
+    @test isempty(flags("module S\nstruct Ax end\nBase.axes(A::Ax) = ()\nBase.axes(A::Ax, d) = ()\ng(A::AbstractArray, d) = length(Base.axes(A, d))\nend\n"))
+    # A qualified extension of a WORKSPACE module keeps its full set, and its checks.
+    @test length(flags("module S2\nmodule Inner\nfoo(x::Int) = 1\nend\nInner.foo(x::String) = 2\ng() = Inner.foo(1.0)\nend\n")) == 1
+
+    # A `where` typevar passed as an argument may bind a value: no opinion — and
+    # the DECISION must use the same operand the message reports.
+    @test isempty(flags("module T2\nf(x::NamedTuple{an}, y::NamedTuple{bn}) where {an,bn} = Base.merge_names(an, bn)\nend\n"))
+end
+
 @testitem "parity: optional slots align before the vararg pad" setup=[FileAnalysisWS] begin
     # `f(a, b="x", xs::T...)`: a call that fills the optional slot must compare
     # it against the OPTIONAL's type, not the vararg's element type.

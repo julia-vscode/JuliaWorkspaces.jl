@@ -37,6 +37,12 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
             end
         end
     else
+        # A `where` typevar PASSED as an argument: its binding carries the
+        # `DataType` meta-type, but the variable can bind a VALUE
+        # (`NamedTuple{names}`, `Val{N}`), and which it is cannot be read here.
+        # No opinion rather than a wrong one — and the same operand the message
+        # printer reports, so a rule-out can never contradict its own reason.
+        _is_where_typevar_ref(arg, meta_dict) && return CoreTypes.Any
         if hasref(arg, meta_dict)
             if refof(arg, meta_dict) isa Binding && refof(arg, meta_dict).type !== nothing
                 type = refof(arg, meta_dict).type
