@@ -134,13 +134,14 @@ end
 # the tree-context visible names AT THE CALL SITE `x` (the site matters:
 # a call inside a module declared in the analyzed file resolves against
 # that module's visibility, not the file's own splice path). When the
-# callee of a call is ALSO visible through the tree context, the file
-# provably sees only a partial method set (other files of the module may
-# add methods, forward declarations get their methods elsewhere), so the
-# method-set lints (`FunctionHasNoMethods`/`IncorrectCallArgs`) must
-# decline — the lost true-positive direction (a genuinely method-less
-# module-level function) is sanctioned conservatism of the per-file
-# architecture.
+# callee of a call is ALSO visible through the tree context, the file only
+# partially sees its method set (other files of the module may add
+# methods, forward declarations get their methods elsewhere) — `check_call`
+# then checks the method-set lints (`FunctionHasNoMethods`/
+# `IncorrectCallArgs`) against the cross-file arity set, and, when the
+# records/extensions/store union is complete, the cross-file argument TYPES
+# too. Whole-closure mode (no `TreeContext`) never takes this path — it
+# keeps the old local-only checks (`func_has_no_methods`/`sig_match_any`).
 function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContext())
     # Linting is disabled inside `@test_throws`: its body is expected to error and
     # may contain invalid code
@@ -470,13 +471,22 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
         func_ref = refof_call_func(x, meta_dict)
         func_ref === nothing && return
 
-        # Per-file mode partial-method-set gate (see `check_all`'s docs):
-        # a Binding-backed callee whose name is also tree-visible has an
-        # unknowable-from-this-file method set — decline. Store-backed
-        # callees (env) keep their full method sets and stay checked.
-        # A tree-visible workspace callee — a local `Binding` whose name is also
-        # tree-visible (methods may span sibling files), OR a `TreeRef` to a
-        # function/macro/struct defined only in sibling files.
+        # Per-file mode partial-method-set gate (see `check_all`'s docs): a
+        # callee whose name is also tree-visible — a Binding (not
+        # function-local) or a TreeRef to a sibling-file function/macro/
+        # struct — has a method set this file only partially sees. Store-
+        # backed callees skip this branch entirely and keep their full
+        # method sets (checked further down via `tree.extended`). Rather
+        # than decline outright, the gate below checks the argument COUNT
+        # against the cross-file arity set (`tree.arities`), then, once an
+        # arity matches, the argument TYPES against the union of the
+        # cross-file signature records, the workspace's extension records,
+        # and (for a store-backed unqualified import) the store's own
+        # methods — but only when that union is complete. It declines (no
+        # flag) only on an incompleteness marker: unknown call shapes
+        # (`has_unknown_shapes`), the name also reaching this module from
+        # outside the tree with no store to fill the gap, an unreadable
+        # extension, or a splatted call (unknowable arity).
         if tree.visible !== nothing &&
            ((func_ref isa Binding && !_is_function_local_binding(func_ref, meta_dict)) ||
             (func_ref isa TreeRef && func_ref.kind in (:function, :macro, :struct, :mutable_struct)))
@@ -485,11 +495,12 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
                 n = valofid(name)
                 if n !== nothing && tree.visible(n, x)
                     # The local `func_ref` sees only THIS file's methods of a
-                    # tree-visible name, but the tree knows all of them. Check the
-                    # argument count against the full cross-file arity set
-                    # (`tree_arities`); a positional TYPE check of a cross-file
-                    # callee is deferred (needs sibling analyses). Splatted calls
-                    # have an unknowable arity — skip.
+                    # tree-visible name, but the tree knows all of them. Check
+                    # the argument count against the full cross-file arity set
+                    # (`tree_arities`) below; the TYPE opinion (records ∪
+                    # extension records ∪ store methods) follows further down
+                    # once an arity matches. Splatted calls have an unknowable
+                    # arity — skip.
                     if tree.arities !== nothing && !call_has_splat(x)
                         arities = tree.arities(n, x)
                         # An unqualified import of a store function/type
@@ -694,6 +705,10 @@ function func_has_no_methods(func_ref, meta_dict)
     return true
 end
 
+# `resolver` is accepted but unused here: threading it into the type match
+# below would need `tree_extended` (layer_file_analysis.jl) widened to the
+# deved roots too, or a deved package's store extensions become false
+# rule-outs — the two must move together.
 function sig_match_any(func_ref::Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}, x, call_counts, tls::Scope, env::ExternalEnv, meta_dict, tree_in_scope=nothing, resolver=nothing)
     in_scope = tree_in_scope === nothing ? nothing : tree_in_scope(x)
     # we can't statically determine how many arguments a splat will take up
@@ -778,6 +793,7 @@ end
 # Short, readable name of a type value (as produced by `call_arg_types` /
 # `_resolve_type_expr` / a MethodStore sig slot). Strips the noisy `Core.` prefix.
 function _format_type(@nospecialize(t))
+    t isa ResolvedUnion && return string("Union{", join((_format_type(m) for m in t.members), ", "), "}")
     s = t === nothing ? "Any" :
         t isa SymbolServer.DataTypeStore ? string(t.name) :
         t isa Binding ? (t.name isa EXPR ? valofid(t.name) : string(t.name)) :

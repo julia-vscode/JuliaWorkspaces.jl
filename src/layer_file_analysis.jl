@@ -915,6 +915,10 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # A store-backed callee (Base/stdlib/package function) that a workspace file
     # extends: its overload isn't in the env store, so decline the method-call
     # lint rather than false-positive (see `_store_extended_in_workspace`).
+    # Consults only THIS root, unlike `tree_ext_records` below (root + deved
+    # roots) — `sig_match_any`'s dead `resolver` parameter must stay dead
+    # unless this is widened to match, or a deved root's own extension reads
+    # as a false rule-out.
     tree_extended = (func_ref, x) -> _store_extended_in_workspace(rt, root, env, func_ref)
     # `tree_arities` lets the method-call lint check a tree-visible workspace
     # callee's ARGUMENT COUNT against its full cross-file method set (the local

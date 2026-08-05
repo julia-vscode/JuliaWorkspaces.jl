@@ -3250,7 +3250,7 @@ end
     end
     """)) == 1
 
-    @test length(flagged("""
+    union_flagged = flagged("""
     struct P end
     struct Q end
     struct Other end
@@ -3259,7 +3259,11 @@ end
         target(v)
         target(w)
     end
-    """)) == 1
+    """)
+    @test length(union_flagged) == 1
+    union_msg = only(union_flagged).message
+    @test occursin("Union{", union_msg) && occursin("P", union_msg) && occursin("Q", union_msg)
+    @test !occursin("ResolvedUnion", union_msg)
 
     @test length(flagged("""
     struct Other end
