@@ -2483,6 +2483,31 @@ end
     @test rec.comparisons >= 2 && rec.rule_outs == 1
 end
 
+@testitem "parity: both include orders give identical diagnostics" setup=[FileAnalysisWS] begin
+    # Two methods of one name, split across the files, plus a call checked
+    # against their union: the answer is the whole root's method set, so it
+    # cannot depend on which file the include tree reaches first.
+    function msgs(includes::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\n$includes\nend\n",
+            A => "struct Own end\ntarget(x::Own) = 1\n",
+            B => """
+            struct Other end
+            target(x::Other) = 2
+            good(v::Own) = target(v)
+            bad(w::Int) = target(w)
+            """,
+        ))
+        return sort([d.message for d in JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B).diagnostics])
+    end
+    ab = msgs("include(\"a.jl\")\ninclude(\"b.jl\")")
+    ba = msgs("include(\"b.jl\")\ninclude(\"a.jl\")")
+    @test ab == ba
+    flagged = filter(m -> occursin("No method matching", m) || occursin("method call error", m), ab)
+    @test length(flagged) == 1
+    @test occursin("target(::Int64)", only(flagged))
+end
+
 @testitem "parity: bare identifier, closure callee flags a definite mismatch" setup=[FileAnalysisWS] begin
     # Types live in the SAME file as the closure: the EXPR path resolves
     # annotations through local bindings only — its cross-file hop is a
