@@ -954,6 +954,10 @@ Salsa.@derived function derived_method_signatures_index(rt, root)
         if item.method_sig !== nothing
             push!(get!(() -> Set{LocatedSignature}(), sigs, key),
                 LocatedSignature(loc, item.method_sig))
+        elseif item.kind in (:struct, :mutable_struct) && !isempty(item.ctor_sigs)
+            for cs in item.ctor_sigs
+                push!(get!(() -> Set{LocatedSignature}(), sigs, key), LocatedSignature(loc, cs))
+            end
         elseif item.kind === :macro_declared
             push!(unknown, key)
         elseif item.kind in (:function, :macro) && item.arity === nothing

@@ -40,11 +40,17 @@ extension of an already-existing name elsewhere). `signature` is a normalized
 callable's `MethodArity` (argument-count shape) computed from the defining EXPR —
 plain data (so it backdates), used by the cross-file argument-count check for
 methods whose full set spans files. `method_sig` is the syntactic
-`MethodSignature` for a `:function`/`:macro` item, or the default-constructor
-record for a `:struct`/`:mutable_struct` item with no inner constructor;
-`nothing` when the shape is unknown, absent, or (for a struct with inner
-constructors) not tracked here. `supertype` is the declared parent
-`TypeExpr` for datatype items, `nothing` otherwise.
+`MethodSignature` for a `:function`/`:macro` item, `nothing` for every datatype
+item (their constructor records live in `ctor_sigs`) and whenever the shape is
+unknown or absent. `supertype` is the declared parent `TypeExpr` for datatype
+items, `nothing` otherwise. `ctor_sigs` is a `:struct`/`:mutable_struct` item's
+constructor records: the default field constructor when it has no inner
+constructor, one record per inner constructor otherwise (slot types erased —
+a constructor rules out on alignment and keywords only, never on a field or
+parameter type), and empty when the struct sits behind a non-doc macrocall
+(the macro may rewrite its constructors, so the shape is unknown) or when any
+inner constructor's signature can't be read. Empty for every non-datatype
+item.
 
 `order` is dense and monotone in source order, and exists so the module tree can
 recover Julia's textual-splice semantics; `id` identifies the declaring statement
@@ -72,16 +78,17 @@ const MacroSpelling = @NamedTuple{qualifier::Vector{String}, name::String}
     # per this file's plain-data firewall.
     method_sig::Union{Nothing,MethodSignature}
     supertype::Union{Nothing,TypeExpr}
+    ctor_sigs::Vector{MethodSignature}
 end
 
 # Back-compat constructors: non-callable items (assignments, consts, enums, …)
 # carry no arity, and only `:macro_declared` rows carry a spelling.
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing, nothing, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, nothing, nothing, nothing, nothing, MethodSignature[])
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing, nothing, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, nothing, nothing, nothing, MethodSignature[])
 InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by) =
-    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, nothing, nothing)
+    InventoryItem(order, id, name, qualifier, kind, signature, field_names, parent_module, arity, declared_by, nothing, nothing, MethodSignature[])
 
 "An explicit symbol in a `using`/`import` colon-form list (`using X: a as b`);
 `alias` is the bound name when the symbol is `as`-renamed, `nothing` otherwise —
@@ -161,6 +168,24 @@ function _doc_wrapped_item(x::CSTParser.EXPR)
     x.args !== nothing && length(x.args) == 4 || return nothing
     StaticLint.is_doc_macro_name(x.args[1]) || return nothing
     return x.args[4]
+end
+
+# Whether `x` sits behind a macrocall other than a doc wrapper — walked via
+# CSTParser parent links, independent of the walker's own macro transparency.
+# A doc wrapper is itself transparent (its wrapped item keeps walking up); any
+# other macrocall ancestor means the macro may rewrite `x` (add/replace
+# constructor methods, e.g. `@kwdef`), so its shape is unknown here.
+function _under_nondoc_macro(x::CSTParser.EXPR)
+    cur = x
+    p = CSTParser.parentof(cur)
+    while p isa CSTParser.EXPR
+        if CSTParser.ismacrocall(p)
+            _doc_wrapped_item(p) === cur || return true
+            cur = p
+        end
+        p = CSTParser.parentof(p)
+    end
+    return false
 end
 
 """
@@ -758,7 +783,7 @@ function _classify_assignment!(acc, x, order, id, parent_module, kind_override, 
             qualifier = _item_qualifier(CSTParser.get_name(x))
             push!(acc.items, InventoryItem(order, id,name, qualifier, something(kind_override, :function), _render_sig(x), String[], parent_module,
                 (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing),
-                nothing, StaticLint.method_signature(x), nothing))
+                nothing, StaticLint.method_signature(x), nothing, MethodSignature[]))
         end
     elseif CSTParser.iscurly(x.args[1])
         # Typealias: `Vector{T} = ...` — name comes from the curly's base
@@ -855,7 +880,7 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
         qualifier = _item_qualifier(CSTParser.get_name(x))
         push!(acc.items, InventoryItem(order, id,name, qualifier, kind, _render_sig(x), String[], parent_module,
             (StaticLint._is_real_method(x) ? MethodArity(StaticLint.func_nargs(x)...) : nothing),
-            nothing, StaticLint.method_signature(x), nothing))
+            nothing, StaticLint.method_signature(x), nothing, MethodSignature[]))
     elseif CSTParser.defines_datatype(x)
         # bindings.jl:96-115
         name = _item_name(CSTParser.get_name(x))
@@ -893,17 +918,46 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
             field_names = String[]
         end
         arity = CSTParser.defines_struct(x) ? MethodArity(StaticLint.struct_nargs(x)...) : nothing
-        # One all-Unknown slot per field for the default constructor — only
-        # when no inner constructor is present (an inner constructor's own
-        # signature isn't tracked here; `arity` alone carries the count).
-        ctor_sig = if CSTParser.defines_struct(x) && !any(CSTParser.defines_function, x.args[3].args)
-            MethodSignature([SigSlot(UnknownType(), false) for _ in field_names],
-                nothing, Dict{String,TypeExpr}(), Symbol[], false)
+        # Constructor records: the default all-Unknown-slot field constructor
+        # when no inner constructor is written, else every inner constructor as
+        # written with slot types erased (alignment/keywords only — not a type
+        # opinion). A struct behind a non-doc macrocall gets no record at all:
+        # the macro may rewrite its constructors (`@kwdef`), so the shape is
+        # unknown rather than the default.
+        ctor_sigs = if !CSTParser.defines_struct(x) || _under_nondoc_macro(x)
+            MethodSignature[]
         else
-            nothing
+            inner = filter(CSTParser.defines_function, x.args[3].args)
+            if isempty(inner)
+                # `field_names` skips a body member that unwraps to no readable
+                # name (an unrecognized field-modifier macro); `struct_nargs`
+                # counts every non-docstring member regardless. When they
+                # disagree, the slot count itself is unknown, not just a name —
+                # no record, same as the macro-wrap case above, rather than a
+                # slot count that would false-flag a correctly-shaped call.
+                nmembers = count(a -> !CSTParser.isstringliteral(a), x.args[3].args)
+                if nmembers == length(field_names)
+                    [MethodSignature([SigSlot(UnknownType(), false) for _ in field_names],
+                        nothing, Dict{String,TypeExpr}(), Symbol[], false)]
+                else
+                    MethodSignature[]
+                end
+            else
+                sigs = MethodSignature[]
+                ok = true
+                for ic in inner
+                    s = StaticLint.method_signature(ic)
+                    if s === nothing
+                        ok = false
+                        break
+                    end
+                    push!(sigs, StaticLint._erase_slot_types(s))
+                end
+                ok ? sigs : MethodSignature[]
+            end
         end
         push!(acc.items, InventoryItem(order, id,name, String[], kind, nothing, field_names, parent_module, arity,
-            nothing, ctor_sig, StaticLint.declared_supertype(x)))
+            nothing, nothing, StaticLint.declared_supertype(x), ctor_sigs))
     elseif CSTParser.isassignment(x)
         # bindings.jl:57-66: function-call form → :function with signature;
         # curly lhs → :assignment (typealias); plain identifier lhs → :assignment

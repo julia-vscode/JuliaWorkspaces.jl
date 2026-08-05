@@ -444,12 +444,6 @@ function _external_module_store(q, env::ExternalEnv, meta_dict)
     return nothing
 end
 
-# A callee that is a datatype, i.e. a constructor call.
-_is_datatype_callee(r::TreeRef) = r.kind in _TREE_DATATYPE_KINDS
-_is_datatype_callee(b::Binding) = CoreTypes.isdatatype(b.type) ||
-    (b.val isa EXPR && CSTParser.defines_datatype(b.val))
-_is_datatype_callee(_) = false
-
 # A function-LOCAL binding — defined inside a function/macro body — as opposed to
 # a module/file top-level definition. A local fully shadows any same-named global,
 # so a callee's method set is exactly its own: the cross-file `tree_arities` gate
@@ -539,7 +533,7 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
                             end
                             if !count_ok
                                 seterror!(x, IncorrectCallArgs, meta_dict)
-                            elseif tree.signatures !== nothing && tree.resolve !== nothing && !_is_datatype_callee(func_ref)
+                            elseif tree.signatures !== nothing && tree.resolve !== nothing
                                 # Matches an arity from one half of the union. The
                                 # positional TYPES are a separate opinion, checked
                                 # against the union of the signature records and
@@ -552,10 +546,10 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
                                 # that gap with its own methods, so the outside-reach
                                 # question only needs asking when there is no store to
                                 # fill it (it also skips the per-call imports walk for
-                                # every store-backed callee). Neither side sees a
-                                # datatype's inner/keyword constructors (the records
-                                # carry the default field constructor only) — excluded
-                                # above.
+                                # every store-backed callee). A datatype callee's
+                                # records carry no field/parameter types (erased at
+                                # inventory time), so this phase still can't rule one
+                                # out on a positional type — only on alignment/keywords.
                                 #
                                 # Methods defined only when the code RUNS — by
                                 # `eval`, or by a macro nothing here can expand —

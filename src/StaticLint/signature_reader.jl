@@ -170,6 +170,17 @@ function _slot_type(arg, tvnames::Set{String})
 end
 
 """
+    _erase_slot_types(sig::MethodSignature) -> MethodSignature
+
+Constructor records carry alignment and keywords, never types: fields and
+inner-constructor annotations are not a type opinion for dispatch on the type.
+"""
+_erase_slot_types(sig::MethodSignature) = MethodSignature(
+    [SigSlot(UnknownType(), s.optional) for s in sig.slots],
+    sig.vararg === nothing ? nothing : VarargSpec(UnknownType(), sig.vararg.count),
+    Dict{String,TypeExpr}(), sig.kws, sig.kwsplat)
+
+"""
     declared_supertype(x::EXPR) -> TypeExpr
 
 The declared parent of a datatype definition. No `<:` clause means `Any` —

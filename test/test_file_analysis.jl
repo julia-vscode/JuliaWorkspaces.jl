@@ -2239,9 +2239,11 @@ end
     @test byname["Own"].supertype == TypeRef(["MyAbs"])
     @test byname["Other"].supertype == TYPE_ANY
 
-    # Struct constructor: one all-Unknown slot per field (count opinion only).
-    @test byname["Own"].method_sig !== nothing
-    @test [sl.type for sl in byname["Own"].method_sig.slots] == [UnknownType(), UnknownType()]
+    # Struct constructor: no inner constructor, so `method_sig` is nothing and
+    # `ctor_sigs` holds the default record — one all-Unknown slot per field.
+    @test byname["Own"].method_sig === nothing
+    @test length(byname["Own"].ctor_sigs) == 1
+    @test [sl.type for sl in byname["Own"].ctor_sigs[1].slots] == [UnknownType(), UnknownType()]
 
     @test byname["target"].method_sig !== nothing
     @test byname["target"].method_sig.slots[1].type == TypeRef(["MyAbs"])
@@ -2351,6 +2353,30 @@ end
     ))
     c_cold = mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, C))
     @test c_cold == c_after
+end
+
+@testitem "backdating: moving a struct with an inner constructor between files leaves the signature set equal" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct T\n    x\n    T(x::Int; scale=1) = new(x * scale)\nend\n",
+        B => "\n",
+    ))
+    rt = jw.runtime
+    before = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "T")
+    @test !isempty(before.signatures)
+
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("\n", "julia")))
+    JuliaWorkspaces.update_file!(jw, TextFile(B, SourceText("struct T\n    x\n    T(x::Int; scale=1) = new(x * scale)\nend\n", "julia")))
+
+    after = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "T")
+    @test after == before
+
+    # A keyword rename is the one edit `ctor_sigs` actually tracks by name
+    # (slot types are erased, positional parameter names aren't recorded) —
+    # proves the equality above isn't vacuous.
+    JuliaWorkspaces.update_file!(jw, TextFile(B, SourceText("struct T\n    x\n    T(x::Int; factor=1) = new(x * factor)\nend\n", "julia")))
+    renamed = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "T")
+    @test renamed != before
 end
 
 @testitem "tree_resolve: workspace names, store names, unknowns" setup=[FileAnalysisWS] begin
@@ -3607,4 +3633,45 @@ end
     # The gate's own predicate (checks.jl): definite emptiness requires
     # `!has_unknown_shapes`, so this NameMethods must not satisfy it.
     @test !(isempty(nm.signatures) && nm.has_forward_decl && !nm.has_unknown_shapes)
+end
+
+@testitem "parity/ctor: datatype callees rule out on keywords and alignment only" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    # keyword passed to a plain struct's field constructor: no method takes keywords
+    @test length(callflags("struct S x end\n", "mk() = S(x = 1)\n")) == 1
+    # field types are NOT an opinion: a 'wrong' positional type stays silent
+    @test isempty(callflags("struct S x::Int end\n", "mk() = S(\"str\")\n"))
+    # inner constructor with a keyword: presence accepted
+    @test isempty(callflags("struct T\n    x\n    T(x::Int; scale=1) = new(x*scale)\nend\n",
+                            "mk() = T(1; scale=2)\n"))
+    # wrong keyword name on an inner constructor: name-checked, rules out
+    @test length(callflags("struct T\n    x\n    T(x::Int; scale=1) = new(x*scale)\nend\n",
+                           "mk() = T(1; nope=2)\n")) == 1
+    # @kwdef keyword form stays silent (shape unknown behind the macro)
+    @test isempty(callflags("Base.@kwdef struct FS\n    inc::Int = 1\nend\n",
+                            "mk() = FS(; inc=3)\n"))
+    # two inner constructors whose UNIONED arity (alignment OR'd across both)
+    # would accept 1 positional + `scale`, but neither ctor alone does — the
+    # per-signature match (not the merged-arity count phase) is what catches it.
+    @test length(callflags("struct T\n    x\n    T(x::Int) = new(x)\n    T(; scale=1) = new(0)\nend\n",
+                           "mk() = T(1; scale=2)\n")) == 1
+    # empty-body struct: struct_nargs answers (0, typemax(Int)) — fully
+    # permissive — for zero fields, so the count phase never rules anything
+    # out here. Only the type phase's zero-slot default record can: this is
+    # the one arm that isolates the exclusion-lift itself (verified red
+    # against the pre-lift gate — see the report).
+    @test length(callflags("struct S end\n", "mk() = S(1)\n")) == 1
+    # a body member with no readable field name (`@weird a, b`) makes the
+    # default record's slot count (from `field_names`) disagree with
+    # `struct_nargs`' own member count — the mismatch must decline to no
+    # record (shape unknown) rather than false-flag the correctly-shaped call.
+    @test length(callflags("struct W\n    @weird a, b\n    c::Int\nend\n", "mk() = W(1)\n")) == 1
+    @test isempty(callflags("struct W\n    @weird a, b\n    c::Int\nend\n", "mk() = W(1, 2)\n"))
 end

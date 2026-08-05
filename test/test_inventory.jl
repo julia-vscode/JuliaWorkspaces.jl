@@ -144,6 +144,34 @@ end
     @test fields_of("struct S\n    @weird a, b\n    c::Int\nend\n") == ["c"]
 end
 
+@testitem "inventory: constructor signatures per struct" setup=[InventoryWS] begin
+    using JuliaWorkspaces: UnknownType
+    # plain struct: one default record, one Unknown slot per field
+    # inner constructors: one record each, as written, slot types erased, kws kept
+    src = """
+    struct A x; y::Int end
+    struct B
+        x
+        B(x::Int; scale=1) = new(x * scale)
+        B() = new(0)
+    end
+    Base.@kwdef struct C
+        inc::Int = 1
+    end
+    """
+    items = inventory_of(src)[1].items
+    a = only(filter(i -> i.name == "A", items))
+    @test length(a.ctor_sigs) == 1 && length(a.ctor_sigs[1].slots) == 2
+    @test all(s -> s.type isa JuliaWorkspaces.UnknownType, a.ctor_sigs[1].slots)
+    b = only(filter(i -> i.name == "B", items))
+    @test length(b.ctor_sigs) == 2
+    @test any(cs -> cs.kws == [:scale], b.ctor_sigs)
+    @test all(cs -> all(s -> s.type isa JuliaWorkspaces.UnknownType, cs.slots), b.ctor_sigs)
+    c = only(filter(i -> i.name == "C", items))
+    @test isempty(c.ctor_sigs)          # macro-wrapped: no constructor opinion
+    @test c.method_sig === nothing
+end
+
 @testitem "inventory extraction: kinds, names, signatures, fields" setup=[InventoryWS] begin
     inv, _ = inventory_of("""
     f(x) = x + 1
