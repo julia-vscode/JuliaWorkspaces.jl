@@ -124,6 +124,9 @@ Base.@kwdef struct TreeContext
     signatures::Union{Nothing,Function} = nothing
     resolve::Union{Nothing,Function} = nothing
     callsite_type::Union{Nothing,Function} = nothing
+    reaches_outside::Union{Nothing,Function} = nothing
+    ext_records::Union{Nothing,Function} = nothing
+    ext_resolve::Union{Nothing,Function} = nothing
 end
 
 # `tree_visible` (per-file traversal mode only, `nothing` in the
@@ -507,17 +510,36 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
                             func_ref.val : nothing
                         if !isempty(arities) || store !== nothing
                             cc = call_nargs(x)
-                            if any(a -> compare_f_call(a, cc), arities)
-                                # Matches a workspace overload's arity. The
-                                # positional TYPES are a separate opinion, from
-                                # the signature records — and only when the
-                                # record set is COMPLETE, since exhausting an
-                                # under-approximation proves nothing. A
-                                # store-backed name keeps the permissive answer:
-                                # its store methods are not in the records, and
-                                # neither are a datatype's inner/keyword
-                                # constructors (the records carry the default
-                                # field constructor only).
+                            # Shared between the count and type phases below — one
+                            # call site, so both ask the same scope/in-scope question.
+                            tls = store === nothing ? nothing : retrieve_toplevel_scope(x, meta_dict)
+                            in_scope = store === nothing || tree.in_scope === nothing ? nothing : tree.in_scope(x)
+                            count_ok = any(a -> compare_f_call(a, cc), arities)
+                            if !count_ok && store !== nothing
+                                # Match against the store's own methods; decline
+                                # (no flag) if we can't resolve a scope for them —
+                                # unknown never flags, so a missing scope reads as OK.
+                                count_ok = !(tls isa Scope) || iterate_over_ss_methods(store, tls, env, m -> compare_f_call(func_nargs(m), cc); in_scope)
+                            end
+                            if !count_ok
+                                seterror!(x, IncorrectCallArgs, meta_dict)
+                            elseif tree.signatures !== nothing && tree.resolve !== nothing && !_is_datatype_callee(func_ref)
+                                # Matches an arity from one half of the union. The
+                                # positional TYPES are a separate opinion, checked
+                                # against the union of the signature records and
+                                # (when store-backed) the store's own methods — and
+                                # only when that union is COMPLETE, since exhausting
+                                # an under-approximation proves nothing. The records
+                                # alone under-approximate whenever this module also
+                                # reaches the name from outside its tree (an
+                                # `import Base: iseven` extension); a store fills
+                                # that gap with its own methods, so the outside-reach
+                                # question only needs asking when there is no store to
+                                # fill it (it also skips the per-call imports walk for
+                                # every store-backed callee). Neither side sees a
+                                # datatype's inner/keyword constructors (the records
+                                # carry the default field constructor only) — excluded
+                                # above.
                                 #
                                 # Methods defined only when the code RUNS — by
                                 # `eval`, or by a macro nothing here can expand —
@@ -526,26 +548,37 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
                                 # methods to any function in any module, so a
                                 # sound marker would have to withhold every type
                                 # opinion everywhere. The blind spot is accepted.
-                                if tree.signatures !== nothing && tree.resolve !== nothing &&
-                                   store === nothing && !_is_datatype_callee(func_ref)
-                                    nm = tree.signatures(n, x)
-                                    if !isempty(nm.signatures) && !nm.has_unknown_shapes
-                                        args, kws = call_arg_types(x, false, meta_dict, getsymbols(env), tree.resolve)
-                                        tree.callsite_type === nothing ||
-                                            (args = tree_arg_operands(x, args, meta_dict, tree.callsite_type))
-                                        any(ls -> match_method(args, kws, ls, tree.resolve, getsymbols(env), meta_dict), nm.signatures) ||
-                                            seterror!(x, IncorrectCallArgs, meta_dict)
+                                #
+                                # A store-backed callee's workspace extensions
+                                # (`tree.ext_records`) are a THIRD candidate set,
+                                # alongside the records and the store's own
+                                # methods: a qualified extension's resolved
+                                # qualifier is never a tree module, so the records
+                                # never see it either, in this root or a deved
+                                # dependency's own. Matched with `tree.ext_resolve`,
+                                # not `tree.resolve`: an extension's `defined_in`
+                                # may name a deved dependency's own module path,
+                                # unreachable by a resolver started at this root.
+                                nm = tree.signatures(n, x)
+                                outside = store === nothing && tree.reaches_outside !== nothing && tree.reaches_outside(n, x)
+                                nm_ext = store !== nothing && tree.ext_records !== nothing ?
+                                    tree.ext_records(store, x) : nothing
+                                ext_sigs = nm_ext === nothing ? () : nm_ext.signatures
+                                complete = !nm.has_unknown_shapes && !outside &&
+                                    (nm_ext === nothing || !nm_ext.has_unknown_shapes)
+                                if complete && (!isempty(nm.signatures) || !isempty(ext_sigs) || store !== nothing)
+                                    args, kws = call_arg_types(x, false, meta_dict, getsymbols(env), tree.resolve)
+                                    tree.callsite_type === nothing ||
+                                        (args = tree_arg_operands(x, args, meta_dict, tree.callsite_type))
+                                    match = any(ls -> match_method(args, kws, ls, tree.resolve, getsymbols(env), meta_dict), nm.signatures)
+                                    if !match && !isempty(ext_sigs) && tree.ext_resolve !== nothing
+                                        match = any(ls -> match_method(args, kws, ls, tree.ext_resolve, getsymbols(env), meta_dict), ext_sigs)
                                     end
+                                    if !match && store !== nothing
+                                        match = !(tls isa Scope) || iterate_over_ss_methods(store, tls, env, m -> match_method(args, kws, m, getsymbols(env), meta_dict); in_scope)
+                                    end
+                                    match || seterror!(x, IncorrectCallArgs, meta_dict)
                                 end
-                            elseif store !== nothing
-                                # Match against the store's own methods; decline
-                                # (no flag) if we can't resolve a scope for them.
-                                tls = retrieve_toplevel_scope(x, meta_dict)
-                                if tls isa Scope && !iterate_over_ss_methods(store, tls, env, m -> compare_f_call(func_nargs(m), cc); in_scope = tree.in_scope === nothing ? nothing : tree.in_scope(x))
-                                    seterror!(x, IncorrectCallArgs, meta_dict)
-                                end
-                            else
-                                seterror!(x, IncorrectCallArgs, meta_dict)
                             end
                         end
                     end

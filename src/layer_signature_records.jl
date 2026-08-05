@@ -80,11 +80,9 @@ files backdates), plus two completeness markers. While `has_unknown_shapes`
 is true the set is an under-approximation: its emptiness proves nothing and
 exhausting it licenses nothing.
 
-`has_unknown_shapes` has a second producer: a consumer that knows the set is
-partial for a reason the index cannot see re-wraps the value with the marker
-set (the per-file analysis does this for a name the module also reaches from
-outside its own tree, i.e. one the workspace only EXTENDS). Read the marker,
-never re-derive it from the set.
+A name the module also reaches from outside its own tree (one the workspace
+only EXTENDS) is a separate, consumer-side question — this marker alone does
+not carry it; a caller that cares weighs it against store backing itself.
 """
 @auto_hash_equals struct NameMethods
     signatures::Set{LocatedSignature}

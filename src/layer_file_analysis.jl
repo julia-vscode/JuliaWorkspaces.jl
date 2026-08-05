@@ -937,14 +937,16 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # is where its names were visible.
     tree_signatures = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
-        nm = derived_method_signatures(rt, root, p, name)
-        # A name that also reaches this module from OUTSIDE its tree carries
-        # methods no record lists — the workspace definitions are extensions of
-        # it — so the set is an under-approximation whatever its own markers say.
-        if !isempty(nm.signatures) && _name_reaches_from_outside(rt, root, p, name)
-            return NameMethods(nm.signatures, true, nm.has_forward_decl)
-        end
-        return nm
+        derived_method_signatures(rt, root, p, name)
+    end
+    # A name that also reaches this module from OUTSIDE its tree carries
+    # methods no record lists — the workspace definitions are extensions of it
+    # — so `tree_signatures`'s set is an under-approximation whatever its own
+    # markers say; the gate weighs this against store backing, which is why it
+    # is a separate question rather than a re-wrap of `NameMethods` here.
+    tree_reaches_outside = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        _name_reaches_from_outside(rt, root, p, name)
     end
     tree_signature_resolver = _tree_type_resolver(rt, root)
     # The same resolver asked at the CALL SITE instead — the argument side, whose
@@ -952,11 +954,95 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # in different modules and only the record side carries its own.
     tree_callsite_type = (t, x) ->
         tree_signature_resolver(t, vcat(path, _in_file_module_names(x, meta_dict)))
+    # A store-backed callee's workspace extensions, from EVERY root that could
+    # write one invisibly to the signature index: this root (a QUALIFIED
+    # extension's resolved qualifier is never a tree module, so
+    # `derived_method_items` drops it — `_name_reaches_from_outside`'s
+    # complement) and every deved dependency (its extensions live in ITS OWN
+    # root's index, never this one's, and in no jstore either). Rendered as
+    # `LocatedSignature`s exactly like a tree method item, from the declaring
+    # item's own `method_sig`.
+    deved_roots = project_uri === nothing ? URI[] :
+        collect(values(derived_workspace_deved_packages(rt, project_uri)))
+    ext_roots = vcat([root], deved_roots)
+    # `x` (the call site) never affects the result — every store target's
+    # aggregation is the same regardless of which call asked — so memoize per
+    # store value for the life of this one file analysis. Without this, a file
+    # with many calls to the same store-backed name re-walks every extension
+    # of every ext root on EVERY call (calls × extensions); measured 17× slower
+    # on a 100-extension × 300-call synthetic root.
+    _ext_records_memo = Dict{UInt,NameMethods}()
+    # The root each record's `defined_in` actually came from, filled as
+    # `tree_ext_records` builds each record — `tree_ext_resolve` below needs
+    # this to start its walk at the right root, and re-deriving it from
+    # `defined_in[1]` alone (a name lookup requiring a readable `Project.toml`)
+    # both duplicates work already done here and is less reliable (see
+    # `tree_ext_resolve`'s fallback comment).
+    _ext_defined_in_roots = Dict{Vector{String},URI}()
+    tree_ext_records = (store_val, x) -> begin
+        key = objectid(store_val)
+        cached = get(_ext_records_memo, key, nothing)
+        cached === nothing || return cached
+        sigs = Set{LocatedSignature}()
+        has_unknown = false
+        for R in ext_roots
+            for e in _matching_workspace_extensions(rt, R, env, store_val)
+                item = _inventory_item(rt, e.ref)
+                if item === nothing || item.method_sig === nothing
+                    has_unknown = true
+                    continue
+                end
+                fp = derived_file_module_path(rt, R, e.ref.file)
+                if fp === nothing
+                    has_unknown = true
+                    continue
+                end
+                defined_in = vcat(fp, item.parent_module)
+                _ext_defined_in_roots[defined_in] = R
+                push!(sigs, LocatedSignature(defined_in, item.method_sig))
+            end
+        end
+        nm = NameMethods(sigs, has_unknown, false)
+        _ext_records_memo[key] = nm
+        return nm
+    end
+    # `tree_signature_resolver` starts its walk at THIS root — correct for
+    # every ordinary record, but an extension's `defined_in` may name a deved
+    # dependency's OWN module path, unreachable from this root's tree at all
+    # (no `using` to hop through, unlike a call-site reference to the same
+    # dependency). Dispatch to a resolver started at whichever root actually
+    # declares `defined_in`'s head module: primarily the root
+    # `tree_ext_records` already recorded for this exact `defined_in` — it
+    # KNOWS, having just walked that root's own inventory to build the record.
+    # The `derived_workspace_package_roots` name lookup is only a fallback for
+    # a `defined_in` no ext record produced (shouldn't happen on this path,
+    # but degrading to a name-based guess is safer than erroring); mirrors
+    # `_method_items_root`'s own `derived_module_exists` check before trusting
+    # a switched root, since a name collision would otherwise silently resolve
+    # in the wrong package's tree.
+    _ext_root_resolvers = Dict{URI,Function}()
+    tree_ext_resolve = (t, defined_in) -> begin
+        r = get(_ext_defined_in_roots, defined_in, nothing)
+        if r === nothing
+            r = root
+            if !isempty(defined_in) && !derived_module_exists(rt, root, defined_in)
+                alt = get(derived_workspace_package_roots(rt), defined_in[1], nothing)
+                if alt !== nothing && derived_module_exists(rt, alt, defined_in)
+                    r = alt
+                end
+            end
+        end
+        resolver = r == root ? tree_signature_resolver :
+            get!(() -> _tree_type_resolver(rt, r), _ext_root_resolvers, r)
+        resolver(t, defined_in)
+    end
     StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict,
         StaticLint.TreeContext(;
             visible = tree_visible, extended = tree_extended, arities = tree_arities,
             in_scope = tree_in_scope, signatures = tree_signatures,
-            resolve = tree_signature_resolver, callsite_type = tree_callsite_type))
+            resolve = tree_signature_resolver, callsite_type = tree_callsite_type,
+            reaches_outside = tree_reaches_outside,
+            ext_records = tree_ext_records, ext_resolve = tree_ext_resolve))
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file

@@ -2651,6 +2651,255 @@ end
                             "caller(kw) = sin(1; kw...)\n"))
 end
 
+@testitem "parity: store callee with a workspace overload — union of both method sets" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "import Base: iseven\nstruct D end\niseven(d::D) = true\nstruct Other end\n",
+        B => """
+        import Base: iseven
+        good1(d::D) = iseven(d)        # served by the workspace overload
+        good2(x::Int) = iseven(x)      # served by the store's own methods
+        bad(w::Other) = iseven(w)      # served by neither: flag
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+end
+
+@testitem "parity: placement (e) — store callee with workspace overload, per shape" setup=[FileAnalysisWS] begin
+    # For each shape, `iseven` (or a workspace-defined stand-in) is bound via
+    # `import Base: ...` in both files and also overloaded in the workspace;
+    # `good1` is served only by the workspace half of the union, `good2` only
+    # by the store half, and `bad` by neither. The bare shape is covered by
+    # "parity: store callee with a workspace overload — union of both method
+    # sets" above — not repeated here.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    # parametric: the workspace half carries the shape — a head-only match
+    # (`D{Int}` vs. the call's `D{String}`) — the store half is unrelated.
+    flagged = callflags(
+        "import Base: iseven\nstruct D{T} end\niseven(d::D{Int}) = true\nstruct Other end\n",
+        """
+        import Base: iseven
+        good1(d::D{String}) = iseven(d)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # union: the workspace half's parameter is a `Union` of two workspace types.
+    flagged = callflags(
+        "import Base: iseven\nstruct P end\nstruct Q end\nstruct Other end\niseven(x::Union{P,Q}) = true\n",
+        """
+        import Base: iseven
+        good1(p::P) = iseven(p)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # where: the workspace half's typevar is bounded by a workspace abstract
+    # type unrelated to the store's own `Real`/`Number` bounds.
+    flagged = callflags(
+        "import Base: iseven\nabstract type MyAbs end\nstruct Own <: MyAbs end\nstruct Other end\niseven(x::T) where {T<:MyAbs} = true\n",
+        """
+        import Base: iseven
+        good1(o::Own) = iseven(o)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # vararg: the workspace half carries the shape — `iseven`'s own methods are
+    # all unary, so a multi-arg call can only be served by the workspace side.
+    flagged = callflags(
+        "import Base: iseven\nstruct D end\niseven(d::D, xs::D...) = true\nstruct Other end\n",
+        """
+        import Base: iseven
+        good1(d::D) = iseven(d, d, d)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w, w)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # optional: the workspace half carries the shape via a defaulted slot.
+    flagged = callflags(
+        "import Base: iseven\nstruct D end\niseven(d::D, y::Int=1) = true\nstruct Other end\n",
+        """
+        import Base: iseven
+        good1(d::D) = iseven(d, 2)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w, 2)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # keywords: the workspace half carries the shape via a declared keyword.
+    flagged = callflags(
+        "import Base: iseven\nstruct D end\niseven(d::D; k=1) = true\nstruct Other end\n",
+        """
+        import Base: iseven
+        good1(d::D) = iseven(d; k=2)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w; k=2)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+end
+
+@testitem "parity: store callee with a qualified extension in the current root" setup=[FileAnalysisWS] begin
+    # `Base.iseven(::D2) = true` is a QUALIFIED extension: its resolved
+    # qualifier is never a tree module, so `derived_method_items`/the
+    # signature index drops it exactly like `derived_external_method_extensions`
+    # does for the arity side — `tree.ext_records` is the only channel that
+    # sees it.
+    bsrc = """
+    import Base: iseven
+    good(d::D2) = iseven(d)   # served by the qualified extension's own record
+    bad(w::Other) = iseven(w)
+    """
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct D2 end\nBase.iseven(::D2) = true\nstruct Other end\n",
+        B => bsrc,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    # The generic message carries no type name here (`describe_call_mismatch`
+    # returns `nothing` for this callee shape) — pin the flag to `bad`'s own
+    # call by its source range instead.
+    @test SubString(bsrc, only(flagged).range) == "iseven(w)\n"
+end
+
+@testitem "parity: store callee with a deved dependency's workspace extension" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # DevPkg is DEVED into MainP (a Manifest `[deps.DevPkg]` entry with a
+    # `path`, no registry version): its `Base.iseven(::E) = true` lives in
+    # DevPkg's OWN root's signature index, never MainP's, and in no jstore
+    # either — `tree.ext_records` walks every deved dependency root, and the
+    # extension's own parameter type (`E`, declared inside DevPkg) resolves
+    # through `tree.ext_resolve`, started at DevPkg's root rather than MainP's.
+    main_project = "name = \"MainP\"\nuuid = \"b2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    dev_uuid = "cccccccc-dddd-eeee-ffff-000000000000"
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+
+    [[deps.DevPkg]]
+    path = "../DevPkg"
+    uuid = "$dev_uuid"
+    version = "0.1.0"
+    """
+    dev_project = "name = \"DevPkg\"\nuuid = \"$dev_uuid\"\nversion = \"0.1.0\"\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///devroot/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///devroot/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///devroot/Main/src/MainP.jl"),
+        SourceText("""
+        module MainP
+        using DevPkg
+        import Base: iseven
+        struct D end
+        iseven(d::D) = true
+        f(e::E) = iseven(e)        # served by the deved dependency's extension
+        good2(x::Int) = iseven(x)  # served by the store's own methods
+        bad(s::String) = iseven(s) # served by neither: flag
+        end
+        """, "julia")))
+    add_file!(jw, TextFile(URI("file:///devroot/DevPkg/src/DevPkg.jl"),
+        SourceText("module DevPkg\nstruct E end\nBase.iseven(::E) = true\nexport E\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///devroot/DevPkg/Project.toml"), SourceText(dev_project, "toml")))
+
+    main_root = URI("file:///devroot/Main/src/MainP.jl")
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, main_root, main_root)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("String", only(flagged).message)
+end
+
+@testitem "parity: a deved dependency's own Project.toml is not required for its extension's control" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # Same shape as the deved-dependency testitem above but DevPkg has NO
+    # `Project.toml` of its own — a manifest dev dep still names it, but it
+    # never becomes a recognized workspace-package FOLDER
+    # (`derived_workspace_package_roots`), so `E` never resolves at the CALL
+    # SITE either (an accepted, unrelated blind spot: `f` stays silent either
+    # way). `tree_ext_records` still finds DevPkg's root directly from
+    # `derived_workspace_deved_packages` (the Manifest entry alone, no
+    # `Project.toml` needed there), and hands `tree_ext_resolve` that SAME
+    # root via `_ext_defined_in_roots` — not a `defined_in[1]` name lookup,
+    # which `derived_workspace_package_roots` would answer `nothing` for
+    # here. Regression guard for the bug the name-lookup fallback had: a
+    # resolver started at the wrong (current) root can't resolve `E`, and an
+    # unresolvable extension parameter widens to Any, silently matching
+    # every argument — including this `bad(s::String)` control.
+    main_project = "name = \"MainP\"\nuuid = \"b2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    dev_uuid = "cccccccc-dddd-eeee-ffff-000000000000"
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+
+    [[deps.DevPkg]]
+    path = "../DevPkg"
+    uuid = "$dev_uuid"
+    version = "0.1.0"
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///devroot2/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///devroot2/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///devroot2/Main/src/MainP.jl"),
+        SourceText("""
+        module MainP
+        using DevPkg
+        import Base: iseven
+        struct D end
+        iseven(d::D) = true
+        f(e::E) = iseven(e)
+        bad(s::String) = iseven(s) # must still flag
+        end
+        """, "julia")))
+    add_file!(jw, TextFile(URI("file:///devroot2/DevPkg/src/DevPkg.jl"),
+        SourceText("module DevPkg\nstruct E end\nBase.iseven(::E) = true\nexport E\nend\n", "julia")))
+    # No DevPkg/Project.toml.
+
+    main_root = URI("file:///devroot2/Main/src/MainP.jl")
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, main_root, main_root)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("String", only(flagged).message)
+end
+
 @testitem "parity: methods defined when the code runs are not indexed" setup=[FileAnalysisWS] begin
     # A method born from `eval`, or from a macro nothing here can expand, leaves
     # no record behind, so a name's record set reads as complete when it is not
