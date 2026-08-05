@@ -2592,3 +2592,35 @@ end
     @test length(callflags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\n",
                            "caller() = f9(1, 2.0, 3.0)\n")) == 1
 end
+
+@testitem "parity/qualified: Base-qualified annotation, sibling callee" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct Other end\ntarget(x::Base.AbstractString) = 1\n",
+        B => "good(v::String) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity/qualified: workspace-module-qualified annotation" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        module Inner
+        abstract type MyAbs end
+        end
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "struct Own <: Inner.MyAbs end\nstruct Other end\ntarget(x::Inner.MyAbs) = 1\n",
+        B => "good(v::Own) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
