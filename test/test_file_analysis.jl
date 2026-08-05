@@ -3035,6 +3035,11 @@ end
     @test isempty(flags("module U\nusing Base: PkgId, UUID\nf() = PkgId(UUID(42), \"x\")\ng(x::Base.UUID) = x\nh() = g(UUID(42))\nend\n"))
     @test isempty(flags("module U2\nimport Base: UUID\ng(x::UUID) = x\nh() = g(UUID(42))\nend\n"))
     @test length(flags("module U3\nusing Base: UUID, Dict\ng(x::Base.UUID) = x\nbad() = g(Dict(1=>2))\nend\n")) == 1
+
+    # `(x,)::Ref{Any}` binds the ELEMENT: the container's type is not `x`'s.
+    @test isempty(flags("module V\nstruct D end\nmycols(df::D) = 1\ng((x,)::Ref{Any}) = mycols(x)\nend\n"))
+    # A `Tuple{…}` annotation does spell each element out, and still rules out.
+    @test length(flags("module V2\nstruct D end\nmycols(df::D) = 1\ng((x, y)::Tuple{Ref{Any},Int}) = (mycols(x), y)\nend\n")) == 1
 end
 
 @testitem "parity: an anonymous constructor's methods are not indexed" setup=[FileAnalysisWS] begin

@@ -67,8 +67,12 @@ function infer_type(binding::Binding, scope, state)
                 end
             elseif binding.val.head isa EXPR && valof(binding.val.head) == "::"
                 lhs = binding.val.args[1]
-                if CSTParser.istuple(lhs) && _infer_tuple_decl_element!(binding, lhs, binding.val.args[2], state, scope)
-                    # `(a, b, …)::Tuple{T1, T2, …}` positional destructure handled below
+                if CSTParser.istuple(lhs)
+                    # A destructuring declaration types each name from the
+                    # ELEMENT it takes, which only a `Tuple{T1, T2, …}`
+                    # annotation spells out. Any other container (`(a,)::Ref{Any}`)
+                    # leaves the names unknown — never the container's own type.
+                    _infer_tuple_decl_element!(binding, lhs, binding.val.args[2], state, scope)
                 else
                     infer_type_decl(binding, state, scope)
                 end
