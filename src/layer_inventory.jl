@@ -490,41 +490,11 @@ Salsa.@derived function derived_file_inventory(rt, uri)
         # whose expansion is unknown here. The row binds no name — it marks its
         # module as one whose declared API this file only partially describes,
         # so a consumer that reasons by EXHAUSTING a name's records knows not to.
-        if before == after
-            if _defines_anonymous_constructor(x)
-                push!(acc.items, InventoryItem(order, id, "", String[], :anon_constructor,
-                    nothing, String[], copy(parent_module)))
-            elseif _may_define_by_evaluation(x) || _is_unread_macro_argument(x)
-                push!(acc.items, InventoryItem(order, id, "", String[], :opaque_eval,
-                    nothing, String[], copy(parent_module)))
-            end
-        end
+        before == after && (_may_define_by_evaluation(x) || _is_unread_macro_argument(x)) &&
+            push!(acc.items, InventoryItem(order, id, "", String[], :opaque_eval,
+                nothing, String[], copy(parent_module)))
     end
     return FileInventory(acc.items, acc.imports, acc.exports, acc.includes, acc.modules)
-end
-
-# Does `x` define a method whose callee is a `(::Type{…})` slot instead of a
-# name? Such a method is a constructor of every type the annotation matches —
-# `(::Type{T})(x::Cenum) where T<:Integer` adds one to every `Integer` subtype,
-# in this workspace or not — so no name is bound and no constructor set anywhere
-# can be treated as complete. A callable-object method (`(f::MyFunctor)(x)`) is
-# NOT this: it names one concrete type, so the annotation must be `Type`.
-function _defines_anonymous_constructor(x::CSTParser.EXPR)
-    CSTParser.defines_function(x) || return false
-    sig = CSTParser.get_sig(x)
-    sig isa CSTParser.EXPR || return false
-    sig = CSTParser.rem_wheres_decls(sig)
-    (sig isa CSTParser.EXPR && CSTParser.iscall(sig) && sig.args !== nothing && !isempty(sig.args)) || return false
-    callee = sig.args[1]
-    (CSTParser.isbracketed(callee) && callee.args !== nothing && !isempty(callee.args)) || return false
-    decl = callee.args[1]
-    # `(::Type{T})(…)` writes the slot with no NAME, so the `::` is a unary
-    # operator node — `isdeclaration` only recognises the binary `x::T` form.
-    (decl.head isa CSTParser.EXPR && CSTParser.valof(decl.head) == "::" &&
-        decl.args !== nothing && !isempty(decl.args)) || return false
-    t = last(decl.args)
-    CSTParser.iscurly(t) && t.args !== nothing && !isempty(t.args) && (t = t.args[1])
-    return _item_name(t) == "Type"
 end
 
 # Is `x` an argument of a macrocall the walker descended into? Then whatever the

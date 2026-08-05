@@ -303,9 +303,6 @@ function _get_workspace_symbols(runtime, query::String)
             # `:opaque_eval` rows bind no name at all — they mark a module whose
             # API a run-time definition may extend.
             it.kind === :opaque_eval && continue
-            # `:anon_constructor` rows likewise: a `(::Type{T})(…)` method names
-            # no type, and the row records only that one exists.
-            it.kind === :anon_constructor && continue
             # A modelled macro's generated names: three rows share the declaring
             # statement's range, so listing them triples the outline entry. They
             # are also unconfirmed at this layer — nothing may treat them as

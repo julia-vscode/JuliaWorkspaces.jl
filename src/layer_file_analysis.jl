@@ -682,13 +682,7 @@ function _matching_workspace_extensions(rt, root, env, func_ref)
 end
 
 _store_extended_in_workspace(rt, root, env, func_ref) =
-    !isempty(_matching_workspace_extensions(rt, root, env, func_ref)) ||
-    # A DATATYPE callee is also extended by an anonymous `(::Type{T})(…)`
-    # constructor, which names no type and so cannot be matched by name: while
-    # one exists in the closure, no constructor set is complete. The callee is a
-    # datatype either directly or through its constructor `FunctionStore`, which
-    # is what an abstract type's name (`Integer`) resolves to.
-    (StaticLint.resolves_to_datatype(func_ref, env) && derived_root_has_anonymous_constructors(rt, root))
+    !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
 
 # Item lookup for a resolved name: scan the declaring file's inventory for the
 # `ItemRef`'s id. Only the inventory is read — never a sibling's analysis —

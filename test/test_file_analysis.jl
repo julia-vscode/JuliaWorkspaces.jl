@@ -2642,12 +2642,6 @@ end
     @test isempty(flags("module Q\nP(::Type{Float64}) = 1\nQ2(::DataType) = 1\nR(::Type) = 1\nb() = (T = Float64; P(T))\nc() = (T = Float64; Q2(T))\nd() = (T = Float64; R(T))\nend\n"))
     @test length(flags("module Q\nP(::Type{Float64}) = 1\nbad() = (T = \"s\"; P(T))\nend\n")) == 1
 
-    # An anonymous `(::Type{T})(…)` constructor serves every matching type, so no
-    # constructor set in the closure is complete while one exists.
-    @test isempty(flags("module R\nabstract type Cenum{T<:Integer} end\n(::Type{T})(x::Cenum{T2}) where {T<:Integer,T2<:Integer} = T(x)\nf(x::Cenum) = Integer(x)\nend\n"))
-    # A callable-object method names one concrete type and marks nothing.
-    @test length(flags("module R\nstruct Fn end\n(f::Fn)(x::Int) = 1\nstruct Foo end\ng(x::Foo) = Integer(x)\nend\n")) == 1
-
     # A qualified extension binds the workspace's SHARE of another module's
     # generic; the owner's own methods are not in that binding.
     @test isempty(flags("module S\nstruct Ax end\nBase.axes(A::Ax) = ()\nBase.axes(A::Ax, d) = ()\ng(A::AbstractArray, d) = length(Base.axes(A, d))\nend\n"))
@@ -2657,6 +2651,25 @@ end
     # A `where` typevar passed as an argument may bind a value: no opinion — and
     # the DECISION must use the same operand the message reports.
     @test isempty(flags("module T2\nf(x::NamedTuple{an}, y::NamedTuple{bn}) where {an,bn} = Base.merge_names(an, bn)\nend\n"))
+end
+
+@testitem "parity: an anonymous constructor's methods are not indexed" setup=[FileAnalysisWS] begin
+    # `(::Type{T})(x::Cenum{T2}) where T<:Integer` binds no name, so nothing
+    # records it and `Integer(x)` is ruled out against Base's constructor set as
+    # if it were complete. The call is correct — no decline for this form exists
+    # yet, and the flag is an accepted false positive.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "(::Type{T})(x::Cenum{T2}) where {T<:Integer,T2<:Integer} = T(bitstring(x))\n",
+        # The type is declared HERE on purpose: a sibling-file annotation leaves
+        # the argument untyped, and an untyped argument rules nothing out, so the
+        # form under test would not be reached at all.
+        B => "abstract type Cenum{T<:Integer} end\nconv(x::Cenum) = Integer(x)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("No method matching", d.message) ||
+                          occursin("method call error", d.message), fa.diagnostics)
+    @test_broken isempty(flagged)
 end
 
 @testitem "parity: optional slots align before the vararg pad" setup=[FileAnalysisWS] begin

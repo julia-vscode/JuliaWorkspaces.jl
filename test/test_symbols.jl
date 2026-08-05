@@ -406,28 +406,3 @@ end
     @test kinds["MyStruct"] == 23  # Struct
     @test kinds["@mymac"] == 12    # Function (no LSP Macro kind)
 end
-
-@testitem "Symbols: a nameless inventory row is never a workspace symbol" begin
-    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_workspace_symbols
-    using JuliaWorkspaces.URIs2: URI
-
-    # An anonymous `(::Type{T})(…)` constructor binds no name; its inventory row
-    # exists only to record that one is present. A list-all query must not offer
-    # it as an empty-named symbol.
-    source = """
-    module PA
-    abstract type Cenum{T<:Integer} end
-    (::Type{T})(x::Cenum{T2}) where {T<:Integer,T2<:Integer} = T(x)
-    f(x::Cenum) = Integer(x)
-    end
-    """
-
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(URI("file:///anonctor/src/PA.jl"), SourceText(source, "julia")))
-
-    results = get_workspace_symbols(jw, "")
-    @test !any(r -> isempty(r.name), results)
-    # the real declarations are still there
-    names = [r.name for r in results]
-    @test "Cenum" in names && "f" in names && "PA" in names
-end

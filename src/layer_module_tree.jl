@@ -904,29 +904,6 @@ Salsa.@derived function derived_method_arities_index(rt, root)
 end
 
 """
-    derived_root_has_anonymous_constructors(rt, root) -> Bool
-
-Does any file spliced into `root` define a method whose callee is a `(::Type{…})`
-slot? Such a method constructs every type its annotation matches — including
-types nothing in this workspace mentions — so while it is present no
-constructor set in the closure can be treated as complete.
-
-Root-scoped, not module-scoped: the method's reach is its annotation's, not its
-module's. A plain `Bool`, so it backdates on every edit that does not change the
-answer, and its dependents re-execute only when one appears or disappears.
-"""
-Salsa.@derived function derived_root_has_anonymous_constructors(rt, root)
-    @debug "derived_root_has_anonymous_constructors" root=root
-
-    found = false
-    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
-                                 kinds=(:anon_constructor,)) do F, item, loc
-        found = true
-    end
-    return found
-end
-
-"""
     derived_method_signatures(rt, root, path, name) -> NameMethods
 
 The signature records of every method of `name` at module `path`, plus the
