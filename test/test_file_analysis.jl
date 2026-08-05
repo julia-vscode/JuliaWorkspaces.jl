@@ -3090,3 +3090,59 @@ end
     @test length(callflags("f(a::Int, b::String=\"x\") = 1\n", "caller() = f(1, 2.0)\n")) == 1
     @test isempty(callflags("f(a::Int, b::String=\"x\") = 1\n", "caller() = f(1)\n"))
 end
+
+@testitem "parity/keywords: presence-only gating, all placements agree" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function samefile_flags(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function oneroot_flags(src::String)
+        jw = ws_with(Dict(B => src))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, B, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function closure_callflags(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    # Cross-file: keyword passed to method with no declared keywords → 1 flag
+    @test length(callflags("struct T end\nf(x::T) = 1", "c(v::T) = f(v; k=1)")) == 1
+    # Cross-file: declared keyword → no flags
+    @test isempty(callflags("struct T end\nf(x::T; k=1) = 1", "c(v::T) = f(v; k=2)"))
+    # Cross-file: wrong keyword name flags via MethodArity channel (compare_f_call name membership); record path gates on presence only
+    @test length(callflags("struct T end\nf(x::T; k=1) = 1", "c(v::T) = f(v; other=2)")) == 1
+    # Cross-file: kwsplat accepts anything → no flags
+    @test isempty(callflags("struct T end\nf(x::T; kws...) = 1", "c(v::T) = f(v; whatever=1)"))
+
+    # Closure placement: keyword passed to method with no declared keywords → 1 flag
+    @test length(closure_callflags("struct T end\nf(x::T) = 1\nfunction caller()\n  c(v::T) = f(v; k=1)\nend")) == 1
+    # Closure placement: declared keyword → no flags
+    @test isempty(closure_callflags("struct T end\nf(x::T; k=1) = 1\nfunction caller()\n  c(v::T) = f(v; k=2)\nend"))
+    # Closure placement: wrong keyword name flags via MethodArity channel (compare_f_call name membership); record path gates on presence only
+    @test length(closure_callflags("struct T end\nf(x::T; k=1) = 1\nfunction caller()\n  c(v::T) = f(v; other=2)\nend")) == 1
+    # Closure placement: kwsplat accepts anything → no flags
+    @test isempty(closure_callflags("struct T end\nf(x::T; kws...) = 1\nfunction caller()\n  c(v::T) = f(v; whatever=1)\nend"))
+
+    # One-file-root variant of first arm: keyword passed to method with no declared keywords → 1 flag
+    @test length(oneroot_flags("struct T end\nf(x::T) = 1\nc(v::T) = f(v; k=1)")) == 1
+end
