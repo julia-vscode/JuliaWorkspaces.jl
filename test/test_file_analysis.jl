@@ -3512,6 +3512,31 @@ end
     @test isempty(oneroot_flags("c(v::Float64) = ceil(v; digits=2)"))
 end
 
+@testitem "parity/ctor-arg: a constructor-call argument carries its type" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    # (c) constructed type declared in the sibling, call in B
+    @test length(callflags("struct Own end\nstruct Other end\ntarget(x::Own) = 1\n",
+                           "b1() = target(Other())\n")) == 1
+    @test isempty(callflags("struct Own end\nstruct Other end\ntarget(x::Own) = 1\n",
+                            "b2() = target(Own())\n"))
+    # (b) same file
+    @test length(callflags("struct Z end\n",
+                           "struct Own end\nstruct Other end\ntarget(x::Own) = 1\nb3() = target(Other())\n")) == 1
+    # (d) store type constructed: ArgumentError("x") vs a slot wanting a workspace type
+    @test length(callflags("struct Own end\ntarget(x::Own) = 1\n",
+                           "b4() = target(ArgumentError(\"x\"))\n")) == 1
+    # (a) closure: whole path is local
+    @test length(callflags("struct Z end\n",
+                           "struct Own end\nstruct Other end\nfunction c()\n    t(x::Own) = 1\n    t(Other())\nend\n")) == 1
+end
+
 @testitem "parity: a forward-declared function with no methods flags, cross-file" setup=[FileAnalysisWS] begin
     function flagsof(a::String, b::String)
         jw = ws_with(Dict(

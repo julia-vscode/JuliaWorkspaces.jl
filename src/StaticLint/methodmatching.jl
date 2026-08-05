@@ -73,6 +73,12 @@ function arg_type(arg, ismethod, meta_dict, store=nothing, resolver=nothing)
         # No opinion rather than a wrong one — and the same operand the message
         # printer reports, so a rule-out can never contradict its own reason.
         _is_where_typevar_ref(arg, meta_dict) && return CoreTypes.Any
+        # A constructor-call argument (`f(Own())`) types as the constructed
+        # datatype rather than falling through to `Any`.
+        if iscall(arg) && arg.args !== nothing && !isempty(arg.args) && store !== nothing &&
+                _is_type_callee(arg.args[1], store, meta_dict)
+            return _resolve_type_expr(arg.args[1], store, meta_dict, resolver)
+        end
         if hasref(arg, meta_dict)
             if refof(arg, meta_dict) isa Binding && refof(arg, meta_dict).type !== nothing
                 type = refof(arg, meta_dict).type

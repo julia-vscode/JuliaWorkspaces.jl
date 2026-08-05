@@ -217,6 +217,10 @@ function _workspace_datatype_segments(val, arg, meta_dict)
         n = val.name isa EXPR ? valofid(val.name) : nothing
         n === nothing || return [n]
     end
+    if arg isa EXPR && iscall(arg) && arg.args !== nothing && !isempty(arg.args) &&
+            _names_workspace_datatype(arg.args[1], meta_dict)
+        return _type_name_segments(arg.args[1])
+    end
     (arg isa EXPR && isidentifier(arg)) || return nothing
     b = refof(arg, meta_dict)
     b isa Binding || return nothing
