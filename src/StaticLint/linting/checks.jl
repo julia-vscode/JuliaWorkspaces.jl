@@ -587,14 +587,35 @@ function check_call(x, env::ExternalEnv, meta_dict, tree::TreeContext=TreeContex
             end
         end
 
-        # Per-file mode partial-method-set gate for a STORE-backed callee that a
-        # workspace file extends (`Base.relpath(::AbstractString, ::PkgData)` in a
-        # sibling): the overload lives in that file's `scope.overloaded` and is not
-        # in the env store's method set, so this file sees only a partial set —
-        # decline rather than false-positive. `tree_extended` (per-file mode only)
-        # confirms `func_ref` is the function actually extended.
+        # Per-file mode union check for a STORE-backed callee that a workspace file
+        # extends (`Base.relpath(::AbstractString, ::PkgData)` in a sibling): the
+        # overload lives in that file's `scope.overloaded` and is not in the env
+        # store's method set, so `func_ref` alone sees only a partial set. Check
+        # against the union of the workspace's extension records (`tree.ext_records`,
+        # matched with `tree.ext_resolve` since a record's `defined_in` may name a
+        # deved dependency's own module path) and the store's own methods, rather
+        # than declining outright.
         if tree.extended !== nothing && (func_ref isa SymbolServer.FunctionStore || func_ref isa SymbolServer.DataTypeStore)
-            tree.extended(func_ref, x) && return
+            if tree.extended(func_ref, x)
+                (tree.ext_records === nothing || tree.ext_resolve === nothing ||
+                    call_has_splat(x)) && return
+                nm = tree.ext_records(func_ref, x)
+                nm.has_unknown_shapes && return
+                tls = retrieve_toplevel_scope(x, meta_dict)
+                args, kws = call_arg_types(x, false, meta_dict, getsymbols(env))
+                tree.callsite_type === nothing ||
+                    (args = tree_arg_operands(x, args, meta_dict, tree.callsite_type))
+                match = any(ls -> match_method(args, kws, ls, tree.ext_resolve, getsymbols(env), meta_dict),
+                            nm.signatures) ||
+                    # Unknown never flags: no top-level scope to search the store's
+                    # own methods in reads as OK, not as a mismatch.
+                    !(tls isa Scope) ||
+                    iterate_over_ss_methods(func_ref, tls, env,
+                        m -> match_method(args, kws, m, getsymbols(env), meta_dict);
+                        in_scope = tree.in_scope === nothing ? nothing : tree.in_scope(x))
+                match || seterror!(x, IncorrectCallArgs, meta_dict)
+                return
+            end
         end
 
         # The mirror image of that gate: a workspace `Base.axes(::Axis, d) = …`

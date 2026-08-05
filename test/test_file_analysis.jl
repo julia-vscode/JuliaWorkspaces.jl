@@ -2900,6 +2900,56 @@ end
     @test occursin("String", only(flagged).message)
 end
 
+@testitem "parity: a bare, unimported store callee the workspace extends is checked against the union" setup=[FileAnalysisWS] begin
+    # No `import` in `B`: `iseven` resolves through the implicit `using Base`
+    # straight to the raw `SymbolServer.FunctionStore`, never a `Binding` — the
+    # callee shape `check_call`'s `tree.extended` early-return arm handles
+    # directly, distinct from the `Binding`-wrapped store value the qualified-
+    # extension testitem above exercises.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct D end\nBase.iseven(d::D) = true\nstruct Other end\n",
+        B => """
+        good1(d::D) = iseven(d)       # served by the sibling's qualified extension
+        good2(x::Int) = iseven(x)     # served by the store
+        bad(w::Other) = iseven(w)     # neither: flag
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+    # `good1` compared against the extension record, `good2` against the
+    # store's own methods, `bad` against both halves and ruled out by each —
+    # real comparisons happened on both sides of the union, not a lucky skip.
+    @test rec.comparisons >= 3 && rec.rule_outs >= 2
+end
+
+@testitem "parity: an unreadable workspace extension declines the raw-store union check" setup=[FileAnalysisWS] begin
+    # `function Base.iseven end` is a QUALIFIED forward declaration: it registers
+    # as a workspace extension of `Base.iseven` (`derived_external_method_extensions`
+    # sees the qualifier), but has no body, so its inventory item's `method_sig`
+    # is `nothing` — the extension record set is an under-approximation. Exhausting
+    # it would license a wrong verdict, so the union check must decline entirely
+    # rather than fall back to the store half alone.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "function Base.iseven end\nstruct Other end\n",
+        B => "bad(w::Other) = iseven(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test isempty(flagged)
+end
+
 @testitem "parity: methods defined when the code runs are not indexed" setup=[FileAnalysisWS] begin
     # A method born from `eval`, or from a macro nothing here can expand, leaves
     # no record behind, so a name's record set reads as complete when it is not
