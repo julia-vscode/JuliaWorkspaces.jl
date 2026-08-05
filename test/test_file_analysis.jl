@@ -2296,6 +2296,49 @@ end
     @test nm.has_unknown_shapes
 end
 
+@testitem "backdating: a type-only edit leaves arity answers equal" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "target(x::Int) = 1\n",
+        B => "caller(y) = target(y)\n",
+    ))
+    rt = jw.runtime
+    arities_before = JuliaWorkspaces.derived_method_arities(rt, ROOT, ["MainPkg"], "target")
+    sigs_before = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("target(x::String) = 1\n", "julia")))
+
+    @test JuliaWorkspaces.derived_method_arities(rt, ROOT, ["MainPkg"], "target") == arities_before
+    @test JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target") != sigs_before
+end
+
+@testitem "backdating: moving a method between files leaves the signature set equal" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "target(x::Int) = 1\ntarget(x::String) = 2\n",
+        B => "\n",
+    ))
+    rt = jw.runtime
+    before = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("target(x::Int) = 1\n", "julia")))
+    JuliaWorkspaces.update_file!(jw, TextFile(B, SourceText("target(x::String) = 2\n", "julia")))
+
+    after = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+    @test after == before
+
+    # And the diagnostic set of an unrelated caller is unchanged: recompute
+    # from cold on an identical second workspace and compare.
+    jw2 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "target(x::Int) = 1\n",
+        B => "target(x::String) = 2\n",
+    ))
+    fa_inc = JuliaWorkspaces.derived_file_analysis(rt, ROOT, B)
+    fa_cold = JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, B)
+    @test [d.message for d in fa_inc.diagnostics] == [d.message for d in fa_cold.diagnostics]
+end
+
 @testitem "tree_resolve: workspace names, store names, unknowns" setup=[FileAnalysisWS] begin
     using JuliaWorkspaces
     using JuliaWorkspaces: TypeRef
