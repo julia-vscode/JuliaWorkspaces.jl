@@ -4921,3 +4921,22 @@ end
     # bad: a workspace struct with supertype Any is definitely ruled out
     @test SL.match_method(Any[other], Any[], m, syms, meta_dict) === false
 end
+
+@testitem "parity/vararg placement d: SigDescriptor bound-N _align_args count window" setup=[shared_static_lint] begin
+    # No end-to-end fixture can reach this branch: for a tree-visible callee,
+    # check_call's MethodArity gate rules out a bound-N count mismatch before
+    # the records path is ever consulted, since its window is identical to
+    # this one. Pin `_align_args`'s bound-N branch directly instead.
+    SL = JuliaWorkspaces.StaticLint
+    _, _, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    intdt = SL.get_eventual_datatype(syms[:Base][:Int], get_env(jw))
+    fdt = SL.get_eventual_datatype(syms[:Base][:Float64], get_env(jw))
+    d = SL.SigDescriptor(Any[intdt], Any[], true, fdt, 2, Any[])
+    # one arg short of nfixed + N = 1 + 2 = 3: no alignment exists
+    @test SL._align_args(d, 2) === nothing
+    # exact count: aligns, and the last vararg_N slots are the pad
+    margs = SL._align_args(d, 3)
+    @test margs !== nothing
+    @test margs[end - 1] === fdt && margs[end] === fdt
+end

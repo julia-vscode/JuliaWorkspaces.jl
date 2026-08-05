@@ -3030,3 +3030,63 @@ end
     @test isempty(flagged)
     @test rec.comparisons >= 1 && rec.rule_outs == 0
 end
+
+@testitem "parity/vararg: every spelling aligns and rules out identically" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    # dotted: typed pad rules out a definite mismatch
+    @test isempty(callflags("f(a::Int, xs::Float64...) = 1", "c() = f(1, 2.0, 3.0)"))
+    @test length(callflags("struct O end\nf(a::Int, xs::Float64...) = 1", "c(o::O) = f(1, o)")) == 1
+    # anonymous ::Vararg: untyped pad accepts anything, count still open-ended
+    @test isempty(callflags("f(a::Int, xs::Vararg) = 1", "c() = f(1, \"s\", 's')"))
+    # ::Vararg{T}
+    @test length(callflags("struct O end\nf(a::Int, xs::Vararg{Float64}) = 1", "c(o::O) = f(1, o)")) == 1
+    # ::Vararg{T,N}: exact count, typed pad
+    @test isempty(callflags("f(a::Int, xs::Vararg{Float64,2}) = 1", "c() = f(1, 1.0, 2.0)"))
+    @test length(callflags("f(a::Int, xs::Vararg{Float64,2}) = 1", "c() = f(1, 1.0)")) == 1   # count, via the MethodArity channel — the arity gate short-circuits before the records path; the two windows are identical for a bound Vararg{T,N}
+    # ::Base.Vararg{T}
+    @test length(callflags("struct O end\nf(a::Int, xs::Base.Vararg{Float64}) = 1", "c(o::O) = f(1, o)")) == 1
+end
+
+@testitem "parity/optional: same-file, one-file-root, and a defaulted slot's own mismatch" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function samefile_flags(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function oneroot_flags(src::String)
+        jw = ws_with(Dict(B => src))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, B, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test isempty(samefile_flags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\ncaller() = f9(1, \"y\")\n"))
+    @test length(samefile_flags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\ncaller() = f9(1, 2.0, 3.0)\n")) == 1
+
+    @test isempty(oneroot_flags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\ncaller() = f9(1, \"y\")\n"))
+    @test length(oneroot_flags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\ncaller() = f9(1, 2.0, 3.0)\n")) == 1
+
+    # The optional slot's own annotation still rules out when the caller fills it explicitly.
+    @test length(callflags("f(a::Int, b::String=\"x\") = 1\n", "caller() = f(1, 2.0)\n")) == 1
+    @test isempty(callflags("f(a::Int, b::String=\"x\") = 1\n", "caller() = f(1)\n"))
+end
