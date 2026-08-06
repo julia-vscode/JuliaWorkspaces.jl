@@ -75,6 +75,7 @@ const LINT_RULES = LintRule[
     LintRule(:testitem_errors, StaticLint.LintCodes[], nothing, Symbol[]),
     LintRule(:toml_syntax_errors, StaticLint.LintCodes[], nothing, Symbol[]),
     LintRule(:config_errors, StaticLint.LintCodes[], nothing, Symbol[]),
+    LintRule(:shadowed_config, StaticLint.LintCodes[], nothing, Symbol[]),
 ]
 
 const LINT_RULES_BY_ID = Dict{Symbol,LintRule}(r.id => r for r in LINT_RULES)
@@ -143,7 +144,19 @@ const _PRESET_DEFAULT = Dict{Symbol,Symbol}(
     :testitem_errors => :error,
     :toml_syntax_errors => :error,
     :config_errors => :error,
+    :shadowed_config => :warning,
 )
+
+# Checked here, before the derived presets are built, so that a rule nobody
+# classified fails with this message rather than with an opaque `KeyError` from
+# the `_PRESET_STRICT` comprehension below.
+for _rule in LINT_RULES
+    haskey(_PRESET_DEFAULT, _rule.id) || error(
+        "Lint rule `$(_rule.id)` has no severity in the `default` preset. Add one to " *
+        "`_PRESET_DEFAULT`. Prefer `:off` for a rule that did not exist before: a rule " *
+        "that switches itself on for every project on upgrade breaks their CI."
+    )
+end
 
 # Only the checks that catch outright breakage; everything stylistic is off.
 const _PRESET_MINIMAL = Dict{Symbol,Symbol}(
@@ -155,6 +168,9 @@ const _PRESET_MINIMAL = Dict{Symbol,Symbol}(
             :config_errors => :error,
             :include_errors => :warning,
             :const_decl => :warning,
+            # A structural problem with the project's own configuration, not a
+            # style opinion — it stays on even in the quietest preset.
+            :shadowed_config => :warning,
         ),
         r.id,
         :off,
@@ -179,6 +195,16 @@ const LINT_PRESETS = Dict{String,Dict{Symbol,Symbol}}(
     "default" => _PRESET_DEFAULT,
     "strict" => _PRESET_STRICT,
 )
+
+# The same invariant for the derived presets: both are comprehensions over
+# `LINT_RULES` today, so this only fires if one is later rewritten in a way that
+# stops covering every rule.
+for (_preset_name, _preset) in LINT_PRESETS, _rule in LINT_RULES
+    haskey(_preset, _rule.id) || error(
+        "Lint rule `$(_rule.id)` is missing from the `$(_preset_name)` preset. " *
+        "Every preset in `LINT_PRESETS` must classify every rule in `LINT_RULES`."
+    )
+end
 
 const DEFAULT_LINT_PRESET = "default"
 
@@ -237,8 +263,11 @@ Base.hash(c::EffectiveLintConfig, h::UInt) =
 The configured severity of `rule_id`, or its `default` preset severity when the
 config does not mention it.
 """
+# No severity fallback: every preset classifies every rule (enforced at load),
+# and an effective config always starts from a preset, so a miss here means the
+# caller passed something that is not a rule id — which should be loud.
 rule_severity(config::EffectiveLintConfig, rule_id::Symbol) =
-    get(config.severities, rule_id, get(_PRESET_DEFAULT, rule_id, :information))
+    get(config.severities, rule_id, _PRESET_DEFAULT[rule_id])
 
 rule_enabled(config::EffectiveLintConfig, rule_id::Symbol) = rule_severity(config, rule_id) !== :off
 

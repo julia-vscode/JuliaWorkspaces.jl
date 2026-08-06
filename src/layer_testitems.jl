@@ -14,7 +14,7 @@ end
 # Test item discovery is scoped by `JuliaTestItems.toml`, whose v1 schema is
 # just the shared `include`/`exclude` globs. Execution settings (workers, env,
 # tag filters) are deliberately not part of it yet.
-const _TESTITEMS_CONFIG_TOP_LEVEL_KEYS = ["include", "exclude"]
+const _TESTITEMS_CONFIG_TOP_LEVEL_KEYS = ["config-version", "include", "exclude"]
 
 Salsa.@derived function derived_testitemsconfig_files(rt)
     files = derived_text_files(rt)
@@ -28,6 +28,8 @@ Salsa.@derived function derived_testitemsconfig_diagnostics(rt, uri)
     res = Diagnostic[]
 
     validate_key_set!(res, toml_content, _TESTITEMS_CONFIG_TOP_LEVEL_KEYS, Dict{String,String}(), "test items configuration key")
+    validate_config_version!(res, toml_content)
+    shadowing_diagnostic!(res, derived_testitemsconfig_files(rt), uri, "JuliaTestItems.toml")
     parse_glob_list!(res, toml_content, "include")
     parse_glob_list!(res, toml_content, "exclude")
 

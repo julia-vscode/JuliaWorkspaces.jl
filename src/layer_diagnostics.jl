@@ -46,7 +46,7 @@ const _LINT_CONFIG_MIGRATIONS = Dict{String,String}(
     "unresolved-import" => "use `[rules] unresolved_import = \"off\"`.",
 )
 
-const _LINT_CONFIG_TOP_LEVEL_KEYS = ["preset", "include", "exclude", "rules", "override"]
+const _LINT_CONFIG_TOP_LEVEL_KEYS = ["config-version", "preset", "include", "exclude", "rules", "override"]
 
 # Validate one `[rules]` table, collecting `id => (severity, options)`.
 function _validate_lint_rules!(res::Vector{Diagnostic}, table, into::Dict{Symbol,Tuple{Union{Nothing,Symbol},Dict{Symbol,Any}}})
@@ -113,6 +113,8 @@ Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
     res = Diagnostic[]
 
     validate_key_set!(res, toml_content, _LINT_CONFIG_TOP_LEVEL_KEYS, _LINT_CONFIG_MIGRATIONS, "lint configuration key")
+    validate_config_version!(res, toml_content)
+    shadowing_diagnostic!(res, derived_lintconfig_files(rt), uri, "JuliaLint.toml")
 
     if haskey(toml_content, "preset")
         p = toml_content["preset"]
@@ -298,16 +300,24 @@ Salsa.@derived function derived_diagnostics(rt, uri)
                     for d in derived_toml_syntax_diagnostics(rt, uri))
         end
 
-        if is_config_file && enabled(:config_errors)
-            sev = severity_of(:config_errors)
-            config_errors = if is_path_lintconfig_file(uri2filepath(uri))
+        if is_config_file
+            config_diags = if is_path_lintconfig_file(uri2filepath(uri))
                 derived_lintconfig_diagnostics(rt, uri)
             elseif is_path_formatconfig_file(uri2filepath(uri))
                 derived_formatconfig_diagnostics(rt, uri)
             else
                 derived_testitemsconfig_diagnostics(rt, uri)
             end
-            append!(results, Diagnostic(d.range, sev, d.message, d.uri, d.tags, d.source, :config_errors) for d in config_errors)
+
+            # Validators emit more than one kind of finding (a schema mistake is
+            # `config_errors`, a config that supersedes an outer one is
+            # `shadowed_config`), so each keeps its own rule id and takes that
+            # rule's configured severity rather than being flattened together.
+            for d in config_diags
+                rule = d.code === nothing ? :config_errors : d.code
+                enabled(rule) || continue
+                push!(results, Diagnostic(d.range, severity_of(rule), d.message, d.uri, d.tags, d.source, rule))
+            end
         end
     end
 

@@ -23,7 +23,7 @@ const _FORMAT_DEFAULT_STYLE = "minimal"
 # alongside it would misreport what the formatter is going to do.
 const _FORMAT_STYLES_WITHOUT_OPTIONS = ("runic",)
 
-const _FORMAT_CONFIG_TOP_LEVEL_KEYS = ["style", "include", "exclude", "options", "override"]
+const _FORMAT_CONFIG_TOP_LEVEL_KEYS = ["config-version", "style", "include", "exclude", "options", "override"]
 
 Salsa.@derived function derived_formatconfig_files(rt)
     files = derived_text_files(rt)
@@ -63,6 +63,8 @@ Salsa.@derived function derived_formatconfig_diagnostics(rt, uri)
     res = Diagnostic[]
 
     validate_key_set!(res, toml_content, _FORMAT_CONFIG_TOP_LEVEL_KEYS, _FORMAT_CONFIG_MIGRATIONS, "format configuration key")
+    validate_config_version!(res, toml_content)
+    shadowing_diagnostic!(res, derived_formatconfig_files(rt), uri, "JuliaFormat.toml")
 
     style = get(toml_content, "style", _FORMAT_DEFAULT_STYLE)
     if !(style isa AbstractString) || !(style in _FORMAT_STYLES)

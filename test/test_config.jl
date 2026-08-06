@@ -76,6 +76,97 @@ end
     @test rel("/proj", "/other/a.jl") === nothing
 end
 
+@testitem "Lint rules: every preset classifies every rule" begin
+    # A rule no preset mentions would be reported at whatever severity the
+    # lookup fell back to, in every project naming a preset, from the moment the
+    # tool is upgraded. `lint_rules.jl` enforces this at load; this test states
+    # the invariant so a refactor there cannot quietly drop it.
+    for (name, preset) in JuliaWorkspaces.LINT_PRESETS
+        for rule in JuliaWorkspaces.LINT_RULES
+            @test haskey(preset, rule.id)
+        end
+        # ...and no preset invents a rule that does not exist.
+        for id in keys(preset)
+            @test haskey(JuliaWorkspaces.LINT_RULES_BY_ID, id)
+        end
+    end
+end
+
+@testitem "Lint config: a nested config reports that it supersedes the outer one" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///sh/JuliaLint.toml"), SourceText("[rules]\nunused_binding = \"off\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///sh/src/JuliaLint.toml"), SourceText("[rules]\nunused_binding = \"error\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///sh/src/deep/JuliaLint.toml"), SourceText("preset = \"minimal\"\n", "toml")))
+
+    # The outermost config supersedes nothing.
+    @test !any(d -> d.code === :shadowed_config, get_diagnostic(jw, URI("file:///sh/JuliaLint.toml")))
+
+    nested = get_diagnostic(jw, URI("file:///sh/src/JuliaLint.toml"))
+    idx = findfirst(d -> d.code === :shadowed_config, nested)
+    @test idx !== nothing
+    @test nested[idx].severity === :warning
+    @test occursin("JuliaLint.toml", nested[idx].message)
+
+    # It names the NEAREST enclosing config, not the outermost one.
+    deep = get_diagnostic(jw, URI("file:///sh/src/deep/JuliaLint.toml"))
+    jdx = findfirst(d -> d.code === :shadowed_config, deep)
+    @test jdx !== nothing
+    @test occursin("src", deep[jdx].message)
+end
+
+@testitem "Lint config: the shadowing warning is an ordinary rule" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///sh2/JuliaLint.toml"), SourceText("preset = \"default\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///sh2/src/JuliaLint.toml"),
+        SourceText("[rules]\nshadowed_config = \"off\"\n", "toml")))
+
+    @test !any(d -> d.code === :shadowed_config, get_diagnostic(jw, URI("file:///sh2/src/JuliaLint.toml")))
+end
+
+@testitem "Config: a nested formatter or test items config reports it too" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///sh3/JuliaFormat.toml"), SourceText("style = \"blue\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///sh3/src/JuliaFormat.toml"), SourceText("style = \"yas\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///sh3/JuliaTestItems.toml"), SourceText("include = [\"src/**\"]\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///sh3/src/JuliaTestItems.toml"), SourceText("include = [\"*.jl\"]\n", "toml")))
+
+    @test any(d -> d.code === :shadowed_config, get_diagnostic(jw, URI("file:///sh3/src/JuliaFormat.toml")))
+    @test any(d -> d.code === :shadowed_config, get_diagnostic(jw, URI("file:///sh3/src/JuliaTestItems.toml")))
+
+    # Different kinds don't shadow each other.
+    @test !any(d -> d.code === :shadowed_config, get_diagnostic(jw, URI("file:///sh3/JuliaFormat.toml")))
+end
+
+@testitem "Config: config-version is reserved" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    function diags(name, content)
+        jw = JuliaWorkspace()
+        uri = URI("file:///cv/" * name)
+        add_file!(jw, TextFile(uri, SourceText(content, "toml")))
+        return get_diagnostic(jw, uri)
+    end
+
+    # Absent and current are both fine.
+    @test isempty(diags("JuliaLint.toml", "preset = \"default\"\n"))
+    @test isempty(diags("JuliaLint.toml", "config-version = 1\npreset = \"default\"\n"))
+
+    # A file from the future says so, rather than complaining about an unknown key.
+    for name in ("JuliaLint.toml", "JuliaFormat.toml", "JuliaTestItems.toml")
+        d = diags(name, "config-version = 2\n")
+        @test any(x -> occursin("only understands version 1", x.message), d)
+    end
+
+    @test any(x -> occursin("expected a positive integer", x.message),
+              diags("JuliaLint.toml", "config-version = \"one\"\n"))
+end
+
 @testitem "Lint config: nearest file governs, no merging" begin
     using JuliaWorkspaces.URIs2: URI
 

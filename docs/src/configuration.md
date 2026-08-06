@@ -118,6 +118,30 @@ This covers the common "different settings for tests" case without needing a
 second config file — which matters more than usual here, because a second file
 would have to restate everything.
 
+### `config-version`
+
+Every file accepts an optional `config-version` integer. The current format is
+version `1`, and an absent key means `1`.
+
+It is reserved from the first release rather than added when first needed: a
+released tool that does not know the key can only report it as an unknown key
+when it meets a file written for a later format, and that cannot be fixed
+retroactively in copies already installed. A file declaring a version this tool
+does not understand is told to upgrade the tooling.
+
+### Superseded configuration
+
+Because the nearest config governs wholesale, a config file in a subdirectory
+does not extend the one above it — it *replaces* it. That is silent by nature,
+so a config file with another of the same kind in an enclosing directory reports
+a `shadowed_config` warning naming the file it takes over from.
+
+This is the price of choosing nearest-wins over cascading. The alternative is
+that a config dropped into a subdirectory — a vendored repository, a copied
+example, a half-finished subpackage extraction — quietly voids the project's own
+configuration for that subtree. It is an ordinary rule, so a project that
+genuinely wants independent subtrees sets `shadowed_config = "off"`.
+
 ### Validation
 
 Unknown keys and invalid values are reported as diagnostics **on the config file
@@ -207,6 +231,17 @@ deltas applied on top of it.
 Because a preset is just a `Dict{Symbol,Symbol}`, adding one later needs no new
 mechanism.
 
+A preset name **floats**: it tracks the tool rather than pinning a frozen rule
+set, so upgrading the tooling can change what a preset reports. To keep that
+from breaking projects on upgrade, a rule that did not exist before enters
+existing presets as `"off"`; promoting it is a deliberate, changelogged change.
+Version-pinning syntax (`preset = "default@2"`) may be added later — bare names
+will keep floating, so nothing written today changes meaning.
+
+Every preset must classify every rule. This is enforced when `lint_rules.jl`
+loads, so a rule added without a decision fails the build rather than appearing
+in everyone's `default` at whatever severity a fallback happened to pick.
+
 ### The rules
 
 | Rule | Default | Reports |
@@ -216,6 +251,7 @@ mechanism.
 | `testitem_errors` | `error` | Malformed `@testitem` blocks |
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |
+| `shadowed_config` | `warning` | A config file that supersedes another of the same kind in an enclosing directory |
 | `incorrect_call_args` | `info` | Wrong argument count/type; calls to method-less functions |
 | `incorrect_iter_spec` | `info` | Loop iterators that will likely error |
 | `index_from_length` | `info` | Indexing off `length`/`size` instead of `eachindex`/`axes` |

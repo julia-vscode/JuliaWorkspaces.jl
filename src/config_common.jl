@@ -197,6 +197,42 @@ The directory containing `config_uri`, `/`-separated and trailing-slashed.
 """
 config_dir_of(config_uri::URI) = _normalize_dir(dirname(uri2filepath(config_uri)))
 
+"""
+    shadowed_config(config_uris, config_uri) -> Union{URI,Nothing}
+
+The config file of the same kind that `config_uri` takes over from: the one in
+the nearest strictly-enclosing directory, or `nothing` when `config_uri` is the
+outermost of its kind.
+
+Because the nearest config governs its subtree wholesale, a nested config file
+does not extend the one above it — it replaces it, and the outer file's
+settings stop applying with no other trace. Reporting that is the price of
+choosing this discovery rule over cascading: the alternative is that a config
+dropped into a subdirectory (a vendored repo, a copied example, a half-finished
+subpackage extraction) silently voids the project's own configuration.
+"""
+function shadowed_config(config_uris, config_uri::URI)
+    config_uri.scheme == "file" || return nothing
+    own_dir = config_dir_of(config_uri)
+
+    best = nothing
+    best_len = -1
+    for other in config_uris
+        other == config_uri && continue
+        other.scheme == "file" || continue
+        dir = config_dir_of(other)
+        # Strictly enclosing: a prefix of our directory, but not our directory.
+        length(dir) < length(own_dir) || continue
+        _path_startswith(own_dir, dir) || continue
+        if length(dir) > best_len
+            best = other
+            best_len = length(dir)
+        end
+    end
+
+    return best
+end
+
 # ── Overrides ───────────────────────────────────────────────────────────────
 
 """
@@ -220,6 +256,52 @@ end
 
 config_diagnostic(message::AbstractString) =
     Diagnostic(1:1, :error, String(message), nothing, Symbol[], "JuliaWorkspaces.jl", :config_errors)
+
+# The config format's own version. A file that does not say is version 1.
+const CONFIG_FORMAT_VERSION = 1
+
+"""
+    validate_config_version!(res, table)
+
+Check the `config-version` key. Reserved from the first release: without it, a
+released tool meeting a file written for a later format can only complain about
+an unknown key, and that cannot be fixed retroactively in copies already
+installed.
+"""
+function validate_config_version!(res::Vector{Diagnostic}, table)
+    haskey(table, "config-version") || return res
+    v = table["config-version"]
+    if !(v isa Integer) || v < 1
+        push!(res, config_diagnostic("Invalid `config-version`, expected a positive integer."))
+    elseif v > CONFIG_FORMAT_VERSION
+        push!(res, config_diagnostic(
+            "This file declares `config-version = $v`, but this version of the Julia " *
+            "tooling only understands version $CONFIG_FORMAT_VERSION. Update the tooling to use it."))
+    end
+    return res
+end
+
+"""
+    shadowing_diagnostic!(res, config_uris, config_uri, filename)
+
+Report that `config_uri` takes over from a config file of the same kind in an
+enclosing directory. See [`shadowed_config`](@ref) for why this is worth saying
+out loud.
+"""
+function shadowing_diagnostic!(res::Vector{Diagnostic}, config_uris, config_uri::URI, filename::AbstractString)
+    outer = shadowed_config(config_uris, config_uri)
+    outer === nothing && return res
+
+    outer_path = uri2filepath(outer)
+    push!(res, Diagnostic(
+        1:1, :warning,
+        "This $filename replaces `$outer_path` for everything below this directory, " *
+        "rather than adding to it — settings from that file do not apply here. " *
+        "Copy anything you want to keep, or remove this file.",
+        nothing, Symbol[], "JuliaWorkspaces.jl", :shadowed_config,
+    ))
+    return res
+end
 
 """
     validate_key_set!(res, table, valid_keys, migrations, what)
