@@ -73,7 +73,7 @@ function StaticLint.test_setup_info(ctx::TreeModuleContext, name::Symbol)
     pkg_folder === nothing && return nothing
     s = derived_test_setup(ctx.rt, pkg_folder, name)
     s === nothing && return nothing
-    return StaticLint.TestSetupInfo(s.kind, Set{String}(s.bound_names), Set{String}(s.exported_names), s.fully_enumerable)
+    return StaticLint.TestSetupInfo(s.kind, Set{String}(s.bound_names), Set{String}(s.exported_names), s.wildcard_packages, s.has_unresolved_wildcard)
 end
 
 # The names of the modules DECLARED IN the analyzed file that enclose `x`,

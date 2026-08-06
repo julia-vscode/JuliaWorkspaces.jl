@@ -170,13 +170,13 @@ end
 
 Plain-data description of a `@testmodule` or `@testsnippet` a `@testitem`
 references via `setup=[...]`: `kind` is `:module`/`:snippet`, `names` the
-names the setup binds at its top level, `exports` the names a `:module`
-setup's top-level `export` makes public (TestItemRunner injects a testmodule
-via `using ..Setups.TM`, which brings in TM's exports, not its full member
-set). `fully_enumerable` is `false` when `names`/`exports` are known to be
-incomplete (a wildcard `using`/`import` or unrecognized macrocall at the
-setup's top level) — the caller must then suppress bare missing-ref checks
-in the referencing `@testitem` body rather than trust the name sets.
+names the setup's body scope binds, `exports` the names a `:module` setup's
+top-level `export` makes public (TestItemRunner injects a testmodule via
+`using ..Setups.TM`, which brings in TM's exports, not its full member
+set). `wildcard_packages` are packages a snippet's wildcard `using`
+resolved against, for re-attachment into the item scope;
+`has_unresolved_wildcard` is `true` when a wildcard resolved against
+nothing, so the item must suppress bare missing-ref checks instead.
 Produced by the `test_setup_info(ctx, name)` interface (backed by a Salsa
 query outside StaticLint); safe to reach from frozen meta.
 """
@@ -184,7 +184,8 @@ query outside StaticLint); safe to reach from frozen meta.
     kind::Symbol
     names::Set{String}
     exports::Set{String}
-    fully_enumerable::Bool
+    wildcard_packages::Vector{String}
+    has_unresolved_wildcard::Bool
 end
 
 """

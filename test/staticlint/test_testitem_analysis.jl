@@ -194,27 +194,157 @@ end
     @test "Missing reference: ifn" in msgs
 end
 
-@testitem "derived_test_setups indexes testmodules and testsnippets as plain data" setup=[TestItemAnalysisWS] begin
+@testitem "derived_test_setups analyzes setup bodies with the normal passes" setup=[TestItemAnalysisWS] begin
     jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
     @testmodule TM begin
         tmf() = 1
         const TC = 2
         struct TS_t end
+        begin
+            inblock = 3
+        end
+        @enum Color Red Green
+        import MyPkg
+        export tmf
     end
     @testsnippet TS begin
         sx = 1
         sy, sz = 2, 3
+        using MyPkg
+        using NoSuchPkg_xyz
     end
     """)
     setups = JuliaWorkspaces.derived_test_setups(jw.runtime, PKG)
     @test Set(keys(setups)) == Set([:TM, :TS])
-    @test setups[:TM].kind == :module
-    @test setups[:TM].file == TESTF
-    @test setups[:TM].bound_names == ["TC", "TS_t", "tmf"]
-    @test setups[:TS].kind == :snippet
-    @test setups[:TS].bound_names == ["sx", "sy", "sz"]
-    @test JuliaWorkspaces.derived_test_setup(jw.runtime, PKG, :TM) == setups[:TM]
+
+    tm = setups[:TM]
+    @test tm.kind == :module
+    @test tm.file == TESTF
+    # normal-pass bindings: block interiors, @enum members, and `import X`
+    # (which binds X itself, as in any file) included
+    @test issubset(["Color", "Green", "MyPkg", "Red", "TC", "TS_t", "inblock", "tmf"], tm.bound_names)
+    @test tm.exported_names == ["tmf"]
+    @test tm.wildcard_packages == String[]
+    @test !tm.has_unresolved_wildcard
+
+    ts = setups[:TS]
+    @test ts.kind == :snippet
+    @test issubset(["sx", "sy", "sz"], ts.bound_names)
+    # resolved wildcard recorded by name; unresolved one sets the flag
+    @test ts.wildcard_packages == ["MyPkg"]
+    @test ts.has_unresolved_wildcard
+
+    @test JuliaWorkspaces.derived_test_setup(jw.runtime, PKG, :TM) == tm
     @test JuliaWorkspaces.derived_test_setup(jw.runtime, PKG, :Nope) === nothing
+end
+
+@testitem "testmodule wildcards do not suppress item-side missing refs" setup=[TestItemAnalysisWS] begin
+    # A wildcard `using` inside a @testmodule stays contained in the module
+    # at runtime: the item sees only TM's explicit exports, so item-side
+    # checking must stay fully enabled even when the wildcard is unresolvable.
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TM] begin
+            tmf()
+            TM.anything_goes()
+            undefined_in_item
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testmodule TM begin
+            using NoSuchPkg_xyz
+            export tmf
+            tmf() = 1
+        end
+        """))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: tmf" in msgs)
+    @test !("Missing reference: anything_goes" in msgs)
+    @test "Missing reference: undefined_in_item" in msgs
+end
+
+@testitem "known binding macros in setups enumerate instead of suppressing" setup=[TestItemAnalysisWS] begin
+    # @enum used to make the whole setup unenumerable; the normal passes
+    # bind its members, so the item resolves them and keeps full checking.
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TS] begin
+            x = Red
+            undefined_after_enum
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testsnippet TS begin
+            @enum Color Red Green
+        end
+        """))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: Red" in msgs)
+    @test "Missing reference: undefined_after_enum" in msgs
+end
+
+@testitem "block-nested setup bindings reach referencing items" setup=[TestItemAnalysisWS] begin
+    # the old top-level-only scan silently dropped these
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TS] begin
+            inblock
+            inbranch
+            undefined_next_to_blocks
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testsnippet TS begin
+            begin
+                inblock = 1
+            end
+            if true
+                inbranch = 2
+            end
+        end
+        """))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: inblock" in msgs)
+    @test !("Missing reference: inbranch" in msgs)
+    @test "Missing reference: undefined_next_to_blocks" in msgs
+end
+
+@testitem "same-file setup references do not cycle" setup=[TestItemAnalysisWS] begin
+    # a @testitem next to its @testmodule is the common layout; the setup
+    # index must come from the raw CST, never from this file's own analysis
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testmodule TM begin
+        export tmf
+        tmf() = 1
+    end
+    @testitem "t" default_imports=false setup=[TM] begin
+        tmf()
+        undefined_same_file
+    end
+    """)
+    msgs = diag_messages(jw)
+    @test !("Missing reference: tmf" in msgs)
+    @test "Missing reference: undefined_same_file" in msgs
+end
+
+@testitem "unresolvable snippet wildcards still suppress item missing refs" setup=[TestItemAnalysisWS] begin
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TS] begin
+            could_come_from_the_wildcard
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testsnippet TS begin
+            using NoSuchPkg_xyz
+        end
+        """))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: could_come_from_the_wildcard" in msgs)
 end
 
 @testitem "setup testmodules and testsnippets inject into @testitem scopes cross-file" setup=[TestItemAnalysisWS] begin

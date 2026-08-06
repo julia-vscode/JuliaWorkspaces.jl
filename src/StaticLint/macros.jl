@@ -495,11 +495,13 @@ function _handle_testitem(x::EXPR, state::Toplevel)
                         (item_scope.names[n] = Binding(noname, nothing, nothing, EXPR[]))
                 end
             end
-            # The setup's name/export sets are not exhaustive (a wildcard
-            # using/import or unrecognized macrocall at its top level) —
-            # suppress bare missing-ref checks in the whole item body rather
-            # than risk flagging a name the setup actually provides.
-            info.fully_enumerable || (item_scope.unresolved_wildcard_import = true)
+            # A snippet's wildcard `using` brings unknown-to-us names into the
+            # item body — suppress bare missing-ref checks there. Testmodule
+            # wildcards stay contained in the module (only its literal exports
+            # reach the item), so they never suppress.
+            if info.kind === :snippet && (info.has_unresolved_wildcard || !isempty(info.wildcard_packages))
+                item_scope.unresolved_wildcard_import = true
+            end
         end
     end
 

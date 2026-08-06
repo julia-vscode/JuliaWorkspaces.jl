@@ -1,25 +1,24 @@
-# Plain-data index of @testmodule/@testsnippet declarations, per package.
-# The per-file analysis injects setups into @testitem scopes from this index
-# (via StaticLint.test_setup_info) — never from another file's EXPRs, which
-# must not survive into a frozen FileAnalysis.
+# Plain-data index of @testmodule/@testsnippet declarations, per package,
+# flattened from a normal-passes analysis run over each body. The per-file
+# analysis injects setups into @testitem scopes from this index (via
+# StaticLint.test_setup_info) — never from another file's EXPRs, which must
+# not survive into a frozen FileAnalysis.
 
 """
     TestSetupData
 
-One `@testmodule` or `@testsnippet` declaration, as plain data: `kind` is
-`:module`/`:snippet`, `file` the declaring file, `bound_names` the sorted,
-unique names the setup's top level binds — declarations, assignments, and the
-explicit leaves of a top-level `using X: a, b`/`import X: a as c` (the alias
-for `as` forms, the leaf name otherwise). `exported_names` are the sorted,
-unique names a top-level `export a, b` makes public (relevant for `:module`
-setups: TestItemRunner injects a testmodule via `using ..Setups.TM`, which
-brings TM's EXPORTS — not its full member set — into the referencing
-testitem). `fully_enumerable` is `false` when the setup body contains a
-top-level wildcard `using X`/`import X` (no explicit `: name` list) or an
-unrecognized top-level macrocall — anything that can bind names this scan
-cannot enumerate — so a consumer must fall back to suppressing bare
-missing-ref checks entirely rather than trust `bound_names`/`exported_names`
-as exhaustive.
+One `@testmodule` or `@testsnippet` declaration, as plain data flattened
+from a normal-passes analysis of the body: `kind` is `:module`/`:snippet`,
+`file` the declaring file, `bound_names` the sorted names the body scope
+binds, `exported_names` the sorted names a top-level `export a, b` makes
+public (relevant for `:module` setups: TestItemRunner injects a testmodule
+via `using ..Setups.TM`, which brings TM's EXPORTS — not its full member
+set — into the referencing testitem). `wildcard_packages` are the packages
+a wildcard `using X` resolved against (env store or module tree); a
+referencing `@testitem` re-attaches them into its own scope.
+`has_unresolved_wildcard` is `true` when a wildcard `using` resolved
+against nothing — the item must then suppress bare missing-ref checks
+rather than trust the name sets.
 """
 @auto_hash_equals struct TestSetupData
     name::Symbol
@@ -27,57 +26,8 @@ as exhaustive.
     file::URI
     bound_names::Vector{String}
     exported_names::Vector{String}
-    fully_enumerable::Bool
-end
-
-# The name an EXPR binds at a setup's top level, or `nothing`.
-function _setup_bound_name(a)
-    a isa CSTParser.EXPR || return nothing
-    if CSTParser.defines_function(a) || CSTParser.defines_struct(a) ||
-       CSTParser.defines_abstract(a) || CSTParser.defines_primitive(a) ||
-       CSTParser.defines_macro(a) || CSTParser.defines_module(a)
-        nm = CSTParser.get_name(a)
-        return nm isa CSTParser.EXPR && CSTParser.isidentifier(nm) ? StaticLint.valofid(nm) : nothing
-    elseif CSTParser.isassignment(a)
-        return nothing # handled by _setup_collect_names! (tuple lhs binds several)
-    elseif (CSTParser.headof(a) === :const || CSTParser.headof(a) === :global) &&
-           a.args !== nothing && length(a.args) >= 1
-        return _setup_bound_name(a.args[1])
-    end
-    return nothing
-end
-
-# Collect the names an assignment lhs binds (identifier, x::T, tuple, call for short-form functions).
-function _setup_lhs_names!(names, l)
-    l isa CSTParser.EXPR || return
-    if CSTParser.isidentifier(l)
-        n = StaticLint.valofid(l)
-        n !== nothing && push!(names, n)
-    elseif CSTParser.isdeclaration(l) && l.args !== nothing && length(l.args) >= 1
-        _setup_lhs_names!(names, l.args[1])
-    elseif (CSTParser.istuple(l) || CSTParser.isbracketed(l)) && l.args !== nothing
-        for el in l.args
-            _setup_lhs_names!(names, el)
-        end
-    elseif CSTParser.headof(l) === :call && l.args !== nothing && length(l.args) >= 1
-        # Short-form function definition: tmf() = ...
-        _setup_lhs_names!(names, l.args[1])
-    end
-    return
-end
-
-function _setup_collect_names!(names, a)
-    a isa CSTParser.EXPR || return
-    if CSTParser.isassignment(a) && a.args !== nothing && length(a.args) >= 1
-        _setup_lhs_names!(names, a.args[1])
-    elseif (CSTParser.headof(a) === :const || CSTParser.headof(a) === :global) &&
-           a.args !== nothing && length(a.args) >= 1
-        _setup_collect_names!(names, a.args[1])
-    else
-        n = _setup_bound_name(a)
-        n !== nothing && push!(names, n)
-    end
-    return
+    wildcard_packages::Vector{String}
+    has_unresolved_wildcard::Bool
 end
 
 # A top-level statement wrapped in a docstring macrocall (`"""doc""" x`)
@@ -104,74 +54,6 @@ function _setup_export_names!(names, a)
     return
 end
 
-# The explicit colon-form node of a top-level `using X: ...`/`import X: ...`
-# (`a.args[1]` when headed by the `:` operator), or `nothing` for a wildcard
-# `using X`/`import X` with no explicit name list.
-function _setup_import_colon_form(a)
-    a isa CSTParser.EXPR || return nothing
-    (CSTParser.headof(a) === :using || CSTParser.headof(a) === :import) || return nothing
-    (a.args !== nothing && length(a.args) >= 1) || return nothing
-    first = a.args[1]
-    first isa CSTParser.EXPR || return nothing
-    (CSTParser.isoperator(CSTParser.headof(first)) && CSTParser.valof(CSTParser.headof(first)) == ":") || return nothing
-    return first
-end
-
-# The name one colon-form leaf binds: for `... as y` the alias, otherwise the
-# trailing identifier of the (possibly dotted) import path. Mirrors
-# `ensure_synthetic_import_binding!`'s leaf handling (imports.jl) — same CST
-# shape, name extraction instead of a synthetic binding.
-function _import_colon_leaf_name(leaf)
-    leaf isa CSTParser.EXPR || return nothing
-    if CSTParser.headof(leaf) === :as
-        (leaf.args !== nothing && length(leaf.args) == 2) || return nothing
-        alias = leaf.args[2]
-        return CSTParser.isidentifier(alias) ? StaticLint.valofid(alias) : nothing
-    end
-    (leaf.args === nothing || isempty(leaf.args)) && return nothing
-    last_component = last(leaf.args)
-    return CSTParser.isidentifier(last_component) ? StaticLint.valofid(last_component) : nothing
-end
-
-# The names an explicit top-level `using X: a, b`/`import X: a as c` binds.
-# A wildcard form (no colon list) binds none here — it instead makes the
-# setup `!fully_enumerable` (see `_setup_unenumerable_toplevel_stmt`).
-function _setup_import_bound_names!(names, a)
-    colon = _setup_import_colon_form(a)
-    colon === nothing && return
-    for i in 2:length(colon.args)
-        nm = _import_colon_leaf_name(colon.args[i])
-        nm !== nothing && push!(names, nm)
-    end
-    return
-end
-
-# Can `a` bind names this plain-CST scan cannot enumerate: a wildcard
-# `using X`/`import X` (no explicit `: name` list), or any macrocall (which
-# may bind arbitrary names, e.g. `@enum`)? Doc-wrapped statements are
-# unwrapped by the caller before this is checked, so a docstring above a
-# recognized definition never trips it.
-function _setup_unenumerable_toplevel_stmt(a)
-    a isa CSTParser.EXPR || return false
-    if CSTParser.headof(a) === :using || CSTParser.headof(a) === :import
-        return _setup_import_colon_form(a) === nothing
-    elseif CSTParser.ismacrocall(a)
-        return true
-    end
-    return false
-end
-
-function _setup_toplevel_bound_names(body::CSTParser.EXPR)
-    names = String[]
-    body.args === nothing && return names
-    for raw in body.args
-        a = _setup_unwrap_doc(raw)
-        _setup_collect_names!(names, a)
-        _setup_import_bound_names!(names, a)
-    end
-    return sort!(unique!(names))
-end
-
 function _setup_toplevel_export_names(body::CSTParser.EXPR)
     names = String[]
     body.args === nothing && return names
@@ -181,12 +63,39 @@ function _setup_toplevel_export_names(body::CSTParser.EXPR)
     return sort!(unique!(names))
 end
 
-function _setup_toplevel_fully_enumerable(body::CSTParser.EXPR)
-    body.args === nothing && return true
-    for raw in body.args
-        _setup_unenumerable_toplevel_stmt(_setup_unwrap_doc(raw)) && return false
+# The target name(s) of a wildcard `using X`/`using A, B` (no explicit `:
+# name` list) anywhere in `body`, found by walking the raw CST rather than
+# reading resolution results — the pass's default-imports injection (`Test`,
+# the package under test) adds its own entries under the SAME kind of key
+# (`scope.modules`), and a snippet's `using <the package under test>` would
+# be indistinguishable from that injection if read back that way. `import`
+# is deliberately excluded: a whole-module `import X` binds only the name
+# `X` (via `scope.names`, checked by the `bound` scan), never its exports,
+# so it needs no re-attachment tracking.
+function _setup_wildcard_using_targets!(names, a)
+    a isa CSTParser.EXPR || return
+    if CSTParser.headof(a) === :using
+        a.args === nothing && return
+        first = a.args[1]
+        # `using X: a, b` — an explicit leaf list, not a wildcard.
+        if first isa CSTParser.EXPR && CSTParser.isoperator(CSTParser.headof(first)) &&
+           CSTParser.valof(CSTParser.headof(first)) == ":"
+            return
+        end
+        for path in a.args
+            path isa CSTParser.EXPR || continue
+            (path.args === nothing || isempty(path.args)) && continue
+            leaf = last(path.args)
+            nm = CSTParser.isidentifier(leaf) ? StaticLint.valofid(leaf) : nothing
+            nm !== nothing && push!(names, nm)
+        end
+        return
     end
-    return true
+    a.args === nothing && return
+    for c in a.args
+        _setup_wildcard_using_targets!(names, c)
+    end
+    return
 end
 
 """
@@ -201,6 +110,10 @@ Salsa.@derived function derived_test_setups_in_file(rt, uri)
     result = TestSetupData[]
     cst = derived_julia_legacy_syntax_tree(rt, uri)
     cst.args === nothing && return result
+
+    # One env/tree frame for all setups in the file, built lazily so files
+    # without setups (the common case) never pay for the env lookup.
+    frame = nothing
     for arg in cst.args
         (CSTParser.ismacrocall(arg) && arg.args !== nothing && length(arg.args) >= 4) || continue
         mname = arg.args[1]
@@ -221,9 +134,58 @@ Salsa.@derived function derived_test_setups_in_file(rt, uri)
             end
         end
         body === nothing && continue
+
+        if frame === nothing
+            root = derived_best_root_for_uri(rt, uri)
+            project_uri = root === nothing ? nothing : derived_project_uri_for_root(rt, root)
+            env = project_uri === nothing ? derived_stdlib_only_env(rt) : derived_environment(rt, project_uri)
+            path = root === nothing ? nothing : derived_file_module_path(rt, root, uri)
+            frame = (env, root, path)
+        end
+        env, root, path = frame
+
+        # Run the normal passes over the WHOLE macrocall (not just its body
+        # block): handle_macro's own @testmodule/@testsnippet dispatch then
+        # builds the module-like scope exactly as it would during a real
+        # file-level analysis, which is what keeps Base/Core (and the tree
+        # context) reachable — a bare :block root has no such protection and
+        # gets its seeded scope.modules cleared by the generic scope-reset
+        # path before any statement runs. No self_package_name: a
+        # @testsnippet's own default-imports injection then simply fails
+        # (harmless — we never read the module-wide unresolved-wildcard flag
+        # it would otherwise misreport, see below). The meta is local and
+        # discarded, so the pass may keep its context handles
+        # (strip_contexts=false), which the wildcard flattening below needs
+        # to see in scope.modules.
+        ctx = path === nothing ? nothing : TreeModuleContext(rt, root, path)
+        meta_dict = Dict{UInt64,StaticLint.Meta}()
+        StaticLint.semantic_pass(uri, arg, env, meta_dict, rt; module_context=ctx, strip_contexts=false)
+        StaticLint.mark_unresolved_imports!(arg, env, meta_dict)
+
+        scope = StaticLint.scopeof(arg, meta_dict)
+        bound = String[]
+        wildcards = String[]
+        unresolved = false
+        if scope isa StaticLint.Scope
+            append!(bound, keys(scope.names))
+            # Cross-check each wildcard `using` WRITTEN IN THE BODY against
+            # scope.modules by name, rather than reading scope.modules'
+            # key set wholesale — the default-imports injection (Test, the
+            # package under test) lands under the same kind of key and would
+            # otherwise be indistinguishable from a real `using` in the body.
+            wildcard_targets = String[]
+            _setup_wildcard_using_targets!(wildcard_targets, body)
+            for nm in unique!(wildcard_targets)
+                if scope.modules isa Dict && haskey(scope.modules, Symbol(nm))
+                    push!(wildcards, nm)
+                else
+                    unresolved = true
+                end
+            end
+        end
         push!(result, TestSetupData(Symbol(setup_name), kind, uri,
-            _setup_toplevel_bound_names(body), _setup_toplevel_export_names(body),
-            _setup_toplevel_fully_enumerable(body)))
+            sort!(unique!(bound)), _setup_toplevel_export_names(body),
+            sort!(unique!(wildcards)), unresolved))
     end
     return result
 end
