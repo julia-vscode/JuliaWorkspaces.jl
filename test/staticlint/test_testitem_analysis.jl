@@ -290,6 +290,81 @@ end
     @test !haskey(setups, :OtherTM)
 end
 
+@testitem "setup-member refs stay out of the outbound table" setup=[TestItemAnalysisWS] begin
+    # TM.tmf inside a testitem resolves against the synthetic setup module,
+    # not a workspace module named TM; an outbound ("tmf", ["TM"]) row would
+    # collide with a real module TM in cross-file reference aggregation
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TM] begin
+            TM.tmf()
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testmodule TM begin
+            export tmf
+            tmf() = 1
+        end
+        """))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, TESTF, TESTF)
+    @test !any(o -> o.name == "tmf" && o.origin_module == ["TM"], fa.outbound)
+end
+
+@testitem "@testsnippet honors default_imports=false" setup=[TestItemAnalysisWS] begin
+    # snippets accept the same kwargs as @testitem; without default imports
+    # the package under test is not visible in the body (Test's store is
+    # absent in this harness env, so efn is the observable default import)
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testsnippet Bare default_imports=false begin
+        efn()
+        undefined_in_bare
+    end
+    @testsnippet Defaulted begin
+        efn()
+    end
+    """)
+    msgs = diag_messages(jw)
+    # only the Bare snippet flags efn; skipping the injection must not
+    # suppress checking either
+    @test count(==("Missing reference: efn"), msgs) == 1
+    @test "Missing reference: undefined_in_bare" in msgs
+end
+
+@testitem "exported macros resolve through the tree-context injections" setup=[TestItemAnalysisWS] begin
+    # the ExportFilteredContext paths (default-imports package injection and
+    # snippet wildcard re-attachment) must resolve exported MACROS bare, not
+    # just function/const exports
+    macro_entry = """
+    module MyPkg
+    export @mymac, efn
+    macro mymac(x)
+        esc(x)
+    end
+    efn() = 1
+    end
+    """
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=macro_entry,
+        testfile="""
+        @testitem "defaults" begin
+            @mymac 1
+        end
+        @testitem "via snippet" default_imports=false setup=[WS] begin
+            @mymac 2
+            undefined_ctrl
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testsnippet WS begin
+            using MyPkg
+        end
+        """))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: @mymac" in msgs)
+    @test "Missing reference: undefined_ctrl" in msgs
+end
+
 @testitem "testmodule wildcards do not suppress item-side missing refs" setup=[TestItemAnalysisWS] begin
     # A wildcard `using` inside a @testmodule stays contained in the module
     # at runtime: the item sees only TM's explicit exports, so item-side
@@ -467,10 +542,8 @@ end
 end
 
 # ───────────────────────────────────────────────────────────────────
-# Regression coverage for the final-review fix wave (see
-# docs/superpowers/plans/2026-08-05-testitem-per-file-support.md):
-# CRITICAL #1 (setup-provided names), IMPORTANT #2 (unresolvable
-# self-package fallback).
+# Regression coverage: setup-provided names and the unresolvable
+# self-package fallback.
 # ───────────────────────────────────────────────────────────────────
 
 @testitem "testmodule exports inject into @testitem scopes bare" setup=[TestItemAnalysisWS] begin

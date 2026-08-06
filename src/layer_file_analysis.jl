@@ -531,6 +531,10 @@ function _collect_outbound(meta_dict::Dict{UInt64,StaticLint.Meta})
         end
         r === nothing && continue
         isempty(r.name) && continue
+        # setup-member refs resolve against a synthetic setup module, not a
+        # workspace module of that name — a real module with the setup's name
+        # would collide with them in cross-file aggregation
+        r.kind === :test_setup_member && continue
         key = (r.name, r.origin_module)
         prev = get(acc, key, nothing)
         if prev === nothing

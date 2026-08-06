@@ -674,6 +674,10 @@ function _handle_testsnippet(x::EXPR, state::Toplevel)
     meta_dict = state.meta_dict
     _mark_test_macro_name!(x, meta_dict)
 
+    # Snippets take the same kwargs as @testitem; only default_imports
+    # affects the declaration-site scope built here.
+    default_imports, _, _ = _parse_testitem_kwargs(x)
+
     # Create an isolating scope — bindings created during traversal stay here
     setscope!(x, Scope(x), meta_dict)
     setparent!(scopeof(x, meta_dict), state.scope)
@@ -683,7 +687,7 @@ function _handle_testsnippet(x::EXPR, state::Toplevel)
     snip_scope.modules[:Base] = getsymbols(state)[:Base]
     snip_scope.modules[:Core] = getsymbols(state)[:Core]
 
-    state.simulate_testitem_runtime && _inject_testitem_default_imports!(snip_scope, state, enclosing_tree_context(state.scope))
+    default_imports && state.simulate_testitem_runtime && _inject_testitem_default_imports!(snip_scope, state, enclosing_tree_context(state.scope))
 
     # Body will be traversed by the standard traverse() in process_EXPR,
     # using this isolating scope (pushed by scopes()).
