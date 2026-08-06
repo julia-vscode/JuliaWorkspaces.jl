@@ -61,10 +61,13 @@ frame:
 - a `TreeModuleContext` for tree/workspace-package resolution;
 - a fresh local `meta_dict`; the `mark_unresolved_imports!` tail step runs
   so the wildcard flag is final;
-- scope seeding matches the runtime semantics the inline handlers
-  (`_handle_testmodule`/`_handle_testsnippet`) already implement:
-  module-like scope with Base/Core for `:module`, default-imports injection
-  for `:snippet`.
+- the pass's default root scope (Base/Core) serves BOTH kinds. Snippet
+  default imports are deliberately NOT seeded here: `_add_module_public_names!`
+  writes exported names into `scope.names`, which would swallow Test's
+  exports into `bound_names`, and no extracted field depends on them (the
+  referencing item injects its own defaults; the snippet body's inline
+  analysis in its declaring file keeps the injection for its own
+  diagnostics).
 
 Flattening:
 
@@ -126,10 +129,13 @@ already never flagged.
 
 End-to-end via `derived_file_analysis`, in the existing branch's test style:
 
-- snippet with indexed wildcard (`using LinearAlgebra` → `norm` resolves;
-  an unrelated undefined name is still flagged);
+- snippet with a resolvable wildcard: `using MyPkg` on the fixture's
+  workspace package (tree channel — the headless test env has no stdlib
+  stores beyond Base/Core, so the env-store attachment branch mirrors the
+  already-tested default-imports store branch instead of getting its own
+  fixture) → exports resolve bare in the item, internals and unrelated
+  undefined names still flagged;
 - snippet with unresolvable wildcard → suppression;
-- snippet wildcard on a deved workspace package → tree channel;
 - testmodule with wildcard → item refs not suppressed;
 - `@enum` in a setup body → names enumerated;
 - `begin`-block bindings in a setup body → found;
