@@ -34,3 +34,21 @@ end
 
     @test read_path_into_textdocuments(filepath2uri(dir), file_limit=4) === nothing
 end
+
+@testitem "read_path_into_textdocuments skips .git and other VCS/dependency dirs" begin
+    using JuliaWorkspaces: read_path_into_textdocuments
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    dir = mktempdir()
+    write(joinpath(dir, "a.jl"), "a() = 1\n")
+
+    for skipped in (".git", ".svn", ".hg", "node_modules")
+        skipped_dir = joinpath(dir, skipped, "nested")
+        mkpath(skipped_dir)
+        write(joinpath(skipped_dir, "b.jl"), "b() = 2\n")
+    end
+
+    files = read_path_into_textdocuments(filepath2uri(dir))
+    @test length(files) == 1
+    @test only(files).uri == filepath2uri(joinpath(dir, "a.jl"))
+end
