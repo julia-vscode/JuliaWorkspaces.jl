@@ -196,6 +196,13 @@ function get_named_toplevel_module(s::Scope, name::String)
     end
     return nothing
 end
+
+function _get_field(par::ExportFilteredContext, arg, state, visited=Base.IdSet{Any}())
+    name = CSTParser.str_value(arg)
+    (name isa String && name in par.names) || return nothing
+    return _get_field(par.inner, arg, state, visited)
+end
+
 function _get_field(par, arg, state, visited=Base.IdSet{Any}())
     par in visited && return nothing
     push!(visited, par)

@@ -62,6 +62,20 @@ end
 
 StaticLint.context_tree_ref(ctx::TreeModuleContext) = _context_tree_ref(ctx)
 
+StaticLint.context_exported_names(ctx::TreeModuleContext) =
+    derived_module_exports(ctx.rt, ctx.root, ctx.path).exports
+
+# ctx.root is the analyzed file's root; for test files the root IS the file,
+# and for src files it is the package entry — both live under the package
+# folder, which keys the setup index.
+function StaticLint.test_setup_info(ctx::TreeModuleContext, name::Symbol)
+    pkg_folder = derived_package_for_file(ctx.rt, ctx.root)
+    pkg_folder === nothing && return nothing
+    s = derived_test_setup(ctx.rt, pkg_folder, name)
+    s === nothing && return nothing
+    return StaticLint.TestSetupInfo(s.kind, Set{String}(s.bound_names), Set{String}(s.exported_names), s.wildcard_packages, s.has_unresolved_wildcard)
+end
+
 # The names of the modules DECLARED IN the analyzed file that enclose `x`,
 # outermost-first, read off the scope chain (works after
 # `strip_module_contexts!` — module nesting survives the handle strip).
@@ -316,10 +330,15 @@ end
 # leak the handle or another file's objects into meta. The binding's val is
 # the context's plain-data `TreeRef` (leaf components that resolve directly
 # to a TreeRef take the GENERIC `_mark_import_arg`, which stores them the
-# same way — `Binding.val` admits `TreeRef`). No `scope.modules` entry is
-# added for `using`: a `using` statement is necessarily module-toplevel, so
-# its bring-ins are already part of this module's
-# `derived_module_visible_names` — the seeded context covers them.
+# same way — `Binding.val` admits `TreeRef`).
+#
+# For `using` at module toplevel no `scope.modules` entry is needed: the
+# bring-ins are part of the module's `derived_module_visible_names` face and
+# the seeded `:__tree__` context covers them. A `using` anywhere else (a
+# `@testitem`/`@testset` body — those macrocalls are opaque to the
+# inventory) has no face to lean on, so its exported names are materialized
+# as an export-filtered context on the current scope; the wrapper holds a
+# runtime handle and is removed by `strip_module_contexts!` before freezing.
 function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged, meta_dict)
     CSTParser.is_id_or_macroname(arg) || return
     if StaticLint.bindingof(arg, meta_dict) === nothing
@@ -327,7 +346,16 @@ function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged
         StaticLint.getmeta(arg, meta_dict).binding = StaticLint.Binding(arg, _context_tree_ref(par), StaticLint.CoreTypes.Module, [])
         StaticLint.setref!(arg, StaticLint.bindingof(arg, meta_dict), meta_dict)
     end
-    if !usinged
+    if usinged
+        if !StaticLint.is_module_toplevel_scope(state.scope)
+            exps = StaticLint.context_exported_names(par)
+            if exps !== nothing
+                nm = StaticLint.valofid(arg)
+                nm !== nothing && StaticLint.add_to_imported_modules(
+                    state.scope, Symbol(nm), StaticLint.ExportFilteredContext(par, Set{String}(exps)))
+            end
+        end
+    else
         # import binds the name in the current scope — except under `as`,
         # where only the alias is bound (matching `_mark_import_arg`)
         if !(CSTParser.parentof(arg) isa CSTParser.EXPR && CSTParser.parentof(CSTParser.parentof(arg)) isa CSTParser.EXPR && CSTParser.headof(CSTParser.parentof(CSTParser.parentof(arg))) === :as)
@@ -503,6 +531,10 @@ function _collect_outbound(meta_dict::Dict{UInt64,StaticLint.Meta})
         end
         r === nothing && continue
         isempty(r.name) && continue
+        # setup-member refs resolve against a synthetic setup module, not a
+        # workspace module of that name — a real module with the setup's name
+        # would collide with them in cross-file aggregation
+        r.kind === :test_setup_member && continue
         key = (r.name, r.origin_module)
         prev = get(acc, key, nothing)
         if prev === nothing
@@ -741,8 +773,18 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     cst = derived_julia_legacy_syntax_tree(rt, file)
     meta_dict = Dict{UInt64,StaticLint.Meta}()
 
+    # The enclosing package's name, for @testitem default-imports injection
+    # (TestItemRunner evaluates each testitem body with `using Test` and
+    # `using <PackageName>` in effect).
+    self_package_name = nothing
+    pkg_folder = derived_package_for_file(rt, file)
+    if pkg_folder !== nothing
+        pkg = derived_package(rt, pkg_folder)
+        pkg !== nothing && (self_package_name = pkg.name)
+    end
+
     ctx = TreeModuleContext(rt, root, path)
-    StaticLint.semantic_pass(file, cst, env, meta_dict, rt; module_context=ctx)
+    StaticLint.semantic_pass(file, cst, env, meta_dict, rt; module_context=ctx, self_package_name)
 
     # Cross-file wildcard-using suppression: if the module this file is
     # spliced into has a failed wildcard `using` ANYWHERE (typically in the
@@ -840,14 +882,6 @@ diagnostics are suppressed here: while a root has no project (e.g. a loose
 file during the LS-startup no-active-project window), every real-package
 import would otherwise flash a "Failed to resolve …" false positive. Once a
 project is active, `new == old` again.
-
-Test-setup parity: the whole-closure pass feeds `derived_test_setup_bindings`
-into `semantic_pass(...; test_setups=…)`; the per-file pass
-(`derived_file_analysis`) passes none. This is behavior-identical TODAY
-because test-setup detection has a verified pre-existing off-by-one (the
-`args[2]` line-info placeholder — setups are never recognized on this
-lineage). Do NOT fix the off-by-one here: it re-opens the stale-EXPR channel;
-it is a ledgered follow-up.
 """
 Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     @debug "derived_new_static_lint_diagnostics" uri=uri

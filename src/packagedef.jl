@@ -34,6 +34,7 @@ include("StaticLint/StaticLint.jl")
 
 include("layer_file_analysis.jl")
 include("layer_static_lint.jl")
+include("layer_test_setups.jl")
 include("layer_projects.jl")
 include("layer_environment.jl")
 include("layer_testitems.jl")

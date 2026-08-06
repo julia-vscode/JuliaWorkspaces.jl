@@ -91,6 +91,30 @@ context type.
 function qualified_module_target end
 
 """
+    context_exported_names(ctx) -> Union{Nothing,Vector{String}}
+
+The names the module denoted by `ctx` exports, or `nothing` when unknown.
+Interface for `AbstractModuleContext` implementations (the concrete method
+for the tree-backed context lives in layer_file_analysis.jl).
+"""
+context_exported_names(@nospecialize(_)) = nothing
+
+"""
+    ExportFilteredContext(inner, names)
+
+A module-context wrapper with `using` semantics: resolves a name through
+`inner` only when the name is in `names` (the target's export list). Used to
+inject a workspace package's exported names into a `@testitem` scope (or any
+non-module-toplevel `using` site) without over-resolving internal names.
+Holds `inner`'s runtime handle, so it must be stripped before meta is frozen
+(`strip_module_contexts!` removes any `AbstractModuleContext` value).
+"""
+struct ExportFilteredContext{C<:AbstractModuleContext} <: AbstractModuleContext
+    inner::C
+    names::Set{String}
+end
+
+"""
     workspace_package_context(ctx::AbstractModuleContext, name::String) -> Union{Nothing,AbstractModuleContext}
 
 The (cross-root) context of the workspace package named `name`, or `nothing`
@@ -140,6 +164,51 @@ the origin module path.
     item::Union{Nothing,ItemRef}
     origin_module::Vector{String}
 end
+
+"""
+    TestSetupInfo
+
+Plain-data description of a `@testmodule` or `@testsnippet` a `@testitem`
+references via `setup=[...]`: `kind` is `:module`/`:snippet`, `names` the
+names the setup's body scope binds, `exports` the names a `:module` setup's
+top-level `export` makes public (TestItemRunner injects a testmodule via
+`using ..Setups.TM`, which brings in TM's exports, not its full member
+set). `wildcard_packages` are packages a snippet's wildcard `using`
+resolved against, for re-attachment into the item scope;
+`has_unresolved_wildcard` is `true` when a wildcard resolved against
+nothing, so the item must suppress bare missing-ref checks instead.
+Produced by the `test_setup_info(ctx, name)` interface (backed by a Salsa
+query outside StaticLint); safe to reach from frozen meta.
+"""
+@auto_hash_equals struct TestSetupInfo
+    kind::Symbol
+    names::Set{String}
+    exports::Set{String}
+    wildcard_packages::Vector{String}
+    has_unresolved_wildcard::Bool
+end
+
+"""
+    TestSetupModuleRef
+
+The `Binding.val` for a `@testmodule` name injected into a `@testitem` scope:
+qualified members (`Foo.x`) resolve against `members`. Plain data — member
+misses are NOT flagged (the set is not enumerable in general; see
+`should_mark_missing_getfield_ref`).
+"""
+@auto_hash_equals struct TestSetupModuleRef
+    name::String
+    members::Set{String}
+end
+
+"""
+    test_setup_info(ctx, name::Symbol) -> Union{Nothing,TestSetupInfo}
+
+The test setup registered under `name` for the package the analyzed file
+belongs to, or `nothing`. Interface for `AbstractModuleContext`
+implementations (concrete method in layer_file_analysis.jl).
+"""
+test_setup_info(@nospecialize(_), ::Symbol) = nothing
 
 include("coretypes.jl")
 include("bindings.jl")
@@ -205,28 +274,6 @@ function Base.hash(a::ExternalEnv, h::UInt)
     return hash(a.project_deps, hash(x, h))
 end
 
-"""
-    TestSetupInfo
-
-Holds pre-computed semantic information for a `@testmodule` or `@testsnippet`
-declaration. Used by `handle_macro` to resolve `setup=[...]` references in
-`@testitem` macros.
-
-- `kind`: `:module` for `@testmodule`, `:snippet` for `@testsnippet`
-- `binding`: For modules, the `Binding` of the module definition (injected into scope.modules).
-             For snippets, `nothing` (snippet body is inlined directly).
-- `body_exprs`: The CSTParser EXPR nodes of the setup's body block. For snippets,
-                these are `process_EXPR`'d directly in the `@testitem`'s scope. For modules,
-                this is `nothing` (the module binding handles it).
-- `scope`: For modules, the `Scope` of the module. For snippets, `nothing`.
-"""
-struct TestSetupInfo
-    kind::Symbol  # :module or :snippet
-    binding::Union{Nothing,Binding}
-    body_exprs::Union{Nothing,Vector{EXPR}}
-    scope::Union{Nothing,Scope}
-end
-
 getsymbols(env::ExternalEnv) = env.symbols
 getsymbolextendeds(env::ExternalEnv) = env.extended_methods
 
@@ -248,12 +295,20 @@ mutable struct Toplevel{RT} <: TraverseState
     resolveonly::Vector{EXPR}
     env::ExternalEnv
     workspace_packages::Dict{String,Any}
-    test_setups::Dict{Symbol,TestSetupInfo}
     self_package_name::Union{Nothing,String}
     # Whether `followinclude` traverses into included files (the whole-closure
     # pass) or returns immediately (the per-file traversal mode, where included
     # files' names come from the module tree instead).
     follow_includes::Bool
+    # Whether `@testitem`/`@testsnippet` handling simulates their implicit
+    # `using Test`/`using <package>` defaults, and whether `@testitem`'s
+    # setup=[...] resolution loop runs at all. `false` for a setup-body-only
+    # pass (`derived_test_setups_in_file`), where the default-imports
+    # injection would leak Test's exports into the setup's own bound-names
+    # data, and where a nested `@testitem setup=[...]` (including one
+    # swallowed into an unclosed enclosing block by parser recovery) would
+    # otherwise re-enter this same query and cycle.
+    simulate_testitem_runtime::Bool
     flags::Int
     meta_dict::Dict{UInt64,Meta}
     runtime::RT
@@ -263,7 +318,7 @@ end
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
 Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, runtime) =
-    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, Dict{Symbol,TestSetupInfo}(), nothing, true, 0, meta_dict, runtime, ReboundBindings())
+    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, nothing, true, true, 0, meta_dict, runtime, ReboundBindings())
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -409,12 +464,20 @@ addition to the Base/Core stores — so `resolve_ref`'s existing scope.modules
 loop resolves non-local names through the module tree, after file-local
 scopes and the Base/Core stores — and includes are NOT followed
 (`follow_includes = false`; included files' names come from the tree).
+
+`simulate_testitem_runtime = false` disables the `using Test`/`using
+<package>` simulation `_handle_testitem`/`_handle_testsnippet` otherwise run
+for every `@testitem`/`@testsnippet` — for a pass over a setup body alone
+(no enclosing testitem), that injection would leak Test's exports into the
+setup's own data — and also disables `_handle_testitem`'s setup=[...]
+resolution loop, so a testitem nested inside the setup body being analyzed
+cannot re-enter the setup-extraction query and cycle.
 """
-function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), test_setups = Dict{Symbol,TestSetupInfo}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing)
+function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing, strip_contexts::Bool = true, simulate_testitem_runtime::Bool = true)
     root_modules = Dict{Symbol,Any}(m => env.symbols[m] for m in IMPLICIT_SCOPE_MODULES)
     module_context !== nothing && (root_modules[:__tree__] = module_context)
     setscope!(cst, Scope(nothing, cst, Dict(), root_modules, nothing), meta_dict)
-    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, test_setups, self_package_name, module_context === nothing, 0, meta_dict, rt, ReboundBindings())
+    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, self_package_name, module_context === nothing, simulate_testitem_runtime, 0, meta_dict, rt, ReboundBindings())
     process_EXPR(cst, state)
     _unify_rebound_types!(state)
     unique!(state.delayed)
@@ -455,25 +518,28 @@ function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; wo
     # derived value, and a runtime handle embedded in a memoized value of
     # that same runtime is forbidden. Any post-pass step that still needs
     # tree resolution must re-seed a fresh context first.
-    module_context === nothing || strip_module_contexts!(meta_dict)
+    # strip_contexts=false is only safe when the caller discards meta_dict
+    # instead of freezing it into a derived value (contexts hold the runtime).
+    (module_context === nothing || !strip_contexts) || strip_module_contexts!(meta_dict)
 end
 
 """
     strip_module_contexts!(meta_dict)
 
-Remove every `:__tree__ => AbstractModuleContext` entry from the scopes
-stored in `meta_dict` (the per-file pass seeds them on the root scope and on
-each in-file module scope). Called at the end of a `semantic_pass` run in
-per-file mode so no runtime handle remains reachable from the returned meta.
-Only context values are removed — a user module that happens to be named
-`__tree__` (a `Scope`/`ModuleStore` value) is left alone.
+Remove every `AbstractModuleContext` value from the scopes stored in
+`meta_dict`, under any key — the per-file pass seeds `:__tree__` on the root
+scope and on each in-file module scope, and testitem injection adds
+package-named entries. Called at the end of a `semantic_pass` run in per-file
+mode so no runtime handle remains reachable from the returned meta.
 """
 function strip_module_contexts!(meta_dict::Dict{UInt64,Meta})
     for m in values(meta_dict)
         s = m.scope
         s isa Scope || continue
         s.modules isa Dict || continue
-        get(s.modules, :__tree__, nothing) isa AbstractModuleContext && delete!(s.modules, :__tree__)
+        for (k, v) in collect(s.modules)
+            v isa AbstractModuleContext && delete!(s.modules, k)
+        end
     end
     return
 end

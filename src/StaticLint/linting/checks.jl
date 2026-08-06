@@ -1128,13 +1128,28 @@ not the macroname) without first crossing a scope-introducing expression
 
 If a user-written scope sits between the identifier and the macrocall, we assume
 the macro respects normal Julia scoping.
+
+The BODY block of a fully-analyzed test macro (`@testitem`/`@testmodule`/
+`@testsnippet` get prebuilt scopes, `@testset`/`@safetestset` ordinary scopes)
+is linted like ordinary code, so reaching one of those through its body block
+does not suppress — the walk continues so an enclosing unknown macro still
+suppresses the whole construct. Their non-body args (name, kwargs) stay
+suppressed.
 """
 function in_macrocall_arg(x::EXPR)
     cur = x
     while parentof(cur) isa EXPR
         p = parentof(cur)
         if CSTParser.ismacrocall(p)
-            return !(length(p.args) > 0 && p.args[1] === cur)
+            if length(p.args) > 0 && p.args[1] === cur
+                return false
+            end
+            if (_is_testitem_scope_macrocall(p) || is_scope_introducing_macrocall(p)) &&
+               cur isa EXPR && headof(cur) === :block
+                cur = p
+                continue
+            end
+            return true
         end
         h = headof(p)
         if h === :function || h === :macro || h === :for || h === :while ||
@@ -1274,6 +1289,11 @@ function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
             # a module, we should know this.
             return true
         elseif lhsref isa Binding
+            if lhsref.val isa TestSetupModuleRef
+                # @testmodule member sets are not enumerable in general
+                # (macro-generated names, usings inside the setup) — never flag.
+                return false
+            end
             if lhsref.val isa Binding
                 lhsref = lhsref.val
             end
