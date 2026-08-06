@@ -51,6 +51,15 @@ exactly one file, rather than reconstructing a merge across an arbitrary number
 of them. The cost is that a nested config must restate anything it wants to
 keep — copy the parent file and edit it.
 
+Because of that cost, **a nested config file is a last resort, not a normal way
+to vary settings by directory**. The normal setup is a single config file of
+each kind at the repository root; when a subtree needs different settings, use
+an [`[[override]]` block](#path-scoped-overrides) in that one file — it changes
+only the keys it names, while a nested file silently resets everything it does
+not restate back to the defaults. Reach for a nested file only when a subtree is
+genuinely independent of the enclosing project and should not follow its
+configuration at all — a vendored repository with its own conventions, say.
+
 Config file names are matched **case-insensitively on the basename**, so
 `JuliaLint.toml` and `julialint.toml` both work. A leading dot does **not**:
 `.JuliaLint.toml` is not recognised.
@@ -99,6 +108,7 @@ identically. Matching is case-insensitive on Windows.
 
 ### Path-scoped overrides
 
+Overrides are **the** mechanism for giving part of a tree different settings.
 Any config file may carry repeated `[[override]]` blocks. Each takes a required
 `paths` glob list and re-scopes a subset of the file's own keys to the files
 those globs match. **Later blocks win over earlier ones.**
@@ -114,9 +124,11 @@ paths = ["test/**"]
 unused_binding = "off"
 ```
 
-This covers the common "different settings for tests" case without needing a
-second config file — which matters more than usual here, because a second file
-would have to restate everything.
+This covers the common "different settings for tests" case — and anything else
+that would tempt one to add a second config file. Prefer an override whenever
+the subtree is still part of the same project: it varies exactly the keys it
+names, where a nested config file would have to restate everything else it
+wants to keep.
 
 ### `config-version`
 
@@ -132,9 +144,12 @@ does not understand is told to upgrade the tooling.
 ### Superseded configuration
 
 Because the nearest config governs wholesale, a config file in a subdirectory
-does not extend the one above it — it *replaces* it. That is silent by nature,
-so a config file with another of the same kind in an enclosing directory reports
-a `shadowed_config` warning naming the file it takes over from.
+does not extend the one above it — it *replaces* it, and since nested config
+files are discouraged (use [`[[override]]`](#path-scoped-overrides) instead),
+that replacement is more often an accident than a decision. It is also silent by
+nature, so a config file with another of the same kind in an enclosing directory
+reports a `shadowed_config` diagnostic (`info` by default) naming the file it
+takes over from.
 
 This is the price of choosing nearest-wins over cascading. The alternative is
 that a config dropped into a subdirectory — a vendored repository, a copied
@@ -251,7 +266,7 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `testitem_errors` | `error` | Malformed `@testitem` blocks |
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |
-| `shadowed_config` | `warning` | A config file that supersedes another of the same kind in an enclosing directory |
+| `shadowed_config` | `info` | A config file that supersedes another of the same kind in an enclosing directory |
 | `incorrect_call_args` | `info` | Wrong argument count/type; calls to method-less functions |
 | `incorrect_iter_spec` | `info` | Loop iterators that will likely error |
 | `index_from_length` | `info` | Indexing off `length`/`size` instead of `eachindex`/`axes` |
