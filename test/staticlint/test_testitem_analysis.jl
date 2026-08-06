@@ -518,3 +518,31 @@ end
     SL.semantic_pass(TESTF, cst2, env, md2, jw.runtime; module_context=ctx)
     @test !haskey(SL.scopeof(cst2, md2).modules, :__tree__)
 end
+
+@testitem "resolvable snippet wildcards re-attach instead of suppressing" setup=[TestItemAnalysisWS] begin
+    # `using MyPkg` in the snippet resolves through the module tree, so the
+    # item gets MyPkg's exports (export-filtered: internals still flagged)
+    # and full missing-ref checking stays on.
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TS] begin
+            efn()
+            MyPkg.ifn()
+            ifn()
+            undefined_beside_wildcard
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testsnippet TS begin
+            using MyPkg
+        end
+        """))
+    msgs = diag_messages(jw)
+    # exported name resolves bare; the package name resolves qualified
+    @test !("Missing reference: efn" in msgs)
+    @test !("Missing reference: MyPkg" in msgs)
+    # non-exported internals and genuine unknowns are still flagged
+    @test "Missing reference: ifn" in msgs
+    @test "Missing reference: undefined_beside_wildcard" in msgs
+end

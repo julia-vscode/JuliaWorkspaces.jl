@@ -494,13 +494,34 @@ function _handle_testitem(x::EXPR, state::Toplevel)
                     haskey(item_scope.names, n) ||
                         (item_scope.names[n] = Binding(noname, nothing, nothing, EXPR[]))
                 end
-            end
-            # A snippet's wildcard `using` brings unknown-to-us names into the
-            # item body — suppress bare missing-ref checks there. Testmodule
-            # wildcards stay contained in the module (only its literal exports
-            # reach the item), so they never suppress.
-            if info.kind === :snippet && (info.has_unresolved_wildcard || !isempty(info.wildcard_packages))
-                item_scope.unresolved_wildcard_import = true
+                # Re-attach the snippet's resolved wildcard `using`s: the env
+                # store where available (full member info), the module tree
+                # otherwise (export-filtered, like the default-imports path).
+                # An attachment miss means the item can't enumerate what the
+                # snippet sees — suppress bare missing-ref checks then.
+                symbols = getsymbols(state)
+                for pkgname in info.wildcard_packages
+                    pkg_sym = Symbol(pkgname)
+                    attached = false
+                    if haskey(symbols, pkg_sym)
+                        item_scope.modules[pkg_sym] = symbols[pkg_sym]
+                        _add_module_public_names!(item_scope, symbols[pkg_sym], state)
+                        attached = true
+                    else
+                        wp = workspace_package_context(tctx, pkgname)
+                        if wp !== nothing
+                            haskey(item_scope.names, pkgname) ||
+                                (item_scope.names[pkgname] = Binding(noname, context_tree_ref(wp), CoreTypes.Module, EXPR[]))
+                            exps = context_exported_names(wp)
+                            if exps !== nothing
+                                item_scope.modules[pkg_sym] = ExportFilteredContext(wp, Set{String}(exps))
+                                attached = true
+                            end
+                        end
+                    end
+                    attached || (item_scope.unresolved_wildcard_import = true)
+                end
+                info.has_unresolved_wildcard && (item_scope.unresolved_wildcard_import = true)
             end
         end
     end
