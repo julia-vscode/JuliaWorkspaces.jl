@@ -332,9 +332,22 @@ end
 # TestItems.jl macro handling (@testitem, @testmodule, @testsnippet)
 # ───────────────────────────────────────────────────────────────────
 
-_is_testitem_macro(x) = isidentifier(x) && valofid(x) == "@testitem"
-_is_testmodule_macro(x) = isidentifier(x) && valofid(x) == "@testmodule"
-_is_testsnippet_macro(x) = isidentifier(x) && valofid(x) == "@testsnippet"
+# Bare `@testitem`/`Module.@testitem` and friends — the qualified `X.@macro`
+# getfield form is unwrapped the same way `is_scope_introducing_macrocall`
+# (scope.jl) does, so a qualified testitem-family call gets the same handling
+# (prebuilt scope, default-import/setup injection) as a bare one.
+function _is_testitem_macro(x)
+    CSTParser.is_getfield_w_quotenode(x) && return _is_testitem_macro(x.args[2].args[1])
+    return isidentifier(x) && valofid(x) == "@testitem"
+end
+function _is_testmodule_macro(x)
+    CSTParser.is_getfield_w_quotenode(x) && return _is_testmodule_macro(x.args[2].args[1])
+    return isidentifier(x) && valofid(x) == "@testmodule"
+end
+function _is_testsnippet_macro(x)
+    CSTParser.is_getfield_w_quotenode(x) && return _is_testsnippet_macro(x.args[2].args[1])
+    return isidentifier(x) && valofid(x) == "@testsnippet"
+end
 
 # The testitem-family macros are recognized syntactically (the defining
 # package is usually not in the analysis environment), so their macro-name
@@ -449,49 +462,19 @@ function _handle_testitem(x::EXPR, state::Toplevel)
     item_scope.modules[:Base] = getsymbols(state)[:Base]
     item_scope.modules[:Core] = getsymbols(state)[:Core]
 
-    # If default_imports=true, add Test module
-    if default_imports
-        symbols = getsymbols(state)
-        if haskey(symbols, :Test)
-            item_scope.modules[:Test] = symbols[:Test]
-            # Also add all Test exports into scope (simulating `using Test`)
-            _add_module_public_names!(item_scope, symbols[:Test], state)
-        end
+    # Looked up once and shared by the default-imports injection below and
+    # the setup-resolution loop (both need the per-file tree-resolution
+    # handle; state.scope is still the ENCLOSING scope here, pre-dating the
+    # item_scope we just created).
+    tctx = enclosing_tree_context(state.scope)
 
-        # Inject the parent package module (simulating `using PackageName`)
-        if state.self_package_name !== nothing
-            pkg_sym = Symbol(state.self_package_name)
-            if haskey(symbols, pkg_sym)
-                # Indexed (env-backed) package store
-                item_scope.modules[pkg_sym] = symbols[pkg_sym]
-                _add_module_public_names!(item_scope, symbols[pkg_sym], state)
-            else
-                # Workspace package: resolve through the module tree,
-                # cross-root. The binding's val is the plain-data module
-                # TreeRef (qualified `Pkg.x` goes through
-                # `qualified_module_target`); bare exported names resolve via
-                # an export-filtered context in scope.modules, which
-                # `strip_module_contexts!` removes before meta is frozen.
-                tctx = enclosing_tree_context(state.scope)
-                if tctx !== nothing
-                    wp = workspace_package_context(tctx, state.self_package_name)
-                    if wp !== nothing
-                        item_scope.names[state.self_package_name] =
-                            Binding(noname, context_tree_ref(wp), CoreTypes.Module, EXPR[])
-                        exps = context_exported_names(wp)
-                        exps !== nothing &&
-                            (item_scope.modules[pkg_sym] = ExportFilteredContext(wp, Set{String}(exps)))
-                    end
-                end
-            end
-        end
-    end
+    # If default_imports=true, add Test and the parent package module
+    default_imports && _inject_testitem_default_imports!(item_scope, state, tctx)
 
     # Resolve setup=[...] references through the plain-data setup index
     # (test_setup_info interface). Testmodules bind their name — members
     # resolve via TestSetupModuleRef; snippet names are injected directly
     # (TestItemRunner splices snippet code into the testitem body).
-    tctx = enclosing_tree_context(state.scope)
     if tctx !== nothing
         for setup_name in setup_names
             info = test_setup_info(tctx, setup_name)
@@ -499,18 +482,95 @@ function _handle_testitem(x::EXPR, state::Toplevel)
             if info.kind === :module
                 item_scope.names[String(setup_name)] =
                     Binding(noname, TestSetupModuleRef(String(setup_name), info.names), CoreTypes.Module, EXPR[])
+                # TestItemRunner injects a testmodule via `using ..Setups.TM`,
+                # which brings TM's EXPORTED names — not its full member set
+                # — into the testitem scope too.
+                for n in info.exports
+                    haskey(item_scope.names, n) ||
+                        (item_scope.names[n] = Binding(noname, nothing, nothing, EXPR[]))
+                end
             elseif info.kind === :snippet
                 for n in info.names
                     haskey(item_scope.names, n) ||
                         (item_scope.names[n] = Binding(noname, nothing, nothing, EXPR[]))
                 end
             end
+            # The setup's name/export sets are not exhaustive (a wildcard
+            # using/import or unrecognized macrocall at its top level) —
+            # suppress bare missing-ref checks in the whole item body rather
+            # than risk flagging a name the setup actually provides.
+            info.fully_enumerable || (item_scope.unresolved_wildcard_import = true)
         end
     end
 
     # NOTE: We intentionally do NOT call process_EXPR(body, state) here.
     # The body will be processed by the standard traverse() in process_EXPR,
     # which will use the scope we just created (pushed by scopes()).
+    return
+end
+
+"""
+    _inject_testitem_default_imports!(scope::Scope, state::Toplevel, tctx)
+
+Simulate the default imports a `@testitem`/`@testsnippet` body runs with:
+`using Test` and `using <the package under test>`. Shared by both handlers —
+TestItemRunner `include_string`s a `@testsnippet`'s code INTO each
+referencing testitem's module, so a snippet body sees the same defaults a
+testitem body does (unlike `@testmodule`, which is a bare module at runtime
+and gets neither).
+
+`tctx` is the caller's `enclosing_tree_context(state.scope)` (passed in
+rather than recomputed here so a caller resolving it for other purposes
+too — `_handle_testitem`'s setup loop — only looks it up once).
+
+If the package injection does not succeed (no `self_package_name`, or the
+package resolves through neither the indexed env nor the workspace module
+tree), the scope's wildcard-import is marked unresolved as a fallback: the
+body behaves as though `using PackageName` ran, and if we cannot enumerate
+that package's names we must suppress bare missing-ref reporting there
+rather than flood it. This is keyed ONLY on the package outcome, deliberately
+NOT on whether the `Test` injection above succeeded (`haskey(symbols,
+:Test)` is false in headless environments where existing tests still expect
+missing refs to fire).
+"""
+function _inject_testitem_default_imports!(scope::Scope, state::Toplevel, tctx)
+    symbols = getsymbols(state)
+    if haskey(symbols, :Test)
+        scope.modules[:Test] = symbols[:Test]
+        # Also add all Test exports into scope (simulating `using Test`)
+        _add_module_public_names!(scope, symbols[:Test], state)
+    end
+
+    # Inject the parent package module (simulating `using PackageName`)
+    package_injected = false
+    if state.self_package_name !== nothing
+        pkg_sym = Symbol(state.self_package_name)
+        if haskey(symbols, pkg_sym)
+            # Indexed (env-backed) package store
+            scope.modules[pkg_sym] = symbols[pkg_sym]
+            _add_module_public_names!(scope, symbols[pkg_sym], state)
+            package_injected = true
+        elseif tctx !== nothing
+            # Workspace package: resolve through the module tree,
+            # cross-root. The binding's val is the plain-data module
+            # TreeRef (qualified `Pkg.x` goes through
+            # `qualified_module_target`); bare exported names resolve via
+            # an export-filtered context in scope.modules, which
+            # `strip_module_contexts!` removes before meta is frozen.
+            wp = workspace_package_context(tctx, state.self_package_name)
+            if wp !== nothing
+                scope.names[state.self_package_name] =
+                    Binding(noname, context_tree_ref(wp), CoreTypes.Module, EXPR[])
+                exps = context_exported_names(wp)
+                if exps !== nothing
+                    scope.modules[pkg_sym] = ExportFilteredContext(wp, Set{String}(exps))
+                    package_injected = true
+                end
+            end
+        end
+    end
+
+    package_injected || (scope.unresolved_wildcard_import = true)
     return
 end
 
@@ -574,6 +634,11 @@ Creates an isolating scope so the declaration-site traversal (by the standard
 `traverse` in `process_EXPR`) doesn't leak bindings into the parent scope. The
 snippet's bound names are separately indexed (`test_setup_info`) and injected
 as synthetic bindings into each `@testitem`'s scope.
+
+TestItemRunner `include_string`s the snippet's code INTO each referencing
+`@testitem`'s module at runtime, so the snippet body itself sees the same
+default imports (`Test`, the package under test) a testitem body does —
+unlike `@testmodule`, whose declaration IS a real, bare module.
 """
 function _handle_testsnippet(x::EXPR, state::Toplevel)
     meta_dict = state.meta_dict
@@ -587,6 +652,8 @@ function _handle_testsnippet(x::EXPR, state::Toplevel)
     snip_scope.modules = Dict{Symbol,Any}()
     snip_scope.modules[:Base] = getsymbols(state)[:Base]
     snip_scope.modules[:Core] = getsymbols(state)[:Core]
+
+    _inject_testitem_default_imports!(snip_scope, state, enclosing_tree_context(state.scope))
 
     # Body will be traversed by the standard traverse() in process_EXPR,
     # using this isolating scope (pushed by scopes()).

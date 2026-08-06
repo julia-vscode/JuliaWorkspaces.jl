@@ -170,13 +170,21 @@ end
 
 Plain-data description of a `@testmodule` or `@testsnippet` a `@testitem`
 references via `setup=[...]`: `kind` is `:module`/`:snippet`, `names` the
-names the setup binds at its top level. Produced by the
-`test_setup_info(ctx, name)` interface (backed by a Salsa query outside
-StaticLint); safe to reach from frozen meta.
+names the setup binds at its top level, `exports` the names a `:module`
+setup's top-level `export` makes public (TestItemRunner injects a testmodule
+via `using ..Setups.TM`, which brings in TM's exports, not its full member
+set). `fully_enumerable` is `false` when `names`/`exports` are known to be
+incomplete (a wildcard `using`/`import` or unrecognized macrocall at the
+setup's top level) — the caller must then suppress bare missing-ref checks
+in the referencing `@testitem` body rather than trust the name sets.
+Produced by the `test_setup_info(ctx, name)` interface (backed by a Salsa
+query outside StaticLint); safe to reach from frozen meta.
 """
-struct TestSetupInfo
+@auto_hash_equals struct TestSetupInfo
     kind::Symbol
     names::Set{String}
+    exports::Set{String}
+    fully_enumerable::Bool
 end
 
 """
@@ -187,7 +195,7 @@ qualified members (`Foo.x`) resolve against `members`. Plain data — member
 misses are NOT flagged (the set is not enumerable in general; see
 `should_mark_missing_getfield_ref`).
 """
-struct TestSetupModuleRef
+@auto_hash_equals struct TestSetupModuleRef
     name::String
     members::Set{String}
 end
@@ -498,13 +506,11 @@ end
 """
     strip_module_contexts!(meta_dict)
 
-Remove every `:__tree__ => AbstractModuleContext` entry from the scopes
-stored in `meta_dict` (the per-file pass seeds them on the root scope and on
-each in-file module scope). Called at the end of a `semantic_pass` run in
-per-file mode so no runtime handle remains reachable from the returned meta.
-Remove every `AbstractModuleContext` value from the scopes stored in `meta_dict`,
-under any key — the per-file pass seeds `:__tree__`, and testitem injection adds
-package-named entries.
+Remove every `AbstractModuleContext` value from the scopes stored in
+`meta_dict`, under any key — the per-file pass seeds `:__tree__` on the root
+scope and on each in-file module scope, and testitem injection adds
+package-named entries. Called at the end of a `semantic_pass` run in per-file
+mode so no runtime handle remains reachable from the returned meta.
 """
 function strip_module_contexts!(meta_dict::Dict{UInt64,Meta})
     for m in values(meta_dict)

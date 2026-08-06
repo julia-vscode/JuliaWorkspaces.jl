@@ -283,3 +283,92 @@ end
     missing_refs = filter(m -> startswith(m, "Missing reference:"), msgs)
     @test missing_refs == ["Missing reference: oops_undefined"]
 end
+
+# ───────────────────────────────────────────────────────────────────
+# Regression coverage for the final-review fix wave (see
+# docs/superpowers/plans/2026-08-05-testitem-per-file-support.md):
+# CRITICAL #1 (setup-provided names), IMPORTANT #2 (unresolvable
+# self-package fallback).
+# ───────────────────────────────────────────────────────────────────
+
+@testitem "testmodule exports inject into @testitem scopes bare" setup=[TestItemAnalysisWS] begin
+    # `using ..Setups.TM` brings TM's EXPORTS into the testitem scope, not
+    # just the name TM — a bare use of an exported name must not be flagged,
+    # while a genuinely undefined name in the same body still is.
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TM] begin
+            tmf()
+            TM.tmf()
+            totally_undefined_xyz
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testmodule TM begin
+        export tmf
+        tmf() = 1
+        end
+        """))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: tmf" in msgs)
+    @test "Missing reference: totally_undefined_xyz" in msgs
+end
+
+@testitem "snippet using-leaves inject into @testitem scopes" setup=[TestItemAnalysisWS] begin
+    # A name a snippet gains via an explicit `using X: a` at its top level
+    # must exist in the referencing testitem too (TestItemRunner splices the
+    # snippet's code into the testitem module), alongside the snippet's own
+    # declarations. A genuinely undefined name still fires.
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[TS] begin
+            ifn()
+            helper()
+            totally_undefined_xyz2
+        end
+        """,
+        extra=Dict(setups_file => """
+        @testsnippet TS begin
+        using MyPkg: ifn
+        helper() = 1
+        end
+        """))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: ifn" in msgs)
+    @test !("Missing reference: helper" in msgs)
+    @test "Missing reference: totally_undefined_xyz2" in msgs
+end
+
+@testitem "testsnippet declaration bodies get default imports" setup=[TestItemAnalysisWS] begin
+    # A @testsnippet body itself is include_string'd into a testitem module
+    # at runtime, so it sees the same default imports (Test, the package
+    # under test) a testitem body does — MyPkg is a resolvable workspace
+    # package in this fixture.
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testsnippet TS2 begin
+        v = efn()
+    end
+    """)
+    msgs = diag_messages(jw)
+    @test !("Missing reference: efn" in msgs)
+end
+
+@testitem "unresolvable self-package suppresses missing refs instead of flooding" setup=[TestItemAnalysisWS] begin
+    # No src/MyPkg.jl entry file at all: the package is a real Project.toml
+    # package (self_package_name resolves), but its module doesn't exist
+    # anywhere in the workspace tree, so the `using MyPkg` default-imports
+    # injection cannot enumerate it. The fallback must suppress bare
+    # missing-ref checks in the body rather than flood it.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(PROJ, SourceText(PROJECT_TOML, "toml")))
+    add_file!(jw, TextFile(MANIF, SourceText(MANIFEST_TOML, "toml")))
+    add_file!(jw, TextFile(TESTF, SourceText("""
+    @testitem "t" begin
+        totally_undefined_no_pkg
+    end
+    """, "julia")))
+    msgs = diag_messages(jw)
+    @test !("Missing reference: totally_undefined_no_pkg" in msgs)
+end

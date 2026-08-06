@@ -354,25 +354,21 @@ end
 # Macros whose bodies are ISOLATED from the enclosing module scope in the
 # analysis — StaticLint's `is_scope_introducing_macrocall` (`@testitem`,
 # `@testset`, `@safetestset`; scope.jl:144-154) plus the prebuilt-scope
-# testsetup macros (`@testmodule`/`@testsnippet`; macros.jl:97-106). Nothing
+# testsetup macros (`@testmodule`/`@testsnippet`; macros.jl matchers). Nothing
 # declared inside them binds at the enclosing level, so the walker keeps the
 # macrocall opaque (one `:opaque_macrocall` item, no descent). Every OTHER
 # macrocall is walked transparently — matching StaticLint's traversal, which
 # processes macro arguments in the enclosing scope.
 #
-# Qualified forms match STATICLINT'S OWN matchers exactly:
-# `is_scope_introducing_macrocall` unwraps `Module.@testset`-style getfields,
-# so the `@testset` family isolates qualified or bare — but
-# `_is_testmodule_macro`/`_is_testsnippet_macro` (macros.jl:335-336) are
-# bare-identifier-only, so a qualified `X.@testmodule` gets no prebuilt
-# scope there, the old traversal descends into it, and the inventory must
-# descend identically.
+# Qualified forms match STATICLINT'S OWN matchers exactly: `_macro_name_string`
+# unwraps the `Module.@macro` getfield form the same way
+# `is_scope_introducing_macrocall` (scope.jl) and `_is_testmodule_macro`/
+# `_is_testsnippet_macro` (macros.jl) do, so all five names isolate whether
+# bare or qualified.
 function _is_isolated_scope_macrocall(x::CSTParser.EXPR)
     mname = _macro_name_string(x.args[1])
-    (mname == "@testitem" || mname == "@testset" || mname == "@safetestset") && return true
-    bare = x.args[1] isa CSTParser.EXPR && CSTParser.isidentifier(x.args[1]) ?
-        StaticLint.valofid(x.args[1]) : nothing
-    return bare == "@testmodule" || bare == "@testsnippet"
+    return mname == "@testitem" || mname == "@testset" || mname == "@safetestset" ||
+        mname == "@testmodule" || mname == "@testsnippet"
 end
 
 # Walks a non-isolating macrocall's macro ARGUMENTS as top-level items: the
