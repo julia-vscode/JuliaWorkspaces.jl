@@ -774,6 +774,26 @@ end
     end
 end
 
+@testitem "check_call struct field types over-rule convert-accepting calls" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # `S(3.0)` is valid Julia — the default constructor passes arguments
+    # through `convert(fieldtype, x)` — but the struct branch types slots from
+    # the field annotations and rules `Float64` out against `Int`. A field
+    # annotation bounds convert-ibility, not the argument's type, so this is a
+    # false positive. (The per-file records path erases field types and stays
+    # silent here.)
+    let (cst, meta_dict) = parse_and_pass("struct S a::Int end\nmk() = S(3.0)")
+        call = cst.args[2].args[2].args[1]   # short-form RHS sits in a :block
+        @test_broken errorof(call, meta_dict) === nothing
+    end
+    # A genuine arity mismatch on the same struct keeps flagging.
+    let (cst, meta_dict) = parse_and_pass("struct S a::Int end\nmk() = S(1, 2)")
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
 @testitem "check_call array and matrix literal argument types" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
 

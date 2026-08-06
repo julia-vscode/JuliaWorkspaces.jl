@@ -3062,6 +3062,32 @@ end
                        occursin("Missing reference", d.message)])
 end
 
+@testitem "parity: an alias-qualified store extension is invisible to the union" setup=[FileAnalysisWS] begin
+    # `const B = Base; B.iseven(::D) = ...` records its qualifier as written.
+    # The extension filter resolves qualifiers against the env's top-level
+    # symbols, where no `B` exists, so the extension is dropped WITHOUT marking
+    # the record set unknown — the union reads complete and rules out the call
+    # the dropped extension serves. Same for the `import Base as B2` spelling.
+    # A drop should mark the set unknown; resolving the alias through the
+    # defining module's visible names would recover the check entirely.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test_broken isempty(callflags("const B = Base\nstruct D end\nB.iseven(d::D) = true\n",
+                                   "import Base: iseven\ngood(d::D) = iseven(d)\n"))
+    @test_broken isempty(callflags("import Base as B2\nstruct D end\nB2.iseven(d::D) = true\n",
+                                   "import Base: iseven\ngood(d::D) = iseven(d)\n"))
+    # Control: a plainly-spelled qualifier joins the union and is checked.
+    @test isempty(callflags("struct D end\nBase.iseven(d::D) = true\n",
+                            "import Base: iseven\ngood(d::D) = iseven(d)\n"))
+end
+
 @testitem "parity: real-corpus operand defects never rule a call out" setup=[FileAnalysisWS] begin
     # Every fixture here is correct code from the 80-package corpus sweep,
     # reduced; each was ruled out by an argument the decision path typed wrongly.
