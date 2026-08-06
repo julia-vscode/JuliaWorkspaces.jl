@@ -238,6 +238,58 @@ end
     @test JuliaWorkspaces.derived_test_setup(jw.runtime, PKG, :Nope) === nothing
 end
 
+@testitem "qualified setup declarations are indexed like bare ones" setup=[TestItemAnalysisWS] begin
+    # TestItems.@testmodule gets the same prebuilt-scope handling as the bare
+    # form, so the index scan must recognize it too
+    setups_file = URI("file:///pkg/test/setups.jl")
+    jw = pkg_ws(entry=DEFAULT_ENTRY,
+        testfile="""
+        @testitem "t" default_imports=false setup=[QTM, QTS] begin
+            qtmf()
+            qsx
+            undefined_next_to_qualified
+        end
+        """,
+        extra=Dict(setups_file => """
+        TestItems.@testmodule QTM begin
+            export qtmf
+            qtmf() = 1
+        end
+        TestItems.@testsnippet QTS begin
+            qsx = 1
+        end
+        """))
+    setups = JuliaWorkspaces.derived_test_setups(jw.runtime, PKG)
+    @test Set(keys(setups)) == Set([:QTM, :QTS])
+    msgs = diag_messages(jw)
+    @test !("Missing reference: qtmf" in msgs)
+    @test !("Missing reference: qsx" in msgs)
+    @test "Missing reference: undefined_next_to_qualified" in msgs
+end
+
+@testitem "the setup index keys files by their containing package" setup=[TestItemAnalysisWS] begin
+    # /pkg and /PKG are distinct packages on a case-sensitive filesystem;
+    # containment must use the same file→package mapping the consumer keys
+    # with (derived_package_for_file), not a case-folded path prefix
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testitem "t" begin
+    end
+    """)
+    add_file!(jw, TextFile(URI("file:///PKG/Project.toml"), SourceText("""
+    name = "OtherPkg"
+    uuid = "22345678-1234-1234-1234-123456789012"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///PKG/Manifest.toml"), SourceText(MANIFEST_TOML, "toml")))
+    add_file!(jw, TextFile(URI("file:///PKG/src/OtherPkg.jl"), SourceText("module OtherPkg end", "julia")))
+    add_file!(jw, TextFile(URI("file:///PKG/test/setups.jl"), SourceText("""
+    @testmodule OtherTM begin
+    end
+    """, "julia")))
+    setups = JuliaWorkspaces.derived_test_setups(jw.runtime, PKG)
+    @test !haskey(setups, :OtherTM)
+end
+
 @testitem "testmodule wildcards do not suppress item-side missing refs" setup=[TestItemAnalysisWS] begin
     # A wildcard `using` inside a @testmodule stays contained in the module
     # at runtime: the item sees only TM's explicit exports, so item-side

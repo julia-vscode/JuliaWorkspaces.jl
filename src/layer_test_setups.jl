@@ -81,9 +81,9 @@ Salsa.@derived function derived_test_setups_in_file(rt, uri)
     frame = nothing
     for arg in cst.args
         (CSTParser.ismacrocall(arg) && arg.args !== nothing && length(arg.args) >= 4) || continue
-        mname = arg.args[1]
-        CSTParser.isidentifier(mname) || continue
-        n = CSTParser.valof(mname)
+        # _macro_name_string unwraps the qualified `X.@testmodule` form, so the
+        # scan recognizes exactly what StaticLint's matchers isolate.
+        n = _macro_name_string(arg.args[1])
         kind = n == "@testmodule" ? :module : n == "@testsnippet" ? :snippet : nothing
         kind === nothing && continue
         # args[2] is CSTParser's NOTHING line-info placeholder; the name is args[3]
@@ -155,22 +155,18 @@ end
 """
     derived_test_setups(rt, package_folder_uri) -> Dict{Symbol,TestSetupData}
 
-All test setups declared in files under `package_folder_uri`. On duplicate
-names the lexicographically smallest file URI wins (deterministic; the
-runner rejects duplicates anyway).
+All test setups declared in files belonging to `package_folder_uri` — the
+same file→package mapping (`derived_package_for_file`) the consumer keys
+its lookups with. On duplicate names the lexicographically smallest file
+URI wins (deterministic; the runner rejects duplicates anyway).
 """
 Salsa.@derived function derived_test_setups(rt, package_folder_uri)
     @debug "derived_test_setups" package_folder_uri=package_folder_uri
 
     result = Dict{Symbol,TestSetupData}()
-    package_folder_uri.scheme == "file" || return result
-    package_folder_path = lowercase(uri2filepath(package_folder_uri))
-    # A path-separator-terminated prefix, so `/pkg` doesn't match `/pkgfoo`.
-    prefix = endswith(package_folder_path, "/") ? package_folder_path : package_folder_path * "/"
     files = sort(collect(derived_all_julia_files(rt)); by=string)
     for uri in files
-        uri.scheme == "file" || continue
-        startswith(lowercase(uri2filepath(uri)), prefix) || continue
+        derived_package_for_file(rt, uri) == package_folder_uri || continue
         for s in derived_test_setups_in_file(rt, uri)
             haskey(result, s.name) || (result[s.name] = s)
         end
