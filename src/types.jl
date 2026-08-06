@@ -306,6 +306,9 @@ A diagnostic struct, consisting of range, severity, message, and source.
 - uri::Union{Nothing,URI}
 - tags::Vector{Symbol}
 - source::String
+- code::Union{Nothing,Symbol}: stable rule id, see `LINT_RULES` in `lint_rules.jl`.
+  This is the identifier users name in `JuliaLint.toml`, and what is reported as
+  the rule id in the CLI's JSON and SARIF output.
 """
 struct Diagnostic
     range::UnitRange{Int64}
@@ -314,7 +317,13 @@ struct Diagnostic
     uri::Union{Nothing,URI}
     tags::Vector{Symbol}
     source::String
+    code::Union{Nothing,Symbol}
 end
+
+# Diagnostics that predate rule ids (or come from sources that have none) are
+# still constructed positionally without a `code`.
+Diagnostic(range, severity, message, uri, tags, source) =
+    Diagnostic(range, severity, message, uri, tags, source, nothing)
 
 # Compare ranges by their endpoints, not as `UnitRange`s: all empty ranges are
 # `==` regardless of position (`24:23 == 23:22`), which would let Salsa backdate
@@ -323,7 +332,8 @@ end
 function _diag_fields_equal(a::Diagnostic, b::Diagnostic, eq)
     eq(first(a.range), first(b.range)) && eq(last(a.range), last(b.range)) &&
         eq(a.severity, b.severity) && eq(a.message, b.message) &&
-        eq(a.uri, b.uri) && eq(a.tags, b.tags) && eq(a.source, b.source)
+        eq(a.uri, b.uri) && eq(a.tags, b.tags) && eq(a.source, b.source) &&
+        eq(a.code, b.code)
 end
 Base.:(==)(a::Diagnostic, b::Diagnostic) = _diag_fields_equal(a, b, ==)
 Base.isequal(a::Diagnostic, b::Diagnostic) = _diag_fields_equal(a, b, isequal)
@@ -335,6 +345,7 @@ function Base.hash(d::Diagnostic, h::UInt)
     h = hash(d.uri, h)
     h = hash(d.tags, h)
     h = hash(d.source, h)
+    h = hash(d.code, h)
     return hash(Diagnostic, h)
 end
 

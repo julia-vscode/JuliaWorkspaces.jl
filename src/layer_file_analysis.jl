@@ -565,56 +565,23 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
             keys(project.deved_packages),
         )))
 
-    missingrefs = _missingrefs_from_config(lint_config)
+    missingrefs = missingrefs_from_config(lint_config)
     # per-file mode: no merged workspace-package meta, cross-file names come
     # from the tree
     workspace_packages = Dict{String,Any}()
     errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
 
-    for err in errs
-        rng = err[1]+1:err[1]+err[2].span+1
-        if StaticLint.headof(err[2]) === :errortoken
-            # parse errors are the syntax layer's job (matching the
-            # whole-closure pass)
-        elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
-            push!(diagnostics, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
-        elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) === StaticLint.UnresolvedImport
-            # `unresolved-import = false` suppresses this diagnostic. The branch
-            # must still match (not be folded into the guard) so the
-            # UnresolvedImport LintCode doesn't fall through to the generic
-            # LintCodes handler below, which would re-emit "Failed to resolve import.".
-            if get(lint_config, "unresolved-import", true)
-                name = CSTParser.str_value(err[2])
-                cause = name in declared_deps ?
-                    "`$name` is a declared dependency but its symbols could not be indexed." :
-                    "Failed to resolve `$name`."
-                consequence = StaticLint.is_in_wildcard_import(err[2]) ?
-                    "Missing-reference checks are disabled in this scope and all nested scopes." :
-                    "Anything imported through this statement is assumed to exist and will not be checked."
-                push!(diagnostics, Diagnostic(rng, :warning, "$cause $consequence", nothing, Symbol[], "StaticLint.jl"))
-            end
-        elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
-            code = StaticLint.errorof(err[2], meta_dict)
-            description = get(StaticLint.LintCodeDescriptions, code, "")
-            if code === StaticLint.IncorrectCallArgs
-                # For a tree-visible workspace callee, describe from the full
-                # cross-file arity set (the local candidates are incomplete);
-                # otherwise from the local candidates (store/local methods).
-                ar = _call_cross_file_arities(rt, root, path, err[2], meta_dict)
-                detail = ar !== nothing ?
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar, tree_in_scope) :
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; tree_in_scope)
-                detail !== nothing && (description = detail)
-            end
-            severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
-                :hint, Symbol[:unnecessary]
-            else
-                :information, Symbol[]
-            end
-            code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
-            push!(diagnostics, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
-        end
+    # For a tree-visible workspace callee, describe from the full cross-file
+    # arity set (the local candidates are incomplete); otherwise from the local
+    # candidates (store/local methods).
+    function describe_call(x)
+        ar = _call_cross_file_arities(rt, root, path, x, meta_dict)
+        return ar !== nothing ?
+            StaticLint.describe_call_mismatch(x, env, meta_dict; cand_arities=ar, tree_in_scope) :
+            StaticLint.describe_call_mismatch(x, env, meta_dict; tree_in_scope)
     end
+
+    _emit_hint_diagnostics!(diagnostics, errs, meta_dict, lint_config, declared_deps; describe_call)
 
     return diagnostics
 end
@@ -774,7 +741,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # stripped at check time, but the module NESTING is still in the scopes.
     # The id-free visible-names faces are dependencies the analysis frame
     # already takes for the modules it touches.
-    lint_config = derived_lint_configuration(rt, file)
+    lint_config = derived_effective_lint_config(rt, file)
     tree_visible = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
         haskey(derived_module_visible_names_idfree(rt, root, p), name)
@@ -797,7 +764,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # hover/signatures/references' `_in_scope_syms_at`, but reuses the already-known
     # per-file `path` instead of re-deriving it from `x`'s URI.
     tree_in_scope = x -> _in_scope_module_syms(rt, root, vcat(path, _in_file_module_names(x, meta_dict)))
-    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
+    StaticLint.check_all(cst, lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file

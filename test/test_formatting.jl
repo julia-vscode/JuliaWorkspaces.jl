@@ -1,5 +1,5 @@
 # Tests for the native formatting functionality (get_format_edits) and the
-# juliaformat.toml configuration model.
+# JuliaFormat.toml configuration model.
 
 @testitem "Format: default (minimal) formatting reformats messy code" begin
     using JuliaWorkspaces.URIs2: URI
@@ -60,7 +60,7 @@ end
     @test occursin("bar(c, d)", te.new_text)
 end
 
-@testitem "Format: explicit default style via juliaformat.toml" begin
+@testitem "Format: explicit default style via JuliaFormat.toml" begin
     using JuliaWorkspaces.URIs2: URI
 
     source = "foo(a,b)\n"
@@ -68,7 +68,7 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/d/juliaformat.toml"), SourceText("style = \"default\"\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/d/JuliaFormat.toml"), SourceText("style = \"default\"\n", "toml")))
 
     edit = JuliaWorkspaces.get_format_edits(jw, uri)
 
@@ -83,7 +83,7 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/blue/juliaformat.toml"), SourceText("style = \"blue\"\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/blue/JuliaFormat.toml"), SourceText("style = \"blue\"\n", "toml")))
 
     edit = JuliaWorkspaces.get_format_edits(jw, uri)
 
@@ -98,7 +98,7 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/yas/juliaformat.toml"), SourceText("style = \"yas\"\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/yas/JuliaFormat.toml"), SourceText("style = \"yas\"\n", "toml")))
 
     edit = JuliaWorkspaces.get_format_edits(jw, uri)
 
@@ -113,7 +113,7 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/sciml/juliaformat.toml"), SourceText("style = \"sciml\"\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/sciml/JuliaFormat.toml"), SourceText("style = \"sciml\"\n", "toml")))
 
     edit = JuliaWorkspaces.get_format_edits(jw, uri)
 
@@ -128,7 +128,7 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/runic/juliaformat.toml"), SourceText("style = \"runic\"\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/runic/JuliaFormat.toml"), SourceText("style = \"runic\"\n", "toml")))
 
     edit = JuliaWorkspaces.get_format_edits(jw, uri)
 
@@ -147,7 +147,7 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/runic2/juliaformat.toml"), SourceText("style = \"runic\"\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/runic2/JuliaFormat.toml"), SourceText("style = \"runic\"\n", "toml")))
 
     edit = JuliaWorkspaces.get_format_edits(jw, uri)
 
@@ -162,7 +162,7 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/margin/juliaformat.toml"), SourceText("style = \"default\"\nmargin = 20\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/margin/JuliaFormat.toml"), SourceText("style = \"default\"\n[options]\nmargin = 20\n", "toml")))
 
     edit = JuliaWorkspaces.get_format_edits(jw, uri)
 
@@ -171,7 +171,7 @@ end
     @test count(==('\n'), edit.edits[1].new_text) > 3
 end
 
-@testitem "Format: nested juliaformat.toml overrides parent" begin
+@testitem "Format: nested JuliaFormat.toml overrides parent" begin
     using JuliaWorkspaces.URIs2: URI
 
     # A function call that fits comfortably within a margin of 92.
@@ -181,9 +181,9 @@ end
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
     # Parent forces a tiny margin (would split the signature)...
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/nest/juliaformat.toml"), SourceText("style = \"default\"\nmargin = 1\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/nest/JuliaFormat.toml"), SourceText("style = \"default\"\n[options]\nmargin = 1\n", "toml")))
     # ...but the nested config overrides the margin back to the default 92.
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/nest/inner/juliaformat.toml"), SourceText("style = \"default\"\nmargin = 92\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/nest/inner/JuliaFormat.toml"), SourceText("style = \"default\"\n[options]\nmargin = 92\n", "toml")))
 
     edit = JuliaWorkspaces.get_format_edits(jw, uri)
 
@@ -203,7 +203,7 @@ end
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
     # A stray .JuliaFormatter.toml forcing a tiny margin must be ignored; only
-    # juliaformat.toml controls behavior. Note JuliaWorkspaces does not even
+    # JuliaFormat.toml controls behavior. Note JuliaWorkspaces does not even
     # track .JuliaFormatter.toml files, but adding it as raw text proves it has
     # no effect on formatting.
     JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/ignore/.JuliaFormatter.toml"), SourceText("margin = 1\n", "toml")))
@@ -268,7 +268,7 @@ end
 @testitem "Format config: invalid style produces a diagnostic" begin
     using JuliaWorkspaces.URIs2: URI
 
-    config_uri = URI("file:///fmt/badstyle/juliaformat.toml")
+    config_uri = URI("file:///fmt/badstyle/JuliaFormat.toml")
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/badstyle/code.jl"), SourceText("x = 1\n", "julia")))
@@ -285,7 +285,7 @@ end
 @testitem "Format config: unknown field produces a diagnostic" begin
     using JuliaWorkspaces.URIs2: URI
 
-    config_uri = URI("file:///fmt/badfield/juliaformat.toml")
+    config_uri = URI("file:///fmt/badfield/JuliaFormat.toml")
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/badfield/code.jl"), SourceText("x = 1\n", "julia")))
@@ -302,11 +302,11 @@ end
 @testitem "Format config: valid config produces no diagnostics" begin
     using JuliaWorkspaces.URIs2: URI
 
-    config_uri = URI("file:///fmt/goodcfg/juliaformat.toml")
+    config_uri = URI("file:///fmt/goodcfg/JuliaFormat.toml")
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/goodcfg/code.jl"), SourceText("x = 1\n", "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(config_uri, SourceText("style = \"blue\"\nmargin = 80\nalways_use_return = true\n", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(config_uri, SourceText("style = \"blue\"\n[options]\nmargin = 80\nalways_use_return = true\n", "toml")))
 
     diags = get_diagnostic(jw, config_uri)
 
@@ -316,7 +316,7 @@ end
 @testitem "Format config: runic is a valid style for the config validator" begin
     using JuliaWorkspaces.URIs2: URI
 
-    config_uri = URI("file:///fmt/runiccfg/juliaformat.toml")
+    config_uri = URI("file:///fmt/runiccfg/JuliaFormat.toml")
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/runiccfg/code.jl"), SourceText("x = 1\n", "julia")))
@@ -325,4 +325,83 @@ end
     diags = get_diagnostic(jw, config_uri)
 
     @test isempty(diags)
+end
+
+@testitem "Format config: runic with options is an error, not a silent ignore" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    config_uri = URI("file:///fmt/runicopts/JuliaFormat.toml")
+
+    jw = JuliaWorkspace()
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/runicopts/code.jl"), SourceText("x = 1\n", "julia")))
+    JuliaWorkspaces.add_file!(jw, TextFile(config_uri, SourceText("style = \"runic\"\n[options]\nmargin = 80\n", "toml")))
+
+    diags = get_diagnostic(jw, config_uri)
+
+    @test any(d -> occursin("does not support any `[options]`", d.message), diags)
+end
+
+@testitem "Format config: top-level option key reports the migration" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    config_uri = URI("file:///fmt/flatopt/JuliaFormat.toml")
+
+    jw = JuliaWorkspace()
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/flatopt/code.jl"), SourceText("x = 1\n", "julia")))
+    JuliaWorkspaces.add_file!(jw, TextFile(config_uri, SourceText("margin = 80\n", "toml")))
+
+    diags = get_diagnostic(jw, config_uri)
+
+    @test any(d -> occursin("`margin` is no longer supported", d.message) &&
+                   occursin("[options]", d.message), diags)
+end
+
+@testitem "Format: exclude suppresses formatting" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    source = "foo(a,b)\n"
+    uri = URI("file:///fmt/excl/gen/code.jl")
+
+    jw = JuliaWorkspace()
+    JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/excl/JuliaFormat.toml"),
+        SourceText("style = \"default\"\nexclude = [\"gen/**\"]\n", "toml")))
+
+    @test_throws Exception JuliaWorkspaces.get_format_edits(jw, uri)
+
+    # A sibling outside the excluded tree still formats.
+    other = URI("file:///fmt/excl/src/code.jl")
+    JuliaWorkspaces.add_file!(jw, TextFile(other, SourceText(source, "julia")))
+    @test occursin("foo(a, b)", JuliaWorkspaces.get_format_edits(jw, other).edits[1].new_text)
+end
+
+@testitem "Format: override block re-scopes options by path" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    source = "function foo(averylongargument, anotherlongargument)\n    return 1\nend\n"
+    config = """
+    style = "default"
+
+    [options]
+    margin = 92
+
+    [[override]]
+    paths = ["docs/**"]
+
+    [override.options]
+    margin = 1
+    """
+
+    jw = JuliaWorkspace()
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/ovr/JuliaFormat.toml"), SourceText(config, "toml")))
+
+    # Outside the override the wide margin keeps the signature on one line.
+    plain = URI("file:///fmt/ovr/src/code.jl")
+    JuliaWorkspaces.add_file!(jw, TextFile(plain, SourceText(source, "julia")))
+    @test isempty(JuliaWorkspaces.get_format_edits(jw, plain).edits)
+
+    # Inside it the tiny margin splits the signature.
+    docs = URI("file:///fmt/ovr/docs/code.jl")
+    JuliaWorkspaces.add_file!(jw, TextFile(docs, SourceText(source, "julia")))
+    @test !isempty(JuliaWorkspaces.get_format_edits(jw, docs).edits)
 end

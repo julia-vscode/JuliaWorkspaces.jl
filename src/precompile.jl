@@ -55,9 +55,12 @@ using PrecompileTools: @setup_workload, @compile_workload
     version = "1.11.0"
     """)
 
-    write(joinpath(project_dir, ".JuliaLint.toml"), """
-    syntax-warnings = true
-    missing-refs = "all"
+    write(joinpath(project_dir, "JuliaLint.toml"), """
+    preset = "default"
+
+    [rules]
+    syntax_warnings = "warning"
+    missing_reference = { severity = "warning", scope = "all" }
     """)
 
     write(joinpath(project_dir, "src", "PrecompileWorkload.jl"), """
@@ -215,7 +218,7 @@ using PrecompileTools: @setup_workload, @compile_workload
     """)
 
     # Subfolder configured for Runic so both formatter backends get compiled.
-    write(joinpath(project_dir, "runicsub", "juliaformat.toml"), """
+    write(joinpath(project_dir, "runicsub", "JuliaFormat.toml"), """
     style = "runic"
     """)
     write(joinpath(project_dir, "runicsub", "runic_file.jl"), """

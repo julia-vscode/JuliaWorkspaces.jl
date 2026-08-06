@@ -154,8 +154,8 @@ Salsa.@derived function derived_static_lint_meta_for_root(rt, uri)
     for file in closure
         cst2 = derived_julia_legacy_syntax_tree(rt, file)
 
-        lint_config = derived_lint_configuration(rt, file)
-        opts = _lint_options_from_config(lint_config)
+        lint_config = derived_effective_lint_config(rt, file)
+        opts = lint_options_from_config(lint_config)
         StaticLint.check_all(cst2, opts, env, meta_dict)
 
         # Late getfield reference resolution. This mutates meta_dict, so it must
@@ -210,47 +210,14 @@ Salsa.@derived function derived_static_lint_diagnostics_for_root(rt, root)
         current_res = get!(res, uri, Set{Diagnostic}())
 
         cst = derived_julia_legacy_syntax_tree(rt, uri)
-        lint_config = derived_lint_configuration(rt, uri)
-        missingrefs = _missingrefs_from_config(lint_config)
+        lint_config = derived_effective_lint_config(rt, uri)
+        missingrefs = missingrefs_from_config(lint_config)
         errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
 
-        for err in errs
-            rng = err[1]+1:err[1]+err[2].span+1
-            if StaticLint.headof(err[2]) === :errortoken
-                # push!(out, Diagnostic(rng, DiagnosticSeverities.Error, missing, missing, "Julia", "Parsing error", missing, missing))
-            elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
-                push!(current_res, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
-            elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) === StaticLint.UnresolvedImport
-                # `unresolved-import = false` suppresses this diagnostic. The branch
-                # must still match (not be folded into the guard) so the
-                # UnresolvedImport LintCode doesn't fall through to the generic
-                # LintCodes handler below, which would re-emit "Failed to resolve import.".
-                if get(lint_config, "unresolved-import", true)
-                    name = CSTParser.str_value(err[2])
-                    cause = name in declared_deps ?
-                        "`$name` is a declared dependency but its symbols could not be indexed." :
-                        "Failed to resolve `$name`."
-                    consequence = StaticLint.is_in_wildcard_import(err[2]) ?
-                        "Missing-reference checks are disabled in this scope and all nested scopes." :
-                        "Anything imported through this statement is assumed to exist and will not be checked."
-                    push!(current_res, Diagnostic(rng, :warning, "$cause $consequence", nothing, Symbol[], "StaticLint.jl"))
-                end
-            elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
-                code = StaticLint.errorof(err[2], meta_dict)
-                description = get(StaticLint.LintCodeDescriptions, code, "")
-                if code === StaticLint.IncorrectCallArgs
-                    detail = StaticLint.describe_call_mismatch(err[2], env, meta_dict)
-                    detail !== nothing && (description = detail)
-                end
-                severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
-                    :hint, Symbol[:unnecessary]
-                else
-                    :information, Symbol[]
-                end
-                code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
-                push!(current_res, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
-            end
-        end
+        _emit_hint_diagnostics!(
+            current_res, errs, meta_dict, lint_config, declared_deps;
+            describe_call = x -> StaticLint.describe_call_mismatch(x, env, meta_dict),
+        )
     end
 
     return res
