@@ -4321,8 +4321,8 @@ end
         @test isempty(collect_hints(cst, meta_dict, jw))
     end
 
-    # But identifiers in a user-written local scope (here a function body, even
-    # when the function is wrapped by the doc macro) are still checked.
+    # But identifiers in a wrapped function definition (here doc-macro-wrapped)
+    # are still checked.
     let (cst, meta_dict, jw) = parse_and_pass("""
         \"\"\"
         docstring
@@ -4334,6 +4334,104 @@ end
         hints = collect_hints(cst, meta_dict, jw)
         @test length(hints) == 1
         @test CSTParser.valof(hints[1][2]) == "undefined_in_body"
+    end
+end
+
+@testitem "no missing refs in scoped constructs under unknown macro" setup=[shared_static_lint] begin
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # Unknown macros may rewrite struct bodies (`@with_kw`-style field
+    # defaults), so identifiers there must not be flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro with_kw(x)
+            x
+        end
+        @with_kw struct Foo
+            a::T = 2
+            b::T = 2
+        end
+        @with_kw mutable struct Bar
+            a::T = 2
+        end
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Other non-function scopes stay suppressed too.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro foo(x)
+            x
+        end
+        @foo let
+            undefined_var
+        end
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Function definitions re-enable checking: macros wrapping a function
+    # (`@inline`-style) rarely rewrite its body.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro foo(x)
+            x
+        end
+        @foo function bar()
+            undefined_in_body
+        end
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+        @test CSTParser.valof(hints[1][2]) == "undefined_in_body"
+    end
+
+    # Base macros with normal semantics keep function bodies fully linted.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @inline function bar()
+            undefined_in_body
+        end
+        Base.@noinline baz() = another_undefined
+        @views function qux(x)
+            x[1:2] .+ yet_another_undefined
+        end
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test map(h -> CSTParser.valof(h[2]), hints) ==
+            ["undefined_in_body", "another_undefined", "yet_another_undefined"]
+    end
+
+    # The doc macro doesn't rewrite its argument — a doc-wrapped struct body
+    # is still checked.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        \"\"\"
+        doc
+        \"\"\"
+        struct Foo
+            a::T
+        end
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+        @test CSTParser.valof(hints[1][2]) == "T"
+    end
+
+    # `Base.@kwdef` field semantics are modeled — its struct body is still
+    # checked.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        Base.@kwdef struct Foo
+            a::T = 2
+        end
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+        @test CSTParser.valof(hints[1][2]) == "T"
+    end
+
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @kwdef struct Foo
+            a::Int = 2
+        end
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
     end
 end
 
