@@ -469,7 +469,7 @@ function _handle_testitem(x::EXPR, state::Toplevel)
     tctx = enclosing_tree_context(state.scope)
 
     # If default_imports=true, add Test and the parent package module
-    default_imports && _inject_testitem_default_imports!(item_scope, state, tctx)
+    default_imports && state.inject_testitem_defaults && _inject_testitem_default_imports!(item_scope, state, tctx)
 
     # Resolve setup=[...] references through the plain-data setup index
     # (test_setup_info interface). Testmodules bind their name — members
@@ -655,7 +655,7 @@ function _handle_testsnippet(x::EXPR, state::Toplevel)
     snip_scope.modules[:Base] = getsymbols(state)[:Base]
     snip_scope.modules[:Core] = getsymbols(state)[:Core]
 
-    _inject_testitem_default_imports!(snip_scope, state, enclosing_tree_context(state.scope))
+    state.inject_testitem_defaults && _inject_testitem_default_imports!(snip_scope, state, enclosing_tree_context(state.scope))
 
     # Body will be traversed by the standard traverse() in process_EXPR,
     # using this isolating scope (pushed by scopes()).

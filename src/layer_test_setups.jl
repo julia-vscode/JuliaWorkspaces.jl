@@ -63,41 +63,6 @@ function _setup_toplevel_export_names(body::CSTParser.EXPR)
     return sort!(unique!(names))
 end
 
-# The target name(s) of a wildcard `using X`/`using A, B` (no explicit `:
-# name` list) anywhere in `body`, found by walking the raw CST rather than
-# reading resolution results — the pass's default-imports injection (`Test`,
-# the package under test) adds its own entries under the SAME kind of key
-# (`scope.modules`), and a snippet's `using <the package under test>` would
-# be indistinguishable from that injection if read back that way. `import`
-# is deliberately excluded: a whole-module `import X` binds only the name
-# `X` (via `scope.names`, checked by the `bound` scan), never its exports,
-# so it needs no re-attachment tracking.
-function _setup_wildcard_using_targets!(names, a)
-    a isa CSTParser.EXPR || return
-    if CSTParser.headof(a) === :using
-        a.args === nothing && return
-        first = a.args[1]
-        # `using X: a, b` — an explicit leaf list, not a wildcard.
-        if first isa CSTParser.EXPR && CSTParser.isoperator(CSTParser.headof(first)) &&
-           CSTParser.valof(CSTParser.headof(first)) == ":"
-            return
-        end
-        for path in a.args
-            path isa CSTParser.EXPR || continue
-            (path.args === nothing || isempty(path.args)) && continue
-            leaf = last(path.args)
-            nm = CSTParser.isidentifier(leaf) ? StaticLint.valofid(leaf) : nothing
-            nm !== nothing && push!(names, nm)
-        end
-        return
-    end
-    a.args === nothing && return
-    for c in a.args
-        _setup_wildcard_using_targets!(names, c)
-    end
-    return
-end
-
 """
     derived_test_setups_in_file(rt, uri) -> Vector{TestSetupData}
 
@@ -150,16 +115,16 @@ Salsa.@derived function derived_test_setups_in_file(rt, uri)
         # file-level analysis, which is what keeps Base/Core (and the tree
         # context) reachable — a bare :block root has no such protection and
         # gets its seeded scope.modules cleared by the generic scope-reset
-        # path before any statement runs. No self_package_name: a
-        # @testsnippet's own default-imports injection then simply fails
-        # (harmless — we never read the module-wide unresolved-wildcard flag
-        # it would otherwise misreport, see below). The meta is local and
-        # discarded, so the pass may keep its context handles
+        # path before any statement runs. `inject_testitem_defaults=false`:
+        # this pass has no enclosing testitem, so the `using Test`/`using
+        # <package>` simulation must not run — it would leak Test's exports
+        # into this setup's own bound-names/wildcards data. The meta is
+        # local and discarded, so the pass may keep its context handles
         # (strip_contexts=false), which the wildcard flattening below needs
         # to see in scope.modules.
         ctx = path === nothing ? nothing : TreeModuleContext(rt, root, path)
         meta_dict = Dict{UInt64,StaticLint.Meta}()
-        StaticLint.semantic_pass(uri, arg, env, meta_dict, rt; module_context=ctx, strip_contexts=false)
+        StaticLint.semantic_pass(uri, arg, env, meta_dict, rt; module_context=ctx, strip_contexts=false, inject_testitem_defaults=false)
         StaticLint.mark_unresolved_imports!(arg, env, meta_dict)
 
         scope = StaticLint.scopeof(arg, meta_dict)
@@ -168,20 +133,15 @@ Salsa.@derived function derived_test_setups_in_file(rt, uri)
         unresolved = false
         if scope isa StaticLint.Scope
             append!(bound, keys(scope.names))
-            # Cross-check each wildcard `using` WRITTEN IN THE BODY against
-            # scope.modules by name, rather than reading scope.modules'
-            # key set wholesale — the default-imports injection (Test, the
-            # package under test) lands under the same kind of key and would
-            # otherwise be indistinguishable from a real `using` in the body.
-            wildcard_targets = String[]
-            _setup_wildcard_using_targets!(wildcard_targets, body)
-            for nm in unique!(wildcard_targets)
-                if scope.modules isa Dict && haskey(scope.modules, Symbol(nm))
-                    push!(wildcards, nm)
-                else
-                    unresolved = true
+            if scope.modules isa Dict
+                # Base/Core are pass-seeded, :__tree__ is the context handle;
+                # everything else got there through a wildcard `using`.
+                for k in keys(scope.modules)
+                    k in (:Base, :Core, :__tree__) && continue
+                    push!(wildcards, String(k))
                 end
             end
+            unresolved = scope.unresolved_wildcard_import
         end
         push!(result, TestSetupData(Symbol(setup_name), kind, uri,
             sort!(unique!(bound)), _setup_toplevel_export_names(body),
