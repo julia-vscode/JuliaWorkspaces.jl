@@ -70,6 +70,7 @@ get_test_env
 is_ready
 wait_until_ready
 get_update_channel
+retry_failed_dynamic_projects!
 ```
 
 ## Language features
@@ -98,6 +99,7 @@ get_inlay_hints
 get_code_actions
 execute_code_action
 get_format_edits
+is_format_excluded
 ```
 
 ## StaticLint and environment accessors

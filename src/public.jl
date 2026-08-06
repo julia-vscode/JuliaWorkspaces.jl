@@ -679,7 +679,8 @@ Returns `true` if no dynamic feature is configured, or if at least one result
 has been consumed (successful or failed) and no work item is pending.
 
 This is a whole-workspace question and stays coarse: per-file consumers want
-[`derived_file_env_ready`](@ref) instead, which is settled per project.
+the internal `derived_file_env_ready` query instead, which is settled per
+project.
 """
 function is_ready(jw::JuliaWorkspace)
     @debug "is_ready"
