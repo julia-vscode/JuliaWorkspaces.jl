@@ -372,3 +372,19 @@ end
     msgs = diag_messages(jw)
     @test !("Missing reference: totally_undefined_no_pkg" in msgs)
 end
+
+@testitem "semantic_pass strip_contexts=false keeps module contexts" setup=[TestItemAnalysisWS] begin
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="")
+    env = JuliaWorkspaces.derived_stdlib_only_env(jw.runtime)
+    ctx = JuliaWorkspaces.TreeModuleContext(jw.runtime, ENTRY, ["MyPkg"])
+
+    cst = CST.parse("x = 1", true)
+    md = Dict{UInt64,SL.Meta}()
+    SL.semantic_pass(TESTF, cst, env, md, jw.runtime; module_context=ctx, strip_contexts=false)
+    @test haskey(SL.scopeof(cst, md).modules, :__tree__)
+
+    cst2 = CST.parse("x = 1", true)
+    md2 = Dict{UInt64,SL.Meta}()
+    SL.semantic_pass(TESTF, cst2, env, md2, jw.runtime; module_context=ctx)
+    @test !haskey(SL.scopeof(cst2, md2).modules, :__tree__)
+end

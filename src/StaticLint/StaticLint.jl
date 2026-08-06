@@ -455,7 +455,7 @@ loop resolves non-local names through the module tree, after file-local
 scopes and the Base/Core stores — and includes are NOT followed
 (`follow_includes = false`; included files' names come from the tree).
 """
-function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing)
+function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing, strip_contexts::Bool = true)
     root_modules = Dict{Symbol,Any}(m => env.symbols[m] for m in IMPLICIT_SCOPE_MODULES)
     module_context !== nothing && (root_modules[:__tree__] = module_context)
     setscope!(cst, Scope(nothing, cst, Dict(), root_modules, nothing), meta_dict)
@@ -500,7 +500,9 @@ function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; wo
     # derived value, and a runtime handle embedded in a memoized value of
     # that same runtime is forbidden. Any post-pass step that still needs
     # tree resolution must re-seed a fresh context first.
-    module_context === nothing || strip_module_contexts!(meta_dict)
+    # strip_contexts=false is only safe when the caller discards meta_dict
+    # instead of freezing it into a derived value (contexts hold the runtime).
+    (module_context === nothing || !strip_contexts) || strip_module_contexts!(meta_dict)
 end
 
 """
