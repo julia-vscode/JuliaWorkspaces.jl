@@ -989,7 +989,7 @@ end
     @test byname("z").kind === :const
 end
 
-@testitem "inventory parity: qualified test macros match StaticLint's bare-only special cases" setup=[InventoryWS] begin
+@testitem "inventory parity: qualified test macros match StaticLint's matchers" setup=[InventoryWS] begin
     inv, _ = inventory_of("""
     TestItems.@testmodule TM begin
         tm_f() = 1
@@ -1002,17 +1002,14 @@ end
     end
     """)
 
-    # StaticLint's `_is_testmodule_macro`/`_is_testsnippet_macro`
-    # (macros.jl:335-336) are bare-identifier-only: a QUALIFIED
-    # `X.@testmodule` gets no prebuilt isolating scope there, so the old
-    # traversal descends into it and binds its contents at module level —
-    # the inventory must descend identically.
+    # StaticLint's `_is_testmodule_macro`/`_is_testsnippet_macro`/
+    # `_is_testitem_macro` (macros.jl) all unwrap the qualified `X.@macro`
+    # getfield form (mirroring `is_scope_introducing_macrocall`, scope.jl),
+    # so a QUALIFIED form gets the same prebuilt isolating scope a bare one
+    # does — the inventory must stay opaque for all three, identically.
     names = Set(i.name for i in inv.items)
-    @test "tm_f" in names
-    @test "ts_f" in names
-    # `@testitem` (and `@testset`/`@safetestset`) isolate via
-    # `is_scope_introducing_macrocall` (scope.jl:144-153), which DOES unwrap
-    # the qualified form — those stay opaque.
+    @test !("tm_f" in names)
+    @test !("ts_f" in names)
     @test !("ti_f" in names)
 end
 
