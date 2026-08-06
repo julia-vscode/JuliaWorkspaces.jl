@@ -74,6 +74,10 @@ diags = get_diagnostics(jw)    # now environment-aware
 - [Architecture](architecture.md) — the Salsa query model, the layer structure,
   the public API design, and the dynamic feature. **Start here if you are
   working on the package.**
+- [Configuration](configuration.md) — the authoritative specification of the
+  `JuliaLint.toml`, `JuliaFormat.toml` and `JuliaTestItems.toml` files: the
+  shared discovery and override mechanism, the lint rule catalogue, and how
+  configuration is resolved and applied internally.
 - [Functions](functions.md) — reference for the exported functions.
 - [Types](types.md) — reference for the exported and internal types.
 

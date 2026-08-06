@@ -1,20 +1,29 @@
 # Formatting layer
 #
-# Native source-code formatting driven by a `juliaformat.toml` configuration
-# file. The configuration model (discovery + hierarchical merge) mirrors the
-# lint configuration in layer_diagnostics.jl.
+# Native source-code formatting driven by a `JuliaFormat.toml` configuration
+# file. The configuration model (nearest file governs its subtree wholesale,
+# shared `include`/`exclude` globs, `[[override]]` blocks) mirrors the lint
+# configuration in layer_diagnostics.jl; the shared machinery lives in
+# config_common.jl.
 #
 # Supported styles are the JuliaFormatter.jl styles ("default", "yas", "blue",
 # "sciml", "minimal") plus "runic", which routes formatting through Runic.jl.
+# `style` names a preset; the `[options]` table holds deltas on top of it.
 #
 # This layer deliberately never reads JuliaFormatter.jl's own `.JuliaFormatter.toml`
 # configuration files: `JuliaFormatter.format_text` is always called with an
-# explicit set of options derived solely from `juliaformat.toml`.
+# explicit set of options derived solely from `JuliaFormat.toml`.
 
 const _FORMAT_STYLES = ("default", "yas", "blue", "sciml", "minimal", "runic")
 
-# Default style used when no `juliaformat.toml` provides a `style` field.
+# Default style used when no `JuliaFormat.toml` provides a `style` field.
 const _FORMAT_DEFAULT_STYLE = "minimal"
+
+# Runic takes no options at all, so silently accepting an `[options]` table
+# alongside it would misreport what the formatter is going to do.
+const _FORMAT_STYLES_WITHOUT_OPTIONS = ("runic",)
+
+const _FORMAT_CONFIG_TOP_LEVEL_KEYS = ["config-version", "style", "include", "exclude", "options", "override"]
 
 Salsa.@derived function derived_formatconfig_files(rt)
     files = derived_text_files(rt)
@@ -22,48 +31,131 @@ Salsa.@derived function derived_formatconfig_files(rt)
     return [file for file in files if file.scheme=="file" && is_path_formatconfig_file(uri2filepath(file))]
 end
 
+# Formatter knobs used to sit at the top level; they now live under `[options]`.
+function _format_config_migrations()
+    migrations = Dict{String,String}()
+    for f in fieldnames(JuliaFormatter.Options)
+        migrations[string(f)] = "move it into the `[options]` table."
+    end
+    return migrations
+end
+
+const _FORMAT_CONFIG_MIGRATIONS = _format_config_migrations()
+
+function _validate_format_options!(res::Vector{Diagnostic}, table, style)
+    table isa Dict || (push!(res, config_diagnostic("Invalid `[options]`, expected a table.")); return)
+
+    valid_option_fields = string.(fieldnames(JuliaFormatter.Options))
+
+    if !isempty(table) && style isa AbstractString && style in _FORMAT_STYLES_WITHOUT_OPTIONS
+        push!(res, config_diagnostic("The `$style` style does not support any `[options]`."))
+    end
+
+    for k in keys(table)
+        k in valid_option_fields ||
+            push!(res, config_diagnostic("Invalid format option `$k`."))
+    end
+end
+
 Salsa.@derived function derived_formatconfig_diagnostics(rt, uri)
     toml_content = derived_toml_syntax_tree(rt, uri)
 
     res = Diagnostic[]
 
-    valid_option_fields = string.(fieldnames(JuliaFormatter.Options))
+    validate_key_set!(res, toml_content, _FORMAT_CONFIG_TOP_LEVEL_KEYS, _FORMAT_CONFIG_MIGRATIONS, "format configuration key")
+    validate_config_version!(res, toml_content)
+    shadowing_diagnostic!(res, derived_formatconfig_files(rt), uri, "JuliaFormat.toml")
 
-    for (k, v) in pairs(toml_content)
-        if k == "style"
-            if !(v isa String) || !(v in _FORMAT_STYLES)
-                valid_values = join(_FORMAT_STYLES, ", ")
-                push!(res, Diagnostic(1:1, :error, "Invalid format configuration value for style, only $valid_values are valid.", nothing, Symbol[], "JuliaWorkspaces.jl"))
-            end
-        elseif !(k in valid_option_fields)
-            push!(res, Diagnostic(1:1, :error, "Invalid format configuration $k.", nothing, Symbol[], "JuliaWorkspaces.jl"))
-        end
+    style = get(toml_content, "style", _FORMAT_DEFAULT_STYLE)
+    if !(style isa AbstractString) || !(style in _FORMAT_STYLES)
+        push!(res, config_diagnostic("Invalid value for `style`, only $(join(_FORMAT_STYLES, ", ")) are valid."))
     end
 
+    parse_glob_list!(res, toml_content, "include")
+    parse_glob_list!(res, toml_content, "exclude")
+
+    haskey(toml_content, "options") && _validate_format_options!(res, toml_content["options"], style)
+
+    parse_overrides!(res, toml_content, (r, block) -> begin
+        validate_key_set!(r, block, ["paths", "style", "options"], _FORMAT_CONFIG_MIGRATIONS, "`[[override]]` key")
+        block_style = get(block, "style", style)
+        if haskey(block, "style") && (!(block_style isa AbstractString) || !(block_style in _FORMAT_STYLES))
+            push!(r, config_diagnostic("Invalid value for `style`, only $(join(_FORMAT_STYLES, ", ")) are valid."))
+        end
+        haskey(block, "options") && _validate_format_options!(r, block["options"], block_style)
+    end)
+
     return res
+end
+
+"""
+    struct EffectiveFormatConfig
+
+The formatting configuration in force for one file, after resolving the style
+preset, the `[options]` deltas and any applicable `[[override]]` blocks.
+
+- `style::String`: The style preset.
+- `options::Dict{Symbol,Any}`: `JuliaFormatter.Options` overrides.
+- `selected::Bool`: Whether the file is formatted at all (`include`/`exclude`).
+"""
+struct EffectiveFormatConfig
+    style::String
+    options::Dict{Symbol,Any}
+    selected::Bool
+end
+
+EffectiveFormatConfig() = EffectiveFormatConfig(_FORMAT_DEFAULT_STYLE, Dict{Symbol,Any}(), true)
+
+function _format_config_fields_equal(a::EffectiveFormatConfig, b::EffectiveFormatConfig, eq)
+    eq(a.style, b.style) && eq(a.options, b.options) && eq(a.selected, b.selected)
+end
+Base.:(==)(a::EffectiveFormatConfig, b::EffectiveFormatConfig) = _format_config_fields_equal(a, b, ==)
+Base.isequal(a::EffectiveFormatConfig, b::EffectiveFormatConfig) = _format_config_fields_equal(a, b, isequal)
+Base.hash(c::EffectiveFormatConfig, h::UInt) =
+    hash(c.style, hash(c.options, hash(c.selected, hash(EffectiveFormatConfig, h))))
+
+function _read_format_options(table)
+    out = Dict{Symbol,Any}()
+    table isa Dict || return out
+    valid = fieldnames(JuliaFormatter.Options)
+    for (k, v) in pairs(table)
+        sym = Symbol(k)
+        sym in valid && (out[sym] = v)
+    end
+    return out
 end
 
 Salsa.@derived function derived_format_configuration(rt, uri)
     @debug "derived_format_configuration" uri=uri
 
-    config_files = derived_formatconfig_files(rt)
+    # Non-file buffers have no folder-based config; defaults apply.
+    uri.scheme == "file" || return EffectiveFormatConfig()
 
-    config_files = sort(config_files, by=i->length(string(i)))
+    config_uri = nearest_config(derived_formatconfig_files(rt), uri)
+    config_uri === nothing && return EffectiveFormatConfig()
 
-    configs = Dict{String,Any}()
-    for config_file in config_files
-        config_folder_path = dirname(uri2filepath(config_file))
+    toml_content = derived_toml_syntax_tree(rt, config_uri)
+    relpath = config_relative_path(config_dir_of(config_uri), uri2filepath(uri))
+    relpath === nothing && return EffectiveFormatConfig()
 
-        if startswith(uri2filepath(uri), config_folder_path)
-            content_as_toml = derived_toml_syntax_tree(rt, config_file)
+    style = get(toml_content, "style", _FORMAT_DEFAULT_STYLE)
+    (style isa AbstractString && style in _FORMAT_STYLES) || (style = _FORMAT_DEFAULT_STYLE)
 
-            for (k, v) in pairs(content_as_toml)
-                configs[k] = v
-            end
+    options = _read_format_options(get(toml_content, "options", nothing))
+
+    discard = Diagnostic[]
+    filter = parse_path_filter!(discard, toml_content)
+    overrides = parse_overrides!(discard, toml_content, (_, _) -> nothing)
+
+    for ov in applicable_overrides(overrides, relpath)
+        ov_style = get(ov, "style", nothing)
+        if ov_style isa AbstractString && ov_style in _FORMAT_STYLES
+            style = ov_style
         end
+        merge!(options, _read_format_options(get(ov, "options", nothing)))
     end
 
-    return configs
+    return EffectiveFormatConfig(String(style), options, path_selected(filter, relpath))
 end
 
 function _format_style_object(style::AbstractString)
@@ -74,30 +166,20 @@ function _format_style_object(style::AbstractString)
     return JuliaFormatter.DefaultStyle()
 end
 
-function _juliaformatter_kwargs(config::Dict)
-    valid = fieldnames(JuliaFormatter.Options)
-    kw = Dict{Symbol,Any}()
-    for (k, v) in pairs(config)
-        k == "style" && continue
-        sym = Symbol(k)
-        if sym in valid
-            kw[sym] = v
-        end
-    end
-    return kw
-end
-
-function _format_text(text::AbstractString, config::Dict)
-    style = get(config, "style", _FORMAT_DEFAULT_STYLE)
-
-    if style == "runic"
+function _format_text(text::AbstractString, config::EffectiveFormatConfig)
+    if config.style in _FORMAT_STYLES_WITHOUT_OPTIONS
+        # The config validator already flags this; erroring here keeps a
+        # programmatically built config from silently dropping the options.
+        isempty(config.options) ||
+            error("The `$(config.style)` style does not support any `[options]`.")
         return Runic.format_string(text)
     else
-        style_obj = _format_style_object(style)
-        kw = _juliaformatter_kwargs(config)
-        return JuliaFormatter.format_text(text; style=style_obj, kw...)
+        style_obj = _format_style_object(config.style)
+        return JuliaFormatter.format_text(text; style=style_obj, config.options...)
     end
 end
+
+const _FORMAT_EXCLUDED_MESSAGE = "File is excluded by JuliaFormat.toml."
 
 # Returns `(formatted_text::Union{String,Nothing}, error::Union{String,Nothing})`.
 Salsa.@derived function derived_formatted_text(rt, uri)
@@ -108,6 +190,7 @@ Salsa.@derived function derived_formatted_text(rt, uri)
 
     text = tf.content.content
     config = derived_format_configuration(rt, uri)
+    config.selected || return (nothing, _FORMAT_EXCLUDED_MESSAGE)
 
     try
         return (_format_text(text, config), nothing)
@@ -153,6 +236,9 @@ Salsa.@derived function derived_format_range_edits(rt, uri, start_line, stop_lin
     st = tf.content
     oldcontent = st.content
     config = derived_format_configuration(rt, uri)
+    # Range formatting is an editor gesture; an excluded file simply yields no
+    # edits rather than surfacing an error the user did not ask for.
+    config.selected || return (WorkspaceFileEdit(uri, TextEditResult[]), nothing)
 
     original_lines = collect(eachline(IOBuffer(oldcontent); keep=true))
 

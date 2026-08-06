@@ -25,10 +25,21 @@ function is_path_lintconfig_file(path)
 end
 
 function is_path_formatconfig_file(path)
+    isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
     return basename_lower_case == "juliaformat.toml"
 end
+
+function is_path_testitemsconfig_file(path)
+    isvalid(path) || return false
+    basename_lower_case = basename(lowercase(path))
+
+    return basename_lower_case == "juliatestitems.toml"
+end
+
+is_path_toolconfig_file(path) =
+    is_path_lintconfig_file(path) || is_path_formatconfig_file(path) || is_path_testitemsconfig_file(path)
 
 function is_path_julia_file(path)
     _, ext = splitext(path)
@@ -69,9 +80,7 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
         "toml"
     elseif is_path_manifest_file(path)
         "toml"
-    elseif is_path_lintconfig_file(path)
-        "toml"
-    elseif is_path_formatconfig_file(path)
+    elseif is_path_toolconfig_file(path)
         "toml"
     elseif is_path_markdown_file(path)
         "markdown"
@@ -151,8 +160,7 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_lim
                 push!(candidate_paths, filepath)
             elseif is_path_project_file(filepath) ||
                         is_path_manifest_file(filepath) ||
-                        is_path_lintconfig_file(filepath) ||
-                        is_path_formatconfig_file(filepath) ||
+                        is_path_toolconfig_file(filepath) ||
                         is_path_markdown_file(filepath) ||
                         is_path_juliamarkdown_file(filepath)
                 push!(candidate_paths, filepath)

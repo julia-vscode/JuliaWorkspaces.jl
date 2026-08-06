@@ -77,7 +77,16 @@ struct _ActionDef
     is_preferred::Bool
     when::Function       # (x::EXPR, meta_dict, ctx) → Bool
     handler::Function    # (x::EXPR, runtime, uri, meta_dict, ctx) → Vector{WorkspaceFileEdit}
+    # The lint rule this action fixes, if any. A rule turned off in
+    # `JuliaLint.toml` stops offering its fix: with no diagnostic to act on,
+    # the lightbulb would be offering to "fix" something the user has said they
+    # do not want reported. `nothing` for refactorings and source actions,
+    # which are editor capabilities rather than fixes and stay always available.
+    rule::Union{Nothing,Symbol}
 end
+
+_ActionDef(id, title, kind, is_preferred, when, handler) =
+    _ActionDef(id, title, kind, is_preferred, when, handler, nothing)
 
 function _action_get_text(runtime, uri::URI)
     return input_text_file(runtime, uri).content.content
@@ -599,6 +608,7 @@ _JW_ACTIONS["FixMissingRef"] = _ActionDef(
     false,
     (x, meta_dict, ctx) -> _is_fixable_missing_ref(x, meta_dict, ctx.diagnostic_messages),
     _apply_missing_ref_fix,
+    :missing_reference,
 )
 
 _JW_ACTIONS["ReexportModule"] = _ActionDef(
@@ -622,6 +632,7 @@ _JW_ACTIONS["DeleteUnusedFunctionArgumentName"] = _ActionDef(
     false,
     (x, meta_dict, ctx) -> StaticLint.is_in_fexpr(x, y -> StaticLint.haserror(y, meta_dict) && StaticLint.errorof(y, meta_dict) == StaticLint.UnusedFunctionArgument),
     _remove_farg_name,
+    :unused_function_argument,
 )
 
 _JW_ACTIONS["ReplaceUnusedAssignmentName"] = _ActionDef(
@@ -631,6 +642,7 @@ _JW_ACTIONS["ReplaceUnusedAssignmentName"] = _ActionDef(
     false,
     (x, meta_dict, ctx) -> StaticLint.is_in_fexpr(x, y -> StaticLint.haserror(y, meta_dict) && StaticLint.errorof(y, meta_dict) == StaticLint.UnusedBinding && y isa CSTParser.EXPR && y.head === :IDENTIFIER),
     _remove_unused_assignment_name,
+    :unused_binding,
 )
 
 _JW_ACTIONS["CompareNothingWithTripleEqual"] = _ActionDef(
@@ -640,6 +652,7 @@ _JW_ACTIONS["CompareNothingWithTripleEqual"] = _ActionDef(
     true,
     (x, meta_dict, ctx) -> StaticLint.is_in_fexpr(x, y -> StaticLint.haserror(y, meta_dict) && StaticLint.errorof(y, meta_dict) in (StaticLint.NothingEquality, StaticLint.NothingNotEq)),
     _double_to_triple_equal,
+    :nothing_comparison,
 )
 
 _JW_ACTIONS["OrganizeImports"] = _ActionDef(
@@ -823,7 +836,11 @@ function _get_code_actions(runtime, uri::URI, offset::Int, diagnostic_messages::
 
     ctx = _ActionContext(offset, diagnostic_messages, workspace_folders, _action_get_text(runtime, uri))
 
+    lint_config = derived_effective_lint_config(runtime, uri)
+
     for (_, ad) in _JW_ACTIONS
+        # A fix for a rule the user turned off is not offered (see `_ActionDef.rule`).
+        ad.rule === nothing || rule_enabled(lint_config, ad.rule) || continue
         try
             if ad.when(x, meta_dict, ctx)
                 push!(actions, CodeActionInfo(ad.id, ad.title, ad.kind, ad.is_preferred))
