@@ -115,16 +115,18 @@ Salsa.@derived function derived_test_setups_in_file(rt, uri)
         # file-level analysis, which is what keeps Base/Core (and the tree
         # context) reachable — a bare :block root has no such protection and
         # gets its seeded scope.modules cleared by the generic scope-reset
-        # path before any statement runs. `inject_testitem_defaults=false`:
+        # path before any statement runs. `simulate_testitem_runtime=false`:
         # this pass has no enclosing testitem, so the `using Test`/`using
         # <package>` simulation must not run — it would leak Test's exports
-        # into this setup's own bound-names/wildcards data. The meta is
-        # local and discarded, so the pass may keep its context handles
-        # (strip_contexts=false), which the wildcard flattening below needs
-        # to see in scope.modules.
+        # into this setup's own bound-names/wildcards data — and a
+        # `@testitem setup=[...]` nested in the body must not resolve its
+        # setups either, or it re-enters this same query and cycles. The
+        # meta is local and discarded, so the pass may keep its context
+        # handles (strip_contexts=false), which the wildcard flattening
+        # below needs to see in scope.modules.
         ctx = path === nothing ? nothing : TreeModuleContext(rt, root, path)
         meta_dict = Dict{UInt64,StaticLint.Meta}()
-        StaticLint.semantic_pass(uri, arg, env, meta_dict, rt; module_context=ctx, strip_contexts=false, inject_testitem_defaults=false)
+        StaticLint.semantic_pass(uri, arg, env, meta_dict, rt; module_context=ctx, strip_contexts=false, simulate_testitem_runtime=false)
         StaticLint.mark_unresolved_imports!(arg, env, meta_dict)
 
         scope = StaticLint.scopeof(arg, meta_dict)

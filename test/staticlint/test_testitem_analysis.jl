@@ -546,3 +546,27 @@ end
     @test "Missing reference: ifn" in msgs
     @test "Missing reference: undefined_beside_wildcard" in msgs
 end
+
+@testitem "nested testitems inside setup bodies do not cycle" setup=[TestItemAnalysisWS] begin
+    # invalid at runtime, but the analyzer must not crash: extraction
+    # re-entering setup resolution used to raise a dependency-cycle error
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testmodule TM begin
+        @testitem "nested" setup=[TM] begin
+        end
+    end
+    """)
+    @test diag_messages(jw) isa Vector
+end
+
+@testitem "an unclosed testmodule above setup-referencing items does not cycle" setup=[TestItemAnalysisWS] begin
+    # transient editing state: parser recovery swallows the items below
+    # into the unclosed block
+    jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
+    @testmodule TM begin
+    @testitem "t" setup=[TM] begin
+        1 + 1
+    end
+    """)
+    @test diag_messages(jw) isa Vector
+end

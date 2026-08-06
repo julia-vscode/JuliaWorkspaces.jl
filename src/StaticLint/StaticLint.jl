@@ -301,10 +301,14 @@ mutable struct Toplevel{RT} <: TraverseState
     # files' names come from the module tree instead).
     follow_includes::Bool
     # Whether `@testitem`/`@testsnippet` handling simulates their implicit
-    # `using Test`/`using <package>` defaults. `false` for a setup-body-only
-    # pass (`derived_test_setups_in_file`), where that injection would leak
-    # Test's exports into the setup's own bound-names data.
-    inject_testitem_defaults::Bool
+    # `using Test`/`using <package>` defaults, and whether `@testitem`'s
+    # setup=[...] resolution loop runs at all. `false` for a setup-body-only
+    # pass (`derived_test_setups_in_file`), where the default-imports
+    # injection would leak Test's exports into the setup's own bound-names
+    # data, and where a nested `@testitem setup=[...]` (including one
+    # swallowed into an unclosed enclosing block by parser recovery) would
+    # otherwise re-enter this same query and cycle.
+    simulate_testitem_runtime::Bool
     flags::Int
     meta_dict::Dict{UInt64,Meta}
     runtime::RT
@@ -461,17 +465,19 @@ loop resolves non-local names through the module tree, after file-local
 scopes and the Base/Core stores — and includes are NOT followed
 (`follow_includes = false`; included files' names come from the tree).
 
-`inject_testitem_defaults = false` disables the `using Test`/`using
+`simulate_testitem_runtime = false` disables the `using Test`/`using
 <package>` simulation `_handle_testitem`/`_handle_testsnippet` otherwise run
 for every `@testitem`/`@testsnippet` — for a pass over a setup body alone
 (no enclosing testitem), that injection would leak Test's exports into the
-setup's own data.
+setup's own data — and also disables `_handle_testitem`'s setup=[...]
+resolution loop, so a testitem nested inside the setup body being analyzed
+cannot re-enter the setup-extraction query and cycle.
 """
-function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing, strip_contexts::Bool = true, inject_testitem_defaults::Bool = true)
+function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; workspace_packages = Dict{String,Any}(), self_package_name::Union{Nothing,String} = nothing, module_context::Union{Nothing,AbstractModuleContext} = nothing, strip_contexts::Bool = true, simulate_testitem_runtime::Bool = true)
     root_modules = Dict{Symbol,Any}(m => env.symbols[m] for m in IMPLICIT_SCOPE_MODULES)
     module_context !== nothing && (root_modules[:__tree__] = module_context)
     setscope!(cst, Scope(nothing, cst, Dict(), root_modules, nothing), meta_dict)
-    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, self_package_name, module_context === nothing, inject_testitem_defaults, 0, meta_dict, rt, ReboundBindings())
+    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, self_package_name, module_context === nothing, simulate_testitem_runtime, 0, meta_dict, rt, ReboundBindings())
     process_EXPR(cst, state)
     _unify_rebound_types!(state)
     unique!(state.delayed)

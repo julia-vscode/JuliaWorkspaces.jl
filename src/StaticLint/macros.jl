@@ -469,13 +469,17 @@ function _handle_testitem(x::EXPR, state::Toplevel)
     tctx = enclosing_tree_context(state.scope)
 
     # If default_imports=true, add Test and the parent package module
-    default_imports && state.inject_testitem_defaults && _inject_testitem_default_imports!(item_scope, state, tctx)
+    default_imports && state.simulate_testitem_runtime && _inject_testitem_default_imports!(item_scope, state, tctx)
 
     # Resolve setup=[...] references through the plain-data setup index
     # (test_setup_info interface). Testmodules bind their name — members
     # resolve via TestSetupModuleRef; snippet names are injected directly
     # (TestItemRunner splices snippet code into the testitem body).
-    if tctx !== nothing
+    # Gated on simulate_testitem_runtime: a setup-body-only pass
+    # (derived_test_setups_in_file) analyzing a @testitem nested in the
+    # body would otherwise re-enter that same query via test_setup_info
+    # and cycle.
+    if tctx !== nothing && state.simulate_testitem_runtime
         for setup_name in setup_names
             info = test_setup_info(tctx, setup_name)
             info === nothing && continue
@@ -501,6 +505,9 @@ function _handle_testitem(x::EXPR, state::Toplevel)
                 # snippet sees — suppress bare missing-ref checks then.
                 symbols = getsymbols(state)
                 for pkgname in info.wildcard_packages
+                    # `pkgname` is the bare leaf of a dotted `using X.Y` (i.e. `Y`),
+                    # so on a name collision this can attach an unrelated top-level
+                    # package sharing that name instead of failing safe.
                     pkg_sym = Symbol(pkgname)
                     attached = false
                     if haskey(symbols, pkg_sym)
@@ -676,7 +683,7 @@ function _handle_testsnippet(x::EXPR, state::Toplevel)
     snip_scope.modules[:Base] = getsymbols(state)[:Base]
     snip_scope.modules[:Core] = getsymbols(state)[:Core]
 
-    state.inject_testitem_defaults && _inject_testitem_default_imports!(snip_scope, state, enclosing_tree_context(state.scope))
+    state.simulate_testitem_runtime && _inject_testitem_default_imports!(snip_scope, state, enclosing_tree_context(state.scope))
 
     # Body will be traversed by the standard traverse() in process_EXPR,
     # using this isolating scope (pushed by scopes()).
