@@ -144,7 +144,7 @@ const _PRESET_DEFAULT = Dict{Symbol,Symbol}(
     :testitem_errors => :error,
     :toml_syntax_errors => :error,
     :config_errors => :error,
-    :shadowed_config => :warning,
+    :shadowed_config => :information,
 )
 
 # Checked here, before the derived presets are built, so that a rule nobody
@@ -170,7 +170,7 @@ const _PRESET_MINIMAL = Dict{Symbol,Symbol}(
             :const_decl => :warning,
             # A structural problem with the project's own configuration, not a
             # style opinion — it stays on even in the quietest preset.
-            :shadowed_config => :warning,
+            :shadowed_config => :information,
         ),
         r.id,
         :off,

@@ -294,7 +294,7 @@ function shadowing_diagnostic!(res::Vector{Diagnostic}, config_uris, config_uri:
 
     outer_path = uri2filepath(outer)
     push!(res, Diagnostic(
-        1:1, :warning,
+        1:1, :information,
         "This $filename replaces `$outer_path` for everything below this directory, " *
         "rather than adding to it — settings from that file do not apply here. " *
         "Copy anything you want to keep, or remove this file.",

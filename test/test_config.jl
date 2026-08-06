@@ -106,7 +106,7 @@ end
     nested = get_diagnostic(jw, URI("file:///sh/src/JuliaLint.toml"))
     idx = findfirst(d -> d.code === :shadowed_config, nested)
     @test idx !== nothing
-    @test nested[idx].severity === :warning
+    @test nested[idx].severity === :information
     @test occursin("JuliaLint.toml", nested[idx].message)
 
     # It names the NEAREST enclosing config, not the outermost one.
