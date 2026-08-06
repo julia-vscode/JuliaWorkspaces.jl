@@ -1354,6 +1354,32 @@ function in_unresolved_wildcard_import_scope(x::EXPR, meta_dict)
     return false
 end
 
+# Should a method-set lint (`IncorrectCallArgs`/`FunctionHasNoMethods`) on
+# call `x` be withheld because it sits under an unresolved wildcard `using`?
+# `check_call` sets these errors during the pass, before this file's own
+# failed `using` is marked (`mark_unresolved_imports!` runs later) — so the
+# wildcard scope can only be consulted here, at hint-collection time.
+#
+# Only a callee with NO local binding is at risk: an unresolvable wildcard
+# `using` can silently EXTEND an existing generic reached purely through the
+# implicit scope (Base's `stack`, gaining a `view` keyword once the failed
+# package loads) — that callee's `refof` is the store value itself, with no
+# intervening `Binding`. A callee bound by an explicit local `import`/`using`
+# colon-form or definition keeps its checks even in the same scope: the
+# wildcard cannot un-bind an explicit import, so that binding's own method
+# set is unaffected. A QUALIFIED callee (`Base.foo(...)`) is exempt for the
+# same reason a wildcard using cannot shadow a qualified path.
+function _suppressed_by_unresolved_wildcard(x::EXPR, meta_dict)
+    code = errorof(x, meta_dict)
+    (code === IncorrectCallArgs || code === FunctionHasNoMethods) || return false
+    iscall(x) || return false
+    callee = x.args[1]
+    isidentifier(callee) || return false
+    ref = hasref(callee, meta_dict) ? refof(callee, meta_dict) : nothing
+    (ref isa SymbolServer.FunctionStore || ref isa SymbolServer.DataTypeStore) || return false
+    in_unresolved_wildcard_import_scope(x, meta_dict)
+end
+
 """
 collect_hints(x::EXPR, env, missingrefs = :all, isquoted = false, errs = Tuple{Int,EXPR}[], pos = 0)
 
@@ -1372,7 +1398,8 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
         # collect parse errors
         push!(errs, (pos, x))
     elseif !isquoted
-        if haserror(x, meta_dict) && errorof(x, meta_dict) isa StaticLint.LintCodes
+        if haserror(x, meta_dict) && errorof(x, meta_dict) isa StaticLint.LintCodes &&
+            !_suppressed_by_unresolved_wildcard(x, meta_dict)
             # collect lint hints
             push!(errs, (pos, x))
         elseif missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&

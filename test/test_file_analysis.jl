@@ -1332,6 +1332,56 @@ end
     @test any(d -> occursin("another_undefined_name", d.message), fa_b.diagnostics)
 end
 
+@testitem "derived_file_analysis: an unresolved wildcard using suppresses method-set lints on bare callees only" setup=[FileAnalysisWS] begin
+    # `stack` is a bare callee with no local binding: it falls through to
+    # Base's implicit-scope method set. `using NotIndexedPkg` failing to
+    # resolve means `stack` could just as well come from there, so judging
+    # the call against Base's `stack` (no `view` keyword) is unsound.
+    root_src = """
+    module MainPkg
+    using NotIndexedPkg
+    caller(v::Vector) = stack(v; view=true)
+    struct Other end
+    badq(w::Other) = Base.iseven(w)
+    module Inner
+    innercaller(x::Vector) = stack(x; view=true)
+    end
+    end
+    """
+    control_uri = URI("file:///t/src/control.jl")
+    control_src = """
+    module ControlPkg
+    caller(v::Vector) = stack(v; view=true)
+    end
+    """
+    jw = ws_with(Dict(
+        ROOT => root_src,
+        control_uri => control_src,
+    ))
+    rt = jw.runtime
+
+    fa = JuliaWorkspaces.derived_file_analysis(rt, ROOT, ROOT)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+
+    # 1. The bare `stack` call under the broken wildcard: silent.
+    @test !any(f -> SubString(root_src, f.range) == "stack(v; view=true)\n", flagged)
+    # 3. The qualified `Base.iseven(w)` call in the SAME module still flags —
+    # a wildcard using cannot shadow a qualified path.
+    @test any(f -> SubString(root_src, f.range) == "Base.iseven(w)\n", flagged)
+    # 4. `Inner` declares no wildcard of its own: the scope walk stops at its
+    # own module boundary before reaching MainPkg's flag, so its bare `stack`
+    # call keeps its checks.
+    @test any(f -> SubString(root_src, f.range) == "stack(x; view=true)\n", flagged)
+
+    # 2. Control: an identical bare `stack` call with no broken wildcard in
+    # scope still flags — the suppression above is conditional, not global.
+    fa_control = JuliaWorkspaces.derived_file_analysis(rt, control_uri, control_uri)
+    flagged_control = filter(d -> occursin("method call error", d.message) ||
+                                  occursin("No method matching", d.message), fa_control.diagnostics)
+    @test any(f -> SubString(control_src, f.range) == "stack(v; view=true)\n", flagged_control)
+end
+
 @testitem "derived_file_analysis: relative-dot imports at the analyzed file's own top level resolve through tree parents" setup=[FileAnalysisWS] begin
     # Shape 1: single-dot colon-form whose module component was ALREADY bound
     # by a preceding `import .URIs2` (the binding's val is a plain-data

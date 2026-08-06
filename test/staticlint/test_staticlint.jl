@@ -4725,6 +4725,51 @@ end
     @test SL.errorof(call, meta_dict) === SL.IncorrectCallArgs
 end
 
+@testitem "check_call: an unresolved wildcard using suppresses bare-name method-set lints, not qualified ones" setup=[shared_static_lint] begin
+    # `errorof` alone can't tell suppressed from flagged here, because
+    # `check_all` runs (and can set the error) before this file's own
+    # `using` is marked unresolved — the suppression is applied later, when
+    # `collect_hints` reads the flag back at collection time. `get_hints`
+    # (the published-diagnostics path) is vacuously empty for a project-less
+    # `parse_and_pass` file, so assert on `collect_hints`'s raw output
+    # instead (see `collect_hints`'s own doc comment above).
+    SL = JuliaWorkspaces.StaticLint
+
+    function enclosing_call(x)
+        p = SL.parentof(x)
+        while p isa SL.CSTParser.EXPR && !SL.iscall(p)
+            p = SL.parentof(p)
+        end
+        return p isa SL.CSTParser.EXPR ? p : nothing
+    end
+
+    cst, meta_dict, jw = parse_and_pass("""
+    using NotIndexedPkg
+    caller(v::Vector) = stack(v; view=true)
+    struct Other end
+    badq(w::Other) = Base.iseven(w)
+    module Inner
+    innercaller(x::Vector) = stack(x; view=true)
+    end
+    """)
+    errs = collect_hints(cst, meta_dict, jw)
+    flagged(node) = any(e -> e[2] === node, errs)
+
+    outer_call = enclosing_call(only(filter(id -> !isempty(find_identifiers(enclosing_call(id), "v")),
+                                             find_identifiers(cst, "stack"))))
+    inner_call = enclosing_call(only(filter(id -> !isempty(find_identifiers(enclosing_call(id), "x")),
+                                             find_identifiers(cst, "stack"))))
+    iseven_call = enclosing_call(only(find_identifiers(cst, "iseven")))
+
+    # The bare `stack` call under the broken wildcard: silent.
+    @test !flagged(outer_call)
+    # The qualified `Base.iseven(w)` call in the SAME module still flags.
+    @test flagged(iseven_call)
+    # `Inner` declares no wildcard of its own: the scope walk stops at its
+    # own module boundary, so its bare `stack` call keeps its checks.
+    @test flagged(inner_call)
+end
+
 @testitem "iterating over a resolved type still reads its type" setup=[shared_static_lint] begin
     SL = JuliaWorkspaces.StaticLint
 
