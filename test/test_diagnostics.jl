@@ -116,7 +116,8 @@ end
 
     jw = JuliaWorkspace()
     JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "julia")))
-    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:/test/JuliaLint.toml"), SourceText("syntax-errors = false", "toml")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:/test/JuliaLint.toml"), SourceText("[rules]
+syntax_errors = \"off\"", "toml")))
 
     diags = get_diagnostic(jw, uri)
 
@@ -244,71 +245,111 @@ end
 # Config validation tests
 # ──────────────────────────────────────────────────────────────────────
 
-@testitem "Config validation: invalid key" begin
+@testitem "Config validation: invalid top-level key" begin
     using JuliaWorkspaces.URIs2: URI
 
     config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(config_uri, SourceText("nonexistent-key = true", "toml")))
+    add_file!(jw, TextFile(config_uri, SourceText("nonexistent_key = true", "toml")))
 
     diags = get_diagnostic(jw, config_uri)
-    @test any(d -> contains(d.message, "Invalid lint configuration nonexistent-key"), diags)
+    @test any(d -> contains(d.message, "Invalid lint configuration key `nonexistent_key`"), diags)
+    @test all(d -> d.code === :config_errors, diags)
 end
 
-@testitem "Config validation: bool key with wrong type" begin
+@testitem "Config validation: unknown rule" begin
     using JuliaWorkspaces.URIs2: URI
 
     config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(config_uri, SourceText("call = \"yes\"", "toml")))
+    add_file!(jw, TextFile(config_uri, SourceText("[rules]\nno_such_rule = \"off\"", "toml")))
 
     diags = get_diagnostic(jw, config_uri)
-    @test any(d -> contains(d.message, "Invalid lint configuration value for call") && contains(d.message, "true") && contains(d.message, "false"), diags)
+    @test any(d -> contains(d.message, "Unknown lint rule `no_such_rule`"), diags)
 end
 
-@testitem "Config validation: missing-refs wrong type" begin
+@testitem "Config validation: invalid severity" begin
     using JuliaWorkspaces.URIs2: URI
 
     config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(config_uri, SourceText("missing-refs = true", "toml")))
+    add_file!(jw, TextFile(config_uri, SourceText("[rules]\nunused_binding = \"loud\"", "toml")))
 
     diags = get_diagnostic(jw, config_uri)
-    @test any(d -> contains(d.message, "Invalid lint configuration value for missing-refs"), diags)
+    @test any(d -> contains(d.message, "Invalid severity `loud` for rule `unused_binding`") &&
+                   contains(d.message, "off, hint, info, warning, error"), diags)
 end
 
-@testitem "Config validation: missing-refs invalid value" begin
+@testitem "Config validation: invalid preset" begin
     using JuliaWorkspaces.URIs2: URI
 
     config_uri = URI("file:/proj/JuliaLint.toml")
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(config_uri, SourceText("missing-refs = \"invalid\"", "toml")))
+    add_file!(jw, TextFile(config_uri, SourceText("preset = \"pedantic\"", "toml")))
 
     diags = get_diagnostic(jw, config_uri)
-    @test any(d -> contains(d.message, "Invalid lint configuration value for missing-refs") && contains(d.message, "none, symbols, all"), diags)
+    @test any(d -> contains(d.message, "Invalid `preset`") && contains(d.message, "minimal, default, strict"), diags)
 end
 
-@testitem "Config validation: valid config keys accepted" begin
+@testitem "Config validation: missing_reference scope invalid value" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    config_uri = URI("file:/proj/JuliaLint.toml")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(config_uri, SourceText(
+        "[rules]\nmissing_reference = { severity = \"warning\", scope = \"invalid\" }", "toml")))
+
+    diags = get_diagnostic(jw, config_uri)
+    @test any(d -> contains(d.message, "Invalid `scope` for rule `missing_reference`") &&
+                   contains(d.message, "none, symbols, all"), diags)
+end
+
+@testitem "Config validation: unknown rule option" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    config_uri = URI("file:/proj/JuliaLint.toml")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(config_uri, SourceText(
+        "[rules]\nunused_binding = { severity = \"warning\", scope = \"all\" }", "toml")))
+
+    diags = get_diagnostic(jw, config_uri)
+    @test any(d -> contains(d.message, "Unknown option `scope` for rule `unused_binding`"), diags)
+end
+
+@testitem "Config validation: old schema keys report their replacement" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    config_uri = URI("file:/proj/JuliaLint.toml")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(config_uri, SourceText(
+        "static-lint = true\nnothingcomp = false\nmissing-refs = \"symbols\"", "toml")))
+
+    diags = get_diagnostic(jw, config_uri)
+    @test any(d -> contains(d.message, "`static-lint` is no longer supported") && contains(d.message, "preset"), diags)
+    @test any(d -> contains(d.message, "`nothingcomp` is no longer supported") && contains(d.message, "nothing_comparison"), diags)
+    @test any(d -> contains(d.message, "`missing-refs` is no longer supported") && contains(d.message, "missing_reference"), diags)
+end
+
+@testitem "Config validation: valid config accepted" begin
     using JuliaWorkspaces.URIs2: URI
 
     config_content = """
-    static-lint = true
-    call = true
-    iter = false
-    nothingcomp = true
-    constif = false
-    lazy = true
-    datadecl = false
-    typeparam = true
-    modname = false
-    pirates = true
-    useoffuncargs = false
-    kwdefault = true
-    literal = false
-    break-continue = true
-    constdecl = false
-    missing-refs = "symbols"
-    syntax-errors = true
+    preset = "default"
+    include = ["**/*.jl"]
+    exclude = ["gen/**"]
+
+    [rules]
+    unused_binding = "warning"
+    nothing_comparison = "error"
+    index_from_length = "off"
+    missing_reference = { severity = "warning", scope = "symbols" }
+    syntax_errors = "error"
+
+    [[override]]
+    paths = ["test/**"]
+
+    [override.rules]
+    unused_binding = "off"
     """
 
     config_uri = URI("file:/proj/JuliaLint.toml")
@@ -317,6 +358,17 @@ end
 
     diags = get_diagnostic(jw, config_uri)
     @test isempty(diags)
+end
+
+@testitem "Config validation: override block requires paths" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    config_uri = URI("file:/proj/JuliaLint.toml")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(config_uri, SourceText("[[override]]\n[override.rules]\nunused_binding = \"off\"", "toml")))
+
+    diags = get_diagnostic(jw, config_uri)
+    @test any(d -> contains(d.message, "missing the required `paths` key"), diags)
 end
 
 # ──────────────────────────────────────────────────────────────────────
@@ -367,7 +419,7 @@ end
     add_file!(jw2, TextFile(URI("file:///sltoggle2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///sltoggle2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///sltoggle2/src/SLToggle.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///sltoggle2/JuliaLint.toml"), SourceText("static-lint = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///sltoggle2/JuliaLint.toml"), SourceText("preset = \"minimal\"", "toml")))
 
     uri2 = URI("file:///sltoggle2/src/SLToggle.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -415,7 +467,7 @@ end
     add_file!(jw, TextFile(URI("file:///subdirtest/src/SubDirTest.jl"), SourceText(source_with_lint, "julia")))
     add_file!(jw, TextFile(URI("file:///subdirtest/test/runtests.jl"), SourceText(test_source, "julia")))
     # Disable static-lint only in test/
-    add_file!(jw, TextFile(URI("file:///subdirtest/test/JuliaLint.toml"), SourceText("static-lint = false", "toml")))
+    add_file!(jw, TextFile(URI("file:///subdirtest/test/JuliaLint.toml"), SourceText("preset = \"minimal\"", "toml")))
 
     # src/ file should have StaticLint diagnostics
     src_uri = URI("file:///subdirtest/src/SubDirTest.jl")
@@ -477,7 +529,8 @@ end
     add_file!(jw2, TextFile(URI("file:///cit4/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///cit4/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///cit4/src/ConstIfToggle.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///cit4/JuliaLint.toml"), SourceText("constif = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///cit4/JuliaLint.toml"), SourceText("[rules]
+const_if_condition = \"off\"", "toml")))
 
     uri2 = URI("file:///cit4/src/ConstIfToggle.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -526,7 +579,8 @@ end
     add_file!(jw2, TextFile(URI("file:///cit2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///cit2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///cit2/src/ConstIfTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///cit2/JuliaLint.toml"), SourceText("constif = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///cit2/JuliaLint.toml"), SourceText("[rules]
+const_if_condition = \"off\"", "toml")))
 
     uri2 = URI("file:///cit2/src/ConstIfTest.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -573,7 +627,8 @@ end
     add_file!(jw2, TextFile(URI("file:///lt2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///lt2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///lt2/src/LazyTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///lt2/JuliaLint.toml"), SourceText("lazy = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///lt2/JuliaLint.toml"), SourceText("[rules]
+pointless_boolean = \"off\"", "toml")))
 
     uri2 = URI("file:///lt2/src/LazyTest.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -618,7 +673,8 @@ end
     add_file!(jw2, TextFile(URI("file:///mnt2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mnt2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mnt2/src/ModNameTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///mnt2/JuliaLint.toml"), SourceText("modname = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///mnt2/JuliaLint.toml"), SourceText("[rules]
+module_name = \"off\"", "toml")))
 
     uri2 = URI("file:///mnt2/src/ModNameTest.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -663,7 +719,8 @@ end
     add_file!(jw2, TextFile(URI("file:///mntog2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mntog2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mntog2/src/ModNameToggle.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///mntog2/JuliaLint.toml"), SourceText("modname = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///mntog2/JuliaLint.toml"), SourceText("[rules]
+module_name = \"off\"", "toml")))
 
     uri2 = URI("file:///mntog2/src/ModNameToggle.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -709,7 +766,8 @@ end
     add_file!(jw2, TextFile(URI("file:///bct2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///bct2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///bct2/src/BreakContTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///bct2/JuliaLint.toml"), SourceText("break-continue = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///bct2/JuliaLint.toml"), SourceText("[rules]
+break_continue = \"off\"", "toml")))
 
     uri2 = URI("file:///bct2/src/BreakContTest.jl")
     diags2 = get_diagnostic(jw2, uri2)
@@ -762,7 +820,8 @@ end
     add_file!(jw2, TextFile(URI("file:///mrt2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mrt2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///mrt2/src/MissRefTest.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///mrt2/JuliaLint.toml"), SourceText("missing-refs = \"none\"", "toml")))
+    add_file!(jw2, TextFile(URI("file:///mrt2/JuliaLint.toml"), SourceText("[rules]
+missing_reference = \"off\"", "toml")))
     JuliaWorkspaces.set_input_env_ready!(jw2.runtime, true)
 
     uri2 = URI("file:///mrt2/src/MissRefTest.jl")
@@ -803,10 +862,17 @@ end
     end
     """
 
-    # Root config disables constif
-    root_config = "constif = false"
-    # Subdir config re-enables constif
-    sub_config = "constif = true"
+    # The root config turns the rule off AND sets an unrelated rule. The
+    # nearest config governs wholesale, so neither key reaches src/.
+    root_config = """
+    [rules]
+    const_if_condition = "off"
+    unused_binding = "off"
+    """
+    sub_config = """
+    [rules]
+    const_if_condition = "info"
+    """
 
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(URI("file:///hier/Project.toml"), SourceText(project_toml, "toml")))
@@ -815,10 +881,15 @@ end
     add_file!(jw, TextFile(URI("file:///hier/JuliaLint.toml"), SourceText(root_config, "toml")))
     add_file!(jw, TextFile(URI("file:///hier/src/JuliaLint.toml"), SourceText(sub_config, "toml")))
 
-    # Child overrides parent — constif should be enabled for src/
+    # The nearest config re-enables the rule for src/.
     uri = URI("file:///hier/src/HierTest.jl")
     diags = get_diagnostic(jw, uri)
     @test any(d -> contains(d.message, "boolean literal") && contains(d.message, "if"), diags)
+
+    # No merging: `unused_binding = "off"` is set only in the root config, so it
+    # does not carry into src/, whose config never mentions the rule.
+    cfg = JuliaWorkspaces.derived_effective_lint_config(jw.runtime, uri)
+    @test JuliaWorkspaces.rule_enabled(cfg, :unused_binding)
 end
 
 # ──────────────────────────────────────────────────────────────────────
@@ -992,7 +1063,8 @@ end
     add_file!(jw2, TextFile(URI("file:///unrestog2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///unrestog2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///unrestog2/src/UnresTog.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///unrestog2/JuliaLint.toml"), SourceText("unresolved-import = false", "toml")))
+    add_file!(jw2, TextFile(URI("file:///unrestog2/JuliaLint.toml"), SourceText("[rules]
+unresolved_import = \"off\"", "toml")))
     JuliaWorkspaces.set_input_env_ready!(jw2.runtime, true)
 
     diags2 = get_diagnostic(jw2, URI("file:///unrestog2/src/UnresTog.jl"))
@@ -1713,7 +1785,8 @@ end
     add_file!(jw2, TextFile(URI("file:///missrefall2/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///missrefall2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///missrefall2/src/MissRefAll.jl"), SourceText(source, "julia")))
-    add_file!(jw2, TextFile(URI("file:///missrefall2/JuliaLint.toml"), SourceText("missing-refs = \"symbols\"", "toml")))
+    add_file!(jw2, TextFile(URI("file:///missrefall2/JuliaLint.toml"), SourceText("[rules]
+missing_reference = { scope = \"symbols\" }", "toml")))
     JuliaWorkspaces.set_input_env_ready!(jw2.runtime, true)
 
     diags2 = get_diagnostic(jw2, URI("file:///missrefall2/src/MissRefAll.jl"))

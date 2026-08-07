@@ -11,7 +11,10 @@ mutable struct Binding
     # `TreeRef`: per-file traversal mode only — an import-statement binding
     # whose target resolved through the module tree (plain data, never
     # another file's EXPR/Binding)
-    val::Union{Binding,EXPR,SymbolServer.SymStore,TreeRef,Nothing}
+    # `TestSetupModuleRef`: per-file traversal mode only — a `@testmodule`
+    # name injected into a `@testitem` scope from the plain-data setup index
+    # (also never another file's EXPR/Binding).
+    val::Union{Binding,EXPR,SymbolServer.SymStore,TreeRef,TestSetupModuleRef,Nothing}
     type::Union{Binding,SymbolServer.SymStore,Nothing}
     refs::Vector{Any}
     # `export`/`public` declarations of this name in its module. exported ⇒

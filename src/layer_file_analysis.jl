@@ -62,6 +62,20 @@ end
 
 StaticLint.context_tree_ref(ctx::TreeModuleContext) = _context_tree_ref(ctx)
 
+StaticLint.context_exported_names(ctx::TreeModuleContext) =
+    derived_module_exports(ctx.rt, ctx.root, ctx.path).exports
+
+# ctx.root is the analyzed file's root; for test files the root IS the file,
+# and for src files it is the package entry — both live under the package
+# folder, which keys the setup index.
+function StaticLint.test_setup_info(ctx::TreeModuleContext, name::Symbol)
+    pkg_folder = derived_package_for_file(ctx.rt, ctx.root)
+    pkg_folder === nothing && return nothing
+    s = derived_test_setup(ctx.rt, pkg_folder, name)
+    s === nothing && return nothing
+    return StaticLint.TestSetupInfo(s.kind, Set{String}(s.bound_names), Set{String}(s.exported_names), s.wildcard_packages, s.has_unresolved_wildcard)
+end
+
 # The names of the modules DECLARED IN the analyzed file that enclose `x`,
 # outermost-first, read off the scope chain (works after
 # `strip_module_contexts!` — module nesting survives the handle strip).
@@ -316,10 +330,15 @@ end
 # leak the handle or another file's objects into meta. The binding's val is
 # the context's plain-data `TreeRef` (leaf components that resolve directly
 # to a TreeRef take the GENERIC `_mark_import_arg`, which stores them the
-# same way — `Binding.val` admits `TreeRef`). No `scope.modules` entry is
-# added for `using`: a `using` statement is necessarily module-toplevel, so
-# its bring-ins are already part of this module's
-# `derived_module_visible_names` — the seeded context covers them.
+# same way — `Binding.val` admits `TreeRef`).
+#
+# For `using` at module toplevel no `scope.modules` entry is needed: the
+# bring-ins are part of the module's `derived_module_visible_names` face and
+# the seeded `:__tree__` context covers them. A `using` anywhere else (a
+# `@testitem`/`@testset` body — those macrocalls are opaque to the
+# inventory) has no face to lean on, so its exported names are materialized
+# as an export-filtered context on the current scope; the wrapper holds a
+# runtime handle and is removed by `strip_module_contexts!` before freezing.
 function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged, meta_dict)
     CSTParser.is_id_or_macroname(arg) || return
     if StaticLint.bindingof(arg, meta_dict) === nothing
@@ -327,7 +346,16 @@ function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged
         StaticLint.getmeta(arg, meta_dict).binding = StaticLint.Binding(arg, _context_tree_ref(par), StaticLint.CoreTypes.Module, [])
         StaticLint.setref!(arg, StaticLint.bindingof(arg, meta_dict), meta_dict)
     end
-    if !usinged
+    if usinged
+        if !StaticLint.is_module_toplevel_scope(state.scope)
+            exps = StaticLint.context_exported_names(par)
+            if exps !== nothing
+                nm = StaticLint.valofid(arg)
+                nm !== nothing && StaticLint.add_to_imported_modules(
+                    state.scope, Symbol(nm), StaticLint.ExportFilteredContext(par, Set{String}(exps)))
+            end
+        end
+    else
         # import binds the name in the current scope — except under `as`,
         # where only the alias is bound (matching `_mark_import_arg`)
         if !(CSTParser.parentof(arg) isa CSTParser.EXPR && CSTParser.parentof(CSTParser.parentof(arg)) isa CSTParser.EXPR && CSTParser.headof(CSTParser.parentof(CSTParser.parentof(arg))) === :as)
@@ -503,6 +531,10 @@ function _collect_outbound(meta_dict::Dict{UInt64,StaticLint.Meta})
         end
         r === nothing && continue
         isempty(r.name) && continue
+        # setup-member refs resolve against a synthetic setup module, not a
+        # workspace module of that name — a real module with the setup's name
+        # would collide with them in cross-file aggregation
+        r.kind === :test_setup_member && continue
         key = (r.name, r.origin_module)
         prev = get(acc, key, nothing)
         if prev === nothing
@@ -572,56 +604,23 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
             keys(project.deved_packages),
         )))
 
-    missingrefs = _missingrefs_from_config(lint_config)
+    missingrefs = missingrefs_from_config(lint_config)
     # per-file mode: no merged workspace-package meta, cross-file names come
     # from the tree
     workspace_packages = Dict{String,Any}()
     errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
 
-    for err in errs
-        rng = err[1]+1:err[1]+err[2].span+1
-        if StaticLint.headof(err[2]) === :errortoken
-            # parse errors are the syntax layer's job (matching the
-            # whole-closure pass)
-        elseif CSTParser.isidentifier(err[2]) && !StaticLint.haserror(err[2], meta_dict)
-            push!(diagnostics, Diagnostic(rng, :warning, "Missing reference: $(err[2].val)", nothing, Symbol[], "StaticLint.jl"))
-        elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) === StaticLint.UnresolvedImport
-            # `unresolved-import = false` suppresses this diagnostic. The branch
-            # must still match (not be folded into the guard) so the
-            # UnresolvedImport LintCode doesn't fall through to the generic
-            # LintCodes handler below, which would re-emit "Failed to resolve import.".
-            if get(lint_config, "unresolved-import", true)
-                name = CSTParser.str_value(err[2])
-                cause = name in declared_deps ?
-                    "`$name` is a declared dependency but its symbols could not be indexed." :
-                    "Failed to resolve `$name`."
-                consequence = StaticLint.is_in_wildcard_import(err[2]) ?
-                    "Missing-reference checks are disabled in this scope and all nested scopes." :
-                    "Anything imported through this statement is assumed to exist and will not be checked."
-                push!(diagnostics, Diagnostic(rng, :warning, "$cause $consequence", nothing, Symbol[], "StaticLint.jl"))
-            end
-        elseif StaticLint.haserror(err[2], meta_dict) && StaticLint.errorof(err[2], meta_dict) isa StaticLint.LintCodes
-            code = StaticLint.errorof(err[2], meta_dict)
-            description = get(StaticLint.LintCodeDescriptions, code, "")
-            if code === StaticLint.IncorrectCallArgs
-                # For a tree-visible workspace callee, describe from the full
-                # cross-file arity set (the local candidates are incomplete);
-                # otherwise from the local candidates (store/local methods).
-                ar = _call_cross_file_arities(rt, root, path, err[2], meta_dict)
-                detail = ar !== nothing ?
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; cand_arities=ar, tree_in_scope, tree_callsite_type, tree_resolve=type_resolver) :
-                    StaticLint.describe_call_mismatch(err[2], env, meta_dict; tree_in_scope, tree_callsite_type, tree_resolve=type_resolver)
-                detail !== nothing && (description = detail)
-            end
-            severity, tags = if code in (StaticLint.UnusedFunctionArgument, StaticLint.UnusedBinding, StaticLint.UnusedTypeParameter)
-                :hint, Symbol[:unnecessary]
-            else
-                :information, Symbol[]
-            end
-            code_details = code === StaticLint.IndexFromLength ? URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex") : nothing
-            push!(diagnostics, Diagnostic(rng, severity, description, code_details, tags, "StaticLint.jl"))
-        end
+    # For a tree-visible workspace callee, describe from the full cross-file
+    # arity set (the local candidates are incomplete); otherwise from the local
+    # candidates (store/local methods).
+    function describe_call(x)
+        ar = _call_cross_file_arities(rt, root, path, x, meta_dict)
+        return ar !== nothing ?
+            StaticLint.describe_call_mismatch(x, env, meta_dict; cand_arities=ar, tree_in_scope, tree_callsite_type, tree_resolve=type_resolver) :
+            StaticLint.describe_call_mismatch(x, env, meta_dict; tree_in_scope, tree_callsite_type, tree_resolve=type_resolver)
     end
+
+    _emit_hint_diagnostics!(diagnostics, errs, meta_dict, lint_config, declared_deps; describe_call)
 
     return diagnostics
 end
@@ -874,8 +873,18 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     cst = derived_julia_legacy_syntax_tree(rt, file)
     meta_dict = Dict{UInt64,StaticLint.Meta}()
 
+    # The enclosing package's name, for @testitem default-imports injection
+    # (TestItemRunner evaluates each testitem body with `using Test` and
+    # `using <PackageName>` in effect).
+    self_package_name = nothing
+    pkg_folder = derived_package_for_file(rt, file)
+    if pkg_folder !== nothing
+        pkg = derived_package(rt, pkg_folder)
+        pkg !== nothing && (self_package_name = pkg.name)
+    end
+
     ctx = TreeModuleContext(rt, root, path)
-    StaticLint.semantic_pass(file, cst, env, meta_dict, rt; module_context=ctx)
+    StaticLint.semantic_pass(file, cst, env, meta_dict, rt; module_context=ctx, self_package_name)
 
     # Cross-file wildcard-using suppression: if the module this file is
     # spliced into has a failed wildcard `using` ANYWHERE (typically in the
@@ -907,7 +916,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # stripped at check time, but the module NESTING is still in the scopes.
     # The id-free visible-names faces are dependencies the analysis frame
     # already takes for the modules it touches.
-    lint_config = derived_lint_configuration(rt, file)
+    lint_config = derived_effective_lint_config(rt, file)
     tree_visible = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
         haskey(derived_module_visible_names_idfree(rt, root, p), name)
@@ -1040,7 +1049,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
             get!(() -> _tree_type_resolver(rt, r), _ext_root_resolvers, r)
         resolver(t, defined_in)
     end
-    StaticLint.check_all(cst, _lint_options_from_config(lint_config), env, meta_dict,
+    StaticLint.check_all(cst, lint_options_from_config(lint_config), env, meta_dict,
         StaticLint.TreeContext(;
             visible = tree_visible, extended = tree_extended, arities = tree_arities,
             in_scope = tree_in_scope, signatures = tree_signatures,
@@ -1090,14 +1099,6 @@ diagnostics are suppressed here: while a root has no project (e.g. a loose
 file during the LS-startup no-active-project window), every real-package
 import would otherwise flash a "Failed to resolve …" false positive. Once a
 project is active, `new == old` again.
-
-Test-setup parity: the whole-closure pass feeds `derived_test_setup_bindings`
-into `semantic_pass(...; test_setups=…)`; the per-file pass
-(`derived_file_analysis`) passes none. This is behavior-identical TODAY
-because test-setup detection has a verified pre-existing off-by-one (the
-`args[2]` line-info placeholder — setups are never recognized on this
-lineage). Do NOT fix the off-by-one here: it re-opens the stale-EXPR channel;
-it is a ledgered follow-up.
 """
 Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     @debug "derived_new_static_lint_diagnostics" uri=uri

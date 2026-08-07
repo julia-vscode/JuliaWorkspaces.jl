@@ -30,6 +30,7 @@ export JuliaWorkspace,
     position_at,
     is_ready,
     wait_until_ready,
+    retry_failed_dynamic_projects!,
     get_update_channel,
     get_legacy_cst,
     get_roots_for_uri,
@@ -82,6 +83,7 @@ export JuliaWorkspace,
     TextEditResult,
     WorkspaceFileEdit,
     get_format_edits,
+    is_format_excluded,
     TextFile,
     SourceText,
     Diagnostic
@@ -628,6 +630,45 @@ function get_test_env(jw::JuliaWorkspace, uri::URI)
     derived_testenv(jw.runtime, uri)
 end
 
+"""
+    retry_failed_dynamic_projects!(jw::JuliaWorkspace)
+
+Forget every terminal dynamic-work failure, so projects that previously failed
+to index are attempted again on the next reconcile.
+
+The dynamic feature otherwise gives each project a bounded number of attempts
+(`max_failure_attempts`) and never forgets a failure on its own. That bound is
+what stops a deterministically unresolvable environment — an unsatisfiable test
+env, an unregistered dependency — from launching a fresh child process on every
+edit to its `Project.toml`. Hosts should wire this function to an explicit user
+action such as "restart language server" or "reindex", which is the intended way
+past the bound.
+
+No-op when the workspace has no dynamic feature.
+"""
+function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
+    @debug "retry_failed_dynamic_projects!"
+
+    df = jw.dynamic_feature
+    df === nothing && return
+
+    # `failed_projects`/`failure_attempts` are owned by the reactor task;
+    # clearing them from here directly would race it.
+    put!(df.in_channel, ResetFailuresMsg())
+
+    # Drop the query-side record too, so readiness gates that treat a failed key
+    # as settled re-open while the retry runs.
+    set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}())
+
+    # `_reconcile!` skips sending a message when the required set is unchanged,
+    # which it will be here — force one through.
+    empty!(df.last_required)
+    df.reconciled_once[] = false
+    _reconcile!(jw)
+
+    return
+end
+
 # Readiness
 
 """
@@ -638,7 +679,8 @@ Returns `true` if no dynamic feature is configured, or if at least one result
 has been consumed (successful or failed) and no work item is pending.
 
 This is a whole-workspace question and stays coarse: per-file consumers want
-[`derived_file_env_ready`](@ref) instead, which is settled per project.
+the internal `derived_file_env_ready` query instead, which is settled per
+project.
 """
 function is_ready(jw::JuliaWorkspace)
     @debug "is_ready"
@@ -1140,13 +1182,14 @@ end
 
 Format the entire document `uri` and return a `WorkspaceFileEdit` describing the
 edits required to apply the formatting. The formatting style and options are
-taken from the nearest `juliaformat.toml` configuration file (see
+taken from the nearest `JuliaFormat.toml` configuration file (see
 `derived_format_configuration`); when no configuration is found the `minimal`
 JuliaFormatter style is used. A `style` of `"runic"` routes formatting through
 Runic.jl.
 
 If the document is already correctly formatted the returned edit list is empty.
-Throws an error if formatting fails (for example because of a syntax error).
+Throws an error if formatting fails (for example because of a syntax error), or
+if the file is excluded by its `JuliaFormat.toml`.
 """
 function get_format_edits(jw::JuliaWorkspace, uri::URI)
     @debug "get_format_edits" uri=uri
@@ -1174,4 +1217,21 @@ function get_format_edits(jw::JuliaWorkspace, uri::URI, start_line::Integer, sto
     result, err = derived_format_range_edits(jw.runtime, uri, start_line, stop_line)
     err === nothing || error(err)
     return result
+end
+
+"""
+    is_format_excluded(jw::JuliaWorkspace, uri::URI) → Bool
+
+Whether the governing `JuliaFormat.toml` excludes `uri` from formatting through
+its `include`/`exclude` globs.
+
+Callers that format many files should consult this first: an excluded file is
+not a formatting failure but something to skip silently, whereas
+[`get_format_edits`](@ref) can only report it as an error.
+"""
+function is_format_excluded(jw::JuliaWorkspace, uri::URI)
+    @debug "is_format_excluded" uri=uri
+
+    process_from_dynamic(jw)
+    return !derived_format_configuration(jw.runtime, uri).selected
 end

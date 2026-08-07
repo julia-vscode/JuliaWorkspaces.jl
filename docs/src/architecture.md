@@ -115,7 +115,7 @@ From the bottom up:
 | `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`. |
 | `layer_environment.jl` | Resolving which project/environment a file belongs to and building its `ExternalEnv`. |
 | `layer_testitems.jl` | `@testitem` / test-setup detection. |
-| `layer_diagnostics.jl` | Aggregating syntax, lint, test, and TOML diagnostics, gated by configuration. |
+| `layer_diagnostics.jl` | Aggregating syntax, lint, test, and TOML diagnostics, gated by configuration (see [Configuration](configuration.md)). |
 | `layer_hover.jl`, `layer_completions.jl`, `layer_references.jl`, `layer_signatures.jl`, `layer_symbols.jl`, `layer_navigation.jl`, `layer_actions.jl`, `layer_formatting.jl`, `layer_misc.jl` | LSP-feature query layers. |
 
 A crucial design rule: **layers contain no LSP wire types**. They operate purely
@@ -136,7 +136,7 @@ graph TD
     H[derived_testitems] --> J[derived_diagnostics]
     Csd --> J
     G --> J
-    K[derived_lint_configuration] --> J
+    K[derived_effective_lint_config] --> J
     J --> L[derived_all_diagnostics]
     F --> Feat[feature layers:<br/>hover, completions,<br/>references, signatures, …]
     E --> Feat
@@ -272,7 +272,10 @@ which is the include manifest. The load order mirrors the dependency stack:
    `dynamic_messages.jl`, `dynamic_feature.jl`.
 3. **Core** — `types.jl`, `sourcetext.jl`, `inputs.jl`.
 4. **Layer stack** — `layer_files.jl`, `layer_syntax_trees.jl`, the bundled
-   `StaticLint`, then the remaining `layer_*.jl` files (see [Layers](#layers)).
+   `StaticLint`, then the tooling-configuration trio (`lint_rules.jl`,
+   `config_common.jl`, `lint_emission.jl` — see
+   [Configuration](configuration.md)), then the remaining `layer_*.jl` files
+   (see [Layers](#layers)).
 5. **Boundary** — `fileio.jl` (disc I/O) and `public.jl` (the public API).
 
 ## Design and roadmap

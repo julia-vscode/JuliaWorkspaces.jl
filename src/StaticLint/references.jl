@@ -155,6 +155,14 @@ function resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
     return resolved
 end
 
+function resolve_ref_from_module(x1::EXPR, ctx::ExportFilteredContext, state::TraverseState)::Bool
+    isidentifier(x1) || return false
+    n = valofid(x1)
+    n === nothing && return false
+    n in ctx.names || return false
+    return resolve_ref_from_module(x1, ctx.inner, state)
+end
+
 # Searches a module store for a binding/variable that matches the reference `x1`.
 function resolve_ref_from_module(x1::EXPR, m::SymbolServer.ModuleStore, state::TraverseState)::Bool
     meta_dict = state.meta_dict
@@ -349,6 +357,8 @@ function resolve_getfield(x::EXPR, b::Binding, state::TraverseState)::Bool
         # there): an import-bound module name (`import .Sib` + `Sib.f()`)
         # stores its tree target as plain data — continue through it.
         resolved = resolve_getfield(x, b.val, state)
+    elseif b.val isa TestSetupModuleRef
+        resolved = resolve_getfield(x, b.val, state)
     elseif b.val isa SymbolServer.ModuleStore || (b.val isa EXPR && CSTParser.defines_module(b.val))
         resolved = resolve_getfield(x, b.val, state)
     elseif b.type isa Binding
@@ -400,6 +410,18 @@ function resolve_getfield(x::EXPR, tr::TreeRef, state::TraverseState)::Bool
     # stores its plain-data stand-in — never a runtime handle in meta.
     setref!(x, cand, meta_dict)
     return true
+end
+
+function resolve_getfield(x::EXPR, tm::TestSetupModuleRef, state::TraverseState)::Bool
+    meta_dict = state.meta_dict
+    hasref(x, meta_dict) && return true
+    CSTParser.is_id_or_macroname(x) || return false
+    n = valofid(x)
+    if n !== nothing && n in tm.members
+        setref!(x, TreeRef(n, :test_setup_member, nothing, [tm.name]), meta_dict)
+        return true
+    end
+    return false
 end
 
 function is_overloaded(val::SymbolServer.SymStore, scope::Scope)

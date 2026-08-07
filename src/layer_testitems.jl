@@ -11,8 +11,61 @@ function vec_startswith(a, b)
     return true
 end
 
+# Test item discovery is scoped by `JuliaTestItems.toml`, whose v1 schema is
+# just the shared `include`/`exclude` globs. Execution settings (workers, env,
+# tag filters) are deliberately not part of it yet.
+const _TESTITEMS_CONFIG_TOP_LEVEL_KEYS = ["config-version", "include", "exclude"]
+
+Salsa.@derived function derived_testitemsconfig_files(rt)
+    files = derived_text_files(rt)
+
+    return [file for file in files if file.scheme=="file" && is_path_testitemsconfig_file(uri2filepath(file))]
+end
+
+Salsa.@derived function derived_testitemsconfig_diagnostics(rt, uri)
+    toml_content = derived_toml_syntax_tree(rt, uri)
+
+    res = Diagnostic[]
+
+    validate_key_set!(res, toml_content, _TESTITEMS_CONFIG_TOP_LEVEL_KEYS, Dict{String,String}(), "test items configuration key")
+    validate_config_version!(res, toml_content)
+    shadowing_diagnostic!(res, derived_testitemsconfig_files(rt), uri, "JuliaTestItems.toml")
+    parse_glob_list!(res, toml_content, "include")
+    parse_glob_list!(res, toml_content, "exclude")
+
+    return res
+end
+
+"""
+    derived_testitems_selected(rt, uri) -> Bool
+
+Whether test items are discovered in `uri` at all, per the governing
+`JuliaTestItems.toml`.
+"""
+Salsa.@derived function derived_testitems_selected(rt, uri)
+    uri.scheme == "file" || return true
+
+    config_uri = nearest_config(derived_testitemsconfig_files(rt), uri)
+    config_uri === nothing && return true
+
+    relpath = config_relative_path(config_dir_of(config_uri), uri2filepath(uri))
+    relpath === nothing && return true
+
+    toml_content = derived_toml_syntax_tree(rt, config_uri)
+    discard = Diagnostic[]
+
+    return path_selected(parse_path_filter!(discard, toml_content), relpath)
+end
+
 Salsa.@derived function derived_testitems(rt, uri)
     @debug "derived_testitems" uri=uri
+
+    # Gating the per-file query covers every consumer at once — the whole
+    # workspace sweep, the LS publish path and the test runner all read
+    # through here.
+    if !derived_testitems_selected(rt, uri)
+        return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
+    end
 
     testitems = []
     testsetups = []

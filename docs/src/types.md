@@ -18,6 +18,8 @@ Diagnostic
 ```@docs
 DynamicMode
 DEFAULT_SYMBOLCACHE_UPSTREAM
+DEFAULT_MAX_FAILURE_ATTEMPTS
+DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS
 ```
 
 ## Completion result types
@@ -75,6 +77,18 @@ InlayHintConfig
 CodeActionInfo
 TextEditResult
 WorkspaceFileEdit
+```
+
+## Configuration types
+
+See [Configuration](configuration.md) for the file format these describe.
+
+```@docs
+LintRule
+EffectiveLintConfig
+EffectiveFormatConfig
+GlobPattern
+PathFilter
 ```
 
 ## Internal types

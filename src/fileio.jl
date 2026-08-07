@@ -25,10 +25,21 @@ function is_path_lintconfig_file(path)
 end
 
 function is_path_formatconfig_file(path)
+    isvalid(path) || return false
     basename_lower_case = basename(lowercase(path))
 
     return basename_lower_case == "juliaformat.toml"
 end
+
+function is_path_testitemsconfig_file(path)
+    isvalid(path) || return false
+    basename_lower_case = basename(lowercase(path))
+
+    return basename_lower_case == "juliatestitems.toml"
+end
+
+is_path_toolconfig_file(path) =
+    is_path_lintconfig_file(path) || is_path_formatconfig_file(path) || is_path_testitemsconfig_file(path)
 
 function is_path_julia_file(path)
     _, ext = splitext(path)
@@ -69,9 +80,7 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
         "toml"
     elseif is_path_manifest_file(path)
         "toml"
-    elseif is_path_lintconfig_file(path)
-        "toml"
-    elseif is_path_formatconfig_file(path)
+    elseif is_path_toolconfig_file(path)
         "toml"
     elseif is_path_markdown_file(path)
         "markdown"
@@ -106,6 +115,9 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
     return TextFile(uri, SourceText(content, language_id))
 end
 
+# Directory names that are never worth descending into. See issue #1415 for details.
+const SKIPPED_DIRNAMES = Set([".git", ".svn", ".hg", "node_modules"])
+
 """
     read_path_into_textdocuments(uri; ignore_io_errors=false, file_limit=nothing)
         -> Union{Vector{TextFile}, Nothing}
@@ -139,11 +151,23 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_lim
     # read; contents are read afterwards with per-file yields.
     candidate_paths = String[]
     julia_file_count = 0
-    for (root, _, files) in walkdir(path, onerror=x -> x)
+    # Explicit walk instead of `walkdir` because it's hard to stop it from
+    # recursing into the skipped directories
+    remaining_dirs = [path]
+    while !isempty(remaining_dirs)
+        dir = popfirst!(remaining_dirs)
         yield()
-        for file in files
-            filepath = joinpath(root, file)
-            if is_path_julia_file(filepath)
+        entries = try
+            readdir(dir, join=true)
+        catch
+            continue
+        end
+        for filepath in entries
+            if !islink(filepath) && isdir(filepath)
+                if basename(filepath) ∉ SKIPPED_DIRNAMES
+                    push!(remaining_dirs, filepath)
+                end
+            elseif is_path_julia_file(filepath)
                 julia_file_count += 1
                 if file_limit !== nothing && julia_file_count > file_limit
                     return nothing
@@ -151,8 +175,7 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_lim
                 push!(candidate_paths, filepath)
             elseif is_path_project_file(filepath) ||
                         is_path_manifest_file(filepath) ||
-                        is_path_lintconfig_file(filepath) ||
-                        is_path_formatconfig_file(filepath) ||
+                        is_path_toolconfig_file(filepath) ||
                         is_path_markdown_file(filepath) ||
                         is_path_juliamarkdown_file(filepath)
                 push!(candidate_paths, filepath)
@@ -240,7 +263,7 @@ function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false)
 end
 
 """
-    workspace_from_folders(workspace_folders::Vector{String}; dynamic=DynamicOff, symbolcache_download=false, symbolcache_upstream=DEFAULT_SYMBOLCACHE_UPSTREAM)
+    workspace_from_folders(workspace_folders::Vector{String}; dynamic=DynamicOff, symbolcache_download=false, symbolcache_upstream=DEFAULT_SYMBOLCACHE_UPSTREAM, store_path=nothing, max_concurrent_djps=4, max_failure_attempts=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
 
 Create a new [`JuliaWorkspace`](@ref) and populate it by recursively reading
 every folder in `workspace_folders` from disc. This is the most convenient entry
@@ -253,14 +276,17 @@ point for analysing a project that lives on the local file system.
   symbol caches from `symbolcache_upstream` instead of indexing locally.
 - `symbolcache_upstream::String`: Upstream URL for symbol-cache downloads.
   Defaults to [`DEFAULT_SYMBOLCACHE_UPSTREAM`](@ref).
+- `store_path`, `max_concurrent_djps`, `max_failure_attempts`,
+  `djp_request_timeout_seconds`: forwarded verbatim to [`JuliaWorkspace`](@ref),
+  which documents them.
 
 # Returns
 - A [`JuliaWorkspace`](@ref) containing all files found under the given folders.
 """
-function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM)
+function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, store_path::Union{Nothing,String}=nothing, max_concurrent_djps::Int=4, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
     @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic symbolcache_download=symbolcache_download
 
-    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream)
+    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream, store_path=store_path, max_concurrent_djps=max_concurrent_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds)
 
     for folder in workspace_folders
         add_folder_from_disc!(jw, folder)
