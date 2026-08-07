@@ -179,6 +179,10 @@ function _format_text(text::AbstractString, config::EffectiveFormatConfig)
     end
 end
 
+# Sentinel error value for files excluded through `include`/`exclude` globs.
+# The public API compares against it by identity (`===`) to distinguish
+# exclusion from real formatting failures, so this exact object must be
+# returned wherever exclusion is reported.
 const _FORMAT_EXCLUDED_MESSAGE = "File is excluded by JuliaFormat.toml."
 
 # Returns `(formatted_text::Union{String,Nothing}, error::Union{String,Nothing})`.
@@ -236,9 +240,7 @@ Salsa.@derived function derived_format_range_edits(rt, uri, start_line, stop_lin
     st = tf.content
     oldcontent = st.content
     config = derived_format_configuration(rt, uri)
-    # Range formatting is an editor gesture; an excluded file simply yields no
-    # edits rather than surfacing an error the user did not ask for.
-    config.selected || return (WorkspaceFileEdit(uri, TextEditResult[]), nothing)
+    config.selected || return (nothing, _FORMAT_EXCLUDED_MESSAGE)
 
     original_lines = collect(eachline(IOBuffer(oldcontent); keep=true))
 

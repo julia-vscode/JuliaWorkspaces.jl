@@ -1188,14 +1188,16 @@ JuliaFormatter style is used. A `style` of `"runic"` routes formatting through
 Runic.jl.
 
 If the document is already correctly formatted the returned edit list is empty.
-Throws an error if formatting fails (for example because of a syntax error), or
-if the file is excluded by its `JuliaFormat.toml`.
+Returns `nothing` if the file is excluded by its `JuliaFormat.toml`
+`include`/`exclude` globs. Throws an error if formatting fails (for example
+because of a syntax error).
 """
 function get_format_edits(jw::JuliaWorkspace, uri::URI)
     @debug "get_format_edits" uri=uri
 
     process_from_dynamic(jw)
     result, err = derived_format_edits(jw.runtime, uri)
+    err === _FORMAT_EXCLUDED_MESSAGE && return nothing
     err === nothing || error(err)
     return result
 end
@@ -1208,13 +1210,15 @@ document `uri` and return a `WorkspaceFileEdit`. Configuration is resolved the
 same way as for full-document formatting.
 
 If the targeted range is already correctly formatted the returned edit list is
-empty. Throws an error if formatting fails.
+empty. Returns `nothing` if the file is excluded by its `JuliaFormat.toml`
+`include`/`exclude` globs. Throws an error if formatting fails.
 """
 function get_format_edits(jw::JuliaWorkspace, uri::URI, start_line::Integer, stop_line::Integer)
     @debug "get_format_edits" uri=uri start_line=start_line stop_line=stop_line
 
     process_from_dynamic(jw)
     result, err = derived_format_range_edits(jw.runtime, uri, start_line, stop_line)
+    err === _FORMAT_EXCLUDED_MESSAGE && return nothing
     err === nothing || error(err)
     return result
 end
@@ -1225,9 +1229,9 @@ end
 Whether the governing `JuliaFormat.toml` excludes `uri` from formatting through
 its `include`/`exclude` globs.
 
-Callers that format many files should consult this first: an excluded file is
-not a formatting failure but something to skip silently, whereas
-[`get_format_edits`](@ref) can only report it as an error.
+Callers that format many files can consult this to skip excluded files cheaply
+before reading their content; [`get_format_edits`](@ref) reports exclusion by
+returning `nothing`.
 """
 function is_format_excluded(jw::JuliaWorkspace, uri::URI)
     @debug "is_format_excluded" uri=uri
