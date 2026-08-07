@@ -107,7 +107,7 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
 end
 
 # Directory names that are never worth descending into. See issue #1415 for details.
-const SKIPPED_WALKDIR_DIRNAMES = Set([".git", ".svn", ".hg", "node_modules"])
+const SKIPPED_DIRNAMES = Set([".git", ".svn", ".hg", "node_modules"])
 
 """
     read_path_into_textdocuments(uri; ignore_io_errors=false, file_limit=nothing)
@@ -142,12 +142,23 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_lim
     # read; contents are read afterwards with per-file yields.
     candidate_paths = String[]
     julia_file_count = 0
-    for (root, dirs, files) in walkdir(path, onerror=x -> x)
+    # Explicit walk instead of `walkdir` because it's hard to stop it from
+    # recursing into the skipped directories
+    remaining_dirs = [path]
+    while !isempty(remaining_dirs)
+        dir = popfirst!(remaining_dirs)
         yield()
-        filter!(d -> d ∉ SKIPPED_WALKDIR_DIRNAMES, dirs)
-        for file in files
-            filepath = joinpath(root, file)
-            if is_path_julia_file(filepath)
+        entries = try
+            readdir(dir, join=true)
+        catch
+            continue
+        end
+        for filepath in entries
+            if !islink(filepath) && isdir(filepath)
+                if basename(filepath) ∉ SKIPPED_DIRNAMES
+                    push!(remaining_dirs, filepath)
+                end
+            elseif is_path_julia_file(filepath)
                 julia_file_count += 1
                 if file_limit !== nothing && julia_file_count > file_limit
                     return nothing
