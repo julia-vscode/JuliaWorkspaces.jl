@@ -19,18 +19,38 @@ end
     using JuliaWorkspaces: read_path_into_textdocuments
     using JuliaWorkspaces.URIs2: filepath2uri
 
-    dir = mktempdir()
-    for i in 1:5
-        write(joinpath(dir, "f$i.jl"), "f$i() = $i\n")
+    mktempdir() do dir
+        for i in 1:5
+            write(joinpath(dir, "f$i.jl"), "f$i() = $i\n")
+        end
+        write(joinpath(dir, "Project.toml"), "name = \"X\"\n")
+
+        unlimited = read_path_into_textdocuments(filepath2uri(dir))
+        @test length(unlimited) == 6
+
+        # Only Julia files count against the limit.
+        at_limit = read_path_into_textdocuments(filepath2uri(dir), file_limit=5)
+        @test length(at_limit) == 6
+
+        @test read_path_into_textdocuments(filepath2uri(dir), file_limit=4) === nothing
     end
-    write(joinpath(dir, "Project.toml"), "name = \"X\"\n")
+end
 
-    unlimited = read_path_into_textdocuments(filepath2uri(dir))
-    @test length(unlimited) == 6
+@testitem "read_path_into_textdocuments skips .git and other VCS/dependency dirs" begin
+    using JuliaWorkspaces: read_path_into_textdocuments
+    using JuliaWorkspaces.URIs2: filepath2uri
 
-    # Only Julia files count against the limit.
-    at_limit = read_path_into_textdocuments(filepath2uri(dir), file_limit=5)
-    @test length(at_limit) == 6
+    mktempdir() do dir
+        write(joinpath(dir, "a.jl"), "a() = 1\n")
 
-    @test read_path_into_textdocuments(filepath2uri(dir), file_limit=4) === nothing
+        for skipped in (".git", ".svn", ".hg", "node_modules")
+            skipped_dir = joinpath(dir, skipped, "nested")
+            mkpath(skipped_dir)
+            write(joinpath(skipped_dir, "b.jl"), "b() = 2\n")
+        end
+
+        files = read_path_into_textdocuments(filepath2uri(dir))
+        @test length(files) == 1
+        @test only(files).uri == filepath2uri(joinpath(dir, "a.jl"))
+    end
 end
