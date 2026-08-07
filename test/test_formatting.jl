@@ -356,7 +356,7 @@ end
                    occursin("[options]", d.message), diags)
 end
 
-@testitem "Format: exclude suppresses formatting" begin
+@testitem "Format: excluded file returns nothing" begin
     using JuliaWorkspaces.URIs2: URI
 
     source = "foo(a,b)\n"
@@ -367,12 +367,60 @@ end
     JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/excl/JuliaFormat.toml"),
         SourceText("style = \"default\"\nexclude = [\"gen/**\"]\n", "toml")))
 
-    @test_throws Exception JuliaWorkspaces.get_format_edits(jw, uri)
+    @test JuliaWorkspaces.is_format_excluded(jw, uri)
+    @test JuliaWorkspaces.get_format_edits(jw, uri) === nothing
+    # Range formatting reports exclusion the same way.
+    @test JuliaWorkspaces.get_format_edits(jw, uri, 1, 1) === nothing
 
     # A sibling outside the excluded tree still formats.
     other = URI("file:///fmt/excl/src/code.jl")
     JuliaWorkspaces.add_file!(jw, TextFile(other, SourceText(source, "julia")))
     @test occursin("foo(a, b)", JuliaWorkspaces.get_format_edits(jw, other).edits[1].new_text)
+end
+
+@testitem "Format config: dropped JuliaFormatter option `ignore` is diagnosed but not fatal" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    config_uri = URI("file:///fmt/ignopt/JuliaFormat.toml")
+    uri = URI("file:///fmt/ignopt/code.jl")
+
+    jw = JuliaWorkspace()
+    JuliaWorkspaces.add_file!(jw, TextFile(uri, SourceText("foo(a,b)\n", "julia")))
+    # `ignore` was a JuliaFormatter.Options field up to 2.4 and no longer exists;
+    # it must surface as an invalid-option diagnostic while formatting proceeds.
+    JuliaWorkspaces.add_file!(jw, TextFile(config_uri,
+        SourceText("style = \"default\"\n[options]\nignore = [\"foo.jl\"]\n", "toml")))
+
+    diags = get_diagnostic(jw, config_uri)
+    @test any(d -> occursin("Invalid format option `ignore`", d.message), diags)
+
+    edit = JuliaWorkspaces.get_format_edits(jw, uri)
+    @test occursin("foo(a, b)", edit.edits[1].new_text)
+end
+
+@testitem "Format: new JuliaFormatter option enforce_triplequoted_docstrings is honored" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # Formatted under the default style except for the single-quoted docstring.
+    # enforce_triplequoted_docstrings (new in JuliaFormatter 2.11, default true)
+    # only applies while docstrings are formatted at all.
+    source = "\"doc\"\nfoo() = 1\n"
+
+    on_uri = URI("file:///fmt/tqd/on/code.jl")
+    jw = JuliaWorkspace()
+    JuliaWorkspaces.add_file!(jw, TextFile(on_uri, SourceText(source, "julia")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/tqd/on/JuliaFormat.toml"),
+        SourceText("style = \"default\"\n[options]\nformat_docstrings = true\n", "toml")))
+    edit = JuliaWorkspaces.get_format_edits(jw, on_uri)
+    @test !isempty(edit.edits)
+    @test occursin("\"\"\"", edit.edits[1].new_text)
+
+    # Turning the new option off leaves the docstring quoting untouched.
+    off_uri = URI("file:///fmt/tqd/off/code.jl")
+    JuliaWorkspaces.add_file!(jw, TextFile(off_uri, SourceText(source, "julia")))
+    JuliaWorkspaces.add_file!(jw, TextFile(URI("file:///fmt/tqd/off/JuliaFormat.toml"),
+        SourceText("style = \"default\"\n[options]\nformat_docstrings = true\nenforce_triplequoted_docstrings = false\n", "toml")))
+    @test isempty(JuliaWorkspaces.get_format_edits(jw, off_uri).edits)
 end
 
 @testitem "Format: override block re-scopes options by path" begin
