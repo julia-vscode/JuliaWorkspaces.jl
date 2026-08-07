@@ -6,7 +6,7 @@ import ..derived_include_dict
 import ..ItemRef
 import ..MethodArity
 
-using AutoHashEquals: @auto_hash_equals
+using ..AutoHashEquals: @auto_hash_equals
 
 function hasfile end
 
@@ -15,9 +15,9 @@ include("exception_types.jl")
 using ..SymbolServer, CSTParser, ..URIs2
 using ..URIs2: URI
 
-using CSTParser: EXPR, isidentifier, setparent!, valof, headof, hastrivia, parentof, isoperator, ispunctuation, to_codeobject
+using ..CSTParser: EXPR, isidentifier, setparent!, valof, headof, hastrivia, parentof, isoperator, ispunctuation, to_codeobject
 # CST utils
-using CSTParser: is_getfield, isassignment, isdeclaration, isbracketed, iskwarg, iscall, iscurly, isunarycall, isunarysyntax, isbinarycall, isbinarysyntax, issplat, defines_function, is_getfield_w_quotenode, iswhere, iskeyword, isstringliteral, isparameters, isnonstdid, istuple
+using ..CSTParser: is_getfield, isassignment, isdeclaration, isbracketed, iskwarg, iscall, iscurly, isunarycall, isunarysyntax, isbinarycall, isbinarysyntax, issplat, defines_function, is_getfield_w_quotenode, iswhere, iskeyword, isstringliteral, isparameters, isnonstdid, istuple
 using ..SymbolServer: VarRef
 
 const noname = EXPR(:noname, nothing, nothing, 0, 0, nothing, nothing, nothing)
