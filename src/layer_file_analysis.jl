@@ -636,18 +636,22 @@ end
 _store_name_symbol(@nospecialize(_)) = nothing
 
 # Resolve a written qualifier + name (`["Base"], :relpath`) to its store via the
-# env symbols, following a `VarRef`. Returns the store or `nothing`.
+# env symbols, following a `VarRef`. Returns the store or `nothing`. Member
+# access goes through `maybe_getfield`, not a raw `vals` probe: a module member
+# may live in a USED module's exports rather than the module's own binding
+# table (on Julia 1.11, `Base.AbstractString` reaches Core's export through
+# Base's `using Core` — `Base` has no binding of its own).
 function _resolve_qualified_store(env, qualifier::Vector{String}, name_sym::Symbol)
     isempty(qualifier) && return nothing
     syms = StaticLint.getsymbols(env)
     store = get(syms, Symbol(qualifier[1]), nothing)
     store isa SymbolServer.ModuleStore || return nothing
     for i in 2:length(qualifier)
-        sub = StaticLint.maybe_lookup(get(store.vals, Symbol(qualifier[i]), nothing), env)
+        sub = StaticLint.maybe_lookup(SymbolServer.maybe_getfield(Symbol(qualifier[i]), store, syms), env)
         sub isa SymbolServer.ModuleStore || return nothing
         store = sub
     end
-    val = get(store.vals, name_sym, nothing)
+    val = SymbolServer.maybe_getfield(name_sym, store, syms)
     val === nothing && return nothing
     return StaticLint.maybe_lookup(val, env)
 end
