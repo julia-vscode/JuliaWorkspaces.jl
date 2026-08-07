@@ -4748,13 +4748,19 @@ end
               (:Function, Function), (:Tuple, Tuple)]
 
     _, meta_dict, jw = parse_and_pass("x = 1\n")
-    syms = get_env(jw).symbols
+    env = get_env(jw)
+    syms = env.symbols
     # `Core` then `Base`, which is the order a bare name is in scope under, so a
     # row never has to hardcode which of the two defines its type (`DenseArray`
-    # is `Core`'s, `AbstractRange` is `Base`'s).
+    # is `Core`'s, `AbstractRange` is `Base`'s). Gated on exportedness, like
+    # `resolve_ref_from_module`: on Julia 1.11 `Core.vals` carries a phantom
+    # non-exported `Rational`/`Complex` constructor `FunctionStore` that scope
+    # resolution never returns.
     function lookup(n)
         for m in (:Core, :Base)
-            haskey(syms, m) && haskey(syms[m], n) && return syms[m][n]
+            haskey(syms, m) || continue
+            SL.isexportedby(n, syms[m]) || continue
+            return SL.maybe_lookup(syms[m][n], env)
         end
         return nothing
     end

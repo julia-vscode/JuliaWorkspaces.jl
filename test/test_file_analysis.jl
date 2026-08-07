@@ -2555,7 +2555,9 @@ end
     @test ab == ba
     flagged = filter(m -> occursin("No method matching", m) || occursin("method call error", m), ab)
     @test length(flagged) == 1
-    @test occursin("target(::Int64)", only(flagged))
+    # `w`'s annotation is the platform-width `Int` alias, and the message names
+    # the aliased type: `Int64` on 64-bit, `Int32` on 32-bit.
+    @test occursin("target(::$Int)", only(flagged))
 end
 
 @testitem "parity: bare identifier, closure callee flags a definite mismatch" setup=[FileAnalysisWS] begin
@@ -3844,9 +3846,16 @@ end
     # project-less root: the resolver and this lookup share the stdlib-only env
     env = JuliaWorkspaces.derived_stdlib_only_env(jw.runtime)
     syms = SL.getsymbols(env)
-    function lookup(n)   # the store-side operand, as the store pin builds it
+    # The store-side operand, as scope resolution binds a bare name: gated on
+    # exportedness, like `resolve_ref_from_module`. A raw `vals` probe is
+    # wrong on Julia 1.11, where `Core.vals` carries a phantom non-exported
+    # `Rational`/`Complex` constructor `FunctionStore` (a constructor method
+    # the crawl attributes to Core) that scope resolution never returns.
+    function lookup(n)
         for m in (:Core, :Base)
-            haskey(syms, m) && haskey(syms[m], Symbol(n)) && return syms[m][Symbol(n)]
+            haskey(syms, m) || continue
+            SL.isexportedby(Symbol(n), syms[m]) || continue
+            return SL.maybe_lookup(syms[m][Symbol(n)], env)
         end
         return nothing
     end
