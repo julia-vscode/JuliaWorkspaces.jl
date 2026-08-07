@@ -1,4 +1,0 @@
-# Fixture sources: deliberately malformed in places, so their syntax is not
-# this project's concern.
-[rules]
-syntax_errors = "off"
