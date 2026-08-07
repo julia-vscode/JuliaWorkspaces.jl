@@ -216,8 +216,10 @@ end
     _build_tree_structure(rt, root::URI) -> (builders, file_modules)
 
 Pass 1 of `derived_module_tree`: splices `root`'s (transitive) include closure
-into a per-root module structure, per the normative splicing semantics (see
-the milestone design doc / task brief). Returns the raw mutable builders
+into a per-root module structure, reproducing Julia's textual-splice semantics:
+an `include` is an in-place expansion at the point it appears, so a name's
+position in the splice order is what decides which definition wins. Returns the
+raw mutable builders
 (keyed by absolute module path) and the `file → absolute splice path` map;
 `derived_module_tree` freezes the builders into plain-data `ModuleNode`s.
 
@@ -897,6 +899,79 @@ Salsa.@derived function derived_method_arities_index(rt, root)
             _resolve_extension_qualifier(modpaths, loc, item.qualifier)
         (resolved === nothing || resolved ∉ modpaths) && return
         push!(get!(() -> MethodArity[], result, (resolved, item.name)), item.arity)
+    end
+    return result
+end
+
+"""
+    derived_method_signatures(rt, root, path, name) -> NameMethods
+
+The signature records of every method of `name` at module `path`, plus the
+completeness markers. Projection of one per-root node — a single lookup.
+"""
+Salsa.@derived function derived_method_signatures(rt, root, path, name)
+    @debug "derived_method_signatures" root=root path=path name=name
+
+    return get(derived_method_signatures_index(rt, root), (path, name), EMPTY_NAME_METHODS)
+end
+
+# Callable kinds whose items participate in the signature set. `:macro_declared`
+# rows are names minted by a macro — shape unknown by construction.
+_is_callable_kind(kind::Symbol) =
+    kind in (:function, :macro, :struct, :mutable_struct, :const, :global, :assignment)
+
+"""
+    derived_method_signatures_index(rt, root) -> Dict{Tuple{Vector{String},String},NameMethods}
+
+Sibling of [`derived_method_arities_index`](@ref): same walk, same keying,
+carrying type records instead of counts. Kept as a separate node so a
+type-only edit invalidates this index while the arity index backdates.
+"""
+Salsa.@derived function derived_method_signatures_index(rt, root)
+    @debug "derived_method_signatures_index" root=root
+
+    tree = derived_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    sigs = Dict{Tuple{Vector{String},String},Set{LocatedSignature}}()
+    unknown = Set{Tuple{Vector{String},String}}()
+    fwd = Set{Tuple{Vector{String},String}}()
+
+    # Widened past the walk's default binding kinds: `:macro_declared` rows
+    # never carry a signature, but they must still reach the `unknown` marker.
+    #
+    # Methods a module defines only when it RUNS — through `eval`, or a macro
+    # nothing here can expand — are invisible to these records and deliberately
+    # unmarked. A marker cannot be scoped soundly: such code can add methods to
+    # any function in any module, so honouring it would mean withholding every
+    # type opinion everywhere rather than in one module. The blind spot is
+    # accepted instead.
+    _walk_spliced_binding_items!(rt, root, String[], nothing, Set{URI}([root]);
+                                 kinds=(_BINDING_ITEM_KINDS..., :macro_declared)) do F, item, loc
+        resolved = isempty(item.qualifier) ? loc :
+            _resolve_extension_qualifier(modpaths, loc, item.qualifier)
+        (resolved === nothing || resolved ∉ modpaths) && return
+        key = (resolved, item.name)
+        if item.method_sig !== nothing
+            push!(get!(() -> Set{LocatedSignature}(), sigs, key),
+                LocatedSignature(loc, item.method_sig))
+        elseif item.kind in (:struct, :mutable_struct) && !isempty(item.ctor_sigs)
+            for cs in item.ctor_sigs
+                push!(get!(() -> Set{LocatedSignature}(), sigs, key), LocatedSignature(loc, cs))
+            end
+        elseif item.kind === :macro_declared
+            push!(unknown, key)
+        elseif item.kind in (:function, :macro) && item.arity === nothing
+            push!(fwd, key)
+        elseif _is_callable_kind(item.kind) && item.arity !== nothing
+            # A callable with a count but no readable signature.
+            push!(unknown, key)
+        end
+    end
+
+    result = Dict{Tuple{Vector{String},String},NameMethods}()
+    for key in union(keys(sigs), unknown, fwd)
+        result[key] = NameMethods(get(() -> Set{LocatedSignature}(), sigs, key),
+            key in unknown, key in fwd)
     end
     return result
 end
