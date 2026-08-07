@@ -107,7 +107,7 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
 end
 
 # Directory names that are never worth descending into. See issue #1415 for details.
-const SKIPPED_WALKDIR_DIRNAMES = (".git", ".svn", ".hg", "node_modules")
+const SKIPPED_WALKDIR_DIRNAMES = Set([".git", ".svn", ".hg", "node_modules"])
 
 """
     read_path_into_textdocuments(uri; ignore_io_errors=false, file_limit=nothing)
