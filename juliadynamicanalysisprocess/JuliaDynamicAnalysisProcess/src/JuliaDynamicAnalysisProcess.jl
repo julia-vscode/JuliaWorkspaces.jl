@@ -86,6 +86,27 @@ JSONRPC.@message_dispatcher dispatch_msg begin
     JuliaDynamicAnalysisProtocol.create_standalone_project_request_type => create_standalone_project_request
 end
 
+# Executed precompile workload: every dynamic-analysis child process pays at
+# runtime for whatever of the symbol-extraction pipeline is not in this
+# package's image. Reflecting over the modules loaded during precompilation
+# (this package plus its stdlib deps) compiles the same getenvtree/symbols
+# machinery that `get_store` runs on real environments.
+function _precompile_workload_()
+    try
+        env_symbols = SymbolServer.getenvtree()
+        visited = Base.IdSet{Module}([Base, Core])
+        SymbolServer.symbols(env_symbols, nothing, SymbolServer.getallns(), visited)
+    catch err
+        # A failed workload must never break the analysis process itself.
+        @warn "JuliaDynamicAnalysisProcess precompile workload failed" exception = (err, catch_backtrace())
+    end
+    return nothing
+end
+
+if ccall(:jl_generating_output, Cint, ()) == 1
+    _precompile_workload_()
+end
+
 function serve(pipename, error_handler=nothing)
     conn = Sockets.connect(pipename)
 
