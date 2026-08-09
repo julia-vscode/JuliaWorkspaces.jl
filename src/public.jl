@@ -556,21 +556,38 @@ function get_diagnostics(jw::JuliaWorkspace)
 end
 
 """
-    get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+    get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing, progress_callback::Union{Nothing,Function}=nothing)
 
 Wait for the dynamic environment to finish loading, then return all diagnostics.
 This is useful for CLI tools that want the full, accurate set of diagnostics.
 If `cancel_token` is provided, throws `CancellationTokens.OperationCanceledException`
 when the token is cancelled.
+If `progress_callback` is provided, it is called as `progress_callback(done::Int,
+total::Int)` after each file's diagnostics are computed. The count restarts when
+newly loaded environments require another pass over the workspace.
 """
-function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing, progress_callback::Union{Nothing,Function}=nothing)
     @debug "get_diagnostics_blocking"
 
     # Each get_diagnostics call may trigger new lazy inputs (e.g., standalone project,
     # then test environment). Loop until no new background tasks are spawned.
     local result
     while true
-        result = get_diagnostics(jw)
+        if progress_callback === nothing
+            result = get_diagnostics(jw)
+        else
+            # Per-file variant of derived_all_diagnostics so progress can be
+            # reported between files; results are identical since it iterates
+            # the same file set with the same per-file derived function.
+            process_from_dynamic(jw)
+            files = derived_text_files(jw.runtime)
+            result = Dict{URI,Vector{Diagnostic}}()
+            for (k, uri) in enumerate(files)
+                result[uri] = derived_diagnostics(jw.runtime, uri)
+                progress_callback(k, length(files))
+                yield()
+            end
+        end
         is_ready(jw) && break
         wait_until_ready(jw; cancel_token=cancel_token)
     end
