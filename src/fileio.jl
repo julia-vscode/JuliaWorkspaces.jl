@@ -163,7 +163,15 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_lim
             continue
         end
         for filepath in entries
-            if !islink(filepath) && isdir(filepath)
+            descend = try
+                !islink(filepath) && isdir(filepath)
+            catch err
+                # Foreign/broken reparse points (e.g. WSL-created symlinks) make
+                # lstat throw on Julia 1.11+; skip entries we cannot stat.
+                is_walkdir_error(err) || rethrow()
+                continue
+            end
+            if descend
                 if basename(filepath) ∉ SKIPPED_DIRNAMES
                     push!(remaining_dirs, filepath)
                 end
