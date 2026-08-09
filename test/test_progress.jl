@@ -80,6 +80,34 @@ end
     @test key ∉ keys(df.child_progress)
 end
 
+@testitem "workspace_from_folders forwards progress_callback" begin
+    using JuliaWorkspaces: workspace_from_folders, DynamicIndexingOnly
+
+    cb = (::String, ::String, ::Int) -> nothing
+    jw = workspace_from_folders([mktempdir()]; dynamic=DynamicIndexingOnly, store_path=mktempdir(), progress_callback=cb)
+    @test jw.dynamic_feature.progress_callback === cb
+end
+
+@testitem "get_diagnostics_blocking per-file progress" begin
+    using JuliaWorkspaces: workspace_from_folders, get_diagnostics_blocking
+
+    dir = mktempdir()
+    write(joinpath(dir, "a.jl"), "x = 1\n")
+    write(joinpath(dir, "b.jl"), "function foo( end\n")
+
+    jw = workspace_from_folders([dir])
+    expected = get_diagnostics_blocking(jw)
+
+    calls = Tuple{Int,Int}[]
+    result = get_diagnostics_blocking(jw, progress_callback=(done, total) -> push!(calls, (done, total)))
+
+    # Same result as the callback-free path, with one in-order report per file.
+    @test result == expected
+    n = length(expected)
+    @test first.(calls) == 1:n
+    @test all(==(n), last.(calls))
+end
+
 @testitem "Refresh progress lands on the refresh bar" begin
     using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, ProcessProgressMsg,
         CreateStandaloneProjectKey, handle!
