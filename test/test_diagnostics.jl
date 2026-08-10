@@ -2244,6 +2244,68 @@ end
     @test derived_file_env_ready(jw.runtime, runtests_uri)
 end
 
+@testitem "environment_errors: a failed env resolve becomes a diagnostic on Project.toml" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, process_from_dynamic, derived_package, get_diagnostic,
+        _test_environment_key, FailedResult, retry_failed_dynamic_projects!,
+        input_dynamic_failure_messages
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
+
+    dir = uri2filepath(filepath2uri(mktempdir()))  # round-trip: drive-letter casing must match production-derived keys on Windows
+    mkpath(joinpath(dir, "src"))
+    mkpath(joinpath(dir, "test"))
+    files = [
+        joinpath(dir, "Project.toml") => ("""
+        name = "EnvErrDiag"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee48"
+        version = "0.1.0"
+        """, "toml"),
+        joinpath(dir, "src", "EnvErrDiag.jl") => ("module EnvErrDiag\nend\n", "julia"),
+        joinpath(dir, "test", "runtests.jl") => ("using Test\n", "julia"),
+    ]
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    for (path, (content, lang)) in files
+        write(path, content)
+        _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+
+    package_uri = filepath2uri(dir)
+    key = _test_environment_key(jw.runtime, package_uri, derived_package(jw.runtime, package_uri))
+    project_toml_uri = filepath2uri(joinpath(dir, "Project.toml"))
+
+    message = "Failed to resolve the test environment of package 'EnvErrDiag' at $dir: boom."
+    put!(jw.dynamic_feature.out_channel, FailedResult(key, message))
+    process_from_dynamic(jw)
+
+    @test input_dynamic_failure_messages(jw.runtime)[key] == message
+
+    diags = get_diagnostic(jw, project_toml_uri)
+    env_diags = filter(d -> d.code === :environment_errors, diags)
+    @test length(env_diags) == 1
+    @test env_diags[1].message == message
+    @test env_diags[1].severity === :information
+    @test env_diags[1].range == 1:1
+
+    # A skipped work item (empty message, e.g. dynamic indexing disabled)
+    # settles readiness without producing a diagnostic — exercised via a second
+    # workspace to keep the failure sets independent.
+    jw2 = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    for (path, (content, lang)) in files
+        _add_file!(jw2, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+    put!(jw2.dynamic_feature.out_channel, FailedResult(key))
+    process_from_dynamic(jw2)
+    @test isempty(input_dynamic_failure_messages(jw2.runtime))
+    @test !any(d -> d.code === :environment_errors, get_diagnostic(jw2, project_toml_uri))
+
+    # The retry entry point clears the query-side record, so the diagnostic
+    # disappears while the retry runs.
+    retry_failed_dynamic_projects!(jw)
+    @test isempty(input_dynamic_failure_messages(jw.runtime))
+    @test !any(d -> d.code === :environment_errors, get_diagnostic(jw, project_toml_uri))
+end
+
 @testitem "env gating: test-environment keys agree between producer and consumers" begin
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, _add_file!,
         _set_active_project!, derived_package, derived_required_dynamic_projects,

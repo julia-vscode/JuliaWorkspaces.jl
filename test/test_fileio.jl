@@ -36,6 +36,32 @@ end
     end
 end
 
+@testitem "read_path_into_textdocuments skips entries it cannot stat" begin
+    using JuliaWorkspaces: read_path_into_textdocuments
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    if Sys.islinux()
+        mktempdir() do dir
+            write(joinpath(dir, "a.jl"), "a() = 1\n")
+
+            noexec = joinpath(dir, "noexec")
+            mkdir(noexec)
+            write(joinpath(noexec, "hidden.jl"), "h() = 1\n")
+            # Readable but not searchable: `readdir` succeeds, but `lstat` on
+            # the entries throws EACCES — the same shape as a broken reparse
+            # point on Windows.
+            chmod(noexec, 0o400)
+            try
+                files = read_path_into_textdocuments(filepath2uri(dir), ignore_io_errors=true)
+                @test length(files) == 1
+                @test only(files).uri == filepath2uri(joinpath(dir, "a.jl"))
+            finally
+                chmod(noexec, 0o700)
+            end
+        end
+    end
+end
+
 @testitem "read_path_into_textdocuments skips .git and other VCS/dependency dirs" begin
     using JuliaWorkspaces: read_path_into_textdocuments
     using JuliaWorkspaces.URIs2: filepath2uri

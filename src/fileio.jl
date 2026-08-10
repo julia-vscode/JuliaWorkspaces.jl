@@ -163,7 +163,15 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_lim
             continue
         end
         for filepath in entries
-            if !islink(filepath) && isdir(filepath)
+            descend = try
+                !islink(filepath) && isdir(filepath)
+            catch err
+                # Foreign/broken reparse points (e.g. WSL-created symlinks) make
+                # lstat throw on Julia 1.11+; skip entries we cannot stat.
+                is_walkdir_error(err) || rethrow()
+                continue
+            end
+            if descend
                 if basename(filepath) ∉ SKIPPED_DIRNAMES
                     push!(remaining_dirs, filepath)
                 end
@@ -277,16 +285,16 @@ point for analysing a project that lives on the local file system.
 - `symbolcache_upstream::String`: Upstream URL for symbol-cache downloads.
   Defaults to [`DEFAULT_SYMBOLCACHE_UPSTREAM`](@ref).
 - `store_path`, `max_concurrent_djps`, `max_failure_attempts`,
-  `djp_request_timeout_seconds`: forwarded verbatim to [`JuliaWorkspace`](@ref),
-  which documents them.
+  `djp_request_timeout_seconds`, `progress_callback`: forwarded verbatim to
+  [`JuliaWorkspace`](@ref), which documents them.
 
 # Returns
 - A [`JuliaWorkspace`](@ref) containing all files found under the given folders.
 """
-function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, store_path::Union{Nothing,String}=nothing, max_concurrent_djps::Int=4, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
+function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, store_path::Union{Nothing,String}=nothing, max_concurrent_djps::Int=4, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, progress_callback::Union{Nothing,Function}=nothing)
     @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic symbolcache_download=symbolcache_download
 
-    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream, store_path=store_path, max_concurrent_djps=max_concurrent_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds)
+    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream, store_path=store_path, max_concurrent_djps=max_concurrent_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds, progress_callback=progress_callback)
 
     for folder in workspace_folders
         add_folder_from_disc!(jw, folder)

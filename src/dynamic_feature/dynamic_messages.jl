@@ -191,10 +191,21 @@ consumed by `process_from_dynamic` (types.jl).
 """
 abstract type DynamicResultMessage end
 
-"""A unit of dynamic work failed for the given key."""
+"""
+A unit of dynamic work failed for the given key.
+
+`message` is the user-facing sentence for the failure (see
+`_humanize_djp_failure`), carried along so the query layer can attach it to the
+project's `Project.toml` as a diagnostic. An empty message means the work was
+skipped rather than failed (e.g. dynamic indexing disabled) — readiness gating
+still needs the key recorded, but there is nothing to report to the user.
+"""
 struct FailedResult <: DynamicResultMessage
     key::DJPKey
+    message::String
 end
+
+FailedResult(key::DJPKey) = FailedResult(key, "")
 
 """The environment for a project has been fully processed."""
 struct EnvironmentReadyResult <: DynamicResultMessage

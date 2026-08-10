@@ -268,26 +268,45 @@ end
 end
 
 @testitem "the setup index keys files by their containing package" setup=[TestItemAnalysisWS] begin
-    # /pkg and /PKG are distinct packages on a case-sensitive filesystem;
-    # containment must use the same file→package mapping the consumer keys
-    # with (derived_package_for_file), not a case-folded path prefix
+    # /pkgb is a distinct package whose path string-prefix-collides with
+    # /pkg; containment must use the same file→package mapping the consumer
+    # keys with (derived_package_for_file), not a path prefix
     jw = pkg_ws(entry=DEFAULT_ENTRY, testfile="""
     @testitem "t" begin
     end
     """)
-    add_file!(jw, TextFile(URI("file:///PKG/Project.toml"), SourceText("""
+    add_file!(jw, TextFile(URI("file:///pkgb/Project.toml"), SourceText("""
     name = "OtherPkg"
     uuid = "22345678-1234-1234-1234-123456789012"
     version = "0.1.0"
     """, "toml")))
-    add_file!(jw, TextFile(URI("file:///PKG/Manifest.toml"), SourceText(MANIFEST_TOML, "toml")))
-    add_file!(jw, TextFile(URI("file:///PKG/src/OtherPkg.jl"), SourceText("module OtherPkg end", "julia")))
-    add_file!(jw, TextFile(URI("file:///PKG/test/setups.jl"), SourceText("""
+    add_file!(jw, TextFile(URI("file:///pkgb/Manifest.toml"), SourceText(MANIFEST_TOML, "toml")))
+    add_file!(jw, TextFile(URI("file:///pkgb/src/OtherPkg.jl"), SourceText("module OtherPkg end", "julia")))
+    add_file!(jw, TextFile(URI("file:///pkgb/test/setups.jl"), SourceText("""
     @testmodule OtherTM begin
     end
     """, "julia")))
     setups = JuliaWorkspaces.derived_test_setups(jw.runtime, PKG)
     @test !haskey(setups, :OtherTM)
+
+    if !Sys.iswindows()
+        # /pkg and /PKG are distinct only where file URIs compare
+        # case-sensitively (URIs2 folds case on Windows); a case-folded
+        # prefix match would wrongly claim /PKG's setups for /pkg
+        add_file!(jw, TextFile(URI("file:///PKG/Project.toml"), SourceText("""
+        name = "CasePkg"
+        uuid = "32345678-1234-1234-1234-123456789012"
+        version = "0.1.0"
+        """, "toml")))
+        add_file!(jw, TextFile(URI("file:///PKG/Manifest.toml"), SourceText(MANIFEST_TOML, "toml")))
+        add_file!(jw, TextFile(URI("file:///PKG/src/CasePkg.jl"), SourceText("module CasePkg end", "julia")))
+        add_file!(jw, TextFile(URI("file:///PKG/test/setups.jl"), SourceText("""
+        @testmodule CaseTM begin
+        end
+        """, "julia")))
+        setups = JuliaWorkspaces.derived_test_setups(jw.runtime, PKG)
+        @test !haskey(setups, :CaseTM)
+    end
 end
 
 @testitem "setup-member refs stay out of the outbound table" setup=[TestItemAnalysisWS] begin

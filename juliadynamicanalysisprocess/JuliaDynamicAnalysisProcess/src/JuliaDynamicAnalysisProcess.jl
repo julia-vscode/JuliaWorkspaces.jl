@@ -33,7 +33,12 @@ end
 
 function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProjectParams, state::JuliaDynamicAnalysisProcessState, token)
     try
-        if params.package !== nothing && CAN_MIRROR_ENV
+        if params.package !== nothing && needs_stdlib_test_env(params.projectPath, params.package)
+            # TestEnv cannot build test environments for stdlib UUIDs, so dev
+            # checkouts of stdlibs get a hand-built scratch test environment.
+            Pkg.activate(materialize_stdlib_test_env(params.projectPath, params.package))
+            Pkg.instantiate()
+        elseif params.package !== nothing && CAN_MIRROR_ENV
             # `TestEnv.activate` instantiates whatever environment is active, which
             # would create a `Manifest.toml` in the user's folder. Give it a scratch
             # mirror of the environment instead.
@@ -84,6 +89,27 @@ end
 JSONRPC.@message_dispatcher dispatch_msg begin
     JuliaDynamicAnalysisProtocol.index_project_request_type => index_project_request
     JuliaDynamicAnalysisProtocol.create_standalone_project_request_type => create_standalone_project_request
+end
+
+# Executed precompile workload: every dynamic-analysis child process pays at
+# runtime for whatever of the symbol-extraction pipeline is not in this
+# package's image. Reflecting over the modules loaded during precompilation
+# (this package plus its stdlib deps) compiles the same getenvtree/symbols
+# machinery that `get_store` runs on real environments.
+function _precompile_workload_()
+    try
+        env_symbols = SymbolServer.getenvtree()
+        visited = Base.IdSet{Module}([Base, Core])
+        SymbolServer.symbols(env_symbols, nothing, SymbolServer.getallns(), visited)
+    catch err
+        # A failed workload must never break the analysis process itself.
+        @warn "JuliaDynamicAnalysisProcess precompile workload failed" exception = (err, catch_backtrace())
+    end
+    return nothing
+end
+
+if ccall(:jl_generating_output, Cint, ()) == 1
+    _precompile_workload_()
 end
 
 function serve(pipename, error_handler=nothing)

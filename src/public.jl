@@ -556,21 +556,38 @@ function get_diagnostics(jw::JuliaWorkspace)
 end
 
 """
-    get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+    get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing, progress_callback::Union{Nothing,Function}=nothing)
 
 Wait for the dynamic environment to finish loading, then return all diagnostics.
 This is useful for CLI tools that want the full, accurate set of diagnostics.
 If `cancel_token` is provided, throws `CancellationTokens.OperationCanceledException`
 when the token is cancelled.
+If `progress_callback` is provided, it is called as `progress_callback(done::Int,
+total::Int)` after each file's diagnostics are computed. The count restarts when
+newly loaded environments require another pass over the workspace.
 """
-function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing, progress_callback::Union{Nothing,Function}=nothing)
     @debug "get_diagnostics_blocking"
 
     # Each get_diagnostics call may trigger new lazy inputs (e.g., standalone project,
     # then test environment). Loop until no new background tasks are spawned.
     local result
     while true
-        result = get_diagnostics(jw)
+        if progress_callback === nothing
+            result = get_diagnostics(jw)
+        else
+            # Per-file variant of derived_all_diagnostics so progress can be
+            # reported between files; results are identical since it iterates
+            # the same file set with the same per-file derived function.
+            process_from_dynamic(jw)
+            files = derived_text_files(jw.runtime)
+            result = Dict{URI,Vector{Diagnostic}}()
+            for (k, uri) in enumerate(files)
+                result[uri] = derived_diagnostics(jw.runtime, uri)
+                progress_callback(k, length(files))
+                yield()
+            end
+        end
         is_ready(jw) && break
         wait_until_ready(jw; cancel_token=cancel_token)
     end
@@ -659,6 +676,7 @@ function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
     # Drop the query-side record too, so readiness gates that treat a failed key
     # as settled re-open while the retry runs.
     set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}())
+    set_input_dynamic_failure_messages!(jw.runtime, Dict{DJPKey,String}())
 
     # `_reconcile!` skips sending a message when the required set is unchanged,
     # which it will be here — force one through.
@@ -1188,14 +1206,16 @@ JuliaFormatter style is used. A `style` of `"runic"` routes formatting through
 Runic.jl.
 
 If the document is already correctly formatted the returned edit list is empty.
-Throws an error if formatting fails (for example because of a syntax error), or
-if the file is excluded by its `JuliaFormat.toml`.
+Returns `nothing` if the file is excluded by its `JuliaFormat.toml`
+`include`/`exclude` globs. Throws an error if formatting fails (for example
+because of a syntax error).
 """
 function get_format_edits(jw::JuliaWorkspace, uri::URI)
     @debug "get_format_edits" uri=uri
 
     process_from_dynamic(jw)
     result, err = derived_format_edits(jw.runtime, uri)
+    err === _FORMAT_EXCLUDED_MESSAGE && return nothing
     err === nothing || error(err)
     return result
 end
@@ -1208,13 +1228,15 @@ document `uri` and return a `WorkspaceFileEdit`. Configuration is resolved the
 same way as for full-document formatting.
 
 If the targeted range is already correctly formatted the returned edit list is
-empty. Throws an error if formatting fails.
+empty. Returns `nothing` if the file is excluded by its `JuliaFormat.toml`
+`include`/`exclude` globs. Throws an error if formatting fails.
 """
 function get_format_edits(jw::JuliaWorkspace, uri::URI, start_line::Integer, stop_line::Integer)
     @debug "get_format_edits" uri=uri start_line=start_line stop_line=stop_line
 
     process_from_dynamic(jw)
     result, err = derived_format_range_edits(jw.runtime, uri, start_line, stop_line)
+    err === _FORMAT_EXCLUDED_MESSAGE && return nothing
     err === nothing || error(err)
     return result
 end
@@ -1225,9 +1247,9 @@ end
 Whether the governing `JuliaFormat.toml` excludes `uri` from formatting through
 its `include`/`exclude` globs.
 
-Callers that format many files should consult this first: an excluded file is
-not a formatting failure but something to skip silently, whereas
-[`get_format_edits`](@ref) can only report it as an error.
+Callers that format many files can consult this to skip excluded files cheaply
+before reading their content; [`get_format_edits`](@ref) reports exclusion by
+returning `nothing`.
 """
 function is_format_excluded(jw::JuliaWorkspace, uri::URI)
     @debug "is_format_excluded" uri=uri

@@ -129,6 +129,16 @@ function materialize_scratch_env(project_path::String, package_name::String)
     empty!(project.extras)
     empty!(project.targets)
 
+    # With `[extras]` gone, a `[compat]` entry for a test-only extra (allowed in
+    # the source project) would reference a package Pkg can no longer see, and
+    # Pkg rejects the whole wrapper project over it. Keep only compat entries
+    # the wrapper can still account for.
+    let allowed = Set{String}(keys(project.deps))
+        push!(allowed, "julia")
+        hasfield(Pkg.Types.Project, :weakdeps) && union!(allowed, keys(project.weakdeps))
+        filter!(kv -> first(kv) in allowed, project.compat)
+    end
+
     # `[workspace]` members are declared relative to the project file, so copying
     # the section over would send Pkg looking for them inside the scratch dir.
     # `[apps]` is simply meaningless without a name. Both sections postdate the
@@ -160,5 +170,95 @@ function materialize_scratch_env(project_path::String, package_name::String)
         _record_project_hash!(env_dir)
     end
 
+    return env_dir
+end
+
+# The UUID of `package_name` as declared by the environment at `src_env` —
+# either the environment's own package or one of its direct dependencies.
+function _package_uuid(src_env, package_name::String)
+    if src_env.pkg !== nothing && src_env.pkg.name == package_name
+        return src_env.pkg.uuid
+    end
+    return get(src_env.project.deps, package_name, nothing)
+end
+
+"""
+    needs_stdlib_test_env(project_path, package_name) -> Bool
+
+Whether the test environment for `package_name` must be built by
+[`materialize_stdlib_test_env`](@ref) instead of TestEnv. TestEnv's
+`get_test_dir` mirrors `Pkg.test` and bails out on any stdlib UUID without
+setting `pkgspec.path`, which crashes downstream (`pkgspec.path::String`) — so a
+dev checkout of a stdlib (the julia repo's `stdlib/` folder, a `Pkg.develop`ed
+stdlib) can never go through TestEnv. The replacement path pins the checkout via
+`[sources]`, hence the 1.11 floor.
+"""
+function needs_stdlib_test_env(project_path::String, package_name::String)
+    (CAN_MIRROR_ENV && VERSION >= v"1.11") || return false
+    uuid = try
+        src_env = Pkg.Types.EnvCache(Pkg.Types.projectfile_path(project_path))
+        _package_uuid(src_env, package_name)
+    catch err
+        err isa InterruptException && rethrow()
+        # A broken environment should fail in the main path, with its real error.
+        return false
+    end
+    return uuid !== nothing && Pkg.Types.is_stdlib(uuid)
+end
+
+"""
+    materialize_stdlib_test_env(project_path, package_name) -> String
+
+Build a scratch test environment for a stdlib package checked out at (or deved
+into) `project_path`, and return its directory. Replaces `TestEnv.activate` for
+stdlib UUIDs (see [`needs_stdlib_test_env`](@ref)): the package itself is
+path-pinned through `[sources]`, and its test dependencies come from
+`test/Project.toml` when present, otherwise from the package's
+`[extras]`/`[targets] test`. The caller is expected to `Pkg.activate` the result
+and `Pkg.instantiate` it; nothing is ever written to the user's folder.
+"""
+function materialize_stdlib_test_env(project_path::String, package_name::String)
+    src_env = Pkg.Types.EnvCache(Pkg.Types.projectfile_path(project_path))
+    manifest = Pkg.Operations.abspath!(src_env, deepcopy(src_env.manifest))
+    package_path = _package_source_path(src_env, manifest, package_name)
+    package_uuid = _package_uuid(src_env, package_name)
+    package_uuid === nothing &&
+        error("Cannot determine the UUID of package $package_name in the environment at $(dirname(src_env.project_file)).")
+
+    pkg_project = Pkg.Types.EnvCache(Pkg.Types.projectfile_path(package_path)).project
+
+    project = Pkg.Types.Project()
+    project.deps[package_name] = package_uuid
+
+    test_project_file = joinpath(package_path, "test", "Project.toml")
+    if isfile(test_project_file)
+        test_env = Pkg.Types.EnvCache(test_project_file)
+        test_project = deepcopy(test_env.project)
+        # `[sources]` paths in test/Project.toml are relative to the test folder.
+        Pkg.Operations.abspath!(test_env, test_project)
+        merge!(project.deps, test_project.deps)
+        for (name, source) in test_project.sources
+            name == package_name && continue
+            project.sources[name] = source
+        end
+        for (name, compat) in test_project.compat
+            haskey(project.deps, name) && (project.compat[name] = compat)
+        end
+    else
+        for target in get(pkg_project.targets, "test", String[])
+            uuid = get(pkg_project.extras, target, nothing)
+            uuid === nothing && (uuid = get(pkg_project.deps, target, nothing))
+            uuid === nothing && continue
+            project.deps[target] = uuid
+        end
+        for (name, compat) in pkg_project.compat
+            name != "julia" && haskey(project.deps, name) && (project.compat[name] = compat)
+        end
+    end
+
+    project.sources[package_name] = Dict("path" => package_path)
+
+    env_dir = mktempdir()
+    Pkg.Types.write_project(project, joinpath(env_dir, "Project.toml"))
     return env_dir
 end

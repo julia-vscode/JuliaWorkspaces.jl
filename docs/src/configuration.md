@@ -267,6 +267,7 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |
 | `shadowed_config` | `info` | A config file that supersedes another of the same kind in an enclosing directory |
+| `environment_errors` | `info` | A project/test environment that could not be resolved, reported on its `Project.toml` |
 | `incorrect_call_args` | `info` | Wrong argument count/type; calls to method-less functions |
 | `incorrect_iter_spec` | `info` | Loop iterators that will likely error |
 | `index_from_length` | `info` | Indexing off `length`/`size` instead of `eachindex`/`axes` |

@@ -7,7 +7,6 @@ include("SymbolServer/SymbolServer.jl")
 include("compat.jl")
 
 import Pkg
-import Scratch
 
 import .URIs2
 using .URIs2: filepath2uri, uri2filepath

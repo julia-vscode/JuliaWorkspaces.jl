@@ -21,7 +21,10 @@
 
     handle!(df, ProcessIndexFailedMsg(k, ErrorException("unsatisfiable")))
     @test isready(df.out_channel)
-    @test take!(df.out_channel) == FailedResult(k)
+    result = take!(df.out_channel)
+    @test result isa FailedResult
+    @test result.key == k
+    @test occursin("unsatisfiable", result.message)
 
     # Reconcile used to prune `failed_projects` to the required set, so a key
     # that dropped out and came back was launched again — indefinitely, for a
@@ -51,7 +54,9 @@ end
         handle!(df, ReconcileMsg(Set{DJPKey}([k])))
         handle!(df, ProcessIndexFailedMsg(k, ErrorException("unsatisfiable")))
         @test isready(df.out_channel)
-        @test take!(df.out_channel) == FailedResult(k)
+        result = take!(df.out_channel)
+        @test result isa FailedResult
+        @test result.key == k
     end
     @test length(launches) == 2
 
@@ -60,7 +65,12 @@ end
     handle!(df, ReconcileMsg(Set{DJPKey}([k3])))
     @test length(launches) == 2
     @test isready(df.out_channel)
-    @test take!(df.out_channel) == FailedResult(k3)
+    result = take!(df.out_channel)
+    @test result isa FailedResult
+    @test result.key == k3
+    # The exhausted-skip short-circuit replays the identity's recorded cause
+    # rather than a generic sentence.
+    @test occursin("unsatisfiable", result.message)
     @test df.pending_count[] == 0
     @test isempty(df.inflight)
 end
@@ -185,6 +195,7 @@ end
     handle!(df, ResetFailuresMsg())
     @test isempty(df.failed_projects)
     @test isempty(df.failure_attempts)
+    @test isempty(df.failure_messages)
 
     k3 = WatchTestEnvironmentKey("/ws/R", "R", UInt64(3))
     handle!(df, ReconcileMsg(Set{DJPKey}([k3])))

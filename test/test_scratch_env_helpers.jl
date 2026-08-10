@@ -27,6 +27,12 @@ end
 materialize_scratch_env(project_path, package_name) =
     Base.invokelatest(_scratch_env_module().materialize_scratch_env, project_path, package_name)
 
+materialize_stdlib_test_env(project_path, package_name) =
+    Base.invokelatest(_scratch_env_module().materialize_stdlib_test_env, project_path, package_name)
+
+needs_stdlib_test_env(project_path, package_name) =
+    Base.invokelatest(_scratch_env_module().needs_stdlib_test_env, project_path, package_name)
+
 # Same story for the vendored TestEnv.
 function activate_test_env(package_name)
     mod = Module(:TestEnvUnderTest)
