@@ -252,6 +252,11 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
             delete!(env_to_use, "JULIA_LOAD_PATH")
             delete!(env_to_use, "JULIA_PROJECT")
 
+            # Ephemeral analysis workers must not run depot auto-gc: Pkg.gc
+            # rewrites ~/.julia/logs/*_usage.toml non-atomically and races
+            # other processes writing those files.
+            env_to_use["JULIA_PKG_GC_AUTO"] = "false"
+
             # Use the same binary as the current process: `julia` from PATH may
             # not resolve at all inside an editor-launched language server (which
             # is started with an explicit executable path), or may resolve to a
