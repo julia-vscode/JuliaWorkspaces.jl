@@ -34,7 +34,9 @@ function fetch_availability_index(upstream::AbstractString)
     try
         return mktempdir() do dir
             dest = joinpath(dir, "idx")  # must NOT pre-exist: download_verify_unpack returns false if isdir(dest)
-            if !Pkg.PlatformEngines.download_verify_unpack(url, nothing, dest)
+            # quiet_download + devnull io: keep Pkg from drawing its own
+            # progress bar onto a TTY stderr over the host's progress UI.
+            if !Pkg.PlatformEngines.download_verify_unpack(url, nothing, dest; quiet_download=true, io=devnull)
                 @debug "Availability index download failed" url
                 return nothing
             end

@@ -23,6 +23,7 @@ export JuliaWorkspace,
     get_diagnostic,
     get_diagnostics,
     get_diagnostics_blocking,
+    parse_files_blocking,
     get_packages,
     get_projects,
     get_test_items,
@@ -553,6 +554,36 @@ function get_diagnostics(jw::JuliaWorkspace)
     process_from_dynamic(jw)
 
     return derived_all_diagnostics(jw.runtime)
+end
+
+"""
+    parse_files_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing, progress_callback::Union{Nothing,Function}=nothing)
+
+Parse every Julia file of the workspace, warming the memoized syntax-tree
+caches. Parsing is environment-independent, so this is useful for CLI tools
+that want to overlap the parse work with dynamic environment indexing (the
+per-file `yield` lets the dynamic feature keep processing results) before
+running a single full analysis pass via [`get_diagnostics_blocking`](@ref).
+If `progress_callback` is provided, it is called as `progress_callback(done::Int,
+total::Int)` after each file is parsed.
+If `cancel_token` is provided, throws `CancellationTokens.OperationCanceledException`
+when the token is cancelled.
+"""
+function parse_files_blocking(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing, progress_callback::Union{Nothing,Function}=nothing)
+    @debug "parse_files_blocking"
+
+    process_from_dynamic(jw)
+    files = derived_all_julia_files(jw.runtime)
+    for (k, uri) in enumerate(files)
+        if cancel_token !== nothing && CancellationTokens.is_cancellation_requested(cancel_token)
+            throw(CancellationTokens.OperationCanceledException(cancel_token))
+        end
+        derived_julia_syntax_diagnostics(jw.runtime, uri)
+        derived_julia_legacy_syntax_tree(jw.runtime, uri)
+        progress_callback === nothing || progress_callback(k, length(files))
+        yield()
+    end
+    return nothing
 end
 
 """
