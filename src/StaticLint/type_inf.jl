@@ -67,8 +67,12 @@ function infer_type(binding::Binding, scope, state)
                 end
             elseif binding.val.head isa EXPR && valof(binding.val.head) == "::"
                 lhs = binding.val.args[1]
-                if CSTParser.istuple(lhs) && _infer_tuple_decl_element!(binding, lhs, binding.val.args[2], state, scope)
-                    # `(a, b, …)::Tuple{T1, T2, …}` positional destructure handled below
+                if CSTParser.istuple(lhs)
+                    # A destructuring declaration types each name from the
+                    # ELEMENT it takes, which only a `Tuple{T1, T2, …}`
+                    # annotation spells out. Any other container (`(a,)::Ref{Any}`)
+                    # leaves the names unknown — never the container's own type.
+                    _infer_tuple_decl_element!(binding, lhs, binding.val.args[2], state, scope)
                 else
                     infer_type_decl(binding, state, scope)
                 end
@@ -129,6 +133,13 @@ function _resolve_constructor_datatype(callname, scope, state)
     end
     return nothing
 end
+
+# The type of a name that holds a store value on an assignment's right-hand side.
+# A TYPE's name binds its constructor `FunctionStore` (`T = Float64`), and what
+# the local holds is the type — `DataType`, not `Function`. Reading it as a
+# function makes it a definite mismatch for every `::Type{…}`/`::DataType` slot.
+_rhs_store_type(val::SymbolServer.FunctionStore, state) =
+    resolves_to_datatype(val, state.env) ? CoreTypes.DataType : CoreTypes.Function
 
 function infer_type_assignment_rhs(binding, state, scope)
     meta_dict = state.meta_dict
@@ -227,7 +238,7 @@ function infer_type_assignment_rhs(binding, state, scope)
                 if refof_rhs.val isa SymbolServer.GenericStore && refof_rhs.val.typ isa SymbolServer.FakeTypeName
                     settype!(binding, maybe_lookup(refof_rhs.val.typ.name, state))
                 elseif refof_rhs.val isa SymbolServer.FunctionStore
-                    settype!(binding, CoreTypes.Function)
+                    settype!(binding, _rhs_store_type(refof_rhs.val, state))
                 elseif refof_rhs.val isa SymbolServer.DataTypeStore
                     settype!(binding, CoreTypes.DataType)
                 else
@@ -242,12 +253,12 @@ function infer_type_assignment_rhs(binding, state, scope)
                 if store isa SymbolServer.DataTypeStore
                     settype!(binding, CoreTypes.DataType)
                 elseif store isa SymbolServer.FunctionStore
-                    settype!(binding, CoreTypes.Function)
+                    settype!(binding, _rhs_store_type(store, state))
                 end
             elseif refof_rhs isa SymbolServer.GenericStore && refof_rhs.typ isa SymbolServer.FakeTypeName
                 settype!(binding, maybe_lookup(refof_rhs.typ.name, state))
             elseif refof_rhs isa SymbolServer.FunctionStore
-                settype!(binding, CoreTypes.Function)
+                settype!(binding, _rhs_store_type(refof_rhs, state))
             elseif refof_rhs isa SymbolServer.DataTypeStore
                 settype!(binding, CoreTypes.DataType)
             end
@@ -518,6 +529,26 @@ end
 # type, so its binding must stay a `DataType` rather than become a `Function`.
 resolves_to_datatype(store, env::ExternalEnv) = get_eventual_datatype(store, env) isa SymbolServer.DataTypeStore
 
+# The type expression of a binding's `::` declaration — a parameter, a
+# `local x::T`, an annotated assignment, an annotated splat — or `nothing` when
+# the value carries no annotation. Returned as written: `where`/curly/getfield
+# unwrapping is the caller's, since callers want different depths of it.
+function decl_annotation(b::Binding)
+    v = b.val
+    v isa EXPR || return nothing
+    if v.head isa EXPR && valof(v.head) == "::" && v.args !== nothing && length(v.args) == 2
+        return v.args[2]
+    elseif isassignment(v) && v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
+           v.args[1].args !== nothing && length(v.args[1].args) == 2
+        return v.args[1].args[2]
+    elseif CSTParser.issplat(v) && v.args !== nothing && length(v.args) >= 1 &&
+           v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
+           v.args[1].args !== nothing && length(v.args[1].args) == 2
+        return v.args[1].args[2]
+    end
+    return nothing
+end
+
 # Per-file traversal mode only: does `b`'s declaration carry an explicit `::`
 # type annotation that resolved through the module tree (a `TreeRef`)? The
 # legacy `Binding.type` slot can't carry a TreeRef, so `infer_type_decl`
@@ -527,20 +558,8 @@ resolves_to_datatype(store, env::ExternalEnv) = get_eventual_datatype(store, env
 # struct's real fields as missing references). Mirrors the annotation
 # unwrapping in `infer_type_decl` (curly / getfield forms).
 function declared_type_is_tree_backed(b::Binding, meta_dict)
-    v = b.val
-    v isa EXPR || return false
-    t = if v.head isa EXPR && valof(v.head) == "::" && v.args !== nothing && length(v.args) == 2
-        v.args[2]
-    elseif isassignment(v) && v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
-           v.args[1].args !== nothing && length(v.args[1].args) == 2
-        v.args[1].args[2]
-    elseif CSTParser.issplat(v) && v.args !== nothing && length(v.args) >= 1 &&
-           v.args[1].head isa EXPR && valof(v.args[1].head) == "::" &&
-           v.args[1].args !== nothing && length(v.args[1].args) == 2
-        v.args[1].args[2]
-    else
-        return false
-    end
+    t = decl_annotation(b)
+    t === nothing && return false
     if iscurly(t) && t.args !== nothing && length(t.args) >= 1
         t = t.args[1]
     end
@@ -597,14 +616,22 @@ function infer_literal_type(x::EXPR)
     h = headof(x)
     h === :INTEGER && return CoreTypes.Int
     if h === :HEXINT
-        return if length(x.val) < 5
+        # A hex literal's width is set by its DIGIT count. `_` separators are not
+        # digits (`0x4000_0001` is a `UInt32`, not a `UInt64`) and neither is the
+        # `0x` prefix. Past 16 digits the literal is `UInt128` or wider, which
+        # this store has no handle for — no opinion beats a wrong one.
+        x.val isa String || return nothing
+        n = count(!isequal('_'), x.val) - 2
+        return if n <= 2
             CoreTypes.UInt8
-        elseif length(x.val) < 7
+        elseif n <= 4
             CoreTypes.UInt16
-        elseif length(x.val) < 11
+        elseif n <= 8
             CoreTypes.UInt32
-        else
+        elseif n <= 16
             CoreTypes.UInt64
+        else
+            nothing
         end
     end
     h === :FLOAT && return CoreTypes.Float64

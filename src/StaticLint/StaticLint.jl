@@ -1,16 +1,10 @@
 module StaticLint
 
-import ..derived_has_file
-import ..derived_julia_legacy_syntax_tree
-import ..derived_include_dict
-import ..ItemRef
-import ..MethodArity
+using ..JuliaWorkspaces: derived_has_file, derived_julia_legacy_syntax_tree, derived_include_dict, ItemRef, MethodArity, TypeExpr,
+                         TypeRef, TypeUnionExpr, TypeVarRef, UnknownType, TYPE_ANY, SigSlot, VarargSpec, MethodSignature,
+                         LocatedSignature, NameMethods
 
 using ..AutoHashEquals: @auto_hash_equals
-
-function hasfile end
-
-include("exception_types.jl")
 
 using ..SymbolServer, CSTParser, ..URIs2
 using ..URIs2: URI
@@ -19,6 +13,10 @@ using ..CSTParser: EXPR, isidentifier, setparent!, valof, headof, hastrivia, par
 # CST utils
 using ..CSTParser: is_getfield, isassignment, isdeclaration, isbracketed, iskwarg, iscall, iscurly, isunarycall, isunarysyntax, isbinarycall, isbinarysyntax, issplat, defines_function, is_getfield_w_quotenode, iswhere, iskeyword, isstringliteral, isparameters, isnonstdid, istuple
 using ..SymbolServer: VarRef
+
+function hasfile end
+
+include("exception_types.jl")
 
 const noname = EXPR(:noname, nothing, nothing, 0, 0, nothing, nothing, nothing)
 
@@ -214,7 +212,9 @@ include("coretypes.jl")
 include("bindings.jl")
 include("scope.jl")
 include("subtypes.jl")
+include("treetypes.jl")
 include("methodmatching.jl")
+include("signature_reader.jl")
 include("traverse.jl")
 
 const LARGE_FILE_LIMIT = 2_000_000 # bytes

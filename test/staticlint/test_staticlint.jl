@@ -625,6 +625,20 @@ end
     @test !isnothing(SL._super(syms[:Core][:Int64], syms, meta_dict))
 end
 
+@testitem "a datatype with no <: clause has supertype Any, definitely" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: CSTParser
+    const SL = JuliaWorkspaces.StaticLint
+
+    x = CSTParser.parse("struct Other end")
+    @test SL._super(x, nothing, nothing) == SL.CoreTypes.Any
+    x = CSTParser.parse("abstract type A end")
+    @test SL._super(x, nothing, nothing) == SL.CoreTypes.Any
+    # An explicit clause still returns the clause EXPR.
+    x = CSTParser.parse("struct Own <: MyAbs end")
+    @test SL._super(x, nothing, nothing) isa CSTParser.EXPR
+end
+
 @testitem "_issubtype separates a truncated walk from a finished one" setup=[shared_static_lint] begin
     SL = JuliaWorkspaces.StaticLint
 
@@ -757,6 +771,26 @@ end
     let (cst, meta_dict) = parse_and_pass("g(v::Vector{Int}) = String(v)")
         call = cst.args[1].args[2].args[1]
         @test_broken errorof(call, meta_dict) === IncorrectCallArgs
+    end
+end
+
+@testitem "check_call struct field types over-rule convert-accepting calls" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, IncorrectCallArgs
+
+    # `S(3.0)` is valid Julia — the default constructor passes arguments
+    # through `convert(fieldtype, x)` — but the struct branch types slots from
+    # the field annotations and rules `Float64` out against `Int`. A field
+    # annotation bounds convert-ibility, not the argument's type, so this is a
+    # false positive. (The per-file records path erases field types and stays
+    # silent here.)
+    let (cst, meta_dict) = parse_and_pass("struct S a::Int end\nmk() = S(3.0)")
+        call = cst.args[2].args[2].args[1]   # short-form RHS sits in a :block
+        @test_broken errorof(call, meta_dict) === nothing
+    end
+    # A genuine arity mismatch on the same struct keeps flagging.
+    let (cst, meta_dict) = parse_and_pass("struct S a::Int end\nmk() = S(1, 2)")
+        call = cst.args[2].args[2].args[1]
+        @test errorof(call, meta_dict) === IncorrectCallArgs
     end
 end
 
@@ -1533,6 +1567,49 @@ end
         # `const` over an imported name is a "cannot declare constant" error
         # (Julia: "it was already declared as an import"), not a plain redefinition.
         @test has_error(cst, meta_dict, jw, CannotDeclareConst)
+    end
+end
+
+@testitem "a local NAMING a type may be reassigned" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidRedefofConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # A type's NAME resolves to its constructor `FunctionStore`, so a local
+    # holding one is a `DataType` — but it DEFINES no type, and reassigning it is
+    # ordinary code (the shape every ArgParse/DSL block uses).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        function f()
+            arg_type = String
+            arg_type = Int
+            arg_type
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    # Same for a workspace datatype, and at module level.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct S end
+        T = S
+        T = Int
+        """)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+
+    # Redefining the type itself, or a `const`, still is an error.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct S end
+        S = 3
+        """)
+        @test has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        const C = String
+        C = Int
+        """)
+        @test has_error(cst, meta_dict, jw, InvalidRedefofConst)
     end
 end
 
@@ -4671,13 +4748,19 @@ end
               (:Function, Function), (:Tuple, Tuple)]
 
     _, meta_dict, jw = parse_and_pass("x = 1\n")
-    syms = get_env(jw).symbols
+    env = get_env(jw)
+    syms = env.symbols
     # `Core` then `Base`, which is the order a bare name is in scope under, so a
     # row never has to hardcode which of the two defines its type (`DenseArray`
-    # is `Core`'s, `AbstractRange` is `Base`'s).
+    # is `Core`'s, `AbstractRange` is `Base`'s). Gated on exportedness, like
+    # `resolve_ref_from_module`: on Julia 1.11 `Core.vals` carries a phantom
+    # non-exported `Rational`/`Complex` constructor `FunctionStore` that scope
+    # resolution never returns.
     function lookup(n)
         for m in (:Core, :Base)
-            haskey(syms, m) && haskey(syms[m], n) && return syms[m][n]
+            haskey(syms, m) || continue
+            SL.isexportedby(n, syms[m]) || continue
+            return SL.maybe_lookup(syms[m][n], env)
         end
         return nothing
     end
@@ -4746,6 +4829,51 @@ end
     @test SL.errorof(call, meta_dict) === SL.IncorrectCallArgs
 end
 
+@testitem "check_call: an unresolved wildcard using suppresses bare-name method-set lints, not qualified ones" setup=[shared_static_lint] begin
+    # `errorof` alone can't tell suppressed from flagged here, because
+    # `check_all` runs (and can set the error) before this file's own
+    # `using` is marked unresolved — the suppression is applied later, when
+    # `collect_hints` reads the flag back at collection time. `get_hints`
+    # (the published-diagnostics path) is vacuously empty for a project-less
+    # `parse_and_pass` file, so assert on `collect_hints`'s raw output
+    # instead (see `collect_hints`'s own doc comment above).
+    SL = JuliaWorkspaces.StaticLint
+
+    function enclosing_call(x)
+        p = SL.parentof(x)
+        while p isa SL.CSTParser.EXPR && !SL.iscall(p)
+            p = SL.parentof(p)
+        end
+        return p isa SL.CSTParser.EXPR ? p : nothing
+    end
+
+    cst, meta_dict, jw = parse_and_pass("""
+    using NotIndexedPkg
+    caller(v::Vector) = stack(v; view=true)
+    struct Other end
+    badq(w::Other) = Base.iseven(w)
+    module Inner
+    innercaller(x::Vector) = stack(x; view=true)
+    end
+    """)
+    errs = collect_hints(cst, meta_dict, jw)
+    flagged(node) = any(e -> e[2] === node, errs)
+
+    outer_call = enclosing_call(only(filter(id -> !isempty(find_identifiers(enclosing_call(id), "v")),
+                                             find_identifiers(cst, "stack"))))
+    inner_call = enclosing_call(only(filter(id -> !isempty(find_identifiers(enclosing_call(id), "x")),
+                                             find_identifiers(cst, "stack"))))
+    iseven_call = enclosing_call(only(find_identifiers(cst, "iseven")))
+
+    # The bare `stack` call under the broken wildcard: silent.
+    @test !flagged(outer_call)
+    # The qualified `Base.iseven(w)` call in the SAME module still flags.
+    @test flagged(iseven_call)
+    # `Inner` declares no wildcard of its own: the scope walk stops at its
+    # own module boundary, so its bare `stack` call keeps its checks.
+    @test flagged(inner_call)
+end
+
 @testitem "iterating over a resolved type still reads its type" setup=[shared_static_lint] begin
     SL = JuliaWorkspaces.StaticLint
 
@@ -4763,4 +4891,249 @@ end
 
     @test spec_error("x = 1\nfor i in x\nend\n") === SL.IncorrectIterSpec
     @test spec_error("x = \"s\"\nfor i in x\nend\n") === nothing
+end
+
+@testitem "where_var_and_bound reads each where-clause entry shape" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: CSTParser
+    const SL = JuliaWorkspaces.StaticLint
+
+    # Parse a method def and pick where-clause entries off the sig EXPR.
+    function where_entries(src)
+        cst = CSTParser.parse(src)
+        sig = CSTParser.get_sig(cst)
+        entries = CSTParser.EXPR[]
+        while CSTParser.iswhere(sig)
+            append!(entries, sig.args[2:end])
+            sig = sig.args[1]
+        end
+        entries
+    end
+
+    e = only(where_entries("f(x::T) where T = 1"))
+    @test SL.where_var_and_bound(e) == ("T", nothing)
+
+    e = only(where_entries("f(x::T) where T <: Integer = 1"))
+    name, ub = SL.where_var_and_bound(e)
+    @test name == "T"
+    @test CSTParser.isidentifier(ub) && SL.valofid(ub) == "Integer"
+
+    e = only(where_entries("f(x::T) where Int <: T <: Integer = 1"))
+    name, ub = SL.where_var_and_bound(e)
+    @test name == "T"
+    @test SL.valofid(ub) == "Integer"
+
+    # Lower bound licenses nothing.
+    e = only(where_entries("f(x::T) where T >: Int = 1"))
+    @test SL.where_var_and_bound(e) == ("T", nothing)
+end
+
+@testitem "method_signature lowers definitions to records" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: CSTParser, TypeRef, TypeVarRef, UnknownType, TYPE_ANY,
+        SigSlot, VarargSpec
+    const SL = JuliaWorkspaces.StaticLint
+
+    ms(src) = SL.method_signature(CSTParser.parse(src))
+
+    s = ms("f(a, b::Own, c::Base.AbstractString) = 1")
+    @test [sl.type for sl in s.slots] ==
+        [TYPE_ANY, TypeRef(["Own"]), TypeRef(["Base", "AbstractString"])]
+    @test all(!sl.optional for sl in s.slots)
+    @test s.vararg === nothing && isempty(s.kws) && !s.kwsplat
+
+    # Parametric head; where-bound var; defaulted slot; kws.
+    s = ms("function g(v::Vector{Int}, t::T, n=1; kw=2, rest...) where T <: Integer end")
+    @test [sl.type for sl in s.slots] == [TypeRef(["Vector"]), TypeVarRef("T"), TYPE_ANY]
+    @test [sl.optional for sl in s.slots] == [false, false, true]
+    @test s.typevars == Dict{String,JuliaWorkspaces.TypeExpr}("T" => TypeRef(["Integer"]))
+    @test s.kws == [:kw] && s.kwsplat
+
+    # A keyword's name survives an annotation, with or without a default —
+    # dropping it reads as "takes no keywords", which rules out every call.
+    @test ms("k(x; opt::Bool=true, req::Int, plain=1) = 1").kws == [:opt, :req, :plain]
+
+    # Vararg spellings.
+    @test ms("h(xs::Int...) = 1").vararg == VarargSpec(TypeRef(["Int"]), nothing)
+    @test ms("h(a, ::Vararg{String}) = 1").vararg == VarargSpec(TypeRef(["String"]), nothing)
+    @test ms("h(x::Vararg{Int,3}) = 1").vararg == VarargSpec(TypeRef(["Int"]), 3)
+    @test ms("h(xs...) = 1").vararg == VarargSpec(TYPE_ANY, nothing)
+    # The vararg slot is not also a positional slot.
+    @test isempty(ms("h(xs::Int...) = 1").slots)
+
+    # Union lowers member-wise; unreadable shapes lower to UnknownType.
+    s = ms("u(x::Union{Int,Own}) = 1")
+    @test s.slots[1].type == JuliaWorkspaces.TypeUnionExpr(
+        JuliaWorkspaces.TypeExpr[TypeRef(["Int"]), TypeRef(["Own"])])
+    @test ms("w(x::typeof(sin)) = 1").slots[1].type == UnknownType()
+
+    # Forward declaration has no signature.
+    @test ms("function f end") === nothing
+
+    # Datatype supertypes: explicit, and implicit Any.
+    @test SL.declared_supertype(CSTParser.parse("struct Own <: MyAbs end")) == TypeRef(["MyAbs"])
+    @test SL.declared_supertype(CSTParser.parse("struct Other end")) == TYPE_ANY
+    @test SL.declared_supertype(CSTParser.parse("abstract type A <: B.C end")) == TypeRef(["B", "C"])
+end
+
+@testitem "record matching: resolution at the leaf with a stub resolver" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: TypeRef, TypeVarRef, UnknownType, TYPE_ANY, SigSlot,
+        MethodSignature, LocatedSignature
+    const SL = JuliaWorkspaces.StaticLint
+    const SS = JuliaWorkspaces.SymbolServer
+
+    # A tiny workspace universe: Own <: MyAbs <: Any, Other <: Any.
+    types = Dict(
+        "MyAbs" => (sup = TYPE_ANY,),
+        "Own"   => (sup = TypeRef(["MyAbs"]),),
+        "Other" => (sup = TYPE_ANY,),
+    )
+    function resolver(t::TypeRef, defined_in)
+        length(t.path) == 1 || return nothing
+        t.path == ["Core", "Any"] && return SL.CoreTypes.Any
+        haskey(types, t.path[1]) || return nothing
+        SL.TreeDataType((["MainPkg"], t.path[1]), types[t.path[1]].sup, resolver)
+    end
+
+    own   = resolver(TypeRef(["Own"]), ["MainPkg"])
+    myabs = resolver(TypeRef(["MyAbs"]), ["MainPkg"])
+    other = resolver(TypeRef(["Other"]), ["MainPkg"])
+
+    @test SL._issubtype(own, myabs, nothing, nothing) === true
+    @test SL._issubtype(other, myabs, nothing, nothing) === false
+    @test SL._has_type_intersection(other, myabs, nothing, nothing) === false
+    # Unreadable supertype: unknown, not a verdict.
+    dangling = SL.TreeDataType((["MainPkg"], "X"), nothing, resolver)
+    @test SL._has_type_intersection(dangling, myabs, nothing, nothing) === nothing
+
+    sig = MethodSignature([SigSlot(TypeRef(["MyAbs"]), false)], nothing,
+        Dict{String,JuliaWorkspaces.TypeExpr}(), Symbol[], false)
+    ls = LocatedSignature(["MainPkg"], sig)
+    @test SL.match_method(Any[own], Any[], ls, resolver, nothing, nothing) === true
+    @test SL.match_method(Any[other], Any[], ls, resolver, nothing, nothing) === false
+    # An UnknownType slot never rules out.
+    usig = MethodSignature([SigSlot(UnknownType(), false)], nothing,
+        Dict{String,JuliaWorkspaces.TypeExpr}(), Symbol[], false)
+    @test SL.match_method(Any[other], Any[], LocatedSignature(["MainPkg"], usig),
+        resolver, nothing, nothing) === true
+end
+
+# The inner-`where` shape (`Vector{T} where T`) has no distinct MethodStore
+# spelling — the store pre-resolves it to the same parametric head as
+# `Vector{Int}` — so it needs no placement-d row of its own.
+
+@testitem "parity/parametric placement d: MethodStore parametric head rules out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    cst, meta_dict, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    vec = syms[:Base][:Vector]          # DataTypeStore behind the constructor
+    vecdt = SL.get_eventual_datatype(vec, get_env(jw))
+    other = SL.bindingof(cst.args[1], meta_dict)
+    m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[:x => SS.FakeTypeName(Vector{Int})], Symbol[], nothing)
+    # good: a Vector argument matches the Vector{Int} slot through the head
+    @test SL.match_method(Any[vecdt], Any[], m, syms, meta_dict) === true
+    # bad: a workspace struct with supertype Any is definitely ruled out
+    @test SL.match_method(Any[other], Any[], m, syms, meta_dict) === false
+end
+
+@testitem "parity/dispatch-only placement d: MethodStore nameless slot rules out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    cst, meta_dict, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    fdt = SL.get_eventual_datatype(syms[:Base][:AbstractFloat], get_env(jw))
+    other = SL.bindingof(cst.args[1], meta_dict)
+    # A real method (`iseven(::Missing)`) spells its nameless slot
+    # `Symbol("#unused#")`, not `Symbol("")` -- `Base.method_argnames` names an
+    # anonymous parameter that way, and the crawler carries it through as-is.
+    m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[Symbol("#unused#") => SS.FakeTypeName(AbstractFloat),
+                      :y => SS.FakeTypeName(Int)],
+        Symbol[], nothing)
+    # good: an AbstractFloat descendant matches the nameless slot through its head
+    @test SL.match_method(Any[fdt, SS.FakeTypeName(Int)], Any[], m, syms, meta_dict) === true
+    # bad: a workspace struct with supertype Any is definitely ruled out
+    @test SL.match_method(Any[other, SS.FakeTypeName(Int)], Any[], m, syms, meta_dict) === false
+end
+
+@testitem "parity/union placement d: MethodStore FakeUnion slot rules out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    cst, meta_dict, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    intdt = SL.get_eventual_datatype(syms[:Base][:Int], get_env(jw))
+    other = SL.bindingof(cst.args[1], meta_dict)
+    m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[:x => SS.FakeUnion(SS.FakeTypeName(Int), SS.FakeTypeName(String))],
+        Symbol[], nothing)
+    # good: an Int argument matches one member of the union
+    @test SL.match_method(Any[intdt], Any[], m, syms, meta_dict) === true
+    # bad: a workspace struct with supertype Any is ruled out against every member
+    @test SL.match_method(Any[other], Any[], m, syms, meta_dict) === false
+end
+
+@testitem "parity/where placement d: MethodStore FakeTypeVar upper bound rules out" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    cst, meta_dict, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    fdt = SL.get_eventual_datatype(syms[:Base][:Float64], get_env(jw))
+    other = SL.bindingof(cst.args[1], meta_dict)
+    m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[:x => SS.FakeTypeVar(:T, SS.FakeTypeName(Union{}), SS.FakeTypeName(Real))],
+        Symbol[], nothing)
+    # good: a Float64 argument matches through the typevar's upper bound
+    @test SL.match_method(Any[fdt], Any[], m, syms, meta_dict) === true
+    # bad: a workspace struct with supertype Any is definitely ruled out
+    @test SL.match_method(Any[other], Any[], m, syms, meta_dict) === false
+end
+
+@testitem "parity/vararg placement d: SigDescriptor bound-N _align_args count window" setup=[shared_static_lint] begin
+    # No end-to-end fixture can reach this branch: for a tree-visible callee,
+    # check_call's MethodArity gate rules out a bound-N count mismatch before
+    # the records path is ever consulted, since its window is identical to
+    # this one. Pin `_align_args`'s bound-N branch directly instead.
+    SL = JuliaWorkspaces.StaticLint
+    _, _, jw = parse_and_pass("struct Other end\nf(w::Other) = w\n")
+    syms = get_env(jw).symbols
+    intdt = SL.get_eventual_datatype(syms[:Base][:Int], get_env(jw))
+    fdt = SL.get_eventual_datatype(syms[:Base][:Float64], get_env(jw))
+    d = SL.SigDescriptor(Any[intdt], Any[], true, fdt, 2, Any[])
+    # one arg short of nfixed + N = 1 + 2 = 3: no alignment exists
+    @test SL._align_args(d, 2) === nothing
+    # exact count: aligns, and the last vararg_N slots are the pad
+    margs = SL._align_args(d, 3)
+    @test margs !== nothing
+    @test margs[end - 1] === fdt && margs[end] === fdt
+end
+
+@testitem "parity/keyword-name placement d: unreadable call kw gets no opinion" setup=[shared_static_lint] begin
+    using JuliaWorkspaces: CSTParser
+    SL = JuliaWorkspaces.StaticLint
+    d = SL.SigDescriptor(Any[], Any[], false, SL.CoreTypes.Any, nothing, Any[:k])
+    # A non-identifier node (a whole call EXPR standing in for an
+    # unreadable keyword name) can't be read by `_kw_name_str` -- it must
+    # get no opinion, not rule the candidate out.
+    unreadable = CSTParser.parse("f(1)")
+    @test SL._match_descriptor(Any[], Any[unreadable], d, nothing, nothing) === true
+    # A readable but wrong name is a genuine mismatch.
+    @test SL._match_descriptor(Any[], Any[:other], d, nothing, nothing) === false
+end
+
+@testitem "parity/keyword-name placement d: MethodStore kwsplat is not a declared name" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+    # `Base.kwarg_decl` encodes a `; kwargs...` catch-all as a literal Symbol
+    # ending in `"..."` mixed into `MethodStore.kws`, not a separate flag --
+    # it must never be name-checked as the method's one declared keyword.
+    splat_m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[], Symbol[Symbol("kwargs...")], nothing)
+    @test SL.match_method(Any[], Any[:other], splat_m, nothing, nothing) === true
+    # A real declared keyword still rejects an unrelated name.
+    named_m = SS.MethodStore(:target, :Fake, "fake.jl", Int32(1),
+        Pair{Any,Any}[], Symbol[:digits], nothing)
+    @test SL.match_method(Any[], Any[:other], named_m, nothing, nothing) === false
 end

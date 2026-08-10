@@ -1332,6 +1332,56 @@ end
     @test any(d -> occursin("another_undefined_name", d.message), fa_b.diagnostics)
 end
 
+@testitem "derived_file_analysis: an unresolved wildcard using suppresses method-set lints on bare callees only" setup=[FileAnalysisWS] begin
+    # `stack` is a bare callee with no local binding: it falls through to
+    # Base's implicit-scope method set. `using NotIndexedPkg` failing to
+    # resolve means `stack` could just as well come from there, so judging
+    # the call against Base's `stack` (no `view` keyword) is unsound.
+    root_src = """
+    module MainPkg
+    using NotIndexedPkg
+    caller(v::Vector) = stack(v; view=true)
+    struct Other end
+    badq(w::Other) = Base.iseven(w)
+    module Inner
+    innercaller(x::Vector) = stack(x; view=true)
+    end
+    end
+    """
+    control_uri = URI("file:///t/src/control.jl")
+    control_src = """
+    module ControlPkg
+    caller(v::Vector) = stack(v; view=true)
+    end
+    """
+    jw = ws_with(Dict(
+        ROOT => root_src,
+        control_uri => control_src,
+    ))
+    rt = jw.runtime
+
+    fa = JuliaWorkspaces.derived_file_analysis(rt, ROOT, ROOT)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+
+    # 1. The bare `stack` call under the broken wildcard: silent.
+    @test !any(f -> SubString(root_src, f.range) == "stack(v; view=true)\n", flagged)
+    # 3. The qualified `Base.iseven(w)` call in the SAME module still flags —
+    # a wildcard using cannot shadow a qualified path.
+    @test any(f -> SubString(root_src, f.range) == "Base.iseven(w)\n", flagged)
+    # 4. `Inner` declares no wildcard of its own: the scope walk stops at its
+    # own module boundary before reaching MainPkg's flag, so its bare `stack`
+    # call keeps its checks.
+    @test any(f -> SubString(root_src, f.range) == "stack(x; view=true)\n", flagged)
+
+    # 2. Control: an identical bare `stack` call with no broken wildcard in
+    # scope still flags — the suppression above is conditional, not global.
+    fa_control = JuliaWorkspaces.derived_file_analysis(rt, control_uri, control_uri)
+    flagged_control = filter(d -> occursin("method call error", d.message) ||
+                                  occursin("No method matching", d.message), fa_control.diagnostics)
+    @test any(f -> SubString(control_src, f.range) == "stack(v; view=true)\n", flagged_control)
+end
+
 @testitem "derived_file_analysis: relative-dot imports at the analyzed file's own top level resolve through tree parents" setup=[FileAnalysisWS] begin
     # Shape 1: single-dot colon-form whose module component was ALREADY bound
     # by a preceding `import .URIs2` (the binding's val is a plain-data
@@ -2213,4 +2263,1617 @@ end
     fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
     @test !any(d -> occursin("method matching", d.message) ||
                     occursin("method call error", d.message), fa.diagnostics)
+end
+
+@testitem "inventory: items carry method signatures and supertypes" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: TypeRef, UnknownType, TYPE_ANY, SigSlot
+
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        abstract type MyAbs end
+        struct Own <: MyAbs
+            a
+            b::Int
+        end
+        struct Other end
+        target(x::MyAbs) = 1
+        function f end
+        end
+        """,
+    ))
+    inv = JuliaWorkspaces.derived_file_inventory(jw.runtime, ROOT)
+    byname = Dict(i.name => i for i in inv.items)
+
+    @test byname["MyAbs"].supertype == TYPE_ANY
+    @test byname["Own"].supertype == TypeRef(["MyAbs"])
+    @test byname["Other"].supertype == TYPE_ANY
+
+    # Struct constructor: no inner constructor, so `method_sig` is nothing and
+    # `ctor_sigs` holds the default record — one all-Unknown slot per field.
+    @test byname["Own"].method_sig === nothing
+    @test length(byname["Own"].ctor_sigs) == 1
+    @test [sl.type for sl in byname["Own"].ctor_sigs[1].slots] == [UnknownType(), UnknownType()]
+
+    @test byname["target"].method_sig !== nothing
+    @test byname["target"].method_sig.slots[1].type == TypeRef(["MyAbs"])
+
+    # Forward declaration: no signature, no arity — shape data absent, kind present.
+    @test byname["f"].method_sig === nothing && byname["f"].arity === nothing
+end
+
+@testitem "signature index: per-name sets with completeness markers" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: LocatedSignature
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "target(x::MyAbs) = 1\nabstract type MyAbs end\nfunction fwd end\n",
+        B => "target(x::MyAbs, y) = 2\n",
+    ))
+    rt = jw.runtime
+
+    nm = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+    @test length(nm.signatures) == 2
+    @test all(ls -> ls.defined_in == ["MainPkg"], nm.signatures)
+    @test !nm.has_unknown_shapes && !nm.has_forward_decl
+
+    fwd = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "fwd")
+    @test isempty(fwd.signatures) && fwd.has_forward_decl
+
+    # Unknown name → the empty, marker-free answer.
+    miss = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "nope")
+    @test miss == JuliaWorkspaces.EMPTY_NAME_METHODS
+
+    # Moving a method between files leaves the per-name value ==.
+    before = nm
+    jw2 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nfunction fwd end\n",
+        B => "target(x::MyAbs) = 1\ntarget(x::MyAbs, y) = 2\n",
+    ))
+    after = JuliaWorkspaces.derived_method_signatures(jw2.runtime, ROOT, ["MainPkg"], "target")
+    @test before == after
+end
+
+@testitem "signature index: a macro-declared name still marks has_unknown_shapes" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "@deprecate oldname newname\n",
+        B => "oldname(x) = 1\n",
+    ))
+    rt = jw.runtime
+
+    nm = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "oldname")
+    @test !isempty(nm.signatures)
+    @test nm.has_unknown_shapes
+end
+
+@testitem "backdating: a type-only edit leaves arity answers equal" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "target(x::Int) = 1\n",
+        B => "caller(y) = target(y)\n",
+    ))
+    rt = jw.runtime
+    arities_before = JuliaWorkspaces.derived_method_arities(rt, ROOT, ["MainPkg"], "target")
+    sigs_before = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("target(x::String) = 1\n", "julia")))
+
+    @test JuliaWorkspaces.derived_method_arities(rt, ROOT, ["MainPkg"], "target") == arities_before
+    @test JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target") != sigs_before
+end
+
+@testitem "backdating: moving a method between files leaves the signature set equal" setup=[FileAnalysisWS] begin
+    # A real cross-file caller (in a third file, `C`) so the diagnostic being
+    # asserted unchanged is an actual definite-mismatch method-call flag, not
+    # just C's self-contained lint hints. `target(:sym)` types as `Symbol`,
+    # which intersects neither `Int` nor `String` — a definite rule-out.
+    mm(fa) = [d.message for d in fa.diagnostics if occursin("No method matching", d.message)]
+
+    C = URI("file:///t/src/c.jl")
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\ninclude(\"c.jl\")\nend\n",
+        A => "target(x::Int) = 1\ntarget(x::String) = 2\n",
+        B => "\n",
+        C => "good() = target(1)\nbad() = target(:sym)\n",
+    ))
+    rt = jw.runtime
+    before = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+    c_before = mm(JuliaWorkspaces.derived_file_analysis(rt, ROOT, C))
+    @test length(c_before) == 1
+
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("target(x::Int) = 1\n", "julia")))
+    JuliaWorkspaces.update_file!(jw, TextFile(B, SourceText("target(x::String) = 2\n", "julia")))
+
+    after = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "target")
+    @test after == before
+
+    # C's own flag (unrelated to the move — its calls never resolve through
+    # A or B directly) survives the move unchanged.
+    c_after = mm(JuliaWorkspaces.derived_file_analysis(rt, ROOT, C))
+    @test c_after == c_before
+
+    # And matches a from-cold rebuild of the already-moved state.
+    jw2 = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\ninclude(\"c.jl\")\nend\n",
+        A => "target(x::Int) = 1\n",
+        B => "target(x::String) = 2\n",
+        C => "good() = target(1)\nbad() = target(:sym)\n",
+    ))
+    c_cold = mm(JuliaWorkspaces.derived_file_analysis(jw2.runtime, ROOT, C))
+    @test c_cold == c_after
+end
+
+@testitem "backdating: moving a struct with an inner constructor between files leaves the signature set equal" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct T\n    x\n    T(x::Int; scale=1) = new(x * scale)\nend\n",
+        B => "\n",
+    ))
+    rt = jw.runtime
+    before = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "T")
+    @test !isempty(before.signatures)
+
+    JuliaWorkspaces.update_file!(jw, TextFile(A, SourceText("\n", "julia")))
+    JuliaWorkspaces.update_file!(jw, TextFile(B, SourceText("struct T\n    x\n    T(x::Int; scale=1) = new(x * scale)\nend\n", "julia")))
+
+    after = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "T")
+    @test after == before
+
+    # A keyword rename is the one edit `ctor_sigs` actually tracks by name
+    # (slot types are erased, positional parameter names aren't recorded) —
+    # proves the equality above isn't vacuous.
+    JuliaWorkspaces.update_file!(jw, TextFile(B, SourceText("struct T\n    x\n    T(x::Int; factor=1) = new(x * factor)\nend\n", "julia")))
+    renamed = JuliaWorkspaces.derived_method_signatures(rt, ROOT, ["MainPkg"], "T")
+    @test renamed != before
+end
+
+@testitem "tree_resolve: workspace names, store names, unknowns" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: TypeRef
+    const SS = JuliaWorkspaces.SymbolServer
+
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nstruct Own <: MyAbs end\n",
+        B => "caller() = 1\n",
+    ))
+    rt = jw.runtime
+    resolve = JuliaWorkspaces._tree_type_resolver(rt, ROOT)
+
+    own = resolve(TypeRef(["Own"]), ["MainPkg"])
+    @test own isa SL.TreeDataType && own.key == (["MainPkg"], "Own")
+    @test own.sup == TypeRef(["MyAbs"])
+
+    # Store name (Base is visible everywhere) → a store value the subtype walk
+    # understands: the DATATYPE, not the constructor `FunctionStore` `Base.Int`
+    # actually holds.
+    int = resolve(TypeRef(["Int"]), ["MainPkg"])
+    @test int isa SS.DataTypeStore
+    # Qualified store name — `Base.AbstractString` is a `VarRef` alias in the
+    # store, and an unfollowed alias compares against nothing.
+    @test resolve(TypeRef(["Base", "AbstractString"]), ["MainPkg"]) isa SS.DataTypeStore
+    # Unknown → nothing, silently.
+    @test resolve(TypeRef(["NoSuchName"]), ["MainPkg"]) === nothing
+    # The walk crosses tree → store: Own <: MyAbs <: Any ends definitely.
+    myabs = resolve(TypeRef(["MyAbs"]), ["MainPkg"])
+    @test SL._issubtype(own, myabs, nothing, nothing) === true
+end
+
+@testitem "tree_resolve: a re-exported package type keys on where it is declared" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: TypeRef, JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # `T` is declared in WP's SUBMODULE and re-exported by WP, so the two
+    # spellings bind it under different modules (`WP` vs `WP.Sub`). Keying a
+    # `TreeDataType` on the binding module would give one type two keys — and a
+    # definite `false` between a type and itself.
+    main_project = "name = \"MainP\"\nuuid = \"b2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    wp_project = "name = \"WP\"\nuuid = \"c2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsptype/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsptype/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsptype/Main/src/MainP.jl"),
+        SourceText("module MainP\nusing WP\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///wsptype/WP/Project.toml"), SourceText(wp_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsptype/WP/src/WP.jl"),
+        SourceText("module WP\ninclude(\"sub.jl\")\nusing .Sub\nexport T, Ab\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///wsptype/WP/src/sub.jl"),
+        SourceText("module Sub\nabstract type Ab end\nstruct T <: Ab end\nexport T, Ab\nend\n", "julia")))
+
+    main_root = URI("file:///wsptype/Main/src/MainP.jl")
+    resolve = JuliaWorkspaces._tree_type_resolver(jw.runtime, main_root)
+
+    reexported = resolve(TypeRef(["T"]), ["MainP"])
+    qualified = resolve(TypeRef(["WP", "Sub", "T"]), ["MainP"])
+    @test reexported isa SL.TreeDataType && qualified isa SL.TreeDataType
+    @test reexported.key == (["WP", "Sub"], "T")
+    @test reexported.key == qualified.key
+    @test SL._has_type_intersection(reexported, qualified, nothing, nothing) === true
+
+    # The supertype walk starts in the DECLARING module, so `Ab` resolves the
+    # same way from either spelling.
+    ab = resolve(TypeRef(["Ab"]), ["MainP"])
+    @test ab isa SL.TreeDataType && ab.key == (["WP", "Sub"], "Ab")
+    @test SL._issubtype(reexported, ab, nothing, nothing) === true
+end
+
+@testitem "parity: bare identifier, sibling-file callee flags a definite mismatch" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => """
+        abstract type MyAbs end
+        struct Own <: MyAbs end
+        struct Other end
+        target(x::MyAbs) = 1
+        """,
+        B => """
+        good(v::Own) = target(v)
+        bad(w::Other) = target(w)
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    msgs = [d.message for d in fa.diagnostics]
+    flagged = filter(m -> occursin("method call error", m) || occursin("No method matching", m), msgs)
+    @test length(flagged) == 1   # `bad` flags, `good` does not
+    # The one flag names the argument's own type, not the `Any` the legacy
+    # binding-type slot falls back to for a sibling-file annotation.
+    @test occursin("target(::Other)", only(flagged))
+    # Both calls were really compared against the record, and only one was ruled out.
+    @test rec.comparisons >= 2 && rec.rule_outs == 1
+end
+
+@testitem "parity: both include orders give identical diagnostics" setup=[FileAnalysisWS] begin
+    # Two methods of one name, split across the files, plus a call checked
+    # against their union: the answer is the whole root's method set, so it
+    # cannot depend on which file the include tree reaches first.
+    function msgs(includes::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\n$includes\nend\n",
+            A => "struct Own end\ntarget(x::Own) = 1\n",
+            B => """
+            struct Other end
+            target(x::Other) = 2
+            good(v::Own) = target(v)
+            bad(w::Int) = target(w)
+            """,
+        ))
+        return sort([d.message for d in JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B).diagnostics])
+    end
+    ab = msgs("include(\"a.jl\")\ninclude(\"b.jl\")")
+    ba = msgs("include(\"b.jl\")\ninclude(\"a.jl\")")
+    @test ab == ba
+    flagged = filter(m -> occursin("No method matching", m) || occursin("method call error", m), ab)
+    @test length(flagged) == 1
+    # `w`'s annotation is the platform-width `Int` alias, and the message names
+    # the aliased type: `Int64` on 64-bit, `Int32` on 32-bit.
+    @test occursin("target(::$Int)", only(flagged))
+end
+
+@testitem "parity: bare identifier, closure callee flags a definite mismatch" setup=[FileAnalysisWS] begin
+    # Types live in the SAME file as the closure: the EXPR path resolves
+    # annotations through local bindings only — its cross-file hop is a
+    # later deferral and is NOT asserted here.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => """
+        abstract type MyAbs end
+        struct Own <: MyAbs end
+        struct Other end
+        function caller(v::Own, w::Other)
+            target(x::MyAbs) = 1
+            target(v)
+            target(w)
+        end
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity: closure callee resolves sibling-file types through the records" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nstruct Own <: MyAbs end\nstruct Other end\n",
+        B => """
+        function caller(v::Own, w::Other)
+            target(x::MyAbs) = 1
+            target(v)
+            target(w)
+        end
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1   # `target(w)` flags, `target(v)` does not
+    @test occursin("target(::Other)", only(flagged).message)
+    # `target(v)`'s match short-circuits in `sig_match_any(::Binding)`'s direct
+    # check; `target(w)`'s mismatch does not, so it falls through to the
+    # `.refs` loop and is compared (and ruled out) a second time.
+    @test rec.comparisons >= 2 && rec.rule_outs == 2
+end
+
+@testitem "parity: closure callee needs the mid-walk hop, not just call-side resolution" setup=[FileAnalysisWS] begin
+    # `Own`'s own supertype (`OtherAbs`) is unrelated to `MyAbs` — ruling this
+    # out needs `_super` to walk PAST `Own`'s immediate supertype and hit the
+    # sibling-file `TreeRef` mid-chain (`OtherAbs`), not merely the call-side
+    # annotation read: a fixture built only from directly cross-file/same-file
+    # annotations can't tell the mid-walk hop apart from a plain "not ruled
+    # out" (both read as "no flag"). Confirmed by temporarily disabling the
+    # `sup_a isa TreeRef` conversion in `_issubtype`: this fixture drops to 0
+    # flags, while the earlier (non-discriminating) mid-walk fixture does not
+    # change either way.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nabstract type OtherAbs end\n",
+        B => """
+        struct Own <: OtherAbs end
+        function caller(v::Own)
+            target(x::MyAbs) = 1
+            target(v)
+        end
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("target(::Own)", only(flagged).message)
+    # The one call's mismatch never short-circuits (see the comment above), so
+    # it is compared, and ruled out, twice.
+    @test rec.comparisons >= 1 && rec.rule_outs == 2
+end
+
+@testitem "parity: bare identifier, same-file module-level callee flags a definite mismatch" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => """
+        abstract type MyAbs end
+        struct Own <: MyAbs end
+        struct Other end
+        target(x::MyAbs) = 1
+        good(v::Own) = target(v)
+        bad(w::Other) = target(w)
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity: bare identifier, store callee flags a definite mismatch" setup=[FileAnalysisWS] begin
+    # `iseven` has an `iseven(n::Real)` method (an ABSTRACT store param — the
+    # good arm must match through ancestry, not by luck), and every one of its
+    # methods (Missing/AbstractFloat/Real/Number) resolves cleanly in a
+    # stdlib-only env, so `Other`'s plain `Any` supertype rules all of them
+    # out. (`sin` was tried first: its store record set also includes
+    # LinearAlgebra-typed methods that this env can't resolve, which read as
+    # unknown rather than ruled out and left `bad` permanently unflagged.)
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => """
+        struct Other end
+        struct MyReal <: Real end
+        good(v::MyReal) = iseven(v)
+        bad(w::Other) = iseven(w)
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity: bare identifier, one-file root reports like a same-file module-level callee" setup=[FileAnalysisWS] begin
+    # The same source analysed as a project-less one-file root: the file IS
+    # its whole tree, so the record path must reach the same verdict. (True
+    # "no root" cannot be expressed through derived_file_analysis — a file
+    # outside every root produces no analysis at all, which is the silent
+    # end of the degradation map by construction.)
+    jw = ws_with(Dict(
+        B => """
+        abstract type MyAbs end
+        struct Own <: MyAbs end
+        struct Other end
+        target(x::MyAbs) = 1
+        good(v::Own) = target(v)
+        bad(w::Other) = target(w)
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, B, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity: the type phase declines wherever the record set is partial" setup=[FileAnalysisWS] begin
+    # Every case here is correct code whose callee has methods, or keywords, the
+    # signature records do not list. Exhausting the records would flag it.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    # A workspace overload of a Base function: the records hold the workspace's
+    # share of `length`'s methods only.
+    @test isempty(callflags("import Base: length\nstruct D end\nlength(d::D) = 1\n",
+                            "caller(v::Vector) = length(v)\n"))
+
+    # `; kwargs...` accepts any keyword.
+    @test isempty(callflags("struct T end\ng(x::T; kwargs...) = 2\n",
+                            "caller(v::T) = g(v; anything=1)\n"))
+
+    # A keyword declared with a type and a default is still a keyword.
+    @test isempty(callflags("struct T end\nf(x::T, y::Int; define::Bool=true) = 1\n",
+                            "caller(v::T) = f(v, 1; define=false)\n"))
+
+    # A type parameter can bind a VALUE, so a typevar argument types nothing.
+    @test isempty(callflags("struct P{Q} end\nd!(b::Bool) = 1\n",
+                            "caller(p::P{Q}) where {Q} = d!(Q)\n"))
+
+    # A datatype's records model the field constructor, not its keyword form.
+    @test isempty(callflags("Base.@kwdef struct FS\n    inc::Int = 1\n    exc::Int = 2\nend\n",
+                            "mk() = FS(; inc=3, exc=4)\n"))
+
+    # A keyword splat passes an unknown — possibly empty — keyword set.
+    @test isempty(callflags("struct O end\nf(x::O) = 1\n",
+                            "caller(v::O, kw) = f(v; kw...)\n"))
+    # Same at a store-backed callee, which reads the call's keywords the same way.
+    @test isempty(callflags("struct O end\nnoop(x::O) = 1\n",
+                            "caller(kw) = sin(1; kw...)\n"))
+end
+
+@testitem "parity: store callee with a workspace overload — union of both method sets" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "import Base: iseven\nstruct D end\niseven(d::D) = true\nstruct Other end\n",
+        B => """
+        import Base: iseven
+        good1(d::D) = iseven(d)        # served by the workspace overload
+        good2(x::Int) = iseven(x)      # served by the store's own methods
+        bad(w::Other) = iseven(w)      # served by neither: flag
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+end
+
+@testitem "parity: placement (e) — store callee with workspace overload, per shape" setup=[FileAnalysisWS] begin
+    # For each shape, `iseven` (or a workspace-defined stand-in) is bound via
+    # `import Base: ...` in both files and also overloaded in the workspace;
+    # `good1` is served only by the workspace half of the union, `good2` only
+    # by the store half, and `bad` by neither. The bare shape is covered by
+    # "parity: store callee with a workspace overload — union of both method
+    # sets" above — not repeated here.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    # parametric: the workspace half carries the shape — a head-only match
+    # (`D{Int}` vs. the call's `D{String}`) — the store half is unrelated.
+    flagged = callflags(
+        "import Base: iseven\nstruct D{T} end\niseven(d::D{Int}) = true\nstruct Other end\n",
+        """
+        import Base: iseven
+        good1(d::D{String}) = iseven(d)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # union: the workspace half's parameter is a `Union` of two workspace types.
+    flagged = callflags(
+        "import Base: iseven\nstruct P end\nstruct Q end\nstruct Other end\niseven(x::Union{P,Q}) = true\n",
+        """
+        import Base: iseven
+        good1(p::P) = iseven(p)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # where: the workspace half's typevar is bounded by a workspace abstract
+    # type unrelated to the store's own `Real`/`Number` bounds.
+    flagged = callflags(
+        "import Base: iseven\nabstract type MyAbs end\nstruct Own <: MyAbs end\nstruct Other end\niseven(x::T) where {T<:MyAbs} = true\n",
+        """
+        import Base: iseven
+        good1(o::Own) = iseven(o)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # vararg: the workspace half carries the shape — `iseven`'s own methods are
+    # all unary, so a multi-arg call can only be served by the workspace side.
+    flagged = callflags(
+        "import Base: iseven\nstruct D end\niseven(d::D, xs::D...) = true\nstruct Other end\n",
+        """
+        import Base: iseven
+        good1(d::D) = iseven(d, d, d)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w, w)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # optional: the workspace half carries the shape via a defaulted slot.
+    flagged = callflags(
+        "import Base: iseven\nstruct D end\niseven(d::D, y::Int=1) = true\nstruct Other end\n",
+        """
+        import Base: iseven
+        good1(d::D) = iseven(d, 2)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w, 2)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+
+    # keywords: the workspace half carries the shape via a declared keyword.
+    flagged = callflags(
+        "import Base: iseven\nstruct D end\niseven(d::D; k=1) = true\nstruct Other end\n",
+        """
+        import Base: iseven
+        good1(d::D) = iseven(d; k=2)
+        good2(x::Int) = iseven(x)
+        bad(w::Other) = iseven(w; k=2)
+        """)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+end
+
+@testitem "parity: store callee with a qualified extension in the current root" setup=[FileAnalysisWS] begin
+    # `Base.iseven(::D2) = true` is a QUALIFIED extension: its resolved
+    # qualifier is never a tree module, so `derived_method_items`/the
+    # signature index drops it exactly like `derived_external_method_extensions`
+    # does for the arity side — `tree.ext_records` is the only channel that
+    # sees it.
+    bsrc = """
+    import Base: iseven
+    good(d::D2) = iseven(d)   # served by the qualified extension's own record
+    bad(w::Other) = iseven(w)
+    """
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct D2 end\nBase.iseven(::D2) = true\nstruct Other end\n",
+        B => bsrc,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    # The generic message carries no type name here (`describe_call_mismatch`
+    # returns `nothing` for this callee shape) — pin the flag to `bad`'s own
+    # call by its source range instead.
+    @test SubString(bsrc, only(flagged).range) == "iseven(w)\n"
+end
+
+@testitem "parity: store callee with a deved dependency's workspace extension" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # DevPkg is DEVED into MainP (a Manifest `[deps.DevPkg]` entry with a
+    # `path`, no registry version): its `Base.iseven(::E) = true` lives in
+    # DevPkg's OWN root's signature index, never MainP's, and in no jstore
+    # either — `tree.ext_records` walks every deved dependency root, and the
+    # extension's own parameter type (`E`, declared inside DevPkg) resolves
+    # through `tree.ext_resolve`, started at DevPkg's root rather than MainP's.
+    main_project = "name = \"MainP\"\nuuid = \"b2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    dev_uuid = "cccccccc-dddd-eeee-ffff-000000000000"
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+
+    [[deps.DevPkg]]
+    path = "../DevPkg"
+    uuid = "$dev_uuid"
+    version = "0.1.0"
+    """
+    dev_project = "name = \"DevPkg\"\nuuid = \"$dev_uuid\"\nversion = \"0.1.0\"\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///devroot/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///devroot/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///devroot/Main/src/MainP.jl"),
+        SourceText("""
+        module MainP
+        using DevPkg
+        import Base: iseven
+        struct D end
+        iseven(d::D) = true
+        f(e::E) = iseven(e)        # served by the deved dependency's extension
+        good2(x::Int) = iseven(x)  # served by the store's own methods
+        bad(s::String) = iseven(s) # served by neither: flag
+        end
+        """, "julia")))
+    add_file!(jw, TextFile(URI("file:///devroot/DevPkg/src/DevPkg.jl"),
+        SourceText("module DevPkg\nstruct E end\nBase.iseven(::E) = true\nexport E\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///devroot/DevPkg/Project.toml"), SourceText(dev_project, "toml")))
+
+    main_root = URI("file:///devroot/Main/src/MainP.jl")
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, main_root, main_root)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("String", only(flagged).message)
+end
+
+@testitem "parity: a deved dependency's own Project.toml is not required for its extension's control" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    # Same shape as the deved-dependency testitem above but DevPkg has NO
+    # `Project.toml` of its own — a manifest dev dep still names it, but it
+    # never becomes a recognized workspace-package FOLDER
+    # (`derived_workspace_package_roots`), so `E` never resolves at the CALL
+    # SITE either (an accepted, unrelated blind spot: `f` stays silent either
+    # way). `tree_ext_records` still finds DevPkg's root directly from
+    # `derived_workspace_deved_packages` (the Manifest entry alone, no
+    # `Project.toml` needed there), and hands `tree_ext_resolve` that SAME
+    # root via `_ext_defined_in_roots` — not a `defined_in[1]` name lookup,
+    # which `derived_workspace_package_roots` would answer `nothing` for
+    # here. Regression guard for the bug the name-lookup fallback had: a
+    # resolver started at the wrong (current) root can't resolve `E`, and an
+    # unresolvable extension parameter widens to Any, silently matching
+    # every argument — including this `bad(s::String)` control.
+    main_project = "name = \"MainP\"\nuuid = \"b2345678-1234-1234-1234-123456789abc\"\nversion = \"0.1.0\"\n"
+    dev_uuid = "cccccccc-dddd-eeee-ffff-000000000000"
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+
+    [[deps.DevPkg]]
+    path = "../DevPkg"
+    uuid = "$dev_uuid"
+    version = "0.1.0"
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///devroot2/Main/Project.toml"), SourceText(main_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///devroot2/Main/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///devroot2/Main/src/MainP.jl"),
+        SourceText("""
+        module MainP
+        using DevPkg
+        import Base: iseven
+        struct D end
+        iseven(d::D) = true
+        f(e::E) = iseven(e)
+        bad(s::String) = iseven(s) # must still flag
+        end
+        """, "julia")))
+    add_file!(jw, TextFile(URI("file:///devroot2/DevPkg/src/DevPkg.jl"),
+        SourceText("module DevPkg\nstruct E end\nBase.iseven(::E) = true\nexport E\nend\n", "julia")))
+    # No DevPkg/Project.toml.
+
+    main_root = URI("file:///devroot2/Main/src/MainP.jl")
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, main_root, main_root)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("String", only(flagged).message)
+end
+
+@testitem "parity: a bare, unimported store callee the workspace extends is checked against the union" setup=[FileAnalysisWS] begin
+    # No `import` in `B`: `iseven` resolves through the implicit `using Base`
+    # straight to the raw `SymbolServer.FunctionStore`, never a `Binding` — the
+    # callee shape `check_call`'s `tree.extended` early-return arm handles
+    # directly, distinct from the `Binding`-wrapped store value the qualified-
+    # extension testitem above exercises.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct D end\nBase.iseven(d::D) = true\nstruct Other end\n",
+        B => """
+        good1(d::D) = iseven(d)       # served by the sibling's qualified extension
+        good2(x::Int) = iseven(x)     # served by the store
+        bad(w::Other) = iseven(w)     # neither: flag
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("Other", only(flagged).message)
+    # `good1` compared against the extension record, `good2` against the
+    # store's own methods, `bad` against both halves and ruled out by each —
+    # real comparisons happened on both sides of the union, not a lucky skip.
+    @test rec.comparisons >= 3 && rec.rule_outs >= 2
+end
+
+@testitem "parity: an unreadable workspace extension declines the raw-store union check" setup=[FileAnalysisWS] begin
+    # `function Base.iseven end` is a QUALIFIED forward declaration: it registers
+    # as a workspace extension of `Base.iseven` (`derived_external_method_extensions`
+    # sees the qualifier), but has no body, so its inventory item's `method_sig`
+    # is `nothing` — the extension record set is an under-approximation. Exhausting
+    # it would license a wrong verdict, so the union check must decline entirely
+    # rather than fall back to the store half alone.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "function Base.iseven end\nstruct Other end\n",
+        B => "bad(w::Other) = iseven(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test isempty(flagged)
+end
+
+@testitem "parity: methods defined when the code runs are not indexed" setup=[FileAnalysisWS] begin
+    # A method born from `eval`, or from a macro nothing here can expand, leaves
+    # no record behind, so a name's record set reads as complete when it is not
+    # and a call the invisible method serves is ruled out. Both calls below are
+    # correct; the flags are accepted false positives — such code can define
+    # methods for any function in any module, so nothing can mark the records
+    # partial without withholding every type opinion everywhere.
+    function flagged(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("No method matching", d.message) ||
+                           occursin("method call error", d.message), fa.diagnostics)
+    end
+
+    # `@eval` under a loop defines `f(::Int)` and `f(::Float64)`.
+    @test_broken isempty(flagged("struct O end\nfor T in (Int, Float64)\n    @eval f(x::\$T) = 1\nend\nf(x::O) = 2\n",
+                                 "caller() = f(3)\n"))
+    # `@gen` expands to a method of `genf`, naming no `eval` at all.
+    @test_broken isempty(flagged("struct O end\nmacro gen() :(genf(x::Int) = 1) end\n@gen\ngenf(x::O) = 2\n",
+                                 "caller() = genf(1)\n"))
+end
+
+@testitem "parity: a relative function import splits the method set across keys" setup=[FileAnalysisWS] begin
+    # `import ..f` binds `f` through the semantic pass, but the module tree
+    # classifies a non-module trailing segment `:unresolved`, so the arity and
+    # signature indices key a local `f(::T) = ...` extension under the CHILD
+    # module while the provider's methods stay under the parent's key. The
+    # outside-reach marker makes the TYPE phase decline for such a name; the
+    # COUNT phase has no such guard, so a call served only by the provider's
+    # method false-flags on arity. Same split for the colon spelling.
+    function flags(mainsrc::String, childsrc::String)
+        jw = ws_with(Dict(ROOT => mainsrc, A => childsrc))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, A)
+        return filter(d -> occursin("No method matching", d.message) ||
+                           occursin("method call error", d.message), fa.diagnostics)
+    end
+
+    # `g()` is served by the parent's `f(::Int, ::Int)`; the child key only
+    # holds `f(::String)`.
+    @test_broken isempty(flags(
+        "module MainPkg\nf(x::Int, y::Int) = 1\ninclude(\"a.jl\")\nend\n",
+        "module Child\nimport ..f\nf(x::String) = 2\ng() = f(1, 2)\nend\n"))
+    # Colon form against a provider submodule: same split, same false flag.
+    @test_broken isempty(flags(
+        "module MainPkg\nmodule Prov\nf(x::Int, y::Int) = 1\nexport f\nend\ninclude(\"a.jl\")\nend\n",
+        "module Child\nusing ..Prov: f\nf(x::String) = 2\ng() = f(1, 2)\nend\n"))
+    # Control: the import binding itself resolves — a bare use of the imported
+    # name is neither a missing ref nor a method-call flag. If this arm ever
+    # fails, the pins above have rotted into silence-by-unresolved-name.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\nf(x::Int) = 1\ninclude(\"a.jl\")\nend\n",
+        A => "module Child\nimport ..f\ng() = f(1)\nend\n"))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, A)
+    @test isempty([d for d in fa.diagnostics if occursin("No method matching", d.message) ||
+                       occursin("method call error", d.message) ||
+                       occursin("Missing reference", d.message)])
+end
+
+@testitem "parity: an alias-qualified store extension is invisible to the union" setup=[FileAnalysisWS] begin
+    # `const B = Base; B.iseven(::D) = ...` records its qualifier as written.
+    # The extension filter resolves qualifiers against the env's top-level
+    # symbols, where no `B` exists, so the extension is dropped WITHOUT marking
+    # the record set unknown — the union reads complete and rules out the call
+    # the dropped extension serves. Same for the `import Base as B2` spelling.
+    # A drop should mark the set unknown; resolving the alias through the
+    # defining module's visible names would recover the check entirely.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test_broken isempty(callflags("const B = Base\nstruct D end\nB.iseven(d::D) = true\n",
+                                   "import Base: iseven\ngood(d::D) = iseven(d)\n"))
+    @test_broken isempty(callflags("import Base as B2\nstruct D end\nB2.iseven(d::D) = true\n",
+                                   "import Base: iseven\ngood(d::D) = iseven(d)\n"))
+    # Control: a plainly-spelled qualifier joins the union and is checked.
+    @test isempty(callflags("struct D end\nBase.iseven(d::D) = true\n",
+                            "import Base: iseven\ngood(d::D) = iseven(d)\n"))
+end
+
+@testitem "parity: real-corpus operand defects never rule a call out" setup=[FileAnalysisWS] begin
+    # Every fixture here is correct code from the 80-package corpus sweep,
+    # reduced; each was ruled out by an argument the decision path typed wrongly.
+    # The control beside it must still flag, or the fix has only silenced things.
+    function flags(src::String)
+        jw = ws_with(Dict(ROOT => src))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, ROOT)
+        return filter(d -> occursin("No method matching", d.message) ||
+                           occursin("method call error", d.message), fa.diagnostics)
+    end
+
+    # A hex literal's width comes from its DIGIT count: `0x4000_0001` is UInt32.
+    @test isempty(flags("module P\nhasleaf(l::UInt32) = true\nf() = (leaf = 0x4000_0001; hasleaf(leaf))\ng() = hasleaf(0x0000_0007)\nend\n"))
+    @test length(flags("module P\nhasleaf(l::UInt32) = true\nh() = hasleaf(0x0000_0000_0000_0007)\nend\n")) == 1
+
+    # A local bound to a type NAME holds a type, so it matches a `::Type{…}` slot.
+    @test isempty(flags("module Q\nP(::Type{Float64}) = 1\nQ2(::DataType) = 1\nR(::Type) = 1\nb() = (T = Float64; P(T))\nc() = (T = Float64; Q2(T))\nd() = (T = Float64; R(T))\nend\n"))
+    @test length(flags("module Q\nP(::Type{Float64}) = 1\nbad() = (T = \"s\"; P(T))\nend\n")) == 1
+
+    # A qualified extension binds the workspace's SHARE of another module's
+    # generic; the owner's own methods are not in that binding.
+    @test isempty(flags("module S\nstruct Ax end\nBase.axes(A::Ax) = ()\nBase.axes(A::Ax, d) = ()\ng(A::AbstractArray, d) = length(Base.axes(A, d))\nend\n"))
+    # A qualified extension of a WORKSPACE module keeps its full set, and its checks.
+    @test length(flags("module S2\nmodule Inner\nfoo(x::Int) = 1\nend\nInner.foo(x::String) = 2\ng() = Inner.foo(1.0)\nend\n")) == 1
+
+    # A `where` typevar passed as an argument may bind a value: no opinion — and
+    # the DECISION must use the same operand the message reports.
+    @test isempty(flags("module T2\nf(x::NamedTuple{an}, y::NamedTuple{bn}) where {an,bn} = Base.merge_names(an, bn)\nend\n"))
+
+    # `using Base: UUID` binds the name locally; a constructor call through the
+    # imported name is the store type it stands for, not the import binding.
+    @test isempty(flags("module U\nusing Base: PkgId, UUID\nf() = PkgId(UUID(42), \"x\")\ng(x::Base.UUID) = x\nh() = g(UUID(42))\nend\n"))
+    @test isempty(flags("module U2\nimport Base: UUID\ng(x::UUID) = x\nh() = g(UUID(42))\nend\n"))
+    @test length(flags("module U3\nusing Base: UUID, Dict\ng(x::Base.UUID) = x\nbad() = g(Dict(1=>2))\nend\n")) == 1
+
+    # `(x,)::Ref{Any}` binds the ELEMENT: the container's type is not `x`'s.
+    @test isempty(flags("module V\nstruct D end\nmycols(df::D) = 1\ng((x,)::Ref{Any}) = mycols(x)\nend\n"))
+    # A `Tuple{…}` annotation does spell each element out, and still rules out.
+    @test length(flags("module V2\nstruct D end\nmycols(df::D) = 1\ng((x, y)::Tuple{Ref{Any},Int}) = (mycols(x), y)\nend\n")) == 1
+end
+
+@testitem "parity: an anonymous constructor's methods are not indexed" setup=[FileAnalysisWS] begin
+    # `(::Type{T})(x::Cenum{T2}) where T<:Integer` binds no name, so nothing
+    # records it and `Integer(x)` is ruled out against Base's constructor set as
+    # if it were complete. The call is correct — no decline for this form exists
+    # yet, and the flag is an accepted false positive.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "(::Type{T})(x::Cenum{T2}) where {T<:Integer,T2<:Integer} = T(bitstring(x))\n",
+        # The type is declared HERE on purpose: a sibling-file annotation leaves
+        # the argument untyped, and an untyped argument rules nothing out, so the
+        # form under test would not be reached at all.
+        B => "abstract type Cenum{T<:Integer} end\nconv(x::Cenum) = Integer(x)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("No method matching", d.message) ||
+                          occursin("method call error", d.message), fa.diagnostics)
+    @test_broken isempty(flagged)
+end
+
+@testitem "parity: optional slots align before the vararg pad" setup=[FileAnalysisWS] begin
+    # `f(a, b="x", xs::T...)`: a call that fills the optional slot must compare
+    # it against the OPTIONAL's type, not the vararg's element type.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test isempty(callflags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\n",
+                            "caller() = f9(1, \"y\")\n"))
+    @test isempty(callflags("f10(a::Int, b::String=\"x\", xs::Vararg{Float64,2}) = 1\n",
+                            "caller() = f10(1, \"y\", 1.0, 2.0)\n"))
+    # The same alignment in the legacy path, where the callee is a local closure
+    # matched against its own definition EXPR.
+    @test isempty(callflags("struct Z end\n",
+                            "function caller()\n    g(a::Int, b::String=\"x\", xs::Float64...) = 1\n    g(1, \"y\")\nend\n"))
+
+    # Still ruled out when the optional slot genuinely does not fit.
+    @test length(callflags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\n",
+                           "caller() = f9(1, 2.0, 3.0)\n")) == 1
+end
+
+@testitem "parity/qualified: Base-qualified annotation, sibling callee" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct Other end\ntarget(x::Base.AbstractString) = 1\n",
+        B => "good(v::String) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity/qualified: workspace-module-qualified annotation" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: TypeRef
+
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        module Inner
+        abstract type MyAbs end
+        end
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "struct Own <: Inner.MyAbs end\nstruct Other end\ntarget(x::Inner.MyAbs) = 1\n",
+        B => "good(v::Own) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+
+    # Whitebox: `flagged == 1` alone does not distinguish a real match from an
+    # indeterminate wave-through — `_issubtype`/`_has_type_intersection` treat
+    # `nothing` as "not ruled out", so a regression that broke ONLY the
+    # module-descent supertype resolution would leave `good` silently
+    # indeterminate while `bad` still flags on its own annotation, and the
+    # count would stay green. Resolve both names directly and assert a
+    # DEFINITE subtype relation, plus the key equality the descent must reach.
+    resolve = JuliaWorkspaces._tree_type_resolver(jw.runtime, ROOT)
+    own = resolve(TypeRef(["Own"]), ["MainPkg"])
+    myabs = resolve(TypeRef(["Inner", "MyAbs"]), ["MainPkg"])
+    @test own isa SL.TreeDataType && myabs isa SL.TreeDataType
+    @test myabs.key == (["MainPkg", "Inner"], "MyAbs")
+    @test SL._issubtype(own, myabs, nothing, nothing) === true
+end
+
+@testitem "parity/parametric: head-only comparison, sibling callee" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct Other end\ntarget(x::Vector{Int}) = 1\n",
+        B => """
+        good(v::Vector{String}) = target(v)   # heads equal; type args are a non-goal
+        bad(w::Other) = target(w)
+        """,
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("target(::Other)", only(flagged).message)
+    @test rec.comparisons >= 2 && rec.rule_outs == 1
+end
+
+@testitem "parity/inner-where: `Vector{T} where T` annotation is its head" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct Other end\ntarget(x::Vector{T} where T) = 1\n",
+        B => "good(v::Vector{Int}) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity/dispatch-only: a nameless `::T` slot still types" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "abstract type MyAbs end\nstruct Own <: MyAbs end\nstruct Other end\ntarget(::MyAbs, y::Int) = 1\n",
+        B => "good(v::Own) = target(v, 1)\nbad(w::Other) = target(w, 1)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "parity/shapes: closure callee flags each shape's definite mismatch" setup=[FileAnalysisWS] begin
+    # Types stay in the SAME file as the closure in every shape below; the
+    # cross-file hop for a closure callee is a later deferral, not asserted here.
+    function flagged(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test length(flagged("""
+    struct Other end
+    function caller(v::Vector{String}, w::Other)
+        target(x::Vector{Int}) = 1
+        target(v)
+        target(w)
+    end
+    """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    function caller(v::Vector{Int}, w::Other)
+        target(x::Vector{T} where T) = 1
+        target(v)
+        target(w)
+    end
+    """)) == 1
+
+    @test length(flagged("""
+    abstract type MyAbs end
+    struct Own <: MyAbs end
+    struct Other end
+    function caller(v::Own, w::Other)
+        target(::MyAbs, y::Int) = 1
+        target(v, 1)
+        target(w, 1)
+    end
+    """)) == 1
+
+    union_flagged = flagged("""
+    struct P end
+    struct Q end
+    struct Other end
+    function caller(v::P, w::Other)
+        target(x::Union{P,Q}) = 1
+        target(v)
+        target(w)
+    end
+    """)
+    @test length(union_flagged) == 1
+    union_msg = only(union_flagged).message
+    @test occursin("Union{", union_msg) && occursin("P", union_msg) && occursin("Q", union_msg)
+    @test !occursin("ResolvedUnion", union_msg)
+
+    @test length(flagged("""
+    struct Other end
+    function caller(v::Float64, w::Other)
+        target(x::T) where {T <: Real} = 1
+        target(v)
+        target(w)
+    end
+    """)) == 1
+end
+
+@testitem "parity/shapes: same-file module-level callee flags each shape's definite mismatch" setup=[FileAnalysisWS] begin
+    function flagged(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test length(flagged("""
+    struct Other end
+    target(x::Vector{Int}) = 1
+    good(v::Vector{String}) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    target(x::Vector{T} where T) = 1
+    good(v::Vector{Int}) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    abstract type MyAbs end
+    struct Own <: MyAbs end
+    struct Other end
+    target(::MyAbs, y::Int) = 1
+    good(v::Own) = target(v, 1)
+    bad(w::Other) = target(w, 1)
+    """)) == 1
+
+    @test length(flagged("""
+    struct P end
+    struct Q end
+    struct Other end
+    target(x::Union{P,Q}) = 1
+    good(v::P) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    target(x::T) where {T <: Real} = 1
+    good(v::Float64) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+end
+
+@testitem "parity/shapes: one-file root reports like a same-file module-level callee" setup=[FileAnalysisWS] begin
+    function flagged(src::String)
+        jw = ws_with(Dict(B => src))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, B, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test length(flagged("""
+    struct Other end
+    target(x::Vector{Int}) = 1
+    good(v::Vector{String}) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    target(x::Vector{T} where T) = 1
+    good(v::Vector{Int}) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    abstract type MyAbs end
+    struct Own <: MyAbs end
+    struct Other end
+    target(::MyAbs, y::Int) = 1
+    good(v::Own) = target(v, 1)
+    bad(w::Other) = target(w, 1)
+    """)) == 1
+
+    @test length(flagged("""
+    struct P end
+    struct Q end
+    struct Other end
+    target(x::Union{P,Q}) = 1
+    good(v::P) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+
+    @test length(flagged("""
+    struct Other end
+    target(x::T) where {T <: Real} = 1
+    good(v::Float64) = target(v)
+    bad(w::Other) = target(w)
+    """)) == 1
+end
+
+@testitem "parity/union: workspace members rule out member-wise, sibling callee" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct P end\nstruct Q end\nstruct Other end\ntarget(x::Union{P,Q}) = 1\n",
+        B => "good(v::P) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+end
+
+@testitem "resolve_record_type: a mixed union keeps member opinions" setup=[FileAnalysisWS] begin
+    using JuliaWorkspaces: TypeRef, TypeUnionExpr, MethodSignature, SigSlot, TypeExpr
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\nend\n",
+        A => "struct P end\nstruct Other end\n",
+    ))
+    resolve = JuliaWorkspaces._tree_type_resolver(jw.runtime, ROOT)
+    sig = MethodSignature([SigSlot(TypeUnionExpr(TypeExpr[TypeRef(["P"]), TypeRef(["Int"])]), false)],
+        nothing, Dict{String,TypeExpr}(), Symbol[], false)
+    u = SL.resolve_record_type(sig.slots[1].type, sig, ["MainPkg"], resolve)
+    @test u isa SL.ResolvedUnion && length(u.members) == 2
+    # A real store, not `nothing`: one member (`Int`) is a genuine env type, and
+    # ruling it out needs `_super` to walk its ACTUAL supertype chain.
+    env = JuliaWorkspaces.derived_stdlib_only_env(jw.runtime)
+    store = SL.getsymbols(env)
+    other = resolve(TypeRef(["Other"]), ["MainPkg"])
+    @test SL._has_type_intersection(other, u, store, nothing) === false
+    p = resolve(TypeRef(["P"]), ["MainPkg"])
+    @test SL._has_type_intersection(p, u, store, nothing) === true
+end
+
+@testitem "parity/where: an upper-bounded typevar rules out, sibling callee" setup=[FileAnalysisWS] begin
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "struct Other end\ntarget(x::T) where {T <: Real} = 1\n",
+        B => "good(v::Float64) = target(v)\nbad(w::Other) = target(w)\n",
+    ))
+    rec = SL.MatchRecorder()
+    SL._match_recorder[] = rec
+    fa = try
+        JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    finally
+        SL._match_recorder[] = nothing
+    end
+    flagged = filter(d -> occursin("method call error", d.message) ||
+                          occursin("No method matching", d.message), fa.diagnostics)
+    @test length(flagged) == 1
+    @test occursin("target(::Other)", only(flagged).message)
+    @test rec.comparisons >= 2 && rec.rule_outs == 1
+end
+
+@testitem "parity/where: a lower bound or unbounded typevar licenses nothing" setup=[FileAnalysisWS] begin
+    # A lower bound (`T >: Int`) constrains the typevar from below, giving no
+    # upper bound to rule a call out with; an unbounded `where T` gives none
+    # either. These are reader facts about the record-side `where_var_and_bound`
+    # (via `resolve_record_type`), not a new placement — sibling-file only.
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        rec = SL.MatchRecorder()
+        SL._match_recorder[] = rec
+        fa = try
+            JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        finally
+            SL._match_recorder[] = nothing
+        end
+        flagged = filter(d -> occursin("method call error", d.message) ||
+                             occursin("No method matching", d.message), fa.diagnostics)
+        return flagged, rec
+    end
+
+    flagged, rec = callflags("struct Other end\ntarget(x::T) where {T >: Int} = 1\n",
+                             "callit(w::Other) = target(w)\n")
+    @test isempty(flagged)
+    # Silence must come from a declined comparison, not a candidate the pass
+    # never reached.
+    @test rec.comparisons >= 1 && rec.rule_outs == 0
+
+    flagged, rec = callflags("struct Other end\ntarget(x::T) where T = 1\n",
+                             "callit(w::Other) = target(w)\n")
+    @test isempty(flagged)
+    @test rec.comparisons >= 1 && rec.rule_outs == 0
+end
+
+@testitem "parity/vararg: every spelling aligns and rules out identically" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    # dotted: typed pad rules out a definite mismatch
+    @test isempty(callflags("f(a::Int, xs::Float64...) = 1", "c() = f(1, 2.0, 3.0)"))
+    @test length(callflags("struct O end\nf(a::Int, xs::Float64...) = 1", "c(o::O) = f(1, o)")) == 1
+    # anonymous ::Vararg: untyped pad accepts anything, count still open-ended
+    @test isempty(callflags("f(a::Int, xs::Vararg) = 1", "c() = f(1, \"s\", 's')"))
+    # ::Vararg{T}
+    @test length(callflags("struct O end\nf(a::Int, xs::Vararg{Float64}) = 1", "c(o::O) = f(1, o)")) == 1
+    # ::Vararg{T,N}: exact count, typed pad
+    @test isempty(callflags("f(a::Int, xs::Vararg{Float64,2}) = 1", "c() = f(1, 1.0, 2.0)"))
+    @test length(callflags("f(a::Int, xs::Vararg{Float64,2}) = 1", "c() = f(1, 1.0)")) == 1   # count, via the MethodArity channel — the arity gate short-circuits before the records path; the two windows are identical for a bound Vararg{T,N}
+    # ::Base.Vararg{T}
+    @test length(callflags("struct O end\nf(a::Int, xs::Base.Vararg{Float64}) = 1", "c(o::O) = f(1, o)")) == 1
+end
+
+@testitem "parity/optional: same-file, one-file-root, and a defaulted slot's own mismatch" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function samefile_flags(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function oneroot_flags(src::String)
+        jw = ws_with(Dict(B => src))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, B, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    @test isempty(samefile_flags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\ncaller() = f9(1, \"y\")\n"))
+    @test length(samefile_flags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\ncaller() = f9(1, 2.0, 3.0)\n")) == 1
+
+    @test isempty(oneroot_flags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\ncaller() = f9(1, \"y\")\n"))
+    @test length(oneroot_flags("f9(a::Int, b::String=\"x\", xs::Float64...) = 1\ncaller() = f9(1, 2.0, 3.0)\n")) == 1
+
+    # The optional slot's own annotation still rules out when the caller fills it explicitly.
+    @test length(callflags("f(a::Int, b::String=\"x\") = 1\n", "caller() = f(1, 2.0)\n")) == 1
+    @test isempty(callflags("f(a::Int, b::String=\"x\") = 1\n", "caller() = f(1)\n"))
+end
+
+@testitem "parity/keywords: name-checked gating, all placements agree" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function oneroot_flags(src::String)
+        jw = ws_with(Dict(B => src))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, B, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    function closure_callflags(src::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+            B => src,
+        ))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+
+    # Cross-file: keyword passed to method with no declared keywords → 1 flag
+    @test length(callflags("struct T end\nf(x::T) = 1", "c(v::T) = f(v; k=1)")) == 1
+    # Cross-file: declared keyword → no flags
+    @test isempty(callflags("struct T end\nf(x::T; k=1) = 1", "c(v::T) = f(v; k=2)"))
+    # Cross-file: wrong keyword name → 1 flag (MethodArity's name-membership gate)
+    @test length(callflags("struct T end\nf(x::T; k=1) = 1", "c(v::T) = f(v; other=2)")) == 1
+    # Cross-file: kwsplat accepts anything → no flags
+    @test isempty(callflags("struct T end\nf(x::T; kws...) = 1", "c(v::T) = f(v; whatever=1)"))
+
+    # Closure placement: `f` itself is nested inside `caller` — only `struct T`
+    # stays at module level — so this exercises the EXPR descriptor engine
+    # (_match_descriptor) exclusively, not the MethodArity/tree-arity channel.
+    # Keyword passed to method with no declared keywords → 1 flag
+    @test length(closure_callflags("struct T end\nfunction caller(v::T)\n  f(x::T) = 1\n  f(v; k=1)\nend")) == 1
+    # Closure placement: declared keyword → no flags
+    @test isempty(closure_callflags("struct T end\nfunction caller(v::T)\n  f(x::T; k=1) = 1\n  f(v; k=2)\nend"))
+    # Closure placement: wrong keyword name → 1 flag (the engine's own
+    # name-membership gate — this placement has no MethodArity channel to
+    # fall back on, so it pins the gate added to _match_descriptor itself)
+    @test length(closure_callflags("struct T end\nfunction caller(v::T)\n  f(x::T; k=1) = 1\n  f(v; other=2)\nend")) == 1
+    # Closure placement: kwsplat accepts anything → no flags
+    @test isempty(closure_callflags("struct T end\nfunction caller(v::T)\n  f(x::T; kws...) = 1\n  f(v; whatever=1)\nend"))
+
+    # One-file-root variant of first arm: keyword passed to method with no declared keywords → 1 flag
+    @test length(oneroot_flags("struct T end\nf(x::T) = 1\nc(v::T) = f(v; k=1)")) == 1
+    # Store callee with a kw splat (`Base.ceil`'s `; digits, sigdigits, base`
+    # methods): a MethodStore's kwsplat entry must not be name-checked as its
+    # one declared keyword.
+    @test isempty(oneroot_flags("c(v::Float64) = ceil(v; digits=2)"))
+end
+
+@testitem "parity/ctor-arg: a constructor-call argument carries its type" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    # (c) constructed type declared in the sibling, call in B
+    @test length(callflags("struct Own end\nstruct Other end\ntarget(x::Own) = 1\n",
+                           "b1() = target(Other())\n")) == 1
+    @test isempty(callflags("struct Own end\nstruct Other end\ntarget(x::Own) = 1\n",
+                            "b2() = target(Own())\n"))
+    # (b) same file
+    @test length(callflags("struct Z end\n",
+                           "struct Own end\nstruct Other end\ntarget(x::Own) = 1\nb3() = target(Other())\n")) == 1
+    # (d) store type constructed: ArgumentError("x") vs a slot wanting a workspace type
+    @test length(callflags("struct Own end\ntarget(x::Own) = 1\n",
+                           "b4() = target(ArgumentError(\"x\"))\n")) == 1
+    # (a) closure: whole path is local
+    @test length(callflags("struct Z end\n",
+                           "struct Own end\nstruct Other end\nfunction c()\n    t(x::Own) = 1\n    t(Other())\nend\n")) == 1
+end
+
+@testitem "parity: a forward-declared function with no methods flags, cross-file" setup=[FileAnalysisWS] begin
+    function flagsof(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return [d.message for d in fa.diagnostics]
+    end
+    # sibling forward declaration, no methods anywhere: flag
+    @test any(m -> occursin("no methods", m), flagsof("function f end\n", "c() = f()\n"))
+    # a real method anywhere unflags it — here, beside the declaration
+    @test !any(m -> occursin("no methods", m), flagsof("function f end\nf(x) = x\n", "c() = f(1)\n"))
+end
+
+@testitem "parity: a forward-declared function with no methods flags, same-file and one-file-root" setup=[FileAnalysisWS] begin
+    # Same-file placement: declaration and call share one file.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"b.jl\")\nend\n",
+        B => "function f end\nc() = f()\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test any(d -> occursin("no methods", d.message), fa.diagnostics)
+
+    # One-file-root: no separate root/include indirection — the file is its
+    # own whole tree.
+    jw2 = ws_with(Dict(B => "function f end\nc() = f()\n"))
+    fa2 = JuliaWorkspaces.derived_file_analysis(jw2.runtime, B, B)
+    @test any(d -> occursin("no methods", d.message), fa2.diagnostics)
+end
+
+@testitem "parity: the no-methods verdict survives moving the forward declaration to a sibling file" setup=[FileAnalysisWS] begin
+    root_src = "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n"
+    function flags_at(a::String, b::String, callfile)
+        jw = ws_with(Dict(ROOT => root_src, A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, callfile)
+        return [d.message for d in fa.diagnostics]
+    end
+
+    # Declaration in a.jl, call in b.jl.
+    @test any(m -> occursin("no methods", m), flags_at("function f end\n", "c() = f()\n", B))
+    # Declaration MOVED to b.jl, call moved to a.jl — same verdict.
+    @test any(m -> occursin("no methods", m), flags_at("c() = f()\n", "function f end\n", A))
+end
+
+@testitem "parity: an unknown-shaped name beside a forward decl is not definitely empty" setup=[FileAnalysisWS] begin
+    # `oldname` gets both a forward declaration (`function oldname end`, kind
+    # :function with no arity) and a macro-declared row for the same key
+    # (`@deprecate` mints an :macro_declared item, which the index marks
+    # `has_unknown_shapes` regardless of confirmation — see the analogous
+    # "signature index: a macro-declared name still marks has_unknown_shapes"
+    # test). The union is incomplete, so the definite-emptiness verdict must
+    # decline even though the signature set is literally empty.
+    #
+    # A full diagnostic fixture cannot distinguish this from the pre-fix
+    # behavior: with no arity and no store, the count phase never runs either
+    # way, so the call is silent both before and after this feature — pinning
+    # the index answer and the gate's own predicate is the only way to assert
+    # the `has_unknown_shapes` branch actually does the excluding.
+    jw = ws_with(Dict(
+        ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        A => "@deprecate oldname newname\n",
+        B => "function oldname end\n",
+    ))
+    nm = JuliaWorkspaces.derived_method_signatures(jw.runtime, ROOT, ["MainPkg"], "oldname")
+    @test isempty(nm.signatures)
+    @test nm.has_forward_decl
+    @test nm.has_unknown_shapes
+    # The gate's own predicate (checks.jl): definite emptiness requires
+    # `!has_unknown_shapes`, so this NameMethods must not satisfy it.
+    @test !(isempty(nm.signatures) && nm.has_forward_decl && !nm.has_unknown_shapes)
+end
+
+@testitem "parity/ctor: datatype callees rule out on keywords and alignment only" setup=[FileAnalysisWS] begin
+    function callflags(a::String, b::String)
+        jw = ws_with(Dict(
+            ROOT => "module MainPkg\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+            A => a, B => b))
+        fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+        return filter(d -> occursin("method call error", d.message) ||
+                           occursin("No method matching", d.message), fa.diagnostics)
+    end
+    # keyword passed to a plain struct's field constructor: no method takes keywords
+    @test length(callflags("struct S x end\n", "mk() = S(x = 1)\n")) == 1
+    # field types are NOT an opinion: a 'wrong' positional type stays silent
+    @test isempty(callflags("struct S x::Int end\n", "mk() = S(\"str\")\n"))
+    # inner constructor with a keyword: presence accepted
+    @test isempty(callflags("struct T\n    x\n    T(x::Int; scale=1) = new(x*scale)\nend\n",
+                            "mk() = T(1; scale=2)\n"))
+    # wrong keyword name on an inner constructor: name-checked, rules out
+    @test length(callflags("struct T\n    x\n    T(x::Int; scale=1) = new(x*scale)\nend\n",
+                           "mk() = T(1; nope=2)\n")) == 1
+    # @kwdef keyword form stays silent (shape unknown behind the macro)
+    @test isempty(callflags("Base.@kwdef struct FS\n    inc::Int = 1\nend\n",
+                            "mk() = FS(; inc=3)\n"))
+    # two inner constructors whose UNIONED arity (alignment OR'd across both)
+    # would accept 1 positional + `scale`, but neither ctor alone does — the
+    # per-signature match (not the merged-arity count phase) is what catches it.
+    @test length(callflags("struct T\n    x\n    T(x::Int) = new(x)\n    T(; scale=1) = new(0)\nend\n",
+                           "mk() = T(1; scale=2)\n")) == 1
+    # empty-body struct: struct_nargs answers (0, typemax(Int)) — fully
+    # permissive — for zero fields, so the count phase never rules anything
+    # out here. Only the type phase's zero-slot default record can: this is
+    # the one arm that isolates the exclusion-lift itself (verified red
+    # against the pre-lift gate — see the report).
+    @test length(callflags("struct S end\n", "mk() = S(1)\n")) == 1
+    # a body member with no readable field name (`@weird a, b`) makes the
+    # default record's slot count (from `field_names`) disagree with
+    # `struct_nargs`' own member count — the mismatch must decline to no
+    # record (shape unknown) rather than false-flag the correctly-shaped call.
+    @test length(callflags("struct W\n    @weird a, b\n    c::Int\nend\n", "mk() = W(1)\n")) == 1
+    @test isempty(callflags("struct W\n    @weird a, b\n    c::Int\nend\n", "mk() = W(1, 2)\n"))
+end
+
+@testitem "record-arm: TypeRef resolution never contradicts the store verdicts" setup=[FileAnalysisWS] begin
+    # Same name table as "the rule-out check never contradicts real subtyping"
+    # (test/staticlint/test_staticlint.jl); the two tables must not drift —
+    # same floors, same pairs.
+    concrete = ["Int8","Int64","UInt8","Float32","Float64","Bool","Char","String",
+                "Symbol","Nothing","Dict","Set","Array","UnitRange","ArgumentError",
+                "BoundsError","Rational","Complex"]
+    bounds = ["Real","Signed","Unsigned","Integer","AbstractFloat","Number",
+              "AbstractString","AbstractChar","AbstractDict","AbstractSet",
+              "AbstractArray","DenseArray","AbstractRange","Exception","Function","Tuple"]
+    using JuliaWorkspaces: TypeRef
+    jw = ws_with(Dict(ROOT => "module MainPkg\nend\n"))
+    resolve = JuliaWorkspaces._tree_type_resolver(jw.runtime, ROOT)
+    # project-less root: the resolver and this lookup share the stdlib-only env
+    env = JuliaWorkspaces.derived_stdlib_only_env(jw.runtime)
+    syms = SL.getsymbols(env)
+    # The store-side operand, as scope resolution binds a bare name: gated on
+    # exportedness, like `resolve_ref_from_module`. A raw `vals` probe is
+    # wrong on Julia 1.11, where `Core.vals` carries a phantom non-exported
+    # `Rational`/`Complex` constructor `FunctionStore` (a constructor method
+    # the crawl attributes to Core) that scope resolution never returns.
+    function lookup(n)
+        for m in (:Core, :Base)
+            haskey(syms, m) || continue
+            SL.isexportedby(Symbol(n), syms[m]) || continue
+            return SL.maybe_lookup(syms[m][Symbol(n)], env)
+        end
+        return nothing
+    end
+    function tally()
+        mismatches = String[]
+        resolved = 0
+        for c in concrete, b in bounds
+            rc = resolve(TypeRef([c]), ["MainPkg"]); rb = resolve(TypeRef([b]), ["MainPkg"])
+            sc = lookup(c); sb = lookup(b)
+            (rc === nothing || rb === nothing || sc === nothing || sb === nothing) && continue
+            resolved += 1
+            SL._has_type_intersection(rc, rb, syms, Dict{UInt64,SL.Meta}()) ===
+                SL._has_type_intersection(sc, sb, syms, Dict{UInt64,SL.Meta}()) ||
+                push!(mismatches, "$c vs $b")
+        end
+        return resolved, mismatches
+    end
+    resolved, mismatches = tally()
+    @test isempty(mismatches)
+    @test resolved >= 250    # floor against silent vacuity (18×16 = 288 pairs)
 end

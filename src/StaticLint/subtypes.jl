@@ -10,24 +10,31 @@ const _MAX_SUPER_DEPTH = 32
 # caller may act on it; `nothing` licenses nothing — except the `FakeTypeofBottom`
 # and `FakeUnion` legs of `_super`, which assert `Any` outright rather than
 # having walked there.
-function _issubtype(a, b, store, meta_dict, depth=0)
+function _issubtype(a, b, store, meta_dict, depth=0, resolver=nothing)
     _isany(b) && return true
     _type_compare(a, b) && return true
     depth >= _MAX_SUPER_DEPTH && return nothing
     sup_a = _super(a, store, meta_dict)
     sup_a === nothing && return nothing
+    # The mid-walk case: a same-file datatype's OWN supertype clause names a
+    # sibling-file type, so `_super(::Binding)` hands back the raw `TreeRef`
+    # it read off the `<:` clause. Convert before comparing/recursing.
+    if sup_a isa TreeRef && resolver !== nothing
+        sup_a = _treeref_operand(sup_a, resolver)
+        sup_a === nothing && return nothing
+    end
     _type_compare(sup_a, b) && return true
     _isany(sup_a) && return false
-    return _issubtype(sup_a, b, store, meta_dict, depth + 1)
+    return _issubtype(sup_a, b, store, meta_dict, depth + 1, resolver)
 end
 
-function _has_type_intersection(a, b, store, meta_dict)
+function _has_type_intersection(a, b, store, meta_dict, resolver=nothing)
     # A bare `Union` datatype means "some union, members unknown" (e.g. the
     # binding type of a `x::Union{…}` declaration); it can't disprove a call.
     (_is_bare_union(a) || _is_bare_union(b)) && return true
-    ab = _issubtype(a, b, store, meta_dict)
+    ab = _issubtype(a, b, store, meta_dict, 0, resolver)
     ab === true && return true
-    ba = _issubtype(b, a, store, meta_dict)
+    ba = _issubtype(b, a, store, meta_dict, 0, resolver)
     ba === true && return true
     (ab === nothing || ba === nothing) && return nothing
     return false
@@ -93,23 +100,31 @@ function _super(b::Binding, store, meta_dict, depth=0)
         return _super(b.val, store, meta_dict, depth + 1)
     end
     sup = _super(b.val, store, meta_dict)
-    if sup isa EXPR && StaticLint.hasref(sup, meta_dict)
-        StaticLint.refof(sup, meta_dict)
-    else
-        nothing
-    end
+    sup isa EXPR || return sup === nothing ? nothing : sup
+    StaticLint.hasref(sup, meta_dict) ? StaticLint.refof(sup, meta_dict) : nothing
 end
 
-function _super(x::EXPR, store, meta_dict)::Union{EXPR,Nothing}
-    if x.head === :struct
-        _super(x.args[2], store, meta_dict)
-    elseif x.head === :abstract || x.head === :primitive
-        _super(x.args[1], store, meta_dict)
+function _super(x::EXPR, store, meta_dict)
+    if x.head === :struct || x.head === :abstract || x.head === :primitive
+        slot = x.head === :struct ? x.args[2] : x.args[1]
+        sup = _super_decl_slot(slot)
+        # No `<:` clause: the parent is `Any` by language semantics — a
+        # definite answer that can end a walk with a verdict.
+        return sup === nothing ? CoreTypes.Any : sup
     elseif CSTParser.issubtypedecl(x)
-        x.args[2]
+        return x.args[2]
     elseif CSTParser.isbracketed(x)
-        _super(x.args[1], store, meta_dict)
+        return _super(x.args[1], store, meta_dict)
     end
+    return nothing
+end
+
+# The `<:` RHS inside a datatype head's name slot, `nothing` when absent.
+function _super_decl_slot(x)
+    x isa EXPR || return nothing
+    CSTParser.issubtypedecl(x) && return x.args[2]
+    CSTParser.isbracketed(x) && return _super_decl_slot(x.args[1])
+    return nothing
 end
 
 function subtypes(T::Binding)

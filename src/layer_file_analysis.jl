@@ -568,7 +568,7 @@ function _call_cross_file_arities(rt, root, path, call, meta_dict)
     # A function-local callee fully shadows any same-named global, so its method
     # set is exactly its own — describe from the local candidates, not the global
     # name's cross-file arities (mirrors `check_call`'s gate).
-    func_ref isa StaticLint.Binding && StaticLint._is_local_callee_binding(func_ref, meta_dict) && return nothing
+    func_ref isa StaticLint.Binding && StaticLint._is_function_local_binding(func_ref, meta_dict) && return nothing
     nm = CSTParser.get_name(call)
     (nm isa CSTParser.EXPR && StaticLint.isidentifier(nm)) || return nothing
     name = StaticLint.valofid(nm)
@@ -578,13 +578,20 @@ function _call_cross_file_arities(rt, root, path, call, meta_dict)
     return derived_method_arities(rt, root, p, name)
 end
 
-function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[])
+function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[], type_resolver=nothing)
     diagnostics = Diagnostic[]
 
     # In-scope external/workspace module set at a call site, for
     # `describe_call_mismatch`'s method-set enumeration (mirrors the
     # `tree_in_scope` closure `derived_file_analysis` passes to `check_all`).
     tree_in_scope = root === nothing ? nothing : (x -> _in_scope_module_syms(rt, root, vcat(path, _in_file_module_names(x, meta_dict))))
+
+    # The argument-side type bridge the type phase matched with, so a message
+    # names the types the flag was actually made against rather than the `Any`
+    # the legacy `Binding.type` slot falls back to. The analysis passes its own
+    # resolver in — building a second one would repeat every leaf query.
+    tree_callsite_type = type_resolver === nothing ? nothing :
+        ((t, x) -> type_resolver(t, vcat(path, _in_file_module_names(x, meta_dict))))
 
     # Names the project declares as dependencies, for the UnresolvedImport
     # message split (same computation as the whole-closure pass; empty
@@ -609,8 +616,8 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
     function describe_call(x)
         ar = _call_cross_file_arities(rt, root, path, x, meta_dict)
         return ar !== nothing ?
-            StaticLint.describe_call_mismatch(x, env, meta_dict; cand_arities=ar, tree_in_scope) :
-            StaticLint.describe_call_mismatch(x, env, meta_dict; tree_in_scope)
+            StaticLint.describe_call_mismatch(x, env, meta_dict; cand_arities=ar, tree_in_scope, tree_callsite_type, tree_resolve=type_resolver) :
+            StaticLint.describe_call_mismatch(x, env, meta_dict; tree_in_scope, tree_callsite_type, tree_resolve=type_resolver)
     end
 
     _emit_hint_diagnostics!(diagnostics, errs, meta_dict, lint_config, declared_deps; describe_call)
@@ -629,18 +636,22 @@ end
 _store_name_symbol(@nospecialize(_)) = nothing
 
 # Resolve a written qualifier + name (`["Base"], :relpath`) to its store via the
-# env symbols, following a `VarRef`. Returns the store or `nothing`.
+# env symbols, following a `VarRef`. Returns the store or `nothing`. Member
+# access goes through `maybe_getfield`, not a raw `vals` probe: a module member
+# may live in a USED module's exports rather than the module's own binding
+# table (on Julia 1.11, `Base.AbstractString` reaches Core's export through
+# Base's `using Core` — `Base` has no binding of its own).
 function _resolve_qualified_store(env, qualifier::Vector{String}, name_sym::Symbol)
     isempty(qualifier) && return nothing
     syms = StaticLint.getsymbols(env)
     store = get(syms, Symbol(qualifier[1]), nothing)
     store isa SymbolServer.ModuleStore || return nothing
     for i in 2:length(qualifier)
-        sub = StaticLint.maybe_lookup(get(store.vals, Symbol(qualifier[i]), nothing), env)
+        sub = StaticLint.maybe_lookup(SymbolServer.maybe_getfield(Symbol(qualifier[i]), store, syms), env)
         sub isa SymbolServer.ModuleStore || return nothing
         store = sub
     end
-    val = get(store.vals, name_sym, nothing)
+    val = SymbolServer.maybe_getfield(name_sym, store, syms)
     val === nothing && return nothing
     return StaticLint.maybe_lookup(val, env)
 end
@@ -675,6 +686,132 @@ end
 
 _store_extended_in_workspace(rt, root, env, func_ref) =
     !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
+
+# Item lookup for a resolved name: scan the declaring file's inventory for the
+# `ItemRef`'s id. Only the inventory is read — never a sibling's analysis —
+# and inventories are small.
+function _inventory_item(rt, ref::ItemRef)
+    for item in derived_file_inventory(rt, ref.file).items
+        item.id == ref.id && return item
+    end
+    return nothing
+end
+
+# The env value a written module path + name denotes, as a comparison operand:
+# `VarRef` aliases followed, and a constructor `FunctionStore` reduced to the
+# datatype it extends (`Base.Int` → `Core.Int`) so the subtype walk has a
+# nominal type to work with. `nothing` when the path names nothing.
+function _store_type_value(env, module_path::Vector{String}, name::String)
+    val = _resolve_qualified_store(env, module_path, Symbol(name))
+    val === nothing && return nothing
+    dt = StaticLint.get_eventual_datatype(val, env)
+    return dt === nothing ? val : dt
+end
+
+# Can `name` reach the module at `path` from somewhere the signature index does
+# not walk — the implicit `using Base`/`using Core`, or any import statement that
+# binds it? Then a definition of `name` here is an EXTENSION, and the records
+# hold only this workspace's share of its methods (`import Base: length` plus
+# `length(::MyType) = …`, the shape every package uses).
+_name_reaches_from_outside(rt, root, path::Vector{String}, name::String) =
+    _member_may_come_from_imports(rt, root, path, name) ||
+    _implicit_member(rt, root, path, name) !== nothing
+
+"""
+    _tree_type_resolver(rt, root) -> Function
+
+The leaf resolver for the type names in signature records: a `TypeRef` plus
+the module path that wrote it → a `TreeDataType` (a workspace datatype), an
+env store value (an external name), or `nothing` (unknown — which rules
+nothing out downstream).
+
+Names resolve through the id-free visible-names face plus the per-name
+`derived_visible_item`, the same split (and the same invalidation contract)
+the rest of this file's resolution context uses. A module-kinded name is
+followed to the module it denotes — cross-root for a workspace package — so
+a `TreeDataType`'s own supertype continues to resolve in the root that
+declared it.
+"""
+function _tree_type_resolver(rt, root)
+    project_uri = derived_project_uri_for_root(rt, root)
+    # `root`'s env, used for every store lookup including those made while
+    # resolving in a deved package's root: a package's own env can only add
+    # names, so reading the consumer's costs at worst an unknown, never a
+    # wrong answer.
+    env = project_uri === nothing ? derived_stdlib_only_env(rt) : derived_environment(rt, project_uri)
+
+    function resolve_in(r::URI, t, defined_in::Vector{String})
+        t isa TypeRef || return nothing
+        # Every unannotated slot carries this, and it can end a walk on its
+        # own: answer it before touching a query.
+        t == TYPE_ANY && return StaticLint.CoreTypes.Any
+        isempty(t.path) && return nothing
+        head = t.path[1]
+        rest = t.path[2:end]
+
+        vn = get(derived_module_visible_names_idfree(rt, r, defined_in), head, nothing)
+        if vn === nothing
+            # A fully-qualified env path (`Base.AbstractString`), or a bare
+            # name from the module's implicit `using Base`/`using Core` —
+            # which the visible-names face never lists.
+            isempty(rest) || return _store_type_value(env, t.path[1:end - 1], t.path[end])
+            im = _implicit_member(rt, r, defined_in, head)
+            im === nothing && return nothing
+            # A failed wildcard `using` brings in names nothing here can
+            # enumerate, so the hit may really be that module's type, not
+            # Base's — decline rather than answer wrongly (the same guard, in
+            # the same order, as `_get_field`'s implicit fallback).
+            derived_module_unresolved_wildcard_using(rt, r, defined_in) && return nothing
+            return StaticLint.get_eventual_datatype(first(im), env)
+        end
+
+        if isempty(rest)
+            if vn.kind === :external_symbol
+                return _store_type_value(env, vn.origin_module, head)
+            end
+            _is_datatype_kind(vn.kind) || return nothing
+            item_ref = derived_visible_item(rt, r, defined_in, head)
+            item_ref === nothing && return nothing
+            item = _inventory_item(rt, item_ref)
+            item === nothing && return nothing
+            item.supertype === nothing && return nothing   # not a datatype after all
+            # Nominal identity is the DECLARING module, which `origin_module`
+            # only reports for a name reached directly: a re-exported one
+            # (`using .Sub` in a package, then `using ThatPackage`) binds under
+            # the re-exporting module, and keying on that would give one type
+            # two keys — a definite `false` between a type and itself. The
+            # declaring path is the item's own: its file's splice path in the
+            # root that owns the binding path (`_method_items_root`'s question,
+            # asked for a datatype), extended by its in-file module path. That
+            # root is also where the declared supertype's names resolve.
+            decl_root = _method_items_root(rt, r, vn.origin_module)
+            fp = derived_file_module_path(rt, decl_root, item_ref.file)
+            decl_path = fp === nothing ? vn.origin_module : vcat(fp, item.parent_module)
+            return StaticLint.TreeDataType((decl_path, item.name), item.supertype,
+                (tt, di) -> resolve_in(decl_root, tt, di))
+        end
+
+        # Qualified, and the head is visible: a module of some workspace tree,
+        # or an env module bound by a whole-module `using`/`import`.
+        if vn.kind === :module
+            target = _tree_module_target(rt, r, StaticLint.TreeRef(head, :module, nothing, vn.origin_module))
+            target === nothing && return nothing
+            return resolve_in(target[1], TypeRef(rest), target[2])
+        end
+        vn.kind === :external_symbol || return nothing
+        # The binding may be a MEMBER of `origin_module` (a submodule brought in
+        # by a wildcard `using`) or `origin_module` ITSELF (a whole-module
+        # binding, possibly aliased: `import Base.Iterators as It`). Deeper path
+        # first, as everywhere else this ambiguity is resolved.
+        for base in (vcat(vn.origin_module, [head]), vn.origin_module)
+            v = _store_type_value(env, vcat(base, rest[1:end - 1]), rest[end])
+            v === nothing || return v
+        end
+        return nothing
+    end
+
+    return (t, defined_in) -> resolve_in(root, t, defined_in)
+end
 
 """
     derived_file_analysis(rt, root::URI, file::URI) -> FileAnalysis
@@ -791,12 +928,17 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # A store-backed callee (Base/stdlib/package function) that a workspace file
     # extends: its overload isn't in the env store, so decline the method-call
     # lint rather than false-positive (see `_store_extended_in_workspace`).
+    # Consults only THIS root, unlike `tree_ext_records` below (root + deved
+    # roots) — `sig_match_any`'s dead `resolver` parameter must stay dead
+    # unless this is widened to match, or a deved root's own extension reads
+    # as a false rule-out.
     tree_extended = (func_ref, x) -> _store_extended_in_workspace(rt, root, env, func_ref)
     # `tree_arities` lets the method-call lint check a tree-visible workspace
     # callee's ARGUMENT COUNT against its full cross-file method set (the local
     # `func_ref` sees only this file's methods). Plain-data arities from the
-    # inventory — no dependency on sibling analyses. (Positional-type checking of
-    # such callees is deferred; see the cross-file-method-checks design doc.)
+    # inventory — no dependency on sibling analyses. The count opinion is decided
+    # here, independently of the TYPE opinion (`tree_signatures` below), so the
+    # two invalidate separately.
     tree_arities = (name, x) -> begin
         p = vcat(path, _in_file_module_names(x, meta_dict))
         derived_method_arities(rt, root, p, name)
@@ -806,7 +948,118 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # hover/signatures/references' `_in_scope_syms_at`, but reuses the already-known
     # per-file `path` instead of re-deriving it from `x`'s URI.
     tree_in_scope = x -> _in_scope_module_syms(rt, root, vcat(path, _in_file_module_names(x, meta_dict)))
-    StaticLint.check_all(cst, lint_options_from_config(lint_config), env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
+    # The TYPE opinion on such a callee: its cross-file signature records
+    # (`tree_signatures`), whose type names resolve at the leaf through
+    # `tree_signature_resolver` — in the module that WROTE each signature, which
+    # is where its names were visible.
+    tree_signatures = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        derived_method_signatures(rt, root, p, name)
+    end
+    # A name that also reaches this module from OUTSIDE its tree carries
+    # methods no record lists — the workspace definitions are extensions of it
+    # — so `tree_signatures`'s set is an under-approximation whatever its own
+    # markers say; the gate weighs this against store backing, which is why it
+    # is a separate question rather than a re-wrap of `NameMethods` here.
+    tree_reaches_outside = (name, x) -> begin
+        p = vcat(path, _in_file_module_names(x, meta_dict))
+        _name_reaches_from_outside(rt, root, p, name)
+    end
+    tree_signature_resolver = _tree_type_resolver(rt, root)
+    # The same resolver asked at the CALL SITE instead — the argument side, whose
+    # type names are written here. Separate closure because the two sides resolve
+    # in different modules and only the record side carries its own.
+    tree_callsite_type = (t, x) ->
+        tree_signature_resolver(t, vcat(path, _in_file_module_names(x, meta_dict)))
+    # A store-backed callee's workspace extensions, from EVERY root that could
+    # write one invisibly to the signature index: this root (a QUALIFIED
+    # extension's resolved qualifier is never a tree module, so
+    # `derived_method_items` drops it — `_name_reaches_from_outside`'s
+    # complement) and every deved dependency (its extensions live in ITS OWN
+    # root's index, never this one's, and in no jstore either). Rendered as
+    # `LocatedSignature`s exactly like a tree method item, from the declaring
+    # item's own `method_sig`.
+    deved_roots = project_uri === nothing ? URI[] :
+        collect(values(derived_workspace_deved_packages(rt, project_uri)))
+    ext_roots = vcat([root], deved_roots)
+    # `x` (the call site) never affects the result — every store target's
+    # aggregation is the same regardless of which call asked — so memoize per
+    # store value for the life of this one file analysis. Without this, a file
+    # with many calls to the same store-backed name re-walks every extension
+    # of every ext root on EVERY call (calls × extensions); measured 17× slower
+    # on a 100-extension × 300-call synthetic root.
+    _ext_records_memo = Dict{UInt,NameMethods}()
+    # The root each record's `defined_in` actually came from, filled as
+    # `tree_ext_records` builds each record — `tree_ext_resolve` below needs
+    # this to start its walk at the right root, and re-deriving it from
+    # `defined_in[1]` alone (a name lookup requiring a readable `Project.toml`)
+    # both duplicates work already done here and is less reliable (see
+    # `tree_ext_resolve`'s fallback comment).
+    _ext_defined_in_roots = Dict{Vector{String},URI}()
+    tree_ext_records = (store_val, x) -> begin
+        key = objectid(store_val)
+        cached = get(_ext_records_memo, key, nothing)
+        cached === nothing || return cached
+        sigs = Set{LocatedSignature}()
+        has_unknown = false
+        for R in ext_roots
+            for e in _matching_workspace_extensions(rt, R, env, store_val)
+                item = _inventory_item(rt, e.ref)
+                if item === nothing || item.method_sig === nothing
+                    has_unknown = true
+                    continue
+                end
+                fp = derived_file_module_path(rt, R, e.ref.file)
+                if fp === nothing
+                    has_unknown = true
+                    continue
+                end
+                defined_in = vcat(fp, item.parent_module)
+                _ext_defined_in_roots[defined_in] = R
+                push!(sigs, LocatedSignature(defined_in, item.method_sig))
+            end
+        end
+        nm = NameMethods(sigs, has_unknown, false)
+        _ext_records_memo[key] = nm
+        return nm
+    end
+    # `tree_signature_resolver` starts its walk at THIS root — correct for
+    # every ordinary record, but an extension's `defined_in` may name a deved
+    # dependency's OWN module path, unreachable from this root's tree at all
+    # (no `using` to hop through, unlike a call-site reference to the same
+    # dependency). Dispatch to a resolver started at whichever root actually
+    # declares `defined_in`'s head module: primarily the root
+    # `tree_ext_records` already recorded for this exact `defined_in` — it
+    # KNOWS, having just walked that root's own inventory to build the record.
+    # The `derived_workspace_package_roots` name lookup is only a fallback for
+    # a `defined_in` no ext record produced (shouldn't happen on this path,
+    # but degrading to a name-based guess is safer than erroring); mirrors
+    # `_method_items_root`'s own `derived_module_exists` check before trusting
+    # a switched root, since a name collision would otherwise silently resolve
+    # in the wrong package's tree.
+    _ext_root_resolvers = Dict{URI,Function}()
+    tree_ext_resolve = (t, defined_in) -> begin
+        r = get(_ext_defined_in_roots, defined_in, nothing)
+        if r === nothing
+            r = root
+            if !isempty(defined_in) && !derived_module_exists(rt, root, defined_in)
+                alt = get(derived_workspace_package_roots(rt), defined_in[1], nothing)
+                if alt !== nothing && derived_module_exists(rt, alt, defined_in)
+                    r = alt
+                end
+            end
+        end
+        resolver = r == root ? tree_signature_resolver :
+            get!(() -> _tree_type_resolver(rt, r), _ext_root_resolvers, r)
+        resolver(t, defined_in)
+    end
+    StaticLint.check_all(cst, lint_options_from_config(lint_config), env, meta_dict,
+        StaticLint.TreeContext(;
+            visible = tree_visible, extended = tree_extended, arities = tree_arities,
+            in_scope = tree_in_scope, signatures = tree_signatures,
+            resolve = tree_signature_resolver, callsite_type = tree_callsite_type,
+            reaches_outside = tree_reaches_outside,
+            ext_records = tree_ext_records, ext_resolve = tree_ext_resolve))
 
     # Late getfield reference resolution — mutates meta_dict, so it must run
     # here, while we still own it (no workspace-package meta in per-file
@@ -817,7 +1070,8 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # `state.resolveonly`, so this can only run after the pass).
     StaticLint.mark_unresolved_imports!(cst, env, meta_dict)
 
-    diagnostics = _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root, path)
+    diagnostics = _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root, path,
+        tree_signature_resolver)
 
     # Extract outbound BEFORE the store strip: the strip rewrites env-store
     # module refs into TreeRef stand-ins, which must not be counted as
