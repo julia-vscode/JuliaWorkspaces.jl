@@ -199,6 +199,17 @@ would want to configure together — `nothing_comparison` covers both
 [`src/lint_rules.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/lint_rules.jl)
 as `LINT_RULES`; `LINTCODE_TO_RULE` inverts it.
 
+Not every rule is backed by the semantic StaticLint pass. Purely syntactic
+rules run on the JuliaSyntax tree of a single file alone
+(see [`src/lint_syntax_rules.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/lint_syntax_rules.jl)):
+
+| Rule | Finds |
+| --- | --- |
+| `nan_comparison` | `x == NaN` / `x != NaN`, which always yield the same answer; use `isnan`. |
+| `duplicate_branch_condition` | An `elseif` condition identical to an earlier condition in the same chain, making the branch unreachable. Conditions containing arbitrary function or macro calls are exempt, since each evaluation may legitimately differ. |
+
+Both are currently `"off"` outside the `strict` preset.
+
 ### Severities
 
 Every rule takes one of:

@@ -10,73 +10,199 @@
 # (syntax, test items, TOML, config validation) carry no codes.
 
 """
+    @enum LintTier
+
+The inputs a lint rule needs, from least to most:
+
+- `TierSyntax`: the syntax tree of a single file, nothing else.
+- `TierSemantic`: a single file plus semantic information (bindings, scopes,
+  package symbols — today the StaticLint semantic pass).
+- `TierProject`: project or environment information (Project.toml, Manifest,
+  configuration files, environment resolution).
+- `TierWorkspace`: cross-file workspace information (include graph, the full
+  set of configuration files).
+
+The tier determines which derived query produces a rule's findings and which
+prerequisites gate it; it is not user-visible.
+"""
+@enum LintTier TierSyntax TierSemantic TierProject TierWorkspace
+
+"""
     struct LintRule
 
-A user-facing lint rule.
+A user-facing lint rule. Fully declarative: everything the pipeline needs to
+know about a rule — where its findings come from, how each preset classifies
+it, its tags and documentation link, whether it depends on the environment
+being ready — is a field here rather than a side table.
 
 - `id::Symbol`: The rule id, as written in `JuliaLint.toml` and reported on
   [`Diagnostic`](@ref)`.code`.
+- `tier::LintTier`: The inputs the rule needs, see [`LintTier`](@ref).
+- `severity_minimal`/`severity_default`/`severity_strict::Symbol`: The rule's
+  severity in each preset (`:off`, `:hint`, `:information`, `:warning`,
+  `:error`). Every rule classifies all three presets, so the "every preset
+  classifies every rule" invariant holds by construction. Prefer `:off` in
+  `minimal` and `default` for a new rule: a rule that switches itself on for
+  every project on upgrade breaks their CI.
+- `tags::Vector{Symbol}`: LSP diagnostic tags, e.g. `[:unnecessary]`. A
+  property of the rule, not of the configured severity: an unused binding stays
+  "unnecessary" (greyed out by the editor) whether the user reports it as a
+  hint or an error.
+- `doc_link::Union{Nothing,URI}`: Documentation link surfaced as the
+  diagnostic's code description.
+- `env_dependent::Bool`: Whether findings depend on package symbols being
+  indexed; such rules are suppressed until a file's environment is ready (see
+  `_is_env_dependent_diagnostic`).
+- `option_keys::Vector{Symbol}`: Extra keys accepted alongside `severity` when
+  the rule is configured as a table.
 - `codes::Vector{StaticLint.LintCodes}`: The StaticLint codes this rule covers;
   empty for rules backed by another analysis.
 - `category::Union{Nothing,Symbol}`: The `StaticLint.LintOptions` field that
   gates the check emitting these codes, or `nothing` when the check always runs
   (those rules are filtered when diagnostics are emitted instead).
-- `option_keys::Vector{Symbol}`: Extra keys accepted alongside `severity` when
-  the rule is configured as a table.
 """
-struct LintRule
+Base.@kwdef struct LintRule
     id::Symbol
-    codes::Vector{StaticLint.LintCodes}
-    category::Union{Nothing,Symbol}
-    option_keys::Vector{Symbol}
+    tier::LintTier
+    severity_minimal::Symbol = :off
+    severity_default::Symbol
+    severity_strict::Symbol
+    tags::Vector{Symbol} = Symbol[]
+    doc_link::Union{Nothing,URI} = nothing
+    env_dependent::Bool = false
+    option_keys::Vector{Symbol} = Symbol[]
+    codes::Vector{StaticLint.LintCodes} = StaticLint.LintCodes[]
+    category::Union{Nothing,Symbol} = nothing
 end
 
+# `severity_default` reproduces the severities that were hard-coded before
+# rules became configurable, so an absent config file changes nothing.
+# `severity_strict` follows the convention "everything on, and everything that
+# is merely a hint promoted to a warning"; `severity_minimal` keeps only the
+# checks that catch outright breakage.
 const LINT_RULES = LintRule[
     # ── StaticLint rules gated by a `LintOptions` field ──────────────────────
-    LintRule(:incorrect_call_args, [StaticLint.IncorrectCallArgs, StaticLint.FunctionHasNoMethods], :call, Symbol[]),
-    LintRule(:incorrect_iter_spec, [StaticLint.IncorrectIterSpec], :iter, Symbol[]),
-    LintRule(:index_from_length, [StaticLint.IndexFromLength], :iter, Symbol[]),
-    LintRule(:nothing_comparison, [StaticLint.NothingEquality, StaticLint.NothingNotEq], :nothingcomp, Symbol[]),
-    LintRule(:const_if_condition, [StaticLint.ConstIfCondition, StaticLint.EqInIfConditional], :constif, Symbol[]),
-    LintRule(:pointless_boolean, [StaticLint.PointlessOR, StaticLint.PointlessAND], :lazy, Symbol[]),
-    LintRule(:invalid_type_declaration, [StaticLint.InvalidTypeDeclaration], :datadecl, Symbol[]),
-    LintRule(:unused_type_parameter, [StaticLint.UnusedTypeParameter], :typeparam, Symbol[]),
-    LintRule(:module_name, [StaticLint.InvalidModuleName], :modname, Symbol[]),
-    LintRule(:type_piracy, [StaticLint.TypePiracy, StaticLint.NotEqDef], :pirates, Symbol[]),
-    LintRule(:unused_function_argument, [StaticLint.UnusedFunctionArgument], :useoffuncargs, Symbol[]),
-    LintRule(:duplicate_function_argument, [StaticLint.DuplicateFuncArgName], :useoffuncargs, Symbol[]),
-    LintRule(:kw_default_mismatch, [StaticLint.KwDefaultMismatch, StaticLint.UnassignedKeywordArgument], :kwdefault, Symbol[]),
-    LintRule(:literal_use, [StaticLint.InappropriateUseOfLiteral], :literal, Symbol[]),
-    LintRule(:break_continue, [StaticLint.ShouldBeInALoop], :breakcontinue, Symbol[]),
-    LintRule(:global_const_decl, [StaticLint.TypeDeclOnGlobalVariable, StaticLint.UnsupportedConstLocalVariable], :constdecl, Symbol[]),
+    LintRule(id = :incorrect_call_args, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        env_dependent = true,
+        codes = [StaticLint.IncorrectCallArgs, StaticLint.FunctionHasNoMethods], category = :call),
+    LintRule(id = :incorrect_iter_spec, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        env_dependent = true,
+        codes = [StaticLint.IncorrectIterSpec], category = :iter),
+    LintRule(id = :index_from_length, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        doc_link = URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex"),
+        codes = [StaticLint.IndexFromLength], category = :iter),
+    LintRule(id = :nothing_comparison, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        env_dependent = true,
+        codes = [StaticLint.NothingEquality, StaticLint.NothingNotEq], category = :nothingcomp),
+    LintRule(id = :const_if_condition, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.ConstIfCondition, StaticLint.EqInIfConditional], category = :constif),
+    LintRule(id = :pointless_boolean, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.PointlessOR, StaticLint.PointlessAND], category = :lazy),
+    LintRule(id = :invalid_type_declaration, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        env_dependent = true,
+        codes = [StaticLint.InvalidTypeDeclaration], category = :datadecl),
+    LintRule(id = :unused_type_parameter, tier = TierSemantic,
+        severity_default = :hint, severity_strict = :warning,
+        tags = [:unnecessary],
+        codes = [StaticLint.UnusedTypeParameter], category = :typeparam),
+    LintRule(id = :module_name, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.InvalidModuleName], category = :modname),
+    LintRule(id = :type_piracy, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        env_dependent = true,
+        codes = [StaticLint.TypePiracy, StaticLint.NotEqDef], category = :pirates),
+    LintRule(id = :unused_function_argument, tier = TierSemantic,
+        severity_default = :hint, severity_strict = :warning,
+        tags = [:unnecessary],
+        codes = [StaticLint.UnusedFunctionArgument], category = :useoffuncargs),
+    LintRule(id = :duplicate_function_argument, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.DuplicateFuncArgName], category = :useoffuncargs),
+    LintRule(id = :kw_default_mismatch, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        env_dependent = true,
+        codes = [StaticLint.KwDefaultMismatch, StaticLint.UnassignedKeywordArgument], category = :kwdefault),
+    LintRule(id = :literal_use, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.InappropriateUseOfLiteral], category = :literal),
+    LintRule(id = :break_continue, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.ShouldBeInALoop], category = :breakcontinue),
+    LintRule(id = :global_const_decl, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.TypeDeclOnGlobalVariable, StaticLint.UnsupportedConstLocalVariable], category = :constdecl),
 
     # ── StaticLint rules whose checks always run (filtered at emission) ──────
-    LintRule(:unused_binding, [StaticLint.UnusedBinding], nothing, Symbol[]),
-    LintRule(:const_decl, [
-        StaticLint.CannotDeclareConst,
-        StaticLint.InvalidRedefofConst,
-        StaticLint.CannotDefineFuncAlreadyHasValue,
-    ], nothing, Symbol[]),
-    LintRule(:relative_import, [StaticLint.RelativeImportTooManyDots], nothing, Symbol[]),
-    LintRule(:include_errors, [
-        StaticLint.IncludeLoop,
-        StaticLint.DuplicateInclude,
-        StaticLint.MissingFile,
-        StaticLint.IncludePathContainsNULL,
-        StaticLint.FileTooBig,
-        StaticLint.FileNotAvailable,
-    ], nothing, Symbol[]),
-    LintRule(:missing_reference, [StaticLint.MissingRef], nothing, [:scope]),
-    LintRule(:unresolved_import, [StaticLint.UnresolvedImport], nothing, Symbol[]),
+    LintRule(id = :unused_binding, tier = TierSemantic,
+        severity_default = :hint, severity_strict = :warning,
+        tags = [:unnecessary],
+        codes = [StaticLint.UnusedBinding]),
+    LintRule(id = :const_decl, tier = TierSemantic,
+        severity_minimal = :warning, severity_default = :information, severity_strict = :warning,
+        codes = [
+            StaticLint.CannotDeclareConst,
+            StaticLint.InvalidRedefofConst,
+            StaticLint.CannotDefineFuncAlreadyHasValue,
+        ]),
+    LintRule(id = :relative_import, tier = TierSemantic,
+        severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.RelativeImportTooManyDots]),
+    LintRule(id = :include_errors, tier = TierWorkspace,
+        severity_minimal = :warning, severity_default = :warning, severity_strict = :warning,
+        codes = [
+            StaticLint.IncludeLoop,
+            StaticLint.DuplicateInclude,
+            StaticLint.MissingFile,
+            StaticLint.IncludePathContainsNULL,
+            StaticLint.FileTooBig,
+            StaticLint.FileNotAvailable,
+        ]),
+    LintRule(id = :missing_reference, tier = TierSemantic,
+        severity_default = :warning, severity_strict = :warning,
+        env_dependent = true, option_keys = [:scope],
+        codes = [StaticLint.MissingRef]),
+    LintRule(id = :unresolved_import, tier = TierSemantic,
+        severity_default = :warning, severity_strict = :warning,
+        env_dependent = true,
+        codes = [StaticLint.UnresolvedImport]),
+
+    # ── Purely syntactic rules (see lint_syntax_rules.jl) ────────────────────
+    # New rules ship `:off` outside `strict` so an upgrade never switches them
+    # on for existing projects; promotion to default-on is a deliberate,
+    # sweep-validated release decision.
+    LintRule(id = :nan_comparison, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning,
+        doc_link = URI("https://docs.julialang.org/en/v1/base/numbers/#Base.isnan")),
+    LintRule(id = :duplicate_branch_condition, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
 
     # ── Rules backed by analyses other than StaticLint ───────────────────────
-    LintRule(:syntax_errors, StaticLint.LintCodes[], nothing, Symbol[]),
-    LintRule(:syntax_warnings, StaticLint.LintCodes[], nothing, Symbol[]),
-    LintRule(:testitem_errors, StaticLint.LintCodes[], nothing, Symbol[]),
-    LintRule(:toml_syntax_errors, StaticLint.LintCodes[], nothing, Symbol[]),
-    LintRule(:config_errors, StaticLint.LintCodes[], nothing, Symbol[]),
-    LintRule(:shadowed_config, StaticLint.LintCodes[], nothing, Symbol[]),
-    LintRule(:environment_errors, StaticLint.LintCodes[], nothing, Symbol[]),
+    LintRule(id = :syntax_errors, tier = TierSyntax,
+        severity_minimal = :error, severity_default = :error, severity_strict = :error),
+    LintRule(id = :syntax_warnings, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
+    LintRule(id = :testitem_errors, tier = TierSyntax,
+        severity_minimal = :error, severity_default = :error, severity_strict = :error),
+    LintRule(id = :toml_syntax_errors, tier = TierProject,
+        severity_minimal = :error, severity_default = :error, severity_strict = :error),
+    LintRule(id = :config_errors, tier = TierProject,
+        severity_minimal = :error, severity_default = :error, severity_strict = :error),
+    # A structural problem with the project's own configuration, not a style
+    # opinion — it stays on even in the quietest preset.
+    LintRule(id = :shadowed_config, tier = TierWorkspace,
+        severity_minimal = :information, severity_default = :information, severity_strict = :warning),
+    # Not the project's fault necessarily (a CI box without registry access
+    # fails every resolve), so informational rather than CI-breaking.
+    LintRule(id = :environment_errors, tier = TierProject,
+        severity_default = :information, severity_strict = :warning),
 ]
 
 const LINT_RULES_BY_ID = Dict{Symbol,LintRule}(r.id => r for r in LINT_RULES)
@@ -85,19 +211,8 @@ const LINTCODE_TO_RULE = Dict{StaticLint.LintCodes,Symbol}(
     c => r.id for r in LINT_RULES for c in r.codes
 )
 
-# Rules whose findings depend on package symbols being indexed, and which are
-# therefore suppressed until a file's environment is ready (see
-# `_is_env_dependent_diagnostic`).
-const ENV_DEPENDENT_LINT_RULES = Set{Symbol}([
-    :incorrect_call_args,
-    :incorrect_iter_spec,
-    :nothing_comparison,
-    :invalid_type_declaration,
-    :type_piracy,
-    :kw_default_mismatch,
-    :missing_reference,
-    :unresolved_import,
-])
+# Derived view for the emission-time check in `_is_env_dependent_diagnostic`.
+const ENV_DEPENDENT_LINT_RULES = Set{Symbol}(r.id for r in LINT_RULES if r.env_dependent)
 
 # ── Severities ──────────────────────────────────────────────────────────────
 
@@ -115,84 +230,11 @@ const VALID_SEVERITY_STRINGS = ["off", "hint", "info", "warning", "error"]
 
 # ── Presets ─────────────────────────────────────────────────────────────────
 
-# `default` reproduces the severities that were hard-coded before rules became
-# configurable, so an absent config file changes nothing.
-const _PRESET_DEFAULT = Dict{Symbol,Symbol}(
-    :incorrect_call_args => :information,
-    :incorrect_iter_spec => :information,
-    :index_from_length => :information,
-    :nothing_comparison => :information,
-    :const_if_condition => :information,
-    :pointless_boolean => :information,
-    :invalid_type_declaration => :information,
-    :unused_type_parameter => :hint,
-    :module_name => :information,
-    :type_piracy => :information,
-    :unused_function_argument => :hint,
-    :duplicate_function_argument => :information,
-    :kw_default_mismatch => :information,
-    :literal_use => :information,
-    :break_continue => :information,
-    :global_const_decl => :information,
-    :unused_binding => :hint,
-    :const_decl => :information,
-    :relative_import => :information,
-    :include_errors => :warning,
-    :missing_reference => :warning,
-    :unresolved_import => :warning,
-    :syntax_errors => :error,
-    :syntax_warnings => :off,
-    :testitem_errors => :error,
-    :toml_syntax_errors => :error,
-    :config_errors => :error,
-    :shadowed_config => :information,
-    # Not the project's fault necessarily (a CI box without registry access
-    # fails every resolve), so informational rather than CI-breaking.
-    :environment_errors => :information,
-)
-
-# Checked here, before the derived presets are built, so that a rule nobody
-# classified fails with this message rather than with an opaque `KeyError` from
-# the `_PRESET_STRICT` comprehension below.
-for _rule in LINT_RULES
-    haskey(_PRESET_DEFAULT, _rule.id) || error(
-        "Lint rule `$(_rule.id)` has no severity in the `default` preset. Add one to " *
-        "`_PRESET_DEFAULT`. Prefer `:off` for a rule that did not exist before: a rule " *
-        "that switches itself on for every project on upgrade breaks their CI."
-    )
-end
-
-# Only the checks that catch outright breakage; everything stylistic is off.
-const _PRESET_MINIMAL = Dict{Symbol,Symbol}(
-    r.id => get(
-        Dict{Symbol,Symbol}(
-            :syntax_errors => :error,
-            :testitem_errors => :error,
-            :toml_syntax_errors => :error,
-            :config_errors => :error,
-            :include_errors => :warning,
-            :const_decl => :warning,
-            # A structural problem with the project's own configuration, not a
-            # style opinion — it stays on even in the quietest preset.
-            :shadowed_config => :information,
-        ),
-        r.id,
-        :off,
-    )
-    for r in LINT_RULES
-)
-
-# Everything on, and everything that is merely a hint promoted to a warning.
-const _PRESET_STRICT = Dict{Symbol,Symbol}(
-    r.id => begin
-        d = _PRESET_DEFAULT[r.id]
-        r.id === :syntax_warnings ? :warning :
-        d === :off ? :warning :
-        d === :hint ? :warning :
-        d === :information ? :warning : d
-    end
-    for r in LINT_RULES
-)
+# Derived from the per-rule severity fields, so every preset classifies every
+# rule by construction.
+const _PRESET_MINIMAL = Dict{Symbol,Symbol}(r.id => r.severity_minimal for r in LINT_RULES)
+const _PRESET_DEFAULT = Dict{Symbol,Symbol}(r.id => r.severity_default for r in LINT_RULES)
+const _PRESET_STRICT = Dict{Symbol,Symbol}(r.id => r.severity_strict for r in LINT_RULES)
 
 const LINT_PRESETS = Dict{String,Dict{Symbol,Symbol}}(
     "minimal" => _PRESET_MINIMAL,
@@ -200,37 +242,13 @@ const LINT_PRESETS = Dict{String,Dict{Symbol,Symbol}}(
     "strict" => _PRESET_STRICT,
 )
 
-# The same invariant for the derived presets: both are comprehensions over
-# `LINT_RULES` today, so this only fires if one is later rewritten in a way that
-# stops covering every rule.
-for (_preset_name, _preset) in LINT_PRESETS, _rule in LINT_RULES
-    haskey(_preset, _rule.id) || error(
-        "Lint rule `$(_rule.id)` is missing from the `$(_preset_name)` preset. " *
-        "Every preset in `LINT_PRESETS` must classify every rule in `LINT_RULES`."
-    )
-end
-
 const DEFAULT_LINT_PRESET = "default"
 
 const VALID_LINT_PRESETS = ["minimal", "default", "strict"]
 
-# Tags are a property of the rule, not of the configured severity: an unused
-# binding stays "unnecessary" (greyed out by the editor) whether the user
-# reports it as a hint or an error.
-const _UNNECESSARY_RULES = Set{Symbol}([
-    :unused_binding,
-    :unused_function_argument,
-    :unused_type_parameter,
-])
+rule_tags(rule_id::Symbol) = LINT_RULES_BY_ID[rule_id].tags
 
-rule_tags(rule_id::Symbol) = rule_id in _UNNECESSARY_RULES ? Symbol[:unnecessary] : Symbol[]
-
-# Documentation links surfaced as the diagnostic's code description.
-const _RULE_CODE_DESCRIPTIONS = Dict{Symbol,URI}(
-    :index_from_length => URI("https://docs.julialang.org/en/v1/base/arrays/#Base.eachindex"),
-)
-
-rule_code_description(rule_id::Symbol) = get(_RULE_CODE_DESCRIPTIONS, rule_id, nothing)
+rule_code_description(rule_id::Symbol) = LINT_RULES_BY_ID[rule_id].doc_link
 
 # ── Effective configuration ─────────────────────────────────────────────────
 
@@ -267,7 +285,7 @@ Base.hash(c::EffectiveLintConfig, h::UInt) =
 The configured severity of `rule_id`, or its `default` preset severity when the
 config does not mention it.
 """
-# No severity fallback: every preset classifies every rule (enforced at load),
+# No severity fallback: every preset classifies every rule (by construction),
 # and an effective config always starts from a preset, so a miss here means the
 # caller passed something that is not a rule id — which should be loud.
 rule_severity(config::EffectiveLintConfig, rule_id::Symbol) =

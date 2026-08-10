@@ -297,6 +297,14 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             end
         end
 
+        # Purely syntactic rules (tier `TierSyntax`, see lint_syntax_rules.jl)
+        # run on the JuliaSyntax tree alone. Their findings carry no severity;
+        # it is applied here, in the one place severity is applied for them.
+        for f in derived_syntax_lint_findings(rt, uri)
+            d = materialize(f, lint_config)
+            d === nothing || push!(results, d)
+        end
+
         # Include-graph diagnostics (DuplicateInclude / IncludeLoop /
         # MissingFile) are a purely structural analysis that does not depend on
         # a project/environment, so they are reported independently of the
