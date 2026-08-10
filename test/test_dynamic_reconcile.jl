@@ -1,12 +1,13 @@
 @testitem "Dynamic reconcile: launch priority orders by depth then kind" begin
     using JuliaWorkspaces: _launch_priority, WatchEnvironmentKey, WatchTestEnvironmentKey,
-        CreateStandaloneProjectKey
+        CreateStandaloneProjectKey, ResolveEnvironmentKey
 
     root_env   = WatchEnvironmentKey("/ws/Pkg", UInt64(1))
     testenv    = WatchTestEnvironmentKey("/ws/Pkg", "Pkg", UInt64(2))
     standalone = CreateStandaloneProjectKey("/ws/Pkg", UInt64(3))
     fixture    = CreateStandaloneProjectKey("/ws/Pkg/test/testdata/Fixture", UInt64(4))
     nested_env = WatchEnvironmentKey("/ws/Pkg/docs", UInt64(5))
+    docs_env   = ResolveEnvironmentKey("/ws/Pkg/docs", UInt64(6))
 
     # shallower paths first
     @test _launch_priority(root_env) < _launch_priority(nested_env)
@@ -14,6 +15,11 @@
     # kind rank breaks ties at equal depth: env < standalone < test env
     @test _launch_priority(root_env) < _launch_priority(standalone)
     @test _launch_priority(standalone) < _launch_priority(testenv)
+    # a parent package's work resolves before its nested docs/ env, and a
+    # resolve-env key ranks like a standalone at equal depth
+    @test _launch_priority(root_env) < _launch_priority(docs_env)
+    @test _launch_priority(standalone) < _launch_priority(docs_env)
+    @test _launch_priority(docs_env) < _launch_priority(WatchTestEnvironmentKey("/ws/Pkg/docs", "X", UInt64(7)))
 end
 
 @testitem "Dynamic reconcile: cap limits concurrent launches" begin
@@ -142,8 +148,9 @@ end
 
 @testitem "Dynamic reconcile: resolve_workspace_environments=false keeps only real envs" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText,
-        derived_required_dynamic_projects, WatchEnvironmentKey
-    using JuliaWorkspaces.URIs2: URI
+        derived_required_dynamic_projects, derived_nonpackage_env, WatchEnvironmentKey,
+        ResolveEnvironmentKey
+    using JuliaWorkspaces.URIs2: URI, uri2filepath
 
     project_toml = """
     name = "P"
@@ -157,8 +164,9 @@ end
 
     [deps]
     """
-    # A workspace project (watch-env key) plus a manifest-less package
-    # (standalone key) with a runtests.jl (test-env key).
+    # A workspace project (watch-env key), a manifest-less package (standalone
+    # key) with a runtests.jl (test-env key), and a manifest-less non-package
+    # docs env (resolve-env key).
     files = [
         TextFile(URI("file:///ws/Proj/Project.toml"), SourceText(project_toml, "toml")),
         TextFile(URI("file:///ws/Proj/Manifest.toml"), SourceText(manifest_toml, "toml")),
@@ -166,6 +174,8 @@ end
         TextFile(URI("file:///ws/Bare/Project.toml"), SourceText(replace(project_toml, "\"P\"" => "\"Bare\"", "1111\"" => "2222\""), "toml")),
         TextFile(URI("file:///ws/Bare/src/Bare.jl"), SourceText("module Bare end", "julia")),
         TextFile(URI("file:///ws/Bare/test/runtests.jl"), SourceText("using Test", "julia")),
+        TextFile(URI("file:///ws/Bare/docs/Project.toml"), SourceText("[deps]\nDocumenter = \"e30172f5-a6a5-5a46-863b-614d45cd2de4\"\n", "toml")),
+        TextFile(URI("file:///ws/Bare/docs/make.jl"), SourceText("using Documenter", "julia")),
     ]
 
     jw_on = JuliaWorkspace()
@@ -177,6 +187,10 @@ end
     req_off = derived_required_dynamic_projects(jw_off.runtime)
 
     @test any(k -> !(k isa WatchEnvironmentKey), req_on)      # sanity: fabrication happens
+    # the docs env is scheduled for resolution, keyed by its Project.toml hash
+    docs_env = derived_nonpackage_env(jw_on.runtime, URI("file:///ws/Bare/docs"))
+    @test docs_env !== nothing
+    @test ResolveEnvironmentKey(uri2filepath(URI("file:///ws/Bare/docs")), docs_env.content_hash) in req_on
     @test all(k -> k isa WatchEnvironmentKey, req_off)        # ...and is fully disabled
     @test !isempty(req_off)                                   # real projects still watched
 end
@@ -234,6 +248,36 @@ end
     pkg_key_v2 = CreateStandaloneProjectKey("/ws2/Pkg", UInt64(3))
     _prepare_standalone_project_dir!(df, pkg_key_v2)
     @test isdir(pkg_extra_dir)
+end
+
+@testitem "Dynamic reconcile: resolve-env dirs share the store but carry an env- tag" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, CreateStandaloneProjectKey,
+        ResolveEnvironmentKey, _prepare_standalone_project_dir!, _standalone_project_dir_path
+
+    store = joinpath(mktempdir(), "cache")
+    df = DynamicFeature(DynamicPersistent, store; launcher=(df, djp) -> nothing)
+
+    env_key = ResolveEnvironmentKey("/ws/Pkg/docs", UInt64(0x1234))
+    dir1 = _prepare_standalone_project_dir!(df, env_key)
+    @test startswith(dir1, joinpath(dirname(store), "standalone-projects"))
+    @test startswith(basename(dir1), "env-docs-")
+    @test _standalone_project_dir_path(df, env_key) == dir1     # pure path agrees
+    @test isdir(dir1)
+
+    # A same-basename *package* never shares a prefix with an env dir, so
+    # neither cleanup can touch the other.
+    pkg_key = CreateStandaloneProjectKey("/elsewhere/docs", UInt64(0x1234))
+    pkg_dir = _prepare_standalone_project_dir!(df, pkg_key)
+    @test !startswith(basename(pkg_dir), "env-")
+    @test isdir(dir1)
+
+    # Editing the env's Project.toml (new content hash) cleans up the stale dir.
+    env_key_v2 = ResolveEnvironmentKey("/ws/Pkg/docs", UInt64(0x5678))
+    dir2 = _prepare_standalone_project_dir!(df, env_key_v2)
+    @test dir2 != dir1
+    @test isdir(dir2)
+    @test !isdir(dir1)
+    @test isdir(pkg_dir)
 end
 
 @testitem "Dynamic reconcile: standalone fast lane serves existing project and refreshes when idle" begin

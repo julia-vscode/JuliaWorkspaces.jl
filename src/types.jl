@@ -117,6 +117,23 @@ Details of a Julia package.
 end
 
 """
+    struct JuliaNonPackageEnv
+
+A folder whose `Project.toml` is not a package (no name/uuid/version) and that
+has no `Manifest.toml` — e.g. a `docs/`, `benchmark/` or `scripts/` environment.
+Such an environment is treated as merely missing its manifest: a resolved copy
+is created in the scratch store via the dynamic analysis process and used as the
+environment for files under the folder.
+
+- `project_file_uri`::URI
+- `content_hash`::UInt64 — hash of the `Project.toml` text
+"""
+@auto_hash_equals struct JuliaNonPackageEnv
+    project_file_uri::URI
+    content_hash::UInt64
+end
+
+"""
     struct JuliaProjectEntryDevedPackage
 
 Details of a Julia project entry for a developed package.
@@ -440,6 +457,7 @@ struct JuliaWorkspace
         set_input_ready_project_environments!(rt, Set{WatchEnvironmentKey}())
         set_input_ready_test_environments!(rt, Dict{WatchTestEnvironmentKey,URI}())
         set_input_standalone_projects!(rt, Dict{CreateStandaloneProjectKey,URI}())
+        set_input_resolved_environments!(rt, Dict{ResolveEnvironmentKey,URI}())
         set_input_failed_dynamic_keys!(rt, Set{DJPKey}())
         set_input_dynamic_failure_messages!(rt, Dict{DJPKey,String}())
 
@@ -590,11 +608,13 @@ function process_from_dynamic(jw::JuliaWorkspace)
     ready_envs = copy(input_ready_project_environments(jw.runtime))
     ready_test_envs = copy(input_ready_test_environments(jw.runtime))
     standalone_projects = copy(input_standalone_projects(jw.runtime))
+    resolved_envs = copy(input_resolved_environments(jw.runtime))
     failed_keys = copy(input_failed_dynamic_keys(jw.runtime))
     failure_messages = copy(input_dynamic_failure_messages(jw.runtime))
     envs_dirty = false
     test_envs_dirty = false
     standalone_dirty = false
+    resolved_dirty = false
     failed_dirty = false
     messages_dirty = false
     saw_result = false
@@ -665,6 +685,21 @@ function process_from_dynamic(jw::JuliaWorkspace)
             standalone_proj_hash = standalone_proj === nothing ? UInt64(0) : standalone_proj.content_hash
             push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), standalone_proj_hash))
             envs_dirty = true
+
+        elseif msg isa ResolvedEnvironmentReadyResult
+            @info "Processing resolved environment" msg.env_folder_uri msg.project_uri
+
+            resolved_envs[ResolveEnvironmentKey(uri2filepath(msg.env_folder_uri), msg.content_hash)] = msg.project_uri
+            resolved_dirty = true
+
+            # Preload package caches and mark the scratch project's own
+            # environment ready, so the next get_diagnostics won't trigger
+            # another round.
+            _load_package_caches_for_project!(jw, msg.project_uri)
+            resolved_proj = derived_project(jw.runtime, msg.project_uri)
+            resolved_proj_hash = resolved_proj === nothing ? UInt64(0) : resolved_proj.content_hash
+            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), resolved_proj_hash))
+            envs_dirty = true
         else
             error("Unknown message: $msg")
         end
@@ -673,6 +708,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
     envs_dirty && set_input_ready_project_environments!(jw.runtime, ready_envs)
     test_envs_dirty && set_input_ready_test_environments!(jw.runtime, ready_test_envs)
     standalone_dirty && set_input_standalone_projects!(jw.runtime, standalone_projects)
+    resolved_dirty && set_input_resolved_environments!(jw.runtime, resolved_envs)
     failed_dirty && set_input_failed_dynamic_keys!(jw.runtime, failed_keys)
     messages_dirty && set_input_dynamic_failure_messages!(jw.runtime, failure_messages)
     saw_result && (df.saw_result[] = true)

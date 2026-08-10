@@ -2306,6 +2306,53 @@ end
     @test !any(d -> d.code === :environment_errors, get_diagnostic(jw, project_toml_uri))
 end
 
+@testitem "environment_errors: a failed env resolve lands on the env folder's own Project.toml" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, process_from_dynamic, derived_nonpackage_env, get_diagnostic,
+        ResolveEnvironmentKey, FailedResult, input_dynamic_failure_messages
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
+
+    dir = uri2filepath(filepath2uri(mktempdir()))  # round-trip: drive-letter casing must match production-derived keys on Windows
+    docs = joinpath(dir, "docs")
+    mkpath(joinpath(dir, "src"))
+    mkpath(docs)
+    files = [
+        joinpath(dir, "Project.toml") => ("""
+        name = "EnvResolveDiag"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee49"
+        version = "0.1.0"
+        """, "toml"),
+        joinpath(dir, "src", "EnvResolveDiag.jl") => ("module EnvResolveDiag\nend\n", "julia"),
+        joinpath(docs, "Project.toml") => ("[deps]\nDocumenter = \"e30172f5-a6a5-5a46-863b-614d45cd2de4\"\n", "toml"),
+        joinpath(docs, "make.jl") => ("using Documenter\n", "julia"),
+    ]
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    for (path, (content, lang)) in files
+        write(path, content)
+        _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+
+    env = derived_nonpackage_env(jw.runtime, filepath2uri(docs))
+    @test env !== nothing
+    key = ResolveEnvironmentKey(uri2filepath(filepath2uri(docs)), env.content_hash)
+
+    message = "Failed to resolve the environment at $docs (no manifest; a resolved copy is created for analysis): boom."
+    put!(jw.dynamic_feature.out_channel, FailedResult(key, message))
+    process_from_dynamic(jw)
+
+    @test input_dynamic_failure_messages(jw.runtime)[key] == message
+
+    # The diagnostic attaches to the env folder's Project.toml ...
+    docs_diags = get_diagnostic(jw, filepath2uri(joinpath(docs, "Project.toml")))
+    env_diags = filter(d -> d.code === :environment_errors, docs_diags)
+    @test length(env_diags) == 1
+    @test env_diags[1].message == message
+    # ... and not to the enclosing package's.
+    pkg_diags = get_diagnostic(jw, filepath2uri(joinpath(dir, "Project.toml")))
+    @test !any(d -> d.code === :environment_errors, pkg_diags)
+end
+
 @testitem "env gating: test-environment keys agree between producer and consumers" begin
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, _add_file!,
         _set_active_project!, derived_package, derived_required_dynamic_projects,

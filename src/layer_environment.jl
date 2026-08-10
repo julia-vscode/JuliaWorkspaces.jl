@@ -127,6 +127,29 @@ Salsa.@derived function derived_ready_standalone_project(rt, package_folder_uri,
     return get(input_standalone_projects(rt), key, nothing)
 end
 
+"""
+    derived_ready_resolved_environment(rt, env_folder_uri, content_hash) -> Union{Nothing,URI}
+
+The resolved scratch-project URI for the manifest-less non-package environment
+at `env_folder_uri`, or `nothing` if it has not been resolved yet.
+"""
+Salsa.@derived function derived_ready_resolved_environment(rt, env_folder_uri, content_hash::UInt64)
+    key = ResolveEnvironmentKey(uri2filepath(env_folder_uri), content_hash)
+    return get(input_resolved_environments(rt), key, nothing)
+end
+
+"""
+    derived_resolve_environment_pending(rt, key::ResolveEnvironmentKey) -> Bool
+
+Whether the environment-resolution work item `key` is scheduled and can still
+produce a result. False when none is scheduled and false once the item failed
+terminally — waiting for either would gate forever.
+"""
+Salsa.@derived function derived_resolve_environment_pending(rt, key::ResolveEnvironmentKey)
+    key in input_failed_dynamic_keys(rt) && return false
+    return key in derived_required_dynamic_projects(rt)
+end
+
 # Salsa-memoized stdlib-only env. Sharing a single env instance is required
 # because `SymbolServer` stores compare by identity: refs resolved against this
 # env during the semantic pass must point at the same instance that later
@@ -200,10 +223,49 @@ Salsa.@derived function derived_workspace_deved_packages(rt, project_uri)
     return result
 end
 
+"""
+    _deepest_nonpackage_env_for_file(rt, uri) -> Union{Nothing,URI}
+
+The non-package, manifest-less env folder enclosing `uri`, but only when it is
+strictly deeper than both the enclosing project folder and the enclosing
+package folder — i.e. when it would win the deepest-folder-wins selection.
+Strict `>` is exact because the three folder classes are disjoint. Shared by
+`derived_project_uri_for_root` and the readiness gate in
+`derived_file_env_ready` so they agree on which files an env resolution is for.
+"""
+Salsa.@derived function _deepest_nonpackage_env_for_file(rt, uri)
+    env_folder_uri = derived_nonpackage_env_for_file(rt, uri)
+    env_folder_uri === nothing && return nothing
+
+    env_len = length(uri2filepath(env_folder_uri))
+
+    project_folder_uri = derived_project_for_file(rt, uri)
+    project_folder_uri === nothing || env_len > length(uri2filepath(project_folder_uri)) || return nothing
+
+    package_folder_uri = derived_package_for_file(rt, uri)
+    package_folder_uri === nothing || env_len > length(uri2filepath(package_folder_uri)) || return nothing
+
+    return env_folder_uri
+end
+
 Salsa.@derived function derived_project_uri_for_root(rt, uri)
     @debug "derived_project_uri_for_root" uri=uri
 
     active_project = input_active_project(rt)
+
+    # A non-package env folder (Project.toml, no manifest, no name/uuid) that is
+    # deeper than any enclosing project/package folder owns its files once its
+    # resolved scratch copy is ready. While resolution is still pending, fall
+    # through to the enclosing package/project logic — `derived_file_env_ready`
+    # suppresses env-dependent diagnostics for these files in the meantime.
+    env_folder_uri = _deepest_nonpackage_env_for_file(rt, uri)
+    if env_folder_uri !== nothing
+        env = derived_nonpackage_env(rt, env_folder_uri)
+        if env !== nothing
+            resolved = derived_ready_resolved_environment(rt, env_folder_uri, env.content_hash)
+            resolved !== nothing && return resolved
+        end
+    end
 
     # Check if the file is inside a project folder (has both Project.toml and Manifest.toml).
     # If this project folder is more specific (deeper) than the enclosing package folder,
@@ -361,6 +423,20 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
         end
     end
 
+    # A manifest-less non-package env that would own this file once resolved:
+    # gate while the resolution can still arrive, so missing-ref checks don't
+    # flash false positives against the fallback (outer package / active
+    # project) environment.
+    env_folder_uri = _deepest_nonpackage_env_for_file(rt, uri)
+    if env_folder_uri !== nothing
+        env = derived_nonpackage_env(rt, env_folder_uri)
+        if env !== nothing &&
+                derived_ready_resolved_environment(rt, env_folder_uri, env.content_hash) === nothing
+            key = ResolveEnvironmentKey(uri2filepath(env_folder_uri), env.content_hash)
+            derived_resolve_environment_pending(rt, key) && return false
+        end
+    end
+
     package_folder_uri = derived_package_for_file(rt, uri)
     package_folder_uri === nothing && return true
 
@@ -424,6 +500,16 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
         push!(required, CreateStandaloneProjectKey(
             uri2filepath(package_uri),
             pkg.content_hash,
+        ))
+    end
+
+    # Non-package Project.tomls without a manifest need a resolved scratch project
+    for env_uri in derived_nonpackage_env_folders(rt)
+        env = derived_nonpackage_env(rt, env_uri)
+        env === nothing && continue
+        push!(required, ResolveEnvironmentKey(
+            uri2filepath(env_uri),
+            env.content_hash,
         ))
     end
 

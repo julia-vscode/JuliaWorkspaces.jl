@@ -86,9 +86,33 @@ function create_standalone_project_request(params::JuliaDynamicAnalysisProtocol.
     end
 end
 
+function resolve_environment_request(params::JuliaDynamicAnalysisProtocol.ResolveEnvironmentParams, state::JuliaDynamicAnalysisProcessState, token)
+    write_resolved_env_project(params.envPath, params.projectDir)
+    Pkg.activate(params.projectDir)
+
+    try
+        # `instantiate`, not `resolve`: SymbolServer loads the packages, so they
+        # must be installed. A failed resolve degrades to whatever symbol caches
+        # exist rather than blocking the environment forever.
+        Pkg.instantiate()
+    catch err
+        @warn "Failed to resolve environment" params.envPath exception=(err, catch_backtrace())
+    end
+
+    try
+        SymbolServer.get_store(params.storePath, progress_reporter(state))
+
+        return dirname(Base.active_project())
+    catch err
+        err isa InterruptException && rethrow()
+        _index_failure(err, catch_backtrace(), "environment (no manifest) at $(params.envPath)")
+    end
+end
+
 JSONRPC.@message_dispatcher dispatch_msg begin
     JuliaDynamicAnalysisProtocol.index_project_request_type => index_project_request
     JuliaDynamicAnalysisProtocol.create_standalone_project_request_type => create_standalone_project_request
+    JuliaDynamicAnalysisProtocol.resolve_environment_request_type => resolve_environment_request
 end
 
 # Executed precompile workload: every dynamic-analysis child process pays at

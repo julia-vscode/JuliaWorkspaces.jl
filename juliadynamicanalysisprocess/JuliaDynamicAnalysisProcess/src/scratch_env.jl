@@ -129,6 +129,16 @@ function materialize_scratch_env(project_path::String, package_name::String)
     empty!(project.extras)
     empty!(project.targets)
 
+    # With `[extras]` gone, a `[sources]` entry for a test-only extra would
+    # reference a package Pkg can no longer see, and `Pkg.Types.validate`
+    # rejects the wrapper over it ("Sources for `X` not listed in `deps` or
+    # `extras` section"). Keep only sources the wrapper still declares as deps —
+    # validate's allowed set is deps ∪ non-weak extras, so weakdeps must NOT be
+    # admitted here (unlike the compat prune below).
+    @static if VERSION >= v"1.11"
+        filter!(kv -> haskey(project.deps, first(kv)), project.sources)
+    end
+
     # With `[extras]` gone, a `[compat]` entry for a test-only extra (allowed in
     # the source project) would reference a package Pkg can no longer see, and
     # Pkg rejects the whole wrapper project over it. Keep only compat entries
@@ -225,7 +235,11 @@ function materialize_stdlib_test_env(project_path::String, package_name::String)
     package_uuid === nothing &&
         error("Cannot determine the UUID of package $package_name in the environment at $(dirname(src_env.project_file)).")
 
-    pkg_project = Pkg.Types.EnvCache(Pkg.Types.projectfile_path(package_path)).project
+    pkg_env = Pkg.Types.EnvCache(Pkg.Types.projectfile_path(package_path))
+    pkg_project = deepcopy(pkg_env.project)
+    # `[sources]` paths in the package's Project.toml are relative to the
+    # package folder; rebase them before any entries are copied elsewhere.
+    Pkg.Operations.abspath!(pkg_env, pkg_project)
 
     project = Pkg.Types.Project()
     project.deps[package_name] = package_uuid
@@ -251,6 +265,13 @@ function materialize_stdlib_test_env(project_path::String, package_name::String)
             uuid === nothing && continue
             project.deps[target] = uuid
         end
+        # A promoted test dep may be path-pinned through the package's own
+        # `[sources]`; without carrying the (rebased) entry over, Pkg would go
+        # looking for it in a registry.
+        for (name, source) in pkg_project.sources
+            name == package_name && continue
+            haskey(project.deps, name) && (project.sources[name] = source)
+        end
         for (name, compat) in pkg_project.compat
             name != "julia" && haskey(project.deps, name) && (project.compat[name] = compat)
         end
@@ -261,4 +282,55 @@ function materialize_stdlib_test_env(project_path::String, package_name::String)
     env_dir = mktempdir()
     Pkg.Types.write_project(project, joinpath(env_dir, "Project.toml"))
     return env_dir
+end
+
+"""
+    write_resolved_env_project(env_path, project_dir) -> Nothing
+
+Copy the `Project.toml` of the manifest-less non-package environment at
+`env_path` into `project_dir`, with relative `[sources]` paths rebased to
+absolute and env-location-relative sections (`[workspace]`, `[apps]`) dropped.
+The caller is expected to `Pkg.activate` the result and `Pkg.instantiate` it,
+which resolves a manifest into `project_dir`; the environment at `env_path` is
+only ever read.
+
+Note: an environment that is a `[workspace]` member normally resolves against
+the workspace root's manifest; the copy resolves standalone instead, which may
+pick different versions. That is acceptable for symbol indexing.
+"""
+function write_resolved_env_project(env_path::String, project_dir::String)
+    mkpath(project_dir)
+
+    if !CAN_MIRROR_ENV
+        # Pre-1.2 Pkg has no Project type; `[sources]`/`[workspace]`/`[apps]`
+        # all postdate it, so a verbatim copy is exact. `projectfile_path` is
+        # only assumed to exist behind CAN_MIRROR_ENV, so find the file by hand
+        # (same JuliaProject-over-Project preference).
+        for name in ("JuliaProject.toml", "Project.toml")
+            candidate = joinpath(env_path, name)
+            if isfile(candidate)
+                cp(candidate, joinpath(project_dir, "Project.toml"); force=true)
+                return
+            end
+        end
+        error("No project file found in the environment at $env_path.")
+    end
+
+    src_env = Pkg.Types.EnvCache(Pkg.Types.projectfile_path(env_path))
+    project = deepcopy(src_env.project)
+
+    @static if VERSION >= v"1.11"
+        # `[sources]` paths are relative to the environment's own folder.
+        Pkg.Operations.abspath!(src_env, project)
+    end
+
+    # `[workspace]` members are declared relative to the project file, and
+    # `[apps]` is meaningless in the scratch copy. Same treatment (and the same
+    # field guards) as in `materialize_scratch_env`.
+    for section in (:workspace, :apps)
+        hasfield(Pkg.Types.Project, section) && empty!(getfield(project, section))
+    end
+
+    Pkg.Types.write_project(project, joinpath(project_dir, "Project.toml"))
+    return
 end
