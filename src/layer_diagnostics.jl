@@ -207,6 +207,22 @@ Salsa.@derived function derived_effective_lint_config(rt, uri)
     return EffectiveLintConfig(severities, options, path_selected(parsed.filter, relpath))
 end
 
+# The user-facing messages of every failed dynamic work item whose project
+# folder contains the project file at `uri`. A test-env failure and an env
+# failure for the same folder both land on that folder's Project.toml.
+# Sorted for a deterministic diagnostic order.
+Salsa.@derived function derived_environment_error_messages(rt, uri)
+    folder_uri = filepath2uri(dirname(uri2filepath(uri)))
+    messages = String[]
+    for (key, message) in input_dynamic_failure_messages(rt)
+        key_path = key isa CreateStandaloneProjectKey ? key.package_path : key.project_path
+        if filepath2uri(key_path) == folder_uri
+            push!(messages, message)
+        end
+    end
+    return sort!(messages)
+end
+
 Salsa.@derived function derived_diagnostics(rt, uri)
     @debug "derived_diagnostics" uri=uri
 
@@ -298,6 +314,15 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             sev = severity_of(:toml_syntax_errors)
             append!(results, Diagnostic(d.range, sev, d.message, d.uri, d.tags, d.source, :toml_syntax_errors)
                     for d in derived_toml_syntax_diagnostics(rt, uri))
+        end
+
+        # Environment-resolution failures are reported on the project file of
+        # the environment they were about — the closest file the user can act
+        # on. Whole-file range, like `config_diagnostic`.
+        if is_path_project_file(uri2filepath(uri)) && enabled(:environment_errors)
+            sev = severity_of(:environment_errors)
+            append!(results, Diagnostic(1:1, sev, message, nothing, Symbol[], "JuliaWorkspaces.jl", :environment_errors)
+                    for message in derived_environment_error_messages(rt, uri))
         end
 
         if is_config_file

@@ -441,6 +441,7 @@ struct JuliaWorkspace
         set_input_ready_test_environments!(rt, Dict{WatchTestEnvironmentKey,URI}())
         set_input_standalone_projects!(rt, Dict{CreateStandaloneProjectKey,URI}())
         set_input_failed_dynamic_keys!(rt, Set{DJPKey}())
+        set_input_dynamic_failure_messages!(rt, Dict{DJPKey,String}())
 
         new(rt, dynamic_feature)
     end
@@ -590,10 +591,12 @@ function process_from_dynamic(jw::JuliaWorkspace)
     ready_test_envs = copy(input_ready_test_environments(jw.runtime))
     standalone_projects = copy(input_standalone_projects(jw.runtime))
     failed_keys = copy(input_failed_dynamic_keys(jw.runtime))
+    failure_messages = copy(input_dynamic_failure_messages(jw.runtime))
     envs_dirty = false
     test_envs_dirty = false
     standalone_dirty = false
     failed_dirty = false
+    messages_dirty = false
     saw_result = false
 
     while isready(df.out_channel)
@@ -615,6 +618,12 @@ function process_from_dynamic(jw::JuliaWorkspace)
             # register doesn't exist — so the key is only remembered as failed.
             push!(failed_keys, msg.key)
             failed_dirty = true
+            # An empty message means "skipped, nothing to report" (e.g. dynamic
+            # indexing disabled) — settle readiness without a user-facing entry.
+            if !isempty(msg.message)
+                failure_messages[msg.key] = msg.message
+                messages_dirty = true
+            end
             if msg.key isa WatchEnvironmentKey
                 push!(ready_envs, msg.key)
                 envs_dirty = true
@@ -665,6 +674,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
     test_envs_dirty && set_input_ready_test_environments!(jw.runtime, ready_test_envs)
     standalone_dirty && set_input_standalone_projects!(jw.runtime, standalone_projects)
     failed_dirty && set_input_failed_dynamic_keys!(jw.runtime, failed_keys)
+    messages_dirty && set_input_dynamic_failure_messages!(jw.runtime, failure_messages)
     saw_result && (df.saw_result[] = true)
 
     return

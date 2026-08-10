@@ -76,6 +76,7 @@ const LINT_RULES = LintRule[
     LintRule(:toml_syntax_errors, StaticLint.LintCodes[], nothing, Symbol[]),
     LintRule(:config_errors, StaticLint.LintCodes[], nothing, Symbol[]),
     LintRule(:shadowed_config, StaticLint.LintCodes[], nothing, Symbol[]),
+    LintRule(:environment_errors, StaticLint.LintCodes[], nothing, Symbol[]),
 ]
 
 const LINT_RULES_BY_ID = Dict{Symbol,LintRule}(r.id => r for r in LINT_RULES)
@@ -145,6 +146,9 @@ const _PRESET_DEFAULT = Dict{Symbol,Symbol}(
     :toml_syntax_errors => :error,
     :config_errors => :error,
     :shadowed_config => :information,
+    # Not the project's fault necessarily (a CI box without registry access
+    # fails every resolve), so informational rather than CI-breaking.
+    :environment_errors => :information,
 )
 
 # Checked here, before the derived presets are built, so that a rule nobody

@@ -126,6 +126,98 @@ end
     @test _snapshot(child) == before_child
 end
 
+@testitem "scratch env: dangling compat for a test-only extra is pruned" begin
+    include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
+    import Pkg
+
+    # A compat entry for a test-only extra is legal in the source project, but
+    # the wrapper empties `[extras]` — carrying the entry over used to make Pkg
+    # reject the whole wrapper ("Compat `Test` not listed in `deps`, `weakdeps`
+    # or `extras` section"), failing the test env of any package shaped like
+    # this (JuliaSyntax, Pkg itself).
+    uuid = "aaaaaaaa-2222-3333-4444-555555555555"
+    dir = mktempdir()
+    mkpath(joinpath(dir, "src"))
+    mkpath(joinpath(dir, "test"))
+    write(
+        joinpath(dir, "Project.toml"), """
+        name = "CompatPrune"
+        uuid = "$uuid"
+        version = "0.1.0"
+
+        [deps]
+        Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+
+        [compat]
+        Dates = "1"
+        Test = "1"
+        julia = "1"
+
+        [extras]
+        Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+        [targets]
+        test = ["Test"]
+        """
+    )
+    write(joinpath(dir, "src", "CompatPrune.jl"), "module CompatPrune\nend\n")
+    write(joinpath(dir, "test", "runtests.jl"), "using Test\n@test true\n")
+
+    env_dir = materialize_scratch_env(dir, "CompatPrune")
+    project = Pkg.Types.read_project(joinpath(env_dir, "Project.toml"))
+
+    @test haskey(project.compat, "Dates")
+    @test haskey(project.compat, "julia")
+    @test !haskey(project.compat, "Test")
+
+    # The wrapper must be acceptable to Pkg — `EnvCache` runs the same project
+    # validation `Pkg.activate` does.
+    @test Pkg.Types.EnvCache(joinpath(env_dir, "Project.toml")) isa Pkg.Types.EnvCache
+end
+
+@testitem "scratch env: a stdlib checkout gets a hand-built test environment" begin
+    include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
+    import Pkg
+
+    # A dev checkout of a stdlib (the julia repo's stdlib/ folder) cannot go
+    # through TestEnv: its `get_test_dir` bails out on stdlib UUIDs without
+    # setting `pkgspec.path` and crashes downstream. The fixture reuses Dates'
+    # real UUID to look like such a checkout.
+    dates_uuid = "ade2ca70-3891-5945-98fb-dc099432e06a"
+    dir = _write_package(mktempdir(), "Dates", dates_uuid)
+
+    @test needs_stdlib_test_env(dir, "Dates") == (VERSION >= v"1.11")
+
+    # An ordinary package is not routed through the stdlib path.
+    other = _write_package(mktempdir(), "Ordinary", "aaaaaaaa-6666-7777-8888-999999999999")
+    @test !needs_stdlib_test_env(other, "Ordinary")
+
+    @static if VERSION >= v"1.11"
+        before = _snapshot(dir)
+        env_dir = materialize_stdlib_test_env(dir, "Dates")
+        project = Pkg.Types.read_project(joinpath(env_dir, "Project.toml"))
+
+        # Nameless wrapper, package path-pinned, test target deps promoted.
+        @test project.name === nothing
+        @test project.deps["Dates"] == Base.UUID(dates_uuid)
+        @test haskey(project.deps, "Test")
+        @test realpath(project.sources["Dates"]["path"]) == realpath(dir)
+        @test _snapshot(dir) == before
+
+        # With a test/Project.toml, the test deps come from there instead.
+        write(
+            joinpath(dir, "test", "Project.toml"), """
+            [deps]
+            Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+            """
+        )
+        env_dir2 = materialize_stdlib_test_env(dir, "Dates")
+        project2 = Pkg.Types.read_project(joinpath(env_dir2, "Project.toml"))
+        @test haskey(project2.deps, "Logging")
+        @test project2.deps["Dates"] == Base.UUID(dates_uuid)
+    end
+end
+
 @testitem "scratch env: TestEnv activates against the scratch env" tags = [:integration] begin
     include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
     import Pkg
