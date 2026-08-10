@@ -68,6 +68,10 @@ Salsa.@declare_input input_ready_test_environments(rt)::Dict{WatchTestEnvironmen
 # resulting project URI.
 Salsa.@declare_input input_standalone_projects(rt)::Dict{CreateStandaloneProjectKey,URI}
 
+# Resolved projects for manifest-less non-package environments, mapping each
+# resolve key to the resulting scratch project URI.
+Salsa.@declare_input input_resolved_environments(rt)::Dict{ResolveEnvironmentKey,URI}
+
 # Work items that failed terminally. Their artifacts (a test/standalone project
 # URI) will never appear, so readiness gates treat these keys as settled and
 # proceed best-effort with whatever symbol caches exist.

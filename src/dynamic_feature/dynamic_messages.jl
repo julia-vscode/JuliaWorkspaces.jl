@@ -30,7 +30,16 @@ end
     content_hash::UInt64
 end
 
-const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey}
+@auto_hash_equals struct ResolveEnvironmentKey
+    env_path::String
+    content_hash::UInt64
+end
+
+const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey, ResolveEnvironmentKey}
+
+# Keys whose work item is "materialize a project into a persistent scratch dir"
+# — they share the dir-prep / fast-lane / background-refresh machinery.
+const ScratchProjectKey = Union{CreateStandaloneProjectKey, ResolveEnvironmentKey}
 
 """
     DJPIdentity
@@ -52,6 +61,12 @@ const DJPIdentity = @NamedTuple{kind::Symbol, path::String, package::String}
 _djp_identity(k::WatchEnvironmentKey)        = (kind=:watch_environment,         path=k.project_path, package="")
 _djp_identity(k::WatchTestEnvironmentKey)    = (kind=:watch_test_environment,    path=k.project_path, package=k.package_name)
 _djp_identity(k::CreateStandaloneProjectKey) = (kind=:create_standalone_project, path=k.package_path, package="")
+_djp_identity(k::ResolveEnvironmentKey)      = (kind=:resolve_environment,       path=k.env_path,     package="")
+
+# The folder a key's failure diagnostics should be attached to.
+_key_folder_path(k::CreateStandaloneProjectKey) = k.package_path
+_key_folder_path(k::ResolveEnvironmentKey)      = k.env_path
+_key_folder_path(k::DJPKey)                     = k.project_path
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Reactor messages (in_channel)
@@ -78,9 +93,13 @@ struct WatchTestEnvironmentMsg <: DynamicReactorMessage
     key::WatchTestEnvironmentKey
 end
 
-"""Request to create a standalone project for a package folder."""
+"""
+Request to materialize a scratch project — a standalone project for a package
+folder, or a resolved project for a manifest-less non-package environment. (The
+message name predates the environment variant.)
+"""
 struct CreateStandaloneProjectMsg <: DynamicReactorMessage
-    key::CreateStandaloneProjectKey
+    key::ScratchProjectKey
 end
 
 """Request an orderly shutdown of the reactor."""
@@ -124,9 +143,11 @@ Posted by the async standalone-prep task spawned from
 `CreateStandaloneProjectMsg`. `fast_lane` is true when the persistent project
 dir already exists and all of its manifest's packages have symbol caches — the
 stale environment is served immediately and refreshed in the background.
+(Applies to both scratch-project key kinds; the name predates the environment
+variant.)
 """
 struct StandaloneProjectPrepDoneMsg <: DynamicReactorMessage
-    key::CreateStandaloneProjectKey
+    key::ScratchProjectKey
     fast_lane::Bool
 end
 
@@ -224,6 +245,13 @@ end
 """A standalone package project has been created."""
 struct StandaloneProjectReadyResult <: DynamicResultMessage
     package_folder_uri::URI
+    project_uri::URI
+    content_hash::UInt64
+end
+
+"""A resolved project for a manifest-less non-package environment is ready."""
+struct ResolvedEnvironmentReadyResult <: DynamicResultMessage
+    env_folder_uri::URI
     project_uri::URI
     content_hash::UInt64
 end

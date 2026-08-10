@@ -258,6 +258,38 @@ Salsa.@derived function derived_project(rt, uri)
     JuliaProject(project_file, manifest_file, julia_version, project_content_hash, deved_packages, regular_packages, stdlib_packages)
 end
 
+"""
+    derived_nonpackage_env(rt, uri) -> Union{Nothing,JuliaNonPackageEnv}
+
+The non-package, manifest-less environment at folder `uri`, or `nothing`. The
+three folder classes are disjoint by construction: a package has
+name+uuid+version (`derived_package`), a project has a manifest
+(`derived_project`), and a non-package env has neither.
+"""
+Salsa.@derived function derived_nonpackage_env(rt, uri)
+    @debug "derived_nonpackage_env" uri=uri
+
+    project_folders = derived_potential_project_folders(rt)
+    toml_files = get(project_folders, uri, nothing)
+    if toml_files === nothing
+        toml_files = derived_project_toml_files(rt, uri)
+    end
+
+    project_file = toml_files.project_file
+    project_file === nothing && return nothing
+    toml_files.manifest_file === nothing || return nothing  # has a manifest → project
+    derived_package(rt, uri) === nothing || return nothing  # package → standalone-project path
+
+    project_text_content = derived_text_file_content(rt, project_file)
+    project_text_content === nothing && return nothing
+
+    return JuliaNonPackageEnv(project_file, hash(project_text_content.content.content))
+end
+
+Salsa.@derived function derived_nonpackage_env_folders(rt)
+    return URI[i for i in keys(derived_potential_project_folders(rt)) if derived_nonpackage_env(rt, i)!==nothing]
+end
+
 Salsa.@derived function derived_package_folders(rt)
     return URI[i for i in keys(derived_potential_project_folders(rt)) if derived_package(rt, i)!==nothing]
 end
@@ -299,6 +331,10 @@ Salsa.@derived function derived_project_folder_parts(rt)
     return folder_parts_table(derived_project_folders(rt))
 end
 
+Salsa.@derived function derived_nonpackage_env_folder_parts(rt)
+    return folder_parts_table(derived_nonpackage_env_folders(rt))
+end
+
 Salsa.@derived function derived_package_for_file(rt, file::URI)
     file_path = uri2filepath(file)
     file_path === nothing && return nothing
@@ -311,4 +347,11 @@ Salsa.@derived function derived_project_for_file(rt, file::URI)
     file_path === nothing && return nothing
 
     return deepest_folder_for_parts(derived_project_folder_parts(rt), splitpath(file_path))
+end
+
+Salsa.@derived function derived_nonpackage_env_for_file(rt, file::URI)
+    file_path = uri2filepath(file)
+    file_path === nothing && return nothing
+
+    return deepest_folder_for_parts(derived_nonpackage_env_folder_parts(rt), splitpath(file_path))
 end

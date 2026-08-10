@@ -215,7 +215,7 @@ Salsa.@derived function derived_environment_error_messages(rt, uri)
     folder_uri = filepath2uri(dirname(uri2filepath(uri)))
     messages = String[]
     for (key, message) in input_dynamic_failure_messages(rt)
-        key_path = key isa CreateStandaloneProjectKey ? key.package_path : key.project_path
+        key_path = _key_folder_path(key)
         if filepath2uri(key_path) == folder_uri
             push!(messages, message)
         end

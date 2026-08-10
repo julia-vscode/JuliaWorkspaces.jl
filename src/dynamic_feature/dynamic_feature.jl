@@ -146,6 +146,19 @@ function create_standalone_project(djp::DynamicJuliaProcess, store_path::String,
     )
 end
 
+function resolve_environment(djp::DynamicJuliaProcess, store_path::String, project_dir::String, timeout_seconds::Int=0)
+    _send_djp_request(
+        djp,
+        timeout_seconds,
+        JuliaDynamicAnalysisProtocol.resolve_environment_request_type,
+        JuliaDynamicAnalysisProtocol.ResolveEnvironmentParams(
+            djp.project_path,
+            store_path,
+            project_dir
+        )
+    )
+end
+
 # Exception thrown when the child process exits before establishing a connection.
 struct DynamicProcessCrashException <: Exception
     key::DJPKey
@@ -163,9 +176,13 @@ end
 _key_path(key::WatchEnvironmentKey) = key.project_path
 _key_path(key::WatchTestEnvironmentKey) = key.project_path
 _key_path(key::CreateStandaloneProjectKey) = key.package_path
+_key_path(key::ResolveEnvironmentKey) = key.env_path
 
 _kind_rank(::WatchEnvironmentKey) = 0
 _kind_rank(::CreateStandaloneProjectKey) = 1
+# Same rank as standalone: the two can never share a path, and depth-first
+# ordering already resolves a parent package before its nested docs/ env.
+_kind_rank(::ResolveEnvironmentKey) = 1
 _kind_rank(::WatchTestEnvironmentKey) = 2
 
 function _launch_priority(key::DJPKey)
@@ -557,11 +574,15 @@ end
 # characters (e.g. `Pkg` vs `Pkg-extra`).
 #
 # `(parent, prefix, dir)` — pure, no filesystem mutation.
-function _standalone_dir_components(df::DynamicFeature, key::CreateStandaloneProjectKey)
+function _standalone_dir_components(df::DynamicFeature, key::ScratchProjectKey)
     parent = joinpath(dirname(df.store_path), "standalone-projects")
-    name = basename(key.package_path)
-    path_hash = string(hash(key.package_path) % UInt32, base=16, pad=8)
-    prefix = string(name, "-", path_hash, "-")
+    path = _key_path(key)
+    name = basename(path)
+    path_hash = string(hash(path) % UInt32, base=16, pad=8)
+    # The `env-` tag keeps a package and a same-basename env from ever sharing
+    # a prefix, and makes the dirs self-describing on disk.
+    tag = key isa ResolveEnvironmentKey ? "env-" : ""
+    prefix = string(tag, name, "-", path_hash, "-")
     dir = joinpath(parent, string(prefix, string(key.content_hash, base=16, pad=16)))
     return (parent, prefix, dir)
 end
@@ -570,7 +591,7 @@ end
 # call OFF the reactor (e.g. from a `ProcessLaunchedMsg` async task, where the
 # destructive `_prepare_standalone_project_dir!` would race a concurrent
 # resolve into a sibling content-hash's live dir).
-_standalone_project_dir_path(df::DynamicFeature, key::CreateStandaloneProjectKey) =
+_standalone_project_dir_path(df::DynamicFeature, key::ScratchProjectKey) =
     _standalone_dir_components(df, key)[3]
 
 # Reactor-only: prepare the dir. Sibling dirs for the same package *path* under
@@ -578,7 +599,7 @@ _standalone_project_dir_path(df::DynamicFeature, key::CreateStandaloneProjectKey
 # and growth stays bounded), then the dir is `mkpath`ed. MUST run on the
 # reactor — the `rm(...; recursive=true)` would otherwise delete a sibling
 # dir that a newer content hash's child is actively resolving into.
-function _prepare_standalone_project_dir!(df::DynamicFeature, key::CreateStandaloneProjectKey)
+function _prepare_standalone_project_dir!(df::DynamicFeature, key::ScratchProjectKey)
     parent, prefix, dir = _standalone_dir_components(df, key)
     if isdir(parent)
         for other in readdir(parent; join=true)
@@ -615,6 +636,7 @@ end
 _progress_key(phase::String, key::WatchEnvironmentKey) = string(phase, ":", key.project_path)
 _progress_key(phase::String, key::WatchTestEnvironmentKey) = string(phase, ":", key.project_path, ":", key.package_name)
 _progress_key(phase::String, key::CreateStandaloneProjectKey) = string(phase, ":", key.package_path)
+_progress_key(phase::String, key::ResolveEnvironmentKey) = string(phase, ":", key.env_path)
 
 const MissingPackage = @NamedTuple{name::String, uuid::UUID, version::String, git_tree_sha1::Union{String,Nothing}}
 
@@ -906,6 +928,8 @@ function _failure_subject(key::DJPKey)
         return "the test environment of package '$(key.package_name)' at $(key.project_path)"
     elseif key isa WatchEnvironmentKey
         return "the environment at $(key.project_path)"
+    elseif key isa ResolveEnvironmentKey
+        return "the environment at $(key.env_path) (no manifest; a resolved copy is created for analysis)"
     else
         return "a standalone project for the package at $(key.package_path)"
     end
@@ -1023,11 +1047,13 @@ end
 # `target` is always a real path so callers can `_short_path` it.
 function _djp_reason_target(df::DynamicFeature, key::DJPKey)
     if key in df.refreshing
-        ("refreshing served standalone project (background; picks up changes)", key.package_path)
+        ("refreshing served scratch project (background; picks up changes)", _key_path(key))
     elseif key isa WatchEnvironmentKey
         ("indexing packages that still lack a symbol cache", key.project_path)
     elseif key isa WatchTestEnvironmentKey
         ("materializing the '$(key.package_name)' test environment (only a child can produce it)", key.project_path)
+    elseif key isa ResolveEnvironmentKey
+        ("resolving an environment without a manifest (only a child can produce it)", key.env_path)
     else
         ("creating a standalone project (only a child can produce it)", key.package_path)
     end
@@ -1038,6 +1064,8 @@ function _launch_now!(df::DynamicFeature, key::DJPKey)
         DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
     elseif key isa WatchTestEnvironmentKey
         DynamicJuliaProcess(key, key.project_path, key.package_name, :watch_test_environment)
+    elseif key isa ResolveEnvironmentKey
+        DynamicJuliaProcess(key, key.env_path, nothing, :resolve_environment)
     else
         DynamicJuliaProcess(key, key.package_path, nothing, :create_standalone_project)
     end
@@ -1255,18 +1283,24 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
     return false
 end
 
+# The ready result for a completed scratch-project work item, by key kind.
+_scratch_ready_result(key::CreateStandaloneProjectKey, dir::String) =
+    StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash)
+_scratch_ready_result(key::ResolveEnvironmentKey, dir::String) =
+    ResolvedEnvironmentReadyResult(filepath2uri(key.env_path), filepath2uri(dir), key.content_hash)
+
 function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
     key = msg.key
     push!(df.inflight, key)
 
     if _is_exhausted(df, key)
-        @warn "Skipping previously failed standalone project" key
+        @warn "Skipping previously failed scratch project" key
         put!(df.out_channel, FailedResult(key, _replay_failure_message(df, key)))
         _complete_work_item!(df, key)
         return false
     end
 
-    _report_progress(df, _progress_key("index", key), "Checking standalone project for $(basename(key.package_path))...", 0)
+    _report_progress(df, _progress_key("index", key), "Checking scratch project for $(basename(_key_path(key)))...", 0)
 
     # Offload the (IO-bound) dir + missing-package check to a task so the
     # reactor stays responsive; the decision comes back as a
@@ -1296,9 +1330,9 @@ function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
     end
 
     if msg.fast_lane
-        @info "Serving existing standalone project; refreshing in background" package_path=key.package_path
+        @info "Serving existing scratch project; refreshing in background" path=_key_path(key)
         dir = _standalone_project_dir_path(df, key)
-        put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash))
+        put!(df.out_channel, _scratch_ready_result(key, dir))
         push!(df.done, key)
         _clear_failure_budget!(df, key)
         _complete_work_item!(df, key)
@@ -1307,15 +1341,15 @@ function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
         df.djp_mode != DynamicOff && push!(df.refresh_queue, key)
         _drain_launch_queue!(df)
     elseif df.djp_mode == DynamicOff
-        # Creating the standalone project needs a child process; terminal
+        # Creating the scratch project needs a child process; terminal
         # without one (files fall back to the active project's environment).
-        @info "Standalone project needs a dynamic child process but dynamic indexing is disabled; skipping" key
+        @info "Scratch project needs a dynamic child process but dynamic indexing is disabled; skipping" key
         put!(df.out_channel, FailedResult(key))
         push!(df.done, key)
         _complete_work_item!(df, key)
         _drain_launch_queue!(df)
     else
-        _report_progress(df, _progress_key("index", key), "Creating standalone project for $(basename(key.package_path))...", 0)
+        _report_progress(df, _progress_key("index", key), "Creating scratch project for $(basename(_key_path(key)))...", 0)
         _request_launch!(df, key)
     end
 
@@ -1347,6 +1381,8 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
             # destructive prepare here — off the reactor — could `rm` a sibling
             # content-hash's dir that another child is resolving into.
             create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
+        elseif key isa ResolveEnvironmentKey
+            resolve_environment(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
         else
             index_project(djp, df.store_path, df.djp_request_timeout_seconds)
         end
@@ -1396,7 +1432,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         if djp !== nothing && state(djp.fsm) == DynamicProcessIndexing
             transition!(djp.fsm, DynamicProcessDone; reason="refreshed")
         end
-        put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(msg.result_dir), key.content_hash))
+        put!(df.out_channel, _scratch_ready_result(key, msg.result_dir))
         if df.djp_mode == DynamicIndexingOnly && djp !== nothing
             kill(djp)
             delete!(df.procs, key)
@@ -1424,9 +1460,8 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     elseif key isa WatchTestEnvironmentKey
         test_project_uri = filepath2uri(msg.result_dir)
         put!(df.out_channel, TestEnvironmentReadyResult(filepath2uri(key.project_path), key.package_name, test_project_uri, key.content_hash))
-    elseif key isa CreateStandaloneProjectKey
-        standalone_project_uri = filepath2uri(msg.result_dir)
-        put!(df.out_channel, StandaloneProjectReadyResult(filepath2uri(key.package_path), standalone_project_uri, key.content_hash))
+    elseif key isa ScratchProjectKey
+        put!(df.out_channel, _scratch_ready_result(key, msg.result_dir))
     end
 
     # Mark the work complete. Under DynamicIndexingOnly the child process is no
@@ -1644,7 +1679,7 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
             handle!(df, WatchEnvironmentMsg(key))
         elseif key isa WatchTestEnvironmentKey
             handle!(df, WatchTestEnvironmentMsg(key))
-        elseif key isa CreateStandaloneProjectKey
+        elseif key isa ScratchProjectKey
             handle!(df, CreateStandaloneProjectMsg(key))
         end
     end
