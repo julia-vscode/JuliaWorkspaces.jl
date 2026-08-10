@@ -122,6 +122,83 @@ end
     """))
 end
 
+@testitem "Syntax rules: string_concat_style flags string-literal concatenation" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    function rule_diags(rule, source)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
+            SourceText("[rules]\n$rule = \"warning\"\n", "toml")))
+        uri = URI("file:///pr/src/a.jl")
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        return filter(d -> d.code === Symbol(rule), get_diagnostic(jw, uri))
+    end
+
+    @test length(rule_diags("string_concat_style", "f(x) = \"a\" * x")) == 1
+    @test length(rule_diags("string_concat_style", "f(x) = x * \"b\"")) == 1
+    @test length(rule_diags("string_concat_style", "f(x, y) = x * \"b\" * y")) == 1
+    @test length(rule_diags("string_concat_style", "f(x) = *(x, \"b\")")) == 1
+
+    # No literal involved: could be numeric multiplication — never reported.
+    @test isempty(rule_diags("string_concat_style", "f(x, y) = x * y"))
+    @test isempty(rule_diags("string_concat_style", "f(x) = 2 * x"))
+    # Other operators on strings are not this rule's business.
+    @test isempty(rule_diags("string_concat_style", "f(x) = \"a\" ^ 3"))
+end
+
+@testitem "Syntax rules: bare_using flags module-only using, not name lists" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    function rule_diags(source)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
+            SourceText("[rules]\nbare_using = \"warning\"\n", "toml")))
+        uri = URI("file:///pr/src/a.jl")
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        return filter(d -> d.code === :bare_using, get_diagnostic(jw, uri))
+    end
+
+    @test length(rule_diags("using Foo")) == 1
+    @test length(rule_diags("using Foo.Bar")) == 1
+    @test length(rule_diags("using ..Rel")) == 1
+    # One finding per bare module, so both are individually actionable.
+    @test length(rule_diags("using Foo, Bar")) == 2
+
+    # The range covers the module path, not the whole statement.
+    d = rule_diags("using Foo, Bar")
+    src = "using Foo, Bar"
+    @test src[first(d[1].range):last(d[1].range)-1] == "Foo"
+    @test src[first(d[2].range):last(d[2].range)-1] == "Bar"
+
+    # Explicit name lists and imports are the recommended forms.
+    @test isempty(rule_diags("using Foo: x"))
+    @test isempty(rule_diags("using Foo: x, y"))
+    @test isempty(rule_diags("import Foo"))
+end
+
+@testitem "Syntax rules: debug_statement and async_task flag their macros" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    function rule_diags(rule, source)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
+            SourceText("[rules]\n$rule = \"warning\"\n", "toml")))
+        uri = URI("file:///pr/src/a.jl")
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        return filter(d -> d.code === Symbol(rule), get_diagnostic(jw, uri))
+    end
+
+    @test length(rule_diags("debug_statement", "f(x) = @show x")) == 1
+    @test length(rule_diags("debug_statement", "f(x) = Base.@show x")) == 1
+    @test isempty(rule_diags("debug_statement", "f(x) = @info x"))
+    # `@showprogress` etc. are different macros.
+    @test isempty(rule_diags("debug_statement", "f(x) = @showtime x"))
+
+    @test length(rule_diags("async_task", "f() = @async g()")) == 1
+    @test isempty(rule_diags("async_task", "f() = Threads.@spawn g()"))
+    @test isempty(rule_diags("async_task", "f() = @sync g()"))
+end
+
 @testitem "Syntax rules: severity-only config edit does not re-run the walk" begin
     using JuliaWorkspaces.URIs2: URI
 

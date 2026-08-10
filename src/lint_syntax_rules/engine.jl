@@ -144,6 +144,22 @@ function _node_range(node::SyntaxNode)
     return min(start, last(rng)):last(rng)
 end
 
+# The `@name` symbol a macrocall invokes, or `nothing`: handles both the bare
+# form (`@show x` — first child is the `MacroName`) and the qualified form
+# (`Base.@show x` — first child is a `K"."` whose last child is the name).
+function _macro_name(node::SyntaxNode)
+    cs = children(node)
+    isempty(cs) && return nothing
+    c = cs[1]
+    if kind(c) === K"." && !JuliaSyntax.is_leaf(c)
+        inner = children(c)
+        isempty(inner) && return nothing
+        c = inner[end]
+    end
+    kind(c) === K"MacroName" && c.val isa Symbol || return nothing
+    return c.val
+end
+
 # Structural equality of two syntax trees: same kinds, same leaf values,
 # trivia (whitespace, comments) ignored because it never reaches the
 # `SyntaxNode` tree.
@@ -160,11 +176,19 @@ end
 
 include("nan_comparison.jl")
 include("duplicate_branch_condition.jl")
+include("string_concat_style.jl")
+include("bare_using.jl")
+include("debug_statement.jl")
+include("async_task.jl")
 
 # A concrete tuple: `Tuple{SyntaxCheck{typeof(f1)}, SyntaxCheck{typeof(f2)}, …}`.
 const SYNTAX_CHECKS = (
     NAN_COMPARISON_CHECK,
     DUPLICATE_BRANCH_CONDITION_CHECK,
+    STRING_CONCAT_STYLE_CHECK,
+    BARE_USING_CHECK,
+    DEBUG_STATEMENT_CHECK,
+    ASYNC_TASK_CHECK,
 )
 
 const SYNTAX_CHECK_RULE_IDS = Set{Symbol}(c.rule_id for c in SYNTAX_CHECKS)

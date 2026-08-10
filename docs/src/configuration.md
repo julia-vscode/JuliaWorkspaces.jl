@@ -207,8 +207,12 @@ rules run on the JuliaSyntax tree of a single file alone
 | --- | --- |
 | `nan_comparison` | `x == NaN` / `x != NaN`, which always yield the same answer; use `isnan`. |
 | `duplicate_branch_condition` | An `elseif` condition identical to an earlier condition in the same chain, making the branch unreachable. Conditions containing arbitrary function or macro calls are exempt, since each evaluation may legitimately differ. |
+| `string_concat_style` | A string literal concatenated with `*`; prefer interpolation or `string(...)`. |
+| `bare_using` | `using Foo` without an explicit name list; prefer `using Foo: x, y` or `import Foo`. |
+| `debug_statement` | A leftover `@show`. |
+| `async_task` | `@async`, which pins the task to the current thread; consider `Threads.@spawn`. |
 
-Both are currently `"off"` outside the `strict` preset.
+All of these are currently `"off"` outside the `strict` preset.
 
 ### Severities
 
@@ -401,18 +405,23 @@ enabled when **any** rule mapping into it is not `"off"`. Because several rules
 can share one category, and several rules have no category at all, that gate is
 necessarily coarse.
 
-The precise per-rule decision therefore happens where diagnostics are emitted,
-in `_emit_hint_diagnostics!`
-([`src/lint_emission.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/lint_emission.jl)):
-each finding's rule id is looked up, an `"off"` rule is skipped, and the
-configured severity replaces the built-in one. This keeps rule granularity
-independent of StaticLint's internal check structure, at the cost of computing a
-small number of findings that are then discarded.
+The precise per-rule decision therefore happens in exactly one place: every
+producer emits severity-free `LintFinding`s (a range, a rule id, a message),
+and `materialize` in `derived_diagnostics`
+([`src/layer_diagnostics.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/layer_diagnostics.jl))
+turns each finding into a `Diagnostic`: an `"off"` rule is dropped, the
+configured severity is applied, and the rule's tags and documentation link are
+attached. This keeps rule granularity independent of StaticLint's internal
+check structure, at the cost of computing a small number of findings that are
+then discarded — and it means a severity-only config edit re-runs only this
+cheap materialization step, never the producers.
 
-`_emit_hint_diagnostics!` is shared by both static-lint pipelines — the
-whole-closure pass in `layer_static_lint.jl` and the per-file pass in
-`layer_file_analysis.jl` — which differ only in how a call mismatch is described
-and in the container they collect into.
+`_emit_hint_findings!`
+([`src/lint_emission.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/lint_emission.jl))
+maps StaticLint's hints onto rule ids and messages; it is shared by both
+static-lint pipelines — the whole-closure pass in `layer_static_lint.jl` and
+the per-file pass in `layer_file_analysis.jl` — which differ only in how a call
+mismatch is described and in the container they collect into.
 
 ### Migrating from the old schema
 

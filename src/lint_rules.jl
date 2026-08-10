@@ -52,7 +52,7 @@ being ready — is a field here rather than a side table.
   diagnostic's code description.
 - `env_dependent::Bool`: Whether findings depend on package symbols being
   indexed; such rules are suppressed until a file's environment is ready (see
-  `_is_env_dependent_diagnostic`).
+  `_is_env_dependent_finding`).
 - `option_keys::Vector{Symbol}`: Extra keys accepted alongside `severity` when
   the rule is configured as a table.
 - `codes::Vector{StaticLint.LintCodes}`: The StaticLint codes this rule covers;
@@ -183,6 +183,14 @@ const LINT_RULES = LintRule[
         doc_link = URI("https://docs.julialang.org/en/v1/base/numbers/#Base.isnan")),
     LintRule(id = :duplicate_branch_condition, tier = TierSyntax,
         severity_default = :off, severity_strict = :warning),
+    LintRule(id = :string_concat_style, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
+    LintRule(id = :bare_using, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
+    LintRule(id = :debug_statement, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
+    LintRule(id = :async_task, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
 
     # ── Rules backed by analyses other than StaticLint ───────────────────────
     LintRule(id = :syntax_errors, tier = TierSyntax,
@@ -211,7 +219,18 @@ const LINTCODE_TO_RULE = Dict{StaticLint.LintCodes,Symbol}(
     c => r.id for r in LINT_RULES for c in r.codes
 )
 
-# Derived view for the emission-time check in `_is_env_dependent_diagnostic`.
+# Every StaticLint code must belong to a rule: `_emit_hint_findings!` indexes
+# `LINTCODE_TO_RULE` unconditionally, so an unmapped code would throw at lint
+# time. Enforced here so adding a code without classifying it fails the build.
+for _code in instances(StaticLint.LintCodes)
+    haskey(LINTCODE_TO_RULE, _code) || error(
+        "StaticLint code `$(_code)` is not covered by any rule in `LINT_RULES`. " *
+        "Add it to an existing rule or introduce a new one."
+    )
+end
+
+# Derived view kept for introspection/tests; the emission-time check
+# (`_is_env_dependent_finding`) reads the rule field directly.
 const ENV_DEPENDENT_LINT_RULES = Set{Symbol}(r.id for r in LINT_RULES if r.env_dependent)
 
 # ── Severities ──────────────────────────────────────────────────────────────

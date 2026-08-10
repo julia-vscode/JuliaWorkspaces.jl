@@ -130,6 +130,10 @@ end
         # Syntactic rules added with the rule registry; off outside `strict`.
         :nan_comparison => :off,
         :duplicate_branch_condition => :off,
+        :string_concat_style => :off,
+        :bare_using => :off,
+        :debug_statement => :off,
+        :async_task => :off,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 
