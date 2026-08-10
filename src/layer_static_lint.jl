@@ -156,9 +156,9 @@ visited set) also makes include cycles inside a project terminate.
 Salsa.@derived function derived_static_lint_diagnostics_for_root(rt, root)
     @debug "derived_static_lint_diagnostics_for_root" root=root
 
-    # We use a Set to deduplicate diagnostics, as the same diagnostic
+    # We use a Set to deduplicate findings, as the same finding
     # can be produced from multiple roots due to includes
-    res = Dict{URI,Set{Diagnostic}}()
+    res = Dict{URI,Set{LintFinding}}()
 
     project_uri = derived_project_uri_for_root(rt, root)
     project_uri === nothing && return res
@@ -181,15 +181,15 @@ Salsa.@derived function derived_static_lint_diagnostics_for_root(rt, root)
         )))
 
     for uri in derived_include_closure(rt, root)
-        current_res = get!(res, uri, Set{Diagnostic}())
+        current_res = get!(res, uri, Set{LintFinding}())
 
         cst = derived_julia_legacy_syntax_tree(rt, uri)
         lint_config = derived_effective_lint_config(rt, uri)
         missingrefs = missingrefs_from_config(lint_config)
         errs = StaticLint.collect_hints(cst, env, workspace_packages, meta_dict, missingrefs)
 
-        _emit_hint_diagnostics!(
-            current_res, errs, meta_dict, lint_config, declared_deps;
+        _emit_hint_findings!(
+            current_res, errs, meta_dict, declared_deps;
             describe_call = x -> StaticLint.describe_call_mismatch(x, env, meta_dict),
         )
     end
@@ -198,9 +198,9 @@ Salsa.@derived function derived_static_lint_diagnostics_for_root(rt, root)
 end
 
 Salsa.@derived function derived_static_lint_diagnostics(rt, uri)
-    # The same diagnostic can be produced from multiple roots due to includes;
+    # The same finding can be produced from multiple roots due to includes;
     # the Set deduplicates across roots.
-    res = Set{Diagnostic}()
+    res = Set{LintFinding}()
 
     for root in derived_roots_for_uri(rt, uri)
         root_diags = derived_static_lint_diagnostics_for_root(rt, root)

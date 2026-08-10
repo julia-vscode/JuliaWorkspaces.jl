@@ -396,7 +396,9 @@ The frozen result of one per-file semantic analysis (`derived_file_analysis`).
 - `outbound`: the plain-data outbound-reference table (direct tree-resolved
   refs AND import-bound sites whose binding val is a tree target, see
   `_collect_outbound`), sorted by `(name, origin_module)`.
-- `diagnostics`: the file's lint diagnostics (`check_all` + `collect_hints`).
+- `diagnostics`: the file's lint findings (`check_all` + `collect_hints`),
+  severity-free `LintFinding`s — severity is applied at materialization in
+  `derived_diagnostics`.
 
 Deliberately NOT `@auto_hash_equals` (unlike `OutboundRef`): `meta` is keyed
 by `objectid` of this file's EXPRs, so identity equality is intended — the
@@ -417,10 +419,10 @@ values, not the identity-compared env containers, and the query depends on
 struct FileAnalysis
     meta::Dict{UInt64,StaticLint.Meta}
     outbound::Vector{OutboundRef}
-    diagnostics::Vector{Diagnostic}
+    diagnostics::Vector{LintFinding}
 end
 
-_empty_file_analysis() = FileAnalysis(Dict{UInt64,StaticLint.Meta}(), OutboundRef[], Diagnostic[])
+_empty_file_analysis() = FileAnalysis(Dict{UInt64,StaticLint.Meta}(), OutboundRef[], LintFinding[])
 
 # The full path of a `SymbolServer.VarRef` chain, root-first.
 function _var_ref_path(vr::SymbolServer.VarRef)
@@ -579,7 +581,7 @@ function _call_cross_file_arities(rt, root, path, call, meta_dict)
 end
 
 function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, project_uri, root=nothing, path=String[])
-    diagnostics = Diagnostic[]
+    diagnostics = LintFinding[]
 
     # In-scope external/workspace module set at a call site, for
     # `describe_call_mismatch`'s method-set enumeration (mirrors the
@@ -613,7 +615,7 @@ function _file_analysis_diagnostics(rt, cst, env, meta_dict, lint_config, projec
             StaticLint.describe_call_mismatch(x, env, meta_dict; tree_in_scope)
     end
 
-    _emit_hint_diagnostics!(diagnostics, errs, meta_dict, lint_config, declared_deps; describe_call)
+    _emit_hint_findings!(diagnostics, errs, meta_dict, declared_deps; describe_call)
 
     return diagnostics
 end
@@ -830,7 +832,7 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
 end
 
 """
-    derived_new_static_lint_diagnostics(rt, uri) -> Set{Diagnostic}
+    derived_new_static_lint_diagnostics(rt, uri) -> Set{LintFinding}
 
 The per-file consumer face of static-lint diagnostics: for every root `uri`
 belongs to (`derived_roots_for_uri`), take that root's per-file analysis
@@ -853,7 +855,7 @@ project is active, `new == old` again.
 Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     @debug "derived_new_static_lint_diagnostics" uri=uri
 
-    res = Set{Diagnostic}()
+    res = Set{LintFinding}()
     for root in derived_roots_for_uri(rt, uri)
         # A project-less root contributes no diagnostics (parity with the old
         # per-root query, layer_static_lint.jl).

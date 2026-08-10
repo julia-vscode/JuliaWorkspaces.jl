@@ -32,6 +32,7 @@ include("layer_scope_modules.jl")
 include("StaticLint/StaticLint.jl")
 
 include("lint_rules.jl")
+include("lint_syntax_rules/engine.jl")
 include("config_common.jl")
 include("lint_emission.jl")
 

@@ -1867,7 +1867,7 @@ end
     # `@declare_input` or `@deprecate` to this fixture would break this
     # assertion legitimately — that is not a regression.
     @test new == old
-    @test new isa Set{JuliaWorkspaces.Diagnostic}
+    @test new isa Set{JuliaWorkspaces.LintFinding}
 end
 
 @testitem "derived_new_static_lint_diagnostics: a file in two roots unions both roots' analyses" setup=[FileAnalysisWS] begin
@@ -1939,7 +1939,7 @@ end
 
     @test isempty(JuliaWorkspaces.derived_roots_for_uri(rt, a))
     res = JuliaWorkspaces.derived_new_static_lint_diagnostics(rt, a)
-    @test res isa Set{JuliaWorkspaces.Diagnostic}
+    @test res isa Set{JuliaWorkspaces.LintFinding}
     @test isempty(res)
 end
 

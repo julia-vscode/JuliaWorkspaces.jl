@@ -92,6 +92,97 @@ end
     end
 end
 
+@testitem "Lint rules: preset severities match the pre-registry values" begin
+    # The presets used to be three hand-written dicts; they are now derived from
+    # per-rule severity fields. This pins every value to what the hand-written
+    # dicts contained, so the registry refactor is provably behavior-neutral and
+    # any future change to a preset severity is a conscious test update.
+    expected_default = Dict{Symbol,Symbol}(
+        :incorrect_call_args => :information,
+        :incorrect_iter_spec => :information,
+        :index_from_length => :information,
+        :nothing_comparison => :information,
+        :const_if_condition => :information,
+        :pointless_boolean => :information,
+        :invalid_type_declaration => :information,
+        :unused_type_parameter => :hint,
+        :module_name => :information,
+        :type_piracy => :information,
+        :unused_function_argument => :hint,
+        :duplicate_function_argument => :information,
+        :kw_default_mismatch => :information,
+        :literal_use => :information,
+        :break_continue => :information,
+        :global_const_decl => :information,
+        :unused_binding => :hint,
+        :const_decl => :information,
+        :relative_import => :information,
+        :include_errors => :warning,
+        :missing_reference => :warning,
+        :unresolved_import => :warning,
+        :syntax_errors => :error,
+        :syntax_warnings => :off,
+        :testitem_errors => :error,
+        :toml_syntax_errors => :error,
+        :config_errors => :error,
+        :shadowed_config => :information,
+        :environment_errors => :information,
+        # Syntactic rules added with the rule registry; off outside `strict`.
+        :nan_comparison => :off,
+        :duplicate_branch_condition => :off,
+        :string_concat_style => :off,
+        :bare_using => :off,
+        :debug_statement => :off,
+        :async_task => :off,
+    )
+    @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
+
+    # minimal: everything off except the checks that catch outright breakage.
+    expected_minimal = Dict{Symbol,Symbol}(
+        r.id => get(
+            Dict{Symbol,Symbol}(
+                :syntax_errors => :error,
+                :testitem_errors => :error,
+                :toml_syntax_errors => :error,
+                :config_errors => :error,
+                :include_errors => :warning,
+                :const_decl => :warning,
+                :shadowed_config => :information,
+            ),
+            r.id,
+            :off,
+        )
+        for r in JuliaWorkspaces.LINT_RULES
+    )
+    @test JuliaWorkspaces.LINT_PRESETS["minimal"] == expected_minimal
+
+    # strict: everything on, hints/infos/offs promoted to warnings.
+    expected_strict = Dict{Symbol,Symbol}(
+        r.id => begin
+            d = expected_default[r.id]
+            r.id === :syntax_warnings ? :warning :
+            d in (:off, :hint, :information) ? :warning : d
+        end
+        for r in JuliaWorkspaces.LINT_RULES
+    )
+    @test JuliaWorkspaces.LINT_PRESETS["strict"] == expected_strict
+
+    # The env-dependent set, formerly a side table, now derived from rule fields.
+    @test JuliaWorkspaces.ENV_DEPENDENT_LINT_RULES == Set([
+        :incorrect_call_args, :incorrect_iter_spec, :nothing_comparison,
+        :invalid_type_declaration, :type_piracy, :kw_default_mismatch,
+        :missing_reference, :unresolved_import,
+    ])
+
+    # Tags and doc links, formerly side tables.
+    @test JuliaWorkspaces.rule_tags(:unused_binding) == [:unnecessary]
+    @test JuliaWorkspaces.rule_tags(:unused_function_argument) == [:unnecessary]
+    @test JuliaWorkspaces.rule_tags(:unused_type_parameter) == [:unnecessary]
+    @test JuliaWorkspaces.rule_tags(:nothing_comparison) == Symbol[]
+    @test JuliaWorkspaces.rule_code_description(:index_from_length) !== nothing
+    @test JuliaWorkspaces.rule_code_description(:nothing_comparison) === nothing
+end
+
 @testitem "Lint config: a nested config reports that it supersedes the outer one" begin
     using JuliaWorkspaces.URIs2: URI
 

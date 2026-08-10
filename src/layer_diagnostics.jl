@@ -4,10 +4,9 @@
 # rephrasing a message (e.g. the detailed `describe_call_mismatch` text that
 # replaces the generic `IncorrectCallArgs` one) cannot silently opt a finding
 # out of the suppression.
-function _is_env_dependent_diagnostic(d::Diagnostic)
-    d.source != "StaticLint.jl" && return false
-    d.code === nothing && return false
-    return d.code in ENV_DEPENDENT_LINT_RULES
+function _is_env_dependent_finding(f::LintFinding)
+    f.source != "StaticLint.jl" && return false
+    return LINT_RULES_BY_ID[f.rule_id].env_dependent
 end
 
 Salsa.@derived function derived_lintconfig_files(rt)
@@ -254,75 +253,80 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         return results
     end
 
-    severity_of(rule) = rule_severity(lint_config, rule)
-    enabled(rule) = severity_of(rule) !== :off
+    enabled(rule) = rule_enabled(lint_config, rule)
+
+    # The single point where severity, tags and doc links are applied — every
+    # producer path below funnels its findings through `materialize`.
+    emit_finding!(f::LintFinding) = begin
+        d = materialize(f, lint_config)
+        d === nothing || push!(results, d)
+        nothing
+    end
+    emit!(range, rule_id, message, related_uri, source) =
+        emit_finding!(LintFinding(range, rule_id, message, related_uri, source))
 
     # Julia-content diagnostics run for file-scheme .jl files AND non-file
     # (e.g. untitled) buffers whose language is julia.
     if _is_julia_uri(rt, uri)
+        # The `enabled` guards below do not filter (materialize does); they skip
+        # running a producer query at all when nothing it can emit is on.
         if enabled(:syntax_errors) || enabled(:syntax_warnings)
-            syntax_diagnostics = derived_julia_syntax_diagnostics(rt, uri)
-
-            if enabled(:syntax_errors)
-                sev = severity_of(:syntax_errors)
-                append!(results, Diagnostic(i.range, sev, i.message, i.uri, i.tags, i.source, :syntax_errors)
-                        for i in syntax_diagnostics if i.severity == :error)
-            end
-
-            if enabled(:syntax_warnings)
-                sev = severity_of(:syntax_warnings)
-                append!(results, Diagnostic(i.range, sev, i.message, i.uri, i.tags, i.source, :syntax_warnings)
-                        for i in syntax_diagnostics if i.severity == :warning)
+            for i in derived_julia_syntax_diagnostics(rt, uri)
+                rule = i.severity == :error ? :syntax_errors : :syntax_warnings
+                emit!(i.range, rule, i.message, i.uri, i.source)
             end
         end
 
         if enabled(:testitem_errors)
-            sev = severity_of(:testitem_errors)
-            tis = derived_testitems(rt, uri)
-            append!(results, Diagnostic(i.range, sev, i.message, nothing, Symbol[], "Testitem", :testitem_errors) for i in tis.testerrors)
+            for i in derived_testitems(rt, uri).testerrors
+                emit!(i.range, :testitem_errors, i.message, nothing, "Testitem")
+            end
         end
 
-        # Individual rule severities are applied where the diagnostics are
-        # produced; this only skips the semantic pass entirely when every rule
-        # it can emit is off. `include_errors` is excluded from the test — its
+        # This only skips the semantic pass entirely when every rule it can
+        # emit is off. `include_errors` is excluded from the test — its
         # findings come from the separate structural pass below, so leaving it
         # on is no reason to run the (much more expensive) semantic one.
         if any(enabled(r.id) for r in LINT_RULES if !isempty(r.codes) && r.id !== :include_errors)
-            sl = derived_new_static_lint_diagnostics(rt, uri)
             env_ready = derived_file_env_ready(rt, uri)
-            if env_ready
-                append!(results, sl)
-            else
-                append!(results, d for d in sl if !_is_env_dependent_diagnostic(d))
+            for f in derived_new_static_lint_diagnostics(rt, uri)
+                if !env_ready && _is_env_dependent_finding(f)
+                    continue
+                end
+                emit_finding!(f)
             end
         end
+
+        # Purely syntactic rules (tier `TierSyntax`, see lint_syntax_rules/)
+        # run on the JuliaSyntax tree alone.
+        foreach(emit_finding!, derived_syntax_lint_findings(rt, uri))
 
         # Include-graph diagnostics (DuplicateInclude / IncludeLoop /
         # MissingFile) are a purely structural analysis that does not depend on
         # a project/environment, so they are reported independently of the
         # semantic static-lint pass above.
         if enabled(:include_errors)
-            sev = severity_of(:include_errors)
-            append!(results, Diagnostic(d.range, sev, d.message, d.uri, d.tags, d.source, :include_errors)
-                    for d in derived_include_diagnostics(rt, uri))
+            for d in derived_include_diagnostics(rt, uri)
+                emit!(d.range, :include_errors, d.message, d.uri, d.source)
+            end
         end
     end
 
     # Config/TOML diagnostics are filesystem-file only.
     if uri.scheme == "file"
         if (is_config_file || is_path_project_file(uri2filepath(uri)) || is_path_manifest_file(uri2filepath(uri))) && enabled(:toml_syntax_errors)
-            sev = severity_of(:toml_syntax_errors)
-            append!(results, Diagnostic(d.range, sev, d.message, d.uri, d.tags, d.source, :toml_syntax_errors)
-                    for d in derived_toml_syntax_diagnostics(rt, uri))
+            for d in derived_toml_syntax_diagnostics(rt, uri)
+                emit!(d.range, :toml_syntax_errors, d.message, d.uri, d.source)
+            end
         end
 
         # Environment-resolution failures are reported on the project file of
         # the environment they were about — the closest file the user can act
         # on. Whole-file range, like `config_diagnostic`.
         if is_path_project_file(uri2filepath(uri)) && enabled(:environment_errors)
-            sev = severity_of(:environment_errors)
-            append!(results, Diagnostic(1:1, sev, message, nothing, Symbol[], "JuliaWorkspaces.jl", :environment_errors)
-                    for message in derived_environment_error_messages(rt, uri))
+            for message in derived_environment_error_messages(rt, uri)
+                emit!(1:1, :environment_errors, message, nothing, "JuliaWorkspaces.jl")
+            end
         end
 
         if is_config_file
@@ -339,9 +343,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             # `shadowed_config`), so each keeps its own rule id and takes that
             # rule's configured severity rather than being flattened together.
             for d in config_diags
-                rule = d.code === nothing ? :config_errors : d.code
-                enabled(rule) || continue
-                push!(results, Diagnostic(d.range, severity_of(rule), d.message, d.uri, d.tags, d.source, rule))
+                emit!(d.range, d.code === nothing ? :config_errors : d.code, d.message, d.uri, d.source)
             end
         end
     end
