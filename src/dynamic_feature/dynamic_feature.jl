@@ -763,7 +763,11 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
 
     try
         @info "Downloading package cache" name=name version=version
-        Pkg.PlatformEngines.download_verify_unpack(link, nothing, pkg_download_dir)
+        # quiet_download + devnull io: Pkg would otherwise draw its own
+        # "Downloading" progress bar straight onto a TTY stderr, clobbering any
+        # progress UI of the host process; progress is reported via our own
+        # callback instead.
+        Pkg.PlatformEngines.download_verify_unpack(link, nothing, pkg_download_dir; quiet_download=true, io=devnull)
 
         download_filepath = joinpath(pkg_download_dir, filename)
         download_filepath_unavailable = string(first(splitext(download_filepath)), ".unavailable")
