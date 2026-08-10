@@ -303,9 +303,17 @@ function write_resolved_env_project(env_path::String, project_dir::String)
 
     if !CAN_MIRROR_ENV
         # Pre-1.2 Pkg has no Project type; `[sources]`/`[workspace]`/`[apps]`
-        # all postdate it, so a verbatim copy is exact.
-        cp(Pkg.Types.projectfile_path(env_path), joinpath(project_dir, "Project.toml"); force=true)
-        return
+        # all postdate it, so a verbatim copy is exact. `projectfile_path` is
+        # only assumed to exist behind CAN_MIRROR_ENV, so find the file by hand
+        # (same JuliaProject-over-Project preference).
+        for name in ("JuliaProject.toml", "Project.toml")
+            candidate = joinpath(env_path, name)
+            if isfile(candidate)
+                cp(candidate, joinpath(project_dir, "Project.toml"); force=true)
+                return
+            end
+        end
+        error("No project file found in the environment at $env_path.")
     end
 
     src_env = Pkg.Types.EnvCache(Pkg.Types.projectfile_path(env_path))

@@ -285,31 +285,30 @@ end
     # A docs/-style env: no name/uuid, deps plus a relative [sources] entry and
     # a [workspace] section. The copy must rebase sources to absolute, drop the
     # env-location-relative sections, and never write into the source folder.
+    # `[sources]` exists from 1.11, `[workspace]` (as a Project field) only from
+    # 1.12 — build the fixture from exactly the sections this Julia's Pkg knows.
+    has_sources = VERSION >= v"1.11"
+    has_workspace = hasfield(Pkg.Types.Project, :workspace)
+
     parent = mktempdir()
     dep = _write_package(joinpath(parent, "LocalDep"), "LocalDep", "aaaaaaaa-7777-8888-9999-aaaaaaaaaaaa")
     env_dir = joinpath(parent, "docs")
     mkpath(env_dir)
-    @static if VERSION >= v"1.11"
-        write(
-            joinpath(env_dir, "Project.toml"), """
-            [deps]
-            LocalDep = "aaaaaaaa-7777-8888-9999-aaaaaaaaaaaa"
+    project_toml = """
+    [deps]
+    LocalDep = "aaaaaaaa-7777-8888-9999-aaaaaaaaaaaa"
+    """
+    has_sources && (project_toml *= """
 
-            [sources]
-            LocalDep = {path = "../LocalDep"}
+    [sources]
+    LocalDep = {path = "../LocalDep"}
+    """)
+    has_workspace && (project_toml *= """
 
-            [workspace]
-            projects = ["sub"]
-            """
-        )
-    else
-        write(
-            joinpath(env_dir, "Project.toml"), """
-            [deps]
-            LocalDep = "aaaaaaaa-7777-8888-9999-aaaaaaaaaaaa"
-            """
-        )
-    end
+    [workspace]
+    projects = ["sub"]
+    """)
+    write(joinpath(env_dir, "Project.toml"), project_toml)
     before = _snapshot(env_dir)
 
     project_dir = mktempdir()
@@ -318,9 +317,11 @@ end
     project = Pkg.Types.read_project(joinpath(project_dir, "Project.toml"))
     @test project.name === nothing
     @test haskey(project.deps, "LocalDep")
-    @static if VERSION >= v"1.11"
+    if has_sources
         @test isabspath(project.sources["LocalDep"]["path"])
         @test realpath(project.sources["LocalDep"]["path"]) == realpath(dep)
+    end
+    if has_workspace
         @test isempty(project.workspace)
     end
     # The copy is valid for Pkg and the source env untouched.
