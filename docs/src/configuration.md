@@ -201,7 +201,7 @@ as `LINT_RULES`; `LINTCODE_TO_RULE` inverts it.
 
 Not every rule is backed by the semantic StaticLint pass. Purely syntactic
 rules run on the JuliaSyntax tree of a single file alone
-(see [`src/lint_syntax_rules.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/lint_syntax_rules.jl)):
+(see [`src/lint_syntax_rules/`](https://github.com/julia-vscode/JuliaWorkspaces.jl/tree/main/src/lint_syntax_rules), one file per rule):
 
 | Rule | Finds |
 | --- | --- |

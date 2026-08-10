@@ -1,9 +1,10 @@
 # Purely syntactic lint rules (tier `TierSyntax`).
 #
 # Rules in this tier need nothing but the JuliaSyntax tree of a single file: no
-# semantic pass, no environment, no other files. They are implemented as plain
-# functions collected in the `SYNTAX_CHECKS` tuple and run in a single pre-order
-# walk per file.
+# semantic pass, no environment, no other files. Each rule lives in its own file
+# in this folder and defines a check function plus a `SyntaxCheck` const; this
+# file holds everything shared — the finding type, the engine, common helpers,
+# the `SYNTAX_CHECKS` tuple that collects the rules, and the Salsa queries.
 #
 # The tuple (rather than a `Vector`) is deliberate: it makes the element types
 # part of the container's type, so every `check.fn` call below is statically
@@ -11,6 +12,10 @@
 # the whole engine stays precompile- and juliac-friendly. Whether a rule is
 # enabled is a runtime `Set` membership test, so configuration never affects
 # code specialization.
+#
+# Adding a rule: one new file here (check function + `SyntaxCheck` const), one
+# entry in the include list and `SYNTAX_CHECKS` below, one `LintRule` entry in
+# lint_rules.jl.
 
 """
     struct LintFinding
@@ -151,101 +156,15 @@ function _syntax_equal(a::SyntaxNode, b::SyntaxNode)
     return all(_syntax_equal(x, y) for (x, y) in zip(ca, cb))
 end
 
-# ── nan_comparison ──────────────────────────────────────────────────────────
+# ── Rules ───────────────────────────────────────────────────────────────────
 
-const _NAN_NAMES = (:NaN, :NaN16, :NaN32, :NaN64)
-const _EQUALITY_OPS = (:(==), :(!=), :≠)
-
-_is_nan_identifier(node) = kind(node) === K"Identifier" && node.val isa Symbol && node.val in _NAN_NAMES
-
-const _NAN_COMPARISON_MESSAGE = "Comparing with `NaN` using `==` or `!=` always yields the same result. Use `isnan` instead."
-
-function _check_nan_comparison(emit!, node, _ctx)
-    cs = children(node)
-    if kind(node) === K"comparison"
-        # Chained comparison: operands at odd indices, operators at even ones.
-        for i in 2:2:length(cs)-1
-            if _op_symbol(cs[i]) in _EQUALITY_OPS && (_is_nan_identifier(cs[i-1]) || _is_nan_identifier(cs[i+1]))
-                emit!(_node_range(node), _NAN_COMPARISON_MESSAGE)
-                return nothing
-            end
-        end
-    elseif JuliaSyntax.is_infix_op_call(node)
-        # `a == NaN`, `a .== NaN`
-        if length(cs) == 3 && _op_symbol(cs[2]) in _EQUALITY_OPS &&
-           (_is_nan_identifier(cs[1]) || _is_nan_identifier(cs[3]))
-            emit!(_node_range(node), _NAN_COMPARISON_MESSAGE)
-        end
-    else
-        # `==(a, NaN)`
-        if length(cs) == 3 && _op_symbol(cs[1]) in _EQUALITY_OPS &&
-           (_is_nan_identifier(cs[2]) || _is_nan_identifier(cs[3]))
-            emit!(_node_range(node), _NAN_COMPARISON_MESSAGE)
-        end
-    end
-    return nothing
-end
-
-# ── duplicate_branch_condition ──────────────────────────────────────────────
-
-# A repeated condition only makes the later branch dead when evaluating the
-# earlier one cannot have changed anything, so the rule restricts itself to
-# conditions built from identifiers, literals, field access, indexing and
-# operator calls. A condition containing an arbitrary function or macro call
-# (`rand() < 0.5`, `readline() == "y"`) can legitimately differ between
-# evaluations and is never reported.
-function _side_effect_free(node::SyntaxNode)
-    JuliaSyntax.is_leaf(node) && return true   # identifiers and literals
-    k = kind(node)
-    cs = children(node)
-    if k === K"call" || k === K"dotcall"
-        isempty(cs) && return false
-        if JuliaSyntax.is_infix_op_call(node)
-            op = _op_symbol(cs[2])
-            op !== nothing && Base.isoperator(op) || return false
-            return all(_side_effect_free(cs[i]) for i in eachindex(cs) if i != 2)
-        else
-            op = _op_symbol(cs[1])
-            op !== nothing && Base.isoperator(op) || return false
-            return all(_side_effect_free, @view cs[2:end])
-        end
-    elseif k === K"parens" || k === K"&&" || k === K"||" || k === K"comparison" ||
-           k === K"." || k === K"ref" || k === K"quote"
-        return all(_side_effect_free, cs)
-    else
-        return false
-    end
-end
-
-const _DUPLICATE_BRANCH_MESSAGE = "This condition is identical to an earlier condition in the same `if`/`elseif` chain, so this branch can never run."
-
-function _check_duplicate_branch_condition(emit!, node, _ctx)
-    # Registered on `K"if"` only; the `elseif` chain is walked from here so
-    # each chain is examined exactly once.
-    conditions = SyntaxNode[]
-    current = node
-    while true
-        cs = children(current)
-        isempty(cs) && return nothing
-        condition = cs[1]
-        for earlier in conditions
-            if _syntax_equal(earlier, condition) && _side_effect_free(condition)
-                emit!(_node_range(condition), _DUPLICATE_BRANCH_MESSAGE)
-                break
-            end
-        end
-        push!(conditions, condition)
-        kind(cs[end]) === K"elseif" || return nothing
-        current = cs[end]
-    end
-end
-
-# ── Check registry ──────────────────────────────────────────────────────────
+include("nan_comparison.jl")
+include("duplicate_branch_condition.jl")
 
 # A concrete tuple: `Tuple{SyntaxCheck{typeof(f1)}, SyntaxCheck{typeof(f2)}, …}`.
 const SYNTAX_CHECKS = (
-    SyntaxCheck(:nan_comparison, (K"call", K"dotcall", K"comparison"), _check_nan_comparison),
-    SyntaxCheck(:duplicate_branch_condition, (K"if",), _check_duplicate_branch_condition),
+    NAN_COMPARISON_CHECK,
+    DUPLICATE_BRANCH_CONDITION_CHECK,
 )
 
 const SYNTAX_CHECK_RULE_IDS = Set{Symbol}(c.rule_id for c in SYNTAX_CHECKS)
