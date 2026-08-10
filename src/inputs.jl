@@ -73,6 +73,13 @@ Salsa.@declare_input input_standalone_projects(rt)::Dict{CreateStandaloneProject
 # proceed best-effort with whatever symbol caches exist.
 Salsa.@declare_input input_failed_dynamic_keys(rt)::Set{DJPKey}
 
+# The user-facing failure message per failed work item, kept separate from
+# `input_failed_dynamic_keys` so the readiness gates (pure membership tests)
+# are not invalidated by message-only differences. Keys whose work was merely
+# skipped (empty `FailedResult.message`) are absent here — they settle
+# readiness but produce no `environment_errors` diagnostic.
+Salsa.@declare_input input_dynamic_failure_messages(rt)::Dict{DJPKey,String}
+
 Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{Nothing,String})::Union{SymbolServer.Package,Nothing} function(ctx, name, uuid, version, git_tree_sha1)
 
 

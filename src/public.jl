@@ -676,6 +676,7 @@ function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
     # Drop the query-side record too, so readiness gates that treat a failed key
     # as settled re-open while the retry runs.
     set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}())
+    set_input_dynamic_failure_messages!(jw.runtime, Dict{DJPKey,String}())
 
     # `_reconcile!` skips sending a message when the required set is unchanged,
     # which it will be here — force one through.

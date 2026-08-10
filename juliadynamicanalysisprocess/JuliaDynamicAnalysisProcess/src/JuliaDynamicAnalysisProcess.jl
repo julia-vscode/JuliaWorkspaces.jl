@@ -33,7 +33,12 @@ end
 
 function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProjectParams, state::JuliaDynamicAnalysisProcessState, token)
     try
-        if params.package !== nothing && CAN_MIRROR_ENV
+        if params.package !== nothing && needs_stdlib_test_env(params.projectPath, params.package)
+            # TestEnv cannot build test environments for stdlib UUIDs, so dev
+            # checkouts of stdlibs get a hand-built scratch test environment.
+            Pkg.activate(materialize_stdlib_test_env(params.projectPath, params.package))
+            Pkg.instantiate()
+        elseif params.package !== nothing && CAN_MIRROR_ENV
             # `TestEnv.activate` instantiates whatever environment is active, which
             # would create a `Manifest.toml` in the user's folder. Give it a scratch
             # mirror of the environment instead.

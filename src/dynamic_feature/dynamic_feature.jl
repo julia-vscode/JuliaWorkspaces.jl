@@ -443,6 +443,10 @@ struct DynamicFeature
     # project would launch a fresh doomed child per keystroke. Cleared for an
     # identity as soon as any of its items succeeds.
     failure_attempts::Dict{DJPIdentity,Int}
+    # The user-facing message of the most recent terminal failure per identity,
+    # so exhausted-skip short-circuits can replay the original cause. Cleared
+    # together with `failure_attempts`.
+    failure_messages::Dict{DJPIdentity,String}
     inflight::Set{DJPKey}
     # Keys whose work has fully completed (indexed / fast-laned). Under
     # DynamicIndexingOnly the process is killed but the key stays here so a
@@ -518,6 +522,7 @@ struct DynamicFeature
             Dict{DJPKey,DynamicJuliaProcess}(),
             Set{DJPKey}(),          # failed_projects
             Dict{DJPIdentity,Int}(),  # failure_attempts
+            Dict{DJPIdentity,String}(),  # failure_messages
             Set{DJPKey}(),          # inflight
             Set{DJPKey}(),          # done
             Set{DJPKey}(),          # last_required
@@ -915,6 +920,16 @@ function _humanize_djp_failure(key::DJPKey, err)
     )
 end
 
+# Variant for a child that died before answering, where there is no exception
+# to unwrap a cause from.
+function _humanize_djp_termination(key::DJPKey)
+    return string(
+        "Failed to resolve ", _failure_subject(key),
+        ": the indexing child process terminated unexpectedly.",
+        " Missing-reference checks are degraded in that scope.",
+    )
+end
+
 # ─── Failure bookkeeping ────────────────────────────────────────────────────
 #
 # Two gates, both reactor-owned, neither pruned by reconcile:
@@ -939,18 +954,35 @@ function _is_exhausted(df::DynamicFeature, key::DJPKey)
     return get(df.failure_attempts, _djp_identity(key), 0) >= df.max_failure_attempts
 end
 
-# Record one terminal failure against both gates.
-function _record_failure!(df::DynamicFeature, key::DJPKey)
+# Record one terminal failure against both gates, keeping the user-facing
+# message so later exhausted-skip short-circuits (which have no exception of
+# their own) can replay the original cause instead of a generic sentence.
+function _record_failure!(df::DynamicFeature, key::DJPKey, message::String)
     push!(df.failed_projects, key)
     id = _djp_identity(key)
     df.failure_attempts[id] = get(df.failure_attempts, id, 0) + 1
+    df.failure_messages[id] = message
     return
+end
+
+# The user-facing message for an exhausted-skip `FailedResult`: the recorded
+# cause of the identity's earlier failure when there is one.
+function _replay_failure_message(df::DynamicFeature, key::DJPKey)
+    return get(df.failure_messages, _djp_identity(key)) do
+        string("Failed to resolve ", _failure_subject(key),
+            ": repeated failures; not retrying.",
+            " Missing-reference checks are degraded in that scope.")
+    end
 end
 
 # A success restores the project's full budget, so a transient failure (a
 # crashed child, a flaky download) doesn't count against it for the session.
-_clear_failure_budget!(df::DynamicFeature, key::DJPKey) =
-    delete!(df.failure_attempts, _djp_identity(key))
+function _clear_failure_budget!(df::DynamicFeature, key::DJPKey)
+    id = _djp_identity(key)
+    delete!(df.failure_attempts, id)
+    delete!(df.failure_messages, id)
+    return
+end
 
 # Transition a freshly-created DJP into its supervised `start` task.
 function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
@@ -1110,7 +1142,7 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
 
     if _is_exhausted(df, key)
         @warn "Skipping previously failed project" key
-        put!(df.out_channel, FailedResult(key))
+        put!(df.out_channel, FailedResult(key, _replay_failure_message(df, key)))
         _complete_work_item!(df, key)
         return false
     end
@@ -1200,7 +1232,7 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
 
     if _is_exhausted(df, key)
         @warn "Skipping previously failed test environment" key
-        put!(df.out_channel, FailedResult(key))
+        put!(df.out_channel, FailedResult(key, _replay_failure_message(df, key)))
         _complete_work_item!(df, key)
         return false
     end
@@ -1229,7 +1261,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
 
     if _is_exhausted(df, key)
         @warn "Skipping previously failed standalone project" key
-        put!(df.out_channel, FailedResult(key))
+        put!(df.out_channel, FailedResult(key, _replay_failure_message(df, key)))
         _complete_work_item!(df, key)
         return false
     end
@@ -1441,12 +1473,13 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         return false
     end
 
-    @warn _humanize_djp_failure(key, msg.err)
+    message = _humanize_djp_failure(key, msg.err)
+    @warn message
     @debug "DynamicJuliaProcess failed" key exception=(msg.err, catch_backtrace())
     # Bar this exact key from ever being retried, and charge the project's
     # failure budget so a re-keying edit can't buy unlimited fresh attempts.
-    _record_failure!(df, key)
-    put!(df.out_channel, FailedResult(key))
+    _record_failure!(df, key, message)
+    put!(df.out_channel, FailedResult(key, message))
 
     djp = get(df.procs, key, nothing)
     if djp !== nothing
@@ -1480,8 +1513,9 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     # died before its index request completed — treat as a failure.
     if key in df.inflight && state(djp.fsm) in (DynamicProcessStarting, DynamicProcessConnected, DynamicProcessIndexing)
         @warn "Dynamic process terminated unexpectedly" key
-        _record_failure!(df, key)
-        put!(df.out_channel, FailedResult(key))
+        message = _humanize_djp_termination(key)
+        _record_failure!(df, key, message)
+        put!(df.out_channel, FailedResult(key, message))
         try kill(djp) catch; end
         delete!(df.procs, key)
         _complete_work_item!(df, key)
@@ -1497,6 +1531,7 @@ function handle!(df::DynamicFeature, ::ResetFailuresMsg)
     @info "Clearing dynamic failure bookkeeping" n_keys=length(df.failed_projects) n_projects=length(df.failure_attempts)
     empty!(df.failed_projects)
     empty!(df.failure_attempts)
+    empty!(df.failure_messages)
     return false
 end
 
