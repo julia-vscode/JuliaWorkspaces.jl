@@ -200,7 +200,7 @@ end
 
 @testitem "body tree: malformed and missing files degrade quietly" setup=[BodyTreeWS] begin
     jw = bt_workspace("f(x = ) := nonsense +\n")
-    @test derived_file_body_forest(jw.runtime, BT_URI) isa Dict{Int64,BodyTree}
+    @test derived_file_body_forest(jw.runtime, BT_URI) isa Dict{Int64,<:BodyTree}
     @test derived_file_body_maps(jw.runtime, BT_URI) isa Dict{Int64,Vector{UnitRange{Int}}}
 
     missing_ref = ItemRef(URI("file:///bt/src/Missing.jl"), Int64(1))

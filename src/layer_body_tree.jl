@@ -30,13 +30,15 @@ Equality is structural and slightly stricter than leaf `isequal`: leaf values
 must also agree in type, so numerically-equal literals of different types
 (e.g. `1` vs `Int8(1)` under the same kind) compare unequal.
 """
-struct BodyTree
-    kind::JuliaSyntax.Kind
+struct BodyTree{K}
+    kind::K
     val::Any
-    children::Union{Nothing,Vector{BodyTree}}
+    children::Union{Nothing,Vector{BodyTree{K}}}
     hash::UInt64
 
-    function BodyTree(kind::JuliaSyntax.Kind, @nospecialize(val), children::Union{Nothing,Vector{BodyTree}})
+    # `K` is a 16-bit primitive kind type: the registered JuliaSyntax.Kind for the
+    # parse-facing forest, the vendored v2 Kind for the lowering layer's forest.
+    function BodyTree{K}(kind::K, @nospecialize(val), children::Union{Nothing,Vector{BodyTree{K}}}) where {K}
         h = hash(reinterpret(UInt16, kind), 0xb0d1743e5eed0000 % UInt64)
         h = hash(typeof(val), h)
         h = hash(val, h)
@@ -48,9 +50,12 @@ struct BodyTree
                 h = hash(c.hash, h)
             end
         end
-        return new(kind, val, children, h)
+        return new{K}(kind, val, children, h)
     end
 end
+
+BodyTree(kind::K, @nospecialize(val), children::Union{Nothing,AbstractVector}) where {K} =
+    BodyTree{K}(kind, val, children === nothing ? nothing : convert(Vector{BodyTree{K}}, children))
 
 Base.hash(t::BodyTree, h::UInt) = hash(t.hash, h)
 
@@ -72,11 +77,15 @@ Base.isequal(a::BodyTree, b::BodyTree) = a == b
 # map line up with the tree.
 function _build_body_tree!(ranges::Union{Nothing,Vector{UnitRange{Int}}}, node::SyntaxNode)
     ranges !== nothing && push!(ranges, _range(node))
+    k = kind(node)
     if JuliaSyntax.is_leaf(node)
-        return BodyTree(kind(node), node.val, nothing)
+        return BodyTree(k, node.val, nothing)
     else
-        cs = BodyTree[_build_body_tree!(ranges, c) for c in children(node)]
-        return BodyTree(kind(node), nothing, cs)
+        cs = Vector{BodyTree{typeof(k)}}()
+        for c in children(node)
+            push!(cs, _build_body_tree!(ranges, c))
+        end
+        return BodyTree(k, nothing, cs)
     end
 end
 
@@ -158,7 +167,7 @@ One JuliaSyntax parse per recompute; values backdate individually through
 Salsa.@derived function derived_file_body_forest(rt, uri)
     @debug "derived_file_body_forest" uri=uri
 
-    result = Dict{Int64,BodyTree}()
+    result = Dict{Int64,BodyTree{JuliaSyntax.Kind}}()
     _foreach_item_syntax_node(rt, uri) do id, node
         result[id] = body_tree(node)
     end
