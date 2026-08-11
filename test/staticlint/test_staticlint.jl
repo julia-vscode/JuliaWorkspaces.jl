@@ -4935,3 +4935,119 @@ end
     @test spec_error("x = 1\nfor i in x\nend\n") === SL.IncorrectIterSpec
     @test spec_error("x = \"s\"\nfor i in x\nend\n") === nothing
 end
+
+@testitem "missing refs suppressed in isdefined/VERSION-guarded branches" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    hint_names(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [CSTParser.valof(x) for (_, x) in collect_hints(cst, meta_dict, jw) if CSTParser.isidentifier(x)]
+    end
+    hint_codes(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [SL.errorof(x, meta_dict) for (_, x) in collect_hints(cst, meta_dict, jw) if SL.errorof(x, meta_dict) isa SL.LintCodes]
+    end
+
+    # Names in either branch of an isdefined-guarded `if` only exist on some
+    # Julia versions — one branch is always dead code on the analyzing
+    # version, so neither side reports bare missing refs.
+    @test isempty(hint_names("""
+        if isdefined(Base, :contains)
+            only_when_defined()
+        else
+            legacy_fallback()
+        end
+        """))
+    # A bare (non-`@static`) version guard — `@static` bodies are already
+    # covered by `in_macrocall_arg`, so this is what exercises the walk.
+    @test isempty(hint_names("""
+        if VERSION < v"1.6"
+            pre16_only_name()
+        end
+        """))
+    @test isempty(hint_names("""
+        @static if VERSION < v"1.6"
+            pre16_only_name()
+        end
+        """))
+    # Qualified references in a guarded branch — the common spelling of the
+    # idiom, since a name that only exists elsewhere can't be used bare.
+    @test isempty(hint_names("""
+        if isdefined(Base, :notarealname_xyz)
+            Base.notarealname_xyz()
+        end
+        """))
+    # `using`/`import` under a guard: reported by the UnresolvedImport
+    # marking pass, suppressed here for the same reason.
+    @test SL.UnresolvedImport ∉ hint_codes("""
+        if isdefined(Base, :NotARealModXYZ)
+            using Base.NotARealModXYZ
+        end
+        """)
+    @test SL.UnresolvedImport ∉ hint_codes("""
+        @static if VERSION >= v"9.11"
+            using Base.NotARealModXYZ
+        end
+        """)
+    # Other lint codes don't depend on which branch runs, so a guard does not
+    # silence them.
+    @test SL.NothingEquality in hint_codes("""
+        if VERSION < v"1.6"
+            x = nothing == 1
+        end
+        """)
+    # Short-circuit form.
+    @test isempty(hint_names("isdefined(Base, :foo) && guarded_use()"))
+    @test isempty(hint_names("VERSION < v\"1.4\" || modern_only()"))
+
+    # Unguarded conditions keep full checking, in the condition and the body.
+    unguarded = hint_names("""
+        if some_flag
+            unguarded_name()
+        end
+        """)
+    @test "unguarded_name" in unguarded
+    @test "some_flag" in unguarded
+    # ...and so does the guard's own condition.
+    @test "not_a_guard" in hint_names("if isdefined(Base, :x) & not_a_guard\nend")
+
+    # A guard is recognized by what the condition's names resolve to, not by
+    # spelling: a quoted `:isdefined` symbol, a non-Base `.VERSION` field and
+    # locally shadowed names are ordinary code and must not disable checking.
+    @test "misspeled_function" in hint_names("""
+        mode = :a
+        if mode === :isdefined
+            misspeled_function()
+        end
+        """)
+    @test "misspeled_function" in hint_names("""
+        cfg = (VERSION = 3,)
+        if cfg.VERSION > 2
+            misspeled_function()
+        end
+        """)
+    @test "misspeled_function" in hint_names("""
+        isdefined(x) = x > 1
+        if isdefined(2)
+            misspeled_function()
+        end
+        """)
+    @test "misspeled_function" in hint_names("""
+        VERSION = 3
+        if VERSION > 2
+            misspeled_function()
+        end
+        """)
+    # Explicitly qualified guards still count.
+    @test isempty(hint_names("""
+        if Base.VERSION < v"1.6"
+            pre16_only_name()
+        end
+        """))
+    @test isempty(hint_names("""
+        if Base.isdefined(Base, :contains)
+            only_when_defined()
+        end
+        """))
+end
