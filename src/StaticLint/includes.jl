@@ -120,8 +120,8 @@ function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false,
         # file structure runtime-dependent. The condition isn't evaluated
         # statically, so no arm is judged: every child except the condition
         # itself descends with `guarded = true` and the diagnostics pass
-        # abstains from MissingFile/DuplicateInclude there. The graph edges
-        # are unaffected.
+        # abstains from MissingFile/DuplicateInclude/ComputedInclude there.
+        # The graph edges are unaffected.
         cond = nothing
         if headof(x) in (:if, :elseif) && x.args !== nothing && length(x.args) >= 1 &&
                 x.args[1] isa EXPR && _is_include_guard(x.args[1])
@@ -185,7 +185,8 @@ Single-pass include analysis for one file. Walks `cst` once and returns a
     include call (including unresolved ones), in source order, for
     include-graph diagnostics. `guarded` marks calls under an existence guard
     (`isfile`/`isdefined`/`@isdefined` condition): they are conditional at
-    runtime, so MissingFile/DuplicateInclude are not reported for them.
+    runtime, so MissingFile/DuplicateInclude/ComputedInclude are not reported
+    for them.
   - `computed_ids::Set{UInt64}` — the `objectid`s of include-call EXPRs whose
     path could NOT be determined statically (computed includes), for the
     semantic pass to mark the enclosing module scope. Same lifetime caveat as

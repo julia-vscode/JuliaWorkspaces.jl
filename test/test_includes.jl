@@ -629,7 +629,11 @@ end
     """, "toml")))
     # deps.jl doesn't exist (Pkg.build output) — guarded, so no MissingFile.
     # helper.jl is re-included under an @isdefined guard — idiomatic
-    # double-inclusion PROTECTION, so no DuplicateInclude.
+    # double-inclusion PROTECTION, so no DuplicateInclude — and helper2.jl
+    # exercises the reverse order: the guarded include comes first, so the
+    # later canonical include is not a duplicate, but the one after it is.
+    # deps2.jl is the variable-path guarded computed include (no
+    # ComputedInclude), while dynpath is unguarded and still warns.
     add_file!(jw, TextFile(root_uri, SourceText("""
     module GuardIncl
     isfile(joinpath(@__DIR__, "deps.jl")) && include("deps.jl")
@@ -637,13 +641,24 @@ end
     if !isdefined(@__MODULE__, :HELPER_LOADED)
         include("helper.jl")
     end
+    isdefined(@__MODULE__, :HELPER2_LOADED) || include("helper2.jl")
+    include("helper2.jl")
+    include("helper2.jl")
+    const depsjl = joinpath(@__DIR__, "deps2.jl")
+    isfile(depsjl) && include(depsjl)
+    dynpath = joinpath(@__DIR__, "dyn.jl")
+    include(dynpath)
     include("really_missing.jl")
     end
     """, "julia")))
     add_file!(jw, TextFile(URI("file:///guardincl/src/helper.jl"), SourceText("const HELPER_LOADED = true\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///guardincl/src/helper2.jl"), SourceText("const HELPER2_LOADED = true\n", "julia")))
 
     msgs = [d.message for d in get_diagnostic(jw, root_uri)]
     # The unguarded missing include still reports; the guarded ones don't.
     @test count(contains("can not be found"), msgs) == 1
-    @test !any(contains("already been included"), msgs)
+    # Only the second unconditional helper2 include is a real duplicate.
+    @test count(contains("already been included"), msgs) == 1
+    # Only the unguarded computed include reports.
+    @test count(contains("could not be determined statically"), msgs) == 1
 end

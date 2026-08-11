@@ -250,7 +250,8 @@ Return the ordered list of `include(...)` call records for the file `uri` as
 `(offset, span, target_uri, guarded)` tuples. `target_uri` is the resolved
 include target (or `nothing` when the path could not be determined statically);
 `guarded` marks calls under an existence/definedness-test conditional, for which
-the include diagnostics abstain from MissingFile/DuplicateInclude. The records
+the include diagnostics abstain from MissingFile/DuplicateInclude/ComputedInclude.
+The records
 are in source order, which the include-graph diagnostics rely on to flag the
 *repeated* `include` rather than the first one.
 """
@@ -264,7 +265,7 @@ function _include_diagnostic(offset, span, code)
     return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl")
 end
 
-function _collect_include_diagnostics!(rt, uri, stack, visited, result)
+function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited, result)
     push!(stack, uri)
 
     for (offset, span, target, guarded) in derived_file_include_records(rt, uri)
@@ -274,8 +275,11 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, result)
             # missing-reference checking is unreliable in this module (see
             # `derived_module_has_computed_include`). One honest diagnostic
             # here replaces the storm of false missing_reference positives
-            # the unattributed file would otherwise produce.
-            push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.ComputedInclude))
+            # the unattributed file would otherwise produce. Guarded computed
+            # includes (`const depsjl = joinpath(...); isfile(depsjl) &&
+            # include(depsjl)`) abstain like the rest; the missing-reference
+            # relaxation applies either way.
+            guarded || push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.ComputedInclude))
             continue
         end
 
@@ -294,15 +298,23 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, result)
         end
 
         if target in visited
-            # Same abstention for re-inclusion: `@isdefined(X) ||
-            # include("x.jl")` is idiomatic double-inclusion protection, and
-            # whether a guarded arm runs at all is unknowable statically.
-            guarded || push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.DuplicateInclude))
+            if guarded || target in guarded_visited
+                # Abstain when either side of the duplication is conditional:
+                # this include is guarded (`@isdefined(X) || include("x.jl")`
+                # is idiomatic double-inclusion protection), or every prior
+                # include of the target was — then this is the canonical
+                # include, not a duplicate. The latter pardon is spent here,
+                # so a further unconditional include is a real duplicate.
+                guarded || delete!(guarded_visited, target)
+            else
+                push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.DuplicateInclude))
+            end
             continue
         end
 
         push!(visited, target)
-        _collect_include_diagnostics!(rt, target, stack, visited, result)
+        guarded && push!(guarded_visited, target)
+        _collect_include_diagnostics!(rt, target, stack, visited, guarded_visited, result)
     end
 
     pop!(stack)
@@ -329,7 +341,8 @@ Salsa.@derived function derived_all_include_diagnostics(rt)
     for root in derived_roots(rt)
         stack = URI[]
         visited = Set{URI}([root])
-        _collect_include_diagnostics!(rt, root, stack, visited, result)
+        guarded_visited = Set{URI}()
+        _collect_include_diagnostics!(rt, root, stack, visited, guarded_visited, result)
     end
 
     # The same statement can be reached from multiple roots; deduplicate.
