@@ -1174,58 +1174,81 @@ end
 # Is `x` inside a scope whose missing-ref checks are disabled by an
 # unresolved wildcard `using`? Stops at module boundaries, mirroring
 # `resolve_ref`: a nested `module` does not inherit its parent's usings.
-# Whether the CONDITION expression mentions an existence/version test:
-# `isdefined(...)`, `@isdefined x`, or a comparison involving `VERSION`.
-function _is_existence_guard(cond::EXPR)
-    if isidentifier(cond)
-        v = valofid(cond)
-        return v == "VERSION" || v == "isdefined"
-    end
-    if CSTParser.ismacrocall(cond) && length(cond.args) >= 1 &&
-            (valof(cond.args[1]) == "@isdefined" ||
-             (CSTParser.is_getfield_w_quotenode(cond.args[1]) && valof(rhs_of_getfield(cond.args[1])) == "@isdefined"))
-        return true
-    end
-    cond.args === nothing && return false
-    return any(a -> a isa EXPR && _is_existence_guard(a), cond.args)
-end
-
-"""
-    in_existence_guarded_branch(x::EXPR) -> Bool
-
-Is `x` inside a branch of an `if`/`elseif` (or the short-circuited side of
-`&&`/`||`) whose condition mentions `isdefined`, `@isdefined`, or `VERSION`?
-Such branches deliberately reference names that only exist on other Julia
-versions or when an optional binding is present — on the analyzing version
-one branch is dead code, so bare missing-reference reporting there is noise
-(`if isdefined(Base, :new_thing); new_thing() else old_thing() end` flags one
-side or the other no matter which Julia runs the analysis). The condition
-itself keeps full checking.
-"""
-function in_existence_guarded_branch(x::EXPR)
-    cur = x
-    while parentof(cur) isa EXPR
-        p = parentof(cur)
-        if headof(p) in (:if, :elseif) && p.args !== nothing && length(p.args) >= 1 &&
-                cur !== p.args[1] && p.args[1] isa EXPR && _is_existence_guard(p.args[1])
-            return true
-        end
-        if isbinarysyntax(p) && (valof(headof(p)) == "&&" || valof(headof(p)) == "||") &&
-                length(p.args) == 2 && cur === p.args[2] &&
-                p.args[1] isa EXPR && _is_existence_guard(p.args[1])
-            return true
-        end
-        cur = p
-    end
-    return false
-end
-
 function in_unresolved_wildcard_import_scope(x::EXPR, meta_dict)
     sc = retrieve_scope(x, meta_dict)
     while sc isa Scope
         sc.unresolved_wildcard_import && return true
         CSTParser.defines_module(sc.expr) && return false
         sc = parentof(sc)
+    end
+    return false
+end
+
+# Does `x` reference `Base.name` (or the `Core.name` Base re-exports)? Goes
+# through the resolved binding, so a quoted `:isdefined`, a config's own
+# `.VERSION` field, or a local definition shadowing the name is not a guard.
+# (`_points_to_arbitrary_macro` is a module-binding lookup despite its name, and
+# handles the qualified spelling.)
+function _refers_to_base_name(x::EXPR, name::Symbol, env, meta_dict)
+    # `rhs_of_getfield` passes plain identifiers through, so one test covers
+    # both `VERSION` and `Base.VERSION` - and keeps the lookups below off the
+    # condition nodes that aren't spelled like a guard in the first place.
+    id = rhs_of_getfield(x)
+    (isidentifier(id) && Symbol(valofid(id)) === name) || return false
+    return _points_to_arbitrary_macro(x, :Base, name, env, meta_dict) ||
+        _points_to_arbitrary_macro(x, :Core, name, env, meta_dict)
+end
+
+# Whether the CONDITION expression contains an existence/version test:
+# `isdefined(...)`, `@isdefined x`, or a comparison against `VERSION`.
+function _is_existence_guard(cond::EXPR, env, meta_dict)
+    if _refers_to_base_name(cond, :VERSION, env, meta_dict)
+        return true
+    elseif iscall(cond) && length(cond.args) >= 1 && cond.args[1] isa EXPR &&
+            _refers_to_base_name(cond.args[1], :isdefined, env, meta_dict)
+        return true
+    elseif CSTParser.ismacrocall(cond) && length(cond.args) >= 1 && cond.args[1] isa EXPR &&
+            _refers_to_base_name(cond.args[1], Symbol("@isdefined"), env, meta_dict)
+        return true
+    end
+    cond.args === nothing && return false
+    return any(a -> a isa EXPR && _is_existence_guard(a, env, meta_dict), cond.args)
+end
+
+"""
+    in_existence_guarded_branch(x::EXPR, env, meta_dict) -> Bool
+
+Is `x` inside a branch of an `if`/`elseif` (or the short-circuited side of
+`&&`/`||`) whose condition tests `isdefined`, `@isdefined`, or `VERSION`?
+Such branches deliberately reference names that only exist on other Julia
+versions or when an optional binding is present — on the analyzing version
+one branch is dead code, so missing-reference reporting there is noise
+(`if isdefined(Base, :new_thing); new_thing() else old_thing() end` flags one
+side or the other no matter which Julia runs the analysis).
+
+Since the condition isn't evaluated, no branch of the construct is judged:
+`else` and `elseif` arms are suppressed along with the guarded one, and so are
+the `elseif` conditions, which only run when an earlier arm was not taken. The
+guarding condition itself keeps full checking.
+
+Guard names are matched through their resolved bindings, so code that merely
+borrows the spelling (`mode === :isdefined`, a config's own `.VERSION` field, a
+local `isdefined`) is not a guard.
+"""
+function in_existence_guarded_branch(x::EXPR, env, meta_dict)
+    cur = x
+    while parentof(cur) isa EXPR
+        p = parentof(cur)
+        if headof(p) in (:if, :elseif) && p.args !== nothing && length(p.args) >= 1 &&
+                cur !== p.args[1] && p.args[1] isa EXPR && _is_existence_guard(p.args[1], env, meta_dict)
+            return true
+        end
+        if isbinarysyntax(p) && (valof(headof(p)) == "&&" || valof(headof(p)) == "||") &&
+                length(p.args) == 2 && cur === p.args[2] &&
+                p.args[1] isa EXPR && _is_existence_guard(p.args[1], env, meta_dict)
+            return true
+        end
+        cur = p
     end
     return false
 end
@@ -1249,8 +1272,13 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
         push!(errs, (pos, x))
     elseif !isquoted
         if haserror(x, meta_dict) && errorof(x, meta_dict) isa StaticLint.LintCodes
-            # collect lint hints
-            push!(errs, (pos, x))
+            # collect lint hints - except an UnresolvedImport under an
+            # existence guard, which is the missing-reference report for
+            # using/import statements and is suppressed like the bare names
+            # below. Other lint codes don't depend on which branch runs.
+            if !(errorof(x, meta_dict) === UnresolvedImport && in_existence_guarded_branch(x, env, meta_dict))
+                push!(errs, (pos, x))
+            end
         elseif missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&
             !(valof(x) == "var" && parentof(x) isa EXPR && isnonstdid(parentof(x))) &&
             !((valof(x) == "stdcall" || valof(x) == "cdecl" || valof(x) == "fastcall" || valof(x) == "thiscall" || valof(x) == "llvmcall") && is_in_fexpr(x, x -> iscall(x) && isidentifier(x.args[1]) && valof(x.args[1]) == "ccall")) &&
@@ -1259,10 +1287,11 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
             # pass is the sole reporter
             !is_in_fexpr(x, y -> headof(y) === :using || headof(y) === :import) &&
             !in_unresolved_wildcard_import_scope(x, meta_dict) &&
-            !in_existence_guarded_branch(x)
+            !in_existence_guarded_branch(x, env, meta_dict)
             push!(errs, (pos, x))
         end
-    elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
+    elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict) &&
+            !in_existence_guarded_branch(x, env, meta_dict)
         push!(errs, (pos, x))
     end
 
