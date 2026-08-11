@@ -111,6 +111,20 @@ end
     parent_module::Vector{String}
 end
 
+"""
+A top-level macrocall whose effects the analyzer does not model (not in
+`StaticLint.EFFECT_FREE_MACROS`/`HANDLED_MACROS`): its expansion may define
+arbitrary names in `parent_module`, so bare missing-reference reporting there
+is unreliable (`derived_module_has_opaque_macrocall`). The macrocall's
+arguments are still walked transparently — visible definitions inside it stay
+in `items`.
+"""
+@auto_hash_equals struct InventoryOpaqueMacro
+    order::Int
+    id::Int64
+    parent_module::Vector{String}
+end
+
 "A `module`/`baremodule` declared in this file."
 @auto_hash_equals struct InventoryModule
     order::Int
@@ -134,10 +148,12 @@ whitespace, comments, or docstrings.
     exports::Vector{InventoryExport}
     includes::Vector{InventoryInclude}
     modules::Vector{InventoryModule}
+    opaque_macros::Vector{InventoryOpaqueMacro}
 end
 
 const EMPTY_FILE_INVENTORY = FileInventory(
-    InventoryItem[], InventoryImport[], InventoryExport[], InventoryInclude[], InventoryModule[])
+    InventoryItem[], InventoryImport[], InventoryExport[], InventoryInclude[], InventoryModule[],
+    InventoryOpaqueMacro[])
 
 # Detect a doc-macro wrapper: a 4-arg :macrocall whose first arg is a doc-macro
 # name (`StaticLint.is_doc_macro_name` — the implicit `globalrefdoc` or an
@@ -383,6 +399,16 @@ end
 function _walk_macrocall!(f, mc::CSTParser.EXPR, parent_module::Vector{String}, offset::Int, alloc::_ItemIdAllocator)
     margs = mc.args
     (margs === nothing || length(margs) < 3) && return nothing
+
+    # A macrocall whose effects the analyzer does not model may define names
+    # its arguments never spell — record it (the classifier files it under
+    # `opaque_macros`) BEFORE walking the arguments transparently, so visible
+    # definitions inside still become ordinary items.
+    if !StaticLint._macro_name_effects_known(_macro_name_string(margs[1]))
+        order, id = _mint_ids!(alloc, mc, parent_module)
+        f(mc, order, id, parent_module, offset)
+    end
+
     child_offset = offset
     for c in mc
         if any(j -> margs[j] === c, 3:length(margs))
@@ -448,14 +474,14 @@ Salsa.@derived function derived_file_inventory(rt, uri)
 
     include_records = derived_file_include_records(rt, uri)
     include_targets_by_offset = Dict{Int,Union{Nothing,URI}}(
-        offset => target for (offset, _, target) in include_records)
+        offset => target for (offset, _, target, _) in include_records)
 
     acc = (items=InventoryItem[], imports=InventoryImport[], exports=InventoryExport[],
-           includes=InventoryInclude[], modules=InventoryModule[])
+           includes=InventoryInclude[], modules=InventoryModule[], opaque_macros=InventoryOpaqueMacro[])
     _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
         _classify_item!(acc, x, order, id, copy(parent_module), offset, include_targets_by_offset, include_records)
     end
-    return FileInventory(acc.items, acc.imports, acc.exports, acc.includes, acc.modules)
+    return FileInventory(acc.items, acc.imports, acc.exports, acc.includes, acc.modules, acc.opaque_macros)
 end
 
 _render_sig(x) = try
@@ -954,13 +980,16 @@ function _classify_item!(acc, x, order, id, parent_module, offset, include_targe
                     mname === nothing || push!(acc.items, InventoryItem(order, id,mname, String[], :enum_member, nothing, String[], parent_module))
                 end
             end
-        else
-            # Only the isolated-scope macros (`_is_isolated_scope_macrocall`)
-            # still reach this arm — the walker descends into every other
-            # macrocall transparently, so their contents were classified as
-            # ordinary items and no opaque row is emitted for them.
+        elseif _is_isolated_scope_macrocall(x)
             mname = _macro_name_string(x.args[1])
             push!(acc.items, InventoryItem(order, id,something(mname, ""), String[], :opaque_macrocall, nothing, String[], parent_module))
+        else
+            # A transparently-walked macrocall reaches this arm only when
+            # `_walk_macrocall!` recorded it as effect-unknown: its expansion
+            # may define names its arguments never spell, so file it for
+            # `derived_module_has_opaque_macrocall` (its argument contents
+            # were classified as ordinary items separately).
+            push!(acc.opaque_macros, InventoryOpaqueMacro(order, id, parent_module))
         end
     end
     return

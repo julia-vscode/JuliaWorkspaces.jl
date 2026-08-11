@@ -744,6 +744,32 @@ frame reads the whole `derived_module_tree` value. Consequences:
   reference an actually-shifted name re-execute, and those MUST (their
   outbound `ItemRef`s change).
 """
+# Roots we can attribute a splice context to without an include edge: the
+# package entry file, standard tool entry points, and @testitem files (which
+# carry their own analysis context). Every OTHER root exists either because it
+# genuinely is a standalone script or because a computed include loads it —
+# indistinguishable statically.
+function _is_recognized_entry_point(rt, uri)
+    _file_has_testitems(rt, uri) && return true
+
+    fp = uri2filepath(uri)
+    fp === nothing && return false
+    name = lowercase(basename(fp))
+    dir = lowercase(basename(dirname(fp)))
+    name == "runtests.jl" && dir == "test" && return true
+    name == "make.jl" && dir == "docs" && return true
+
+    pkg_folder = derived_package_for_file(rt, uri)
+    if pkg_folder !== nothing
+        pkg = derived_package(rt, pkg_folder)
+        if pkg !== nothing
+            entry = joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl")
+            lowercase(fp) == lowercase(entry) && return true
+        end
+    end
+    return false
+end
+
 Salsa.@derived function derived_file_analysis(rt, root, file)
     @debug "derived_file_analysis" root=root file=file
 
@@ -785,7 +811,24 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # keep their hints (matching the old pass's module-boundary rule). The
     # file's OWN failed wildcard usings need no help — `semantic_pass` +
     # `mark_unresolved_imports!` set the flag locally, as always.
-    if derived_module_unresolved_wildcard_using(rt, root, path)
+    # A computed `include` anywhere in the module is the same situation:
+    # unknown code is spliced into the module, so any bare name may be
+    # defined by the unseen file (the ComputedInclude diagnostic at the
+    # include site is the user-visible explanation).
+    # Third case: a top-level macrocall whose effects the analyzer does not
+    # model, anywhere in the module (typically another file) — its expansion
+    # may define arbitrary names in the module.
+    # Fourth case: an ORPHAN root (no include edge reaches it, and it is not a
+    # recognizable entry point) inside a package that has a computed include
+    # somewhere is very likely the *target* of that include — its real module
+    # context (and the usings that come with it) is unknown, so bare
+    # missing-ref reporting against the bare context is unreliable.
+    if derived_module_unresolved_wildcard_using(rt, root, path) ||
+            derived_module_has_computed_include(rt, root, path) ||
+            derived_module_has_opaque_macrocall(rt, root, path) ||
+            (root == file && pkg_folder !== nothing &&
+                !_is_recognized_entry_point(rt, file) &&
+                derived_folder_has_computed_include(rt, pkg_folder))
         fscope = StaticLint.scopeof(cst, meta_dict)
         fscope isa StaticLint.Scope && (fscope.unresolved_wildcard_import = true)
     end
