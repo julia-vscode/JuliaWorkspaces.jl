@@ -628,6 +628,37 @@ end
 _get_hover(b::StaticLint.Binding, documentation::String, expr, env, meta_dict) =
     _get_tooltip(b, documentation, meta_dict, expr, env; show_definition = true)
 
+# What a plain-assignment binding names (`const Foo = Int16` → `Int16`'s store,
+# `const Foo = Bar` → `Bar`'s datatype/function binding), following `const B =
+# A` chains (bounded). `nothing` when the alias doesn't land on a store or a
+# definition — the typed-definition line then stands alone as before.
+function _alias_hover_target(b::StaticLint.Binding, meta_dict, depth=0)
+    depth > 20 && return nothing
+    v = b.val
+    (v isa CSTParser.EXPR && CSTParser.isassignment(v) && v.args !== nothing && length(v.args) == 2) || return nothing
+    rhs = CSTParser.rem_wheres_decls(v.args[2])
+    if CSTParser.iscurly(rhs) && rhs.args !== nothing && length(rhs.args) >= 1
+        rhs = rhs.args[1]
+    end
+    r = if CSTParser.isidentifier(rhs)
+        StaticLint.refof(rhs, meta_dict)
+    elseif CSTParser.is_getfield_w_quotenode(rhs)
+        StaticLint.refof_maybe_getfield(rhs, meta_dict)
+    else
+        nothing
+    end
+    r isa SymbolServer.SymStore && return r
+    if r isa StaticLint.Binding
+        rv = r.val
+        if rv isa CSTParser.EXPR && (CSTParser.defines_function(rv) || CSTParser.defines_datatype(rv))
+            return r
+        end
+        rv isa SymbolServer.SymStore && return rv
+        return _alias_hover_target(r, meta_dict, depth + 1)
+    end
+    return nothing
+end
+
 function _get_tooltip(b::StaticLint.Binding, documentation::String, meta_dict::MetaDict=_empty_hover_meta_dict, expr = nothing, env = nothing; show_definition = false)
     if b.val isa StaticLint.Binding
         documentation = _get_hover(b.val, documentation, expr, env, meta_dict)
@@ -677,6 +708,12 @@ function _get_tooltip(b::StaticLint.Binding, documentation::String, meta_dict::M
                 else
                     documentation
                 end
+                # `const Foo = Int16`: render what the alias names below the
+                # definition line, as hovering the RHS name directly would.
+                if env !== nothing && (target = _alias_hover_target(b, meta_dict)) !== nothing
+                    documentation = _get_hover(target, _ensure_ends_with(documentation), expr, env, meta_dict)
+                end
+                documentation
             catch err
                 @error "get_hover failed to convert Expr" exception = (err, catch_backtrace())
                 documentation
