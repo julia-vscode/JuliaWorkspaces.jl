@@ -40,6 +40,22 @@ end
     end
 end
 
+@testitem "infer_const_alias_of_store_type" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof
+    # `Int16` resolves to its constructor FunctionStore in the symbol store; the
+    # alias names a type, not a function.
+    let (cst, meta_dict) = parse_and_pass("const Foo = Int16")
+        @test JuliaWorkspaces.StaticLint.CoreTypes.isdatatype(bindingof(cst.args[1].args[1].args[1], meta_dict).type)
+    end
+    let (cst, meta_dict) = parse_and_pass("const A = Int16\nconst B = A")
+        @test JuliaWorkspaces.StaticLint.CoreTypes.isdatatype(bindingof(cst.args[2].args[1].args[1], meta_dict).type)
+    end
+    # an alias of a genuine function stays a Function
+    let (cst, meta_dict) = parse_and_pass("const g = rand")
+        @test JuliaWorkspaces.StaticLint.CoreTypes.isfunction(bindingof(cst.args[1].args[1].args[1], meta_dict).type)
+    end
+end
+
 @testitem "infer_integer_literal" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: bindingof
     let (cst, meta_dict) = parse_and_pass("x = 1")
