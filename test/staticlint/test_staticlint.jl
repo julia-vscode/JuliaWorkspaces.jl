@@ -3871,6 +3871,53 @@ end
     end
 end
 
+@testitem "type decl through a const alias" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidTypeDeclaration
+
+    # `Int16` resolves to its constructor FunctionStore in the symbol store; the
+    # alias must still count as a datatype.
+    let (cst, meta_dict) = parse_and_pass("""
+        const Foo = Int16
+        f(x::Foo) = x
+        """)
+        @test errorof(cst.args[2].args[1].args[2], meta_dict) === nothing
+    end
+
+    # A chain of aliases lands on the same store.
+    let (cst, meta_dict) = parse_and_pass("""
+        const A = Int16
+        const B = A
+        f(x::B) = x
+        """)
+        @test errorof(cst.args[3].args[1].args[2], meta_dict) === nothing
+    end
+
+    # An alias of a workspace datatype.
+    let (cst, meta_dict) = parse_and_pass("""
+        struct Bar end
+        const Foo = Bar
+        f(x::Foo) = x
+        """)
+        @test errorof(cst.args[3].args[1].args[2], meta_dict) === nothing
+    end
+
+    # An alias of a genuine function is still flagged.
+    let (cst, meta_dict) = parse_and_pass("""
+        const g = rand
+        f(x::g) = x
+        """)
+        @test errorof(cst.args[2].args[1].args[2], meta_dict) === InvalidTypeDeclaration
+    end
+
+    # A non-const alias works the same way.
+    let (cst, meta_dict) = parse_and_pass("""
+        Foo = Int16
+        f(x::Foo) = x
+        """)
+        @test errorof(cst.args[2].args[1].args[2], meta_dict) === nothing
+    end
+end
+
 @testitem "macro-rewritten call signature (#389)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: func_nargs, errorof, IncorrectCallArgs
 

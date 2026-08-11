@@ -227,7 +227,9 @@ function infer_type_assignment_rhs(binding, state, scope)
                 if refof_rhs.val isa SymbolServer.GenericStore && refof_rhs.val.typ isa SymbolServer.FakeTypeName
                     settype!(binding, maybe_lookup(refof_rhs.val.typ.name, state))
                 elseif refof_rhs.val isa SymbolServer.FunctionStore
-                    settype!(binding, CoreTypes.Function)
+                    # a store type's name resolves to its constructor FunctionStore
+                    # (`const Foo = Int16`), so the alias is a type, not a function
+                    settype!(binding, resolves_to_datatype(refof_rhs.val, state.env) ? CoreTypes.DataType : CoreTypes.Function)
                 elseif refof_rhs.val isa SymbolServer.DataTypeStore
                     settype!(binding, CoreTypes.DataType)
                 else
@@ -242,12 +244,12 @@ function infer_type_assignment_rhs(binding, state, scope)
                 if store isa SymbolServer.DataTypeStore
                     settype!(binding, CoreTypes.DataType)
                 elseif store isa SymbolServer.FunctionStore
-                    settype!(binding, CoreTypes.Function)
+                    settype!(binding, resolves_to_datatype(store, state.env) ? CoreTypes.DataType : CoreTypes.Function)
                 end
             elseif refof_rhs isa SymbolServer.GenericStore && refof_rhs.typ isa SymbolServer.FakeTypeName
                 settype!(binding, maybe_lookup(refof_rhs.typ.name, state))
             elseif refof_rhs isa SymbolServer.FunctionStore
-                settype!(binding, CoreTypes.Function)
+                settype!(binding, resolves_to_datatype(refof_rhs, state.env) ? CoreTypes.DataType : CoreTypes.Function)
             elseif refof_rhs isa SymbolServer.DataTypeStore
                 settype!(binding, CoreTypes.DataType)
             end

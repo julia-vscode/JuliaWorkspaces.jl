@@ -885,6 +885,64 @@ end
         "\n```julia\nmyglobal = [1, 2]\n```\n\nv docs"
 end
 
+@testitem "Hover: const alias renders what it names" setup=[HoverCrossWS] begin
+    # Hovering `Foo` in `f(x::Foo)` follows the alias to the store `Int16`
+    # names and renders it below the typed-definition line — the same docs a
+    # direct `Int16` hover shows.
+    a_src = "unrelated() = 1\n"
+    b_src = """
+    const Foo = Int16
+    f(x::Foo) = x
+    """
+    jw = hoverx_workspace(a_src, b_src)
+    result = hover_at(jw, b_src, "f(x::Foo")
+    @test result !== nothing
+    @test occursin("Foo::DataType = Int16", result)
+    @test occursin("16-bit signed integer type", result)
+
+    # a chain of aliases lands on the same store
+    b_src = """
+    const A = Int16
+    const B = A
+    f(x::B) = x
+    """
+    jw = hoverx_workspace(a_src, b_src)
+    result = hover_at(jw, b_src, "f(x::B")
+    @test result !== nothing
+    @test occursin("16-bit signed integer type", result)
+
+    # the alias declared in a SIBLING file renders the same way
+    a_src = "const CrossAlias = Int16\n"
+    b_src = "g(x::CrossAlias) = x\n"
+    jw = hoverx_workspace(a_src, b_src)
+    result = hover_at(jw, b_src, "g(x::CrossAlias")
+    @test result !== nothing
+    @test occursin("16-bit signed integer type", result)
+
+    # an alias of a workspace struct renders the struct definition
+    b_src = """
+    struct Bar
+        fielda
+    end
+    const Foo2 = Bar
+    h(x::Foo2) = x
+    """
+    jw = hoverx_workspace("unrelated() = 1\n", b_src)
+    result = hover_at(jw, b_src, "h(x::Foo2")
+    @test result !== nothing
+    @test occursin("fielda", result)
+
+    # an alias of a function renders the function's docs, like hovering it
+    b_src = """
+    const myrand = rand
+    r() = myrand()
+    """
+    jw = hoverx_workspace(a_src, b_src)
+    result = hover_at(jw, b_src, "r() = myrand")
+    @test result !== nothing
+    @test occursin("Pick a random element", result)
+end
+
 @testitem "Hover: external symbol through a sibling file's using is unchanged" setup=[HoverCrossWS] begin
     # `partition` is brought in by `using Base.Iterators` in the ENTRY file;
     # in per-file mode the hovered file's ref is a `TreeRef` of kind

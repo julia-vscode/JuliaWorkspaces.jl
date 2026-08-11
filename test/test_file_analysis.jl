@@ -2113,6 +2113,42 @@ end
     @test any(r -> r.file == utils, mi)
 end
 
+@testitem "file analysis: a type decl through a cross-file const alias is not flagged" setup=[FileAnalysisWS] begin
+    # A `const Foo = Int16` alias declared in a SIBLING file resolves through
+    # the module tree as a `:const` TreeRef, whose target can't be inspected —
+    # the `::Foo` annotation must not be flagged as a non-DataType.
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "const Foo = Int16\n",
+        B => "f(x::Foo) = x\n",
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("non-DataType", d.message), fa.diagnostics)
+
+    # Same for an in-file alias of a sibling-file datatype (the alias RHS is a
+    # `:struct` TreeRef).
+    jw = ws_with(Dict(
+        ROOT => """
+        module MainPkg
+        include("a.jl")
+        include("b.jl")
+        end
+        """,
+        A => "struct Bar end\n",
+        B => """
+        const Foo = Bar
+        f(x::Foo) = x
+        """,
+    ))
+    fa = JuliaWorkspaces.derived_file_analysis(jw.runtime, ROOT, B)
+    @test !any(d -> occursin("non-DataType", d.message), fa.diagnostics)
+end
+
 @testitem "file analysis: a nested local closure shadowing a sibling-file datatype stays local" setup=[FileAnalysisWS] begin
     # Companion to the outer-constructor regression above: the method-extension
     # rule for a sibling-file datatype must only fire at MODULE/top-level scope,
