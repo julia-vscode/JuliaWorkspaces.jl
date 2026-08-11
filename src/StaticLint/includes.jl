@@ -53,19 +53,6 @@ function get_path(x::EXPR, file_dir, meta_dict)
     return nothing
 end
 
-# Shared walker for include-call analyses. Calls `f(x, pos, target, in_function)`
-# for every `include(...)`/`includet(...)` call, where `pos` is the 0-based byte
-# offset of the call EXPR and `target` the resolved target `URI` or `nothing`.
-# `file_dir` may be `nothing` (a file without a filesystem path, e.g. an unsaved
-# buffer), in which case only absolute include paths resolve.
-#
-# Calls inside function/macro bodies are reported with `in_function = true` and
-# always `target = nothing`: a runtime `include` splices into whichever module
-# the enclosing function is called from, so even a literal path has no static
-# splice context — it must never become an include-graph edge, but it IS the
-# "file structure not statically resolvable" signal (ComputedInclude). The
-# *signature* of such a definition is excluded, so custom `include` methods
-# (`include(p::AbstractPath) = ...`, FilePathsBase-style) are not reported.
 # Whether `cond` is an existence test that commonly guards an `include`:
 # mentions `isfile`/`ispath`/`isdefined` or `@isdefined` anywhere.
 function _is_include_guard(cond::EXPR)
@@ -77,6 +64,21 @@ function _is_include_guard(cond::EXPR)
     return any(a -> a isa EXPR && _is_include_guard(a), cond.args)
 end
 
+# Shared walker for include-call analyses. Calls `f(x, pos, target, in_function,
+# guarded)` for every `include(...)`/`includet(...)` call, where `pos` is the
+# 0-based byte offset of the call EXPR, `target` the resolved target `URI` or
+# `nothing`, and `guarded` whether the call sits under an existence-guarded
+# conditional (see below). `file_dir` may be `nothing` (a file without a
+# filesystem path, e.g. an unsaved buffer), in which case only absolute include
+# paths resolve.
+#
+# Calls inside function/macro bodies are reported with `in_function = true` and
+# always `target = nothing`: a runtime `include` splices into whichever module
+# the enclosing function is called from, so even a literal path has no static
+# splice context — it must never become an include-graph edge, but it IS the
+# "file structure not statically resolvable" signal (ComputedInclude). The
+# *signature* of such a definition is excluded, so custom `include` methods
+# (`include(p::AbstractPath) = ...`, FilePathsBase-style) are not reported.
 function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false, skip::Union{Nothing,EXPR}=nothing, guarded::Bool=false)
     x === skip && return nothing
 
@@ -112,11 +114,14 @@ function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false,
             p += x[i].fullspan
         end
     elseif !(headof(x) === :export || headof(x) === :public)
-        # An include under an existence guard (`isfile(deps) && include(deps)`,
-        # `@isdefined(X) || include("x.jl")`, `if !isdefined(Main, :t)
-        # include(...) end`) is conditional at runtime: descend into the
-        # guarded side with `guarded = true` so the diagnostics pass can skip
-        # MissingFile/DuplicateInclude there. The graph edges are unaffected.
+        # A conditional whose test mentions an existence/definedness check
+        # (`isfile(deps) && include(deps)`, `@isdefined(X) || include("x.jl")`,
+        # `if isfile(cfg) include(cfg) else include("default.jl") end`) makes
+        # file structure runtime-dependent. The condition isn't evaluated
+        # statically, so no arm is judged: every child except the condition
+        # itself descends with `guarded = true` and the diagnostics pass
+        # abstains from MissingFile/DuplicateInclude there. The graph edges
+        # are unaffected.
         cond = nothing
         if headof(x) in (:if, :elseif) && x.args !== nothing && length(x.args) >= 1 &&
                 x.args[1] isa EXPR && _is_include_guard(x.args[1])

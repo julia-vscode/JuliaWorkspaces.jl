@@ -6,7 +6,7 @@ that produces all three include products at once:
 
   - `edges` — the file's resolved include-graph edges,
   - `include_dict` — `objectid`→target map for the semantic pass, and
-  - `records` — `(offset, span, target)` tuples for include diagnostics.
+  - `records` — `(offset, span, target, guarded)` tuples for include diagnostics.
 
 The three are exposed through the thin selectors below. Keeping the selectors
 separate is what preserves Salsa's early-exit: `include_dict` churns on every
@@ -247,9 +247,11 @@ end
     derived_file_include_records(rt, uri)
 
 Return the ordered list of `include(...)` call records for the file `uri` as
-`(offset, span, target_uri)` tuples. `target_uri` is the resolved include target
-(or `nothing` when the path could not be determined statically). The records are
-in source order, which the include-graph diagnostics rely on to flag the
+`(offset, span, target_uri, guarded)` tuples. `target_uri` is the resolved
+include target (or `nothing` when the path could not be determined statically);
+`guarded` marks calls under an existence/definedness-test conditional, for which
+the include diagnostics abstain from MissingFile/DuplicateInclude. The records
+are in source order, which the include-graph diagnostics rely on to flag the
 *repeated* `include` rather than the first one.
 """
 Salsa.@derived function derived_file_include_records(rt, uri)
@@ -278,9 +280,10 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, result)
         end
 
         if derived_text_file_content(rt, target) === nothing
-            # An existence-guarded include (`isfile(deps) && include(deps)`)
-            # of a file that isn't there is the guard doing its job — the
-            # standard shape for Pkg.build-generated deps.jl files.
+            # A guarded include's condition makes file structure runtime-
+            # dependent (`isfile(deps) && include(deps)`, the standard shape
+            # for Pkg.build-generated deps.jl files): whether the target
+            # should exist statically is unknowable, so abstain.
             guarded || push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.MissingFile))
             continue
         end
@@ -291,8 +294,9 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, result)
         end
 
         if target in visited
-            # `@isdefined(X) || include("x.jl")` re-including a shared helper
-            # is idiomatic double-inclusion PROTECTION, not a double include.
+            # Same abstention for re-inclusion: `@isdefined(X) ||
+            # include("x.jl")` is idiomatic double-inclusion protection, and
+            # whether a guarded arm runs at all is unknowable statically.
             guarded || push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.DuplicateInclude))
             continue
         end
