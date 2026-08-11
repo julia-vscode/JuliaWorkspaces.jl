@@ -141,9 +141,106 @@ function handle_macro(x::EXPR, state)
         #             _mark_JuMP_binding(x[3])
         #         end
         #     end
+        else
+            # Unknown-effect macrocall at module/file top level: the
+            # expansion replaces this call and may define arbitrary names in
+            # the module namespace. Invocation shape carries no information
+            # about that (`@with_kw struct Para ... end` also generates a
+            # hidden `@unpack_Para`), so unless the macro is on the curated
+            # known list, mark the toplevel scope like an unresolved wildcard
+            # `using`: names that resolve keep all checks, bare missing
+            # references are not reported there.
+            #
+            # Deliberately NOT applied to macrocalls in local scopes: names a
+            # local expansion introduces (`@unpack a = c`) are rare, and the
+            # established policy there is narrower — `in_macrocall_arg`
+            # suppresses inside the ARGUMENTS only, the rest of the function
+            # keeps checking (see "macro-name imports are bound, uses
+            # silent" in test_diagnostics.jl).
+            # Module/file scopes only — NOT @testitem-family scopes (which
+            # `is_toplevel_scope` also accepts): testitem bodies have their
+            # own deliberate policy (macros.jl testitem handlers +
+            # ExportFilteredContext injection) where checking stays on.
+            if !_macro_effects_known(x.args[1])
+                tls = retrieve_toplevel_or_func_scope(state.scope)
+                if tls isa Scope && tls.expr isa EXPR &&
+                        (CSTParser.defines_module(tls.expr) || headof(tls.expr) === :file)
+                    _mark_cst_wildcard_using!(tls)
+                end
+            end
         end
     end
 end
+
+# Macros that are safe to leave unmarked: their expansions introduce no names
+# beyond what the plain-Julia traversal of their arguments already registers
+# (pass-through wrappers, logging/timing/testing, value-producing macros).
+#
+# Name-based on purpose (like `_is_symbolics_vardef_macro`): resolution can
+# tell where a macro comes from, never what it expands to, so a curated list
+# of implemented/vetted semantics is the only legitimate "known". Future
+# escape hatch: user-declared macro effects in JuliaLint.toml.
+const EFFECT_FREE_MACROS = Set{String}([
+    # Base/Core annotations & wrappers
+    "@inline", "@noinline", "@propagate_inbounds", "@generated",
+    "@assume_effects", "@constprop", "@pure", "@nospecializeinfer",
+    "@specialize", "@polly", "@inbounds", "@boundscheck", "@fastmath",
+    "@simd", "@views", "@view", "@static", "@compat", "@doc", "@main",
+    "@kwdef", "@.", "@__dot__", "@ccall", "@cfunction", "@ccallable",
+    # logging / diagnostics / timing
+    "@assert", "@show", "@info", "@warn", "@error", "@debug", "@logmsg",
+    "@time", "@timed", "@timev", "@elapsed", "@allocated", "@allocations",
+    "@profile",
+    # concurrency / atomics
+    "@threads", "@spawn", "@async", "@sync", "@lock",
+    "@atomic", "@atomicswap", "@atomicreplace", "@atomiconce",
+    # value-producing
+    "@isdefined", "@__MODULE__", "@__FILE__", "@__DIR__", "@__LINE__",
+    "@__FUNCTION__", "@ntuple", "@something", "@coalesce", "@invoke",
+    "@invokelatest", "@macroexpand", "@macroexpand1",
+    # Printf
+    "@printf", "@sprintf",
+    # Test / SafeTestsets / JET
+    "@test", "@testset", "@test_throws", "@test_broken", "@test_skip",
+    "@test_logs", "@test_deprecated", "@test_warn", "@test_nowarn",
+    "@inferred", "@safetestset", "@test_opt", "@test_call",
+    # common effect-free ecosystem macros
+    "@load_preference", "@has_preference", "@set_preferences!",
+    "@delete_preferences!", "@get_scratch!",
+    "@setup_workload", "@compile_workload",
+    "@muladd", "@turbo", "@tturbo",
+])
+
+# Macros with name-introducing effects that `handle_macro` above (or the
+# binding machinery) implements. Kept as a separate set so the same predicate
+# serves the syntax-only inventory walk (`layer_inventory.jl`), which cannot
+# consult resolution.
+const HANDLED_MACROS = Set{String}([
+    "@deprecate", "@deprecate_binding", "@eval", "@irrational", "@enum",
+    "@goto", "@label", "@NamedTuple", "@reexport", "@nospecialize",
+    "@testitem", "@testmodule", "@testsnippet",
+    "@variables", "@parameters", "@constants",
+    # Modeled by the macro-declared-names subsystem (MACRO_DECLARATION_RULES,
+    # layer_inventory.jl): its confirm-then-flag refinement must not be
+    # trampled by blanket suppression.
+    "@declare_input",
+])
+
+function _macro_name_str(x::EXPR)
+    CSTParser.is_getfield_w_quotenode(x) && return _macro_name_str(x.args[2].args[1])
+    return isidentifier(x) ? valofid(x) : nothing
+end
+
+function _macro_name_effects_known(name)
+    name isa AbstractString || return false
+    name in EFFECT_FREE_MACROS && return true
+    name in HANDLED_MACROS && return true
+    # String/cmd macros produce values by strong convention.
+    (endswith(name, "_str") || endswith(name, "_cmd")) && return true
+    return false
+end
+
+_macro_effects_known(macroname::EXPR) = _macro_name_effects_known(_macro_name_str(macroname))
 
 function mark_enum_member_binding!(arg::EXPR, meta_dict, val)
     if CSTParser.isassignment(arg)

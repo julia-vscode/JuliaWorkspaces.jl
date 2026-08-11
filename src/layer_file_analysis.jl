@@ -815,13 +815,17 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # unknown code is spliced into the module, so any bare name may be
     # defined by the unseen file (the ComputedInclude diagnostic at the
     # include site is the user-visible explanation).
-    # Third case: an ORPHAN root (no include edge reaches it, and it is not a
+    # Third case: a top-level macrocall whose effects the analyzer does not
+    # model, anywhere in the module (typically another file) — its expansion
+    # may define arbitrary names in the module.
+    # Fourth case: an ORPHAN root (no include edge reaches it, and it is not a
     # recognizable entry point) inside a package that has a computed include
     # somewhere is very likely the *target* of that include — its real module
     # context (and the usings that come with it) is unknown, so bare
     # missing-ref reporting against the bare context is unreliable.
     if derived_module_unresolved_wildcard_using(rt, root, path) ||
             derived_module_has_computed_include(rt, root, path) ||
+            derived_module_has_opaque_macrocall(rt, root, path) ||
             (root == file && pkg_folder !== nothing &&
                 !_is_recognized_entry_point(rt, file) &&
                 derived_folder_has_computed_include(rt, pkg_folder))
