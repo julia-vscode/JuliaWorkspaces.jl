@@ -4764,3 +4764,45 @@ end
     @test spec_error("x = 1\nfor i in x\nend\n") === SL.IncorrectIterSpec
     @test spec_error("x = \"s\"\nfor i in x\nend\n") === nothing
 end
+
+@testitem "missing refs suppressed in isdefined/VERSION-guarded branches" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    hint_names(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [CSTParser.valof(x) for (_, x) in collect_hints(cst, meta_dict, jw) if CSTParser.isidentifier(x)]
+    end
+
+    # Names in either branch of an isdefined-guarded `if` only exist on some
+    # Julia versions — one branch is always dead code on the analyzing
+    # version, so neither side reports bare missing refs.
+    @test isempty(hint_names("""
+        if isdefined(Base, :contains)
+            only_when_defined()
+        else
+            legacy_fallback()
+        end
+        """))
+    @test isempty(hint_names("""
+        @static if VERSION < v"1.6"
+            pre16_only_name()
+        end
+        """))
+    # Short-circuit form.
+    @test isempty(hint_names("isdefined(Base, :foo) && guarded_use()"))
+    @test isempty(hint_names("VERSION < v\"1.4\" || modern_only()"))
+
+    # Unguarded conditions keep full checking...
+    @test "unguarded_name" in hint_names("""
+        if some_flag
+            unguarded_name()
+        end
+        """) || "some_flag" in hint_names("""
+        if some_flag
+            unguarded_name()
+        end
+        """)
+    # ...and the guard's own condition does too.
+    @test "not_a_guard" in hint_names("if isdefined(Base, :x) & not_a_guard\nend")
+end

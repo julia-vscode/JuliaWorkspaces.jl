@@ -1174,6 +1174,52 @@ end
 # Is `x` inside a scope whose missing-ref checks are disabled by an
 # unresolved wildcard `using`? Stops at module boundaries, mirroring
 # `resolve_ref`: a nested `module` does not inherit its parent's usings.
+# Whether the CONDITION expression mentions an existence/version test:
+# `isdefined(...)`, `@isdefined x`, or a comparison involving `VERSION`.
+function _is_existence_guard(cond::EXPR)
+    if isidentifier(cond)
+        v = valofid(cond)
+        return v == "VERSION" || v == "isdefined"
+    end
+    if CSTParser.ismacrocall(cond) && length(cond.args) >= 1 &&
+            (valof(cond.args[1]) == "@isdefined" ||
+             (CSTParser.is_getfield_w_quotenode(cond.args[1]) && valof(rhs_of_getfield(cond.args[1])) == "@isdefined"))
+        return true
+    end
+    cond.args === nothing && return false
+    return any(a -> a isa EXPR && _is_existence_guard(a), cond.args)
+end
+
+"""
+    in_existence_guarded_branch(x::EXPR) -> Bool
+
+Is `x` inside a branch of an `if`/`elseif` (or the short-circuited side of
+`&&`/`||`) whose condition mentions `isdefined`, `@isdefined`, or `VERSION`?
+Such branches deliberately reference names that only exist on other Julia
+versions or when an optional binding is present — on the analyzing version
+one branch is dead code, so bare missing-reference reporting there is noise
+(`if isdefined(Base, :new_thing); new_thing() else old_thing() end` flags one
+side or the other no matter which Julia runs the analysis). The condition
+itself keeps full checking.
+"""
+function in_existence_guarded_branch(x::EXPR)
+    cur = x
+    while parentof(cur) isa EXPR
+        p = parentof(cur)
+        if headof(p) in (:if, :elseif) && p.args !== nothing && length(p.args) >= 1 &&
+                cur !== p.args[1] && p.args[1] isa EXPR && _is_existence_guard(p.args[1])
+            return true
+        end
+        if isbinarysyntax(p) && (valof(headof(p)) == "&&" || valof(headof(p)) == "||") &&
+                length(p.args) == 2 && cur === p.args[2] &&
+                p.args[1] isa EXPR && _is_existence_guard(p.args[1])
+            return true
+        end
+        cur = p
+    end
+    return false
+end
+
 function in_unresolved_wildcard_import_scope(x::EXPR, meta_dict)
     sc = retrieve_scope(x, meta_dict)
     while sc isa Scope
@@ -1212,7 +1258,8 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
             # inside using/import statements the UnresolvedImport marking
             # pass is the sole reporter
             !is_in_fexpr(x, y -> headof(y) === :using || headof(y) === :import) &&
-            !in_unresolved_wildcard_import_scope(x, meta_dict)
+            !in_unresolved_wildcard_import_scope(x, meta_dict) &&
+            !in_existence_guarded_branch(x)
             push!(errs, (pos, x))
         end
     elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
