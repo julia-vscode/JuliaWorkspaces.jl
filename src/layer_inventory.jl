@@ -448,7 +448,7 @@ Salsa.@derived function derived_file_inventory(rt, uri)
 
     include_records = derived_file_include_records(rt, uri)
     include_targets_by_offset = Dict{Int,Union{Nothing,URI}}(
-        offset => target for (offset, _, target) in include_records)
+        offset => target for (offset, _, target, _) in include_records)
 
     acc = (items=InventoryItem[], imports=InventoryImport[], exports=InventoryExport[],
            includes=InventoryInclude[], modules=InventoryModule[])

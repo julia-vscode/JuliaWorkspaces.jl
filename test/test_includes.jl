@@ -608,3 +608,42 @@ end
     @test !any(d -> contains(d.message, "undefined_in_orpha"), get_diagnostic(jw, orphan_a))
     @test any(d -> contains(d.message, "undefined_in_orphb"), get_diagnostic(jw, orphan_b))
 end
+
+@testitem "guarded includes: isfile/isdefined guards suppress MissingFile and DuplicateInclude" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///guardincl/src/GuardIncl.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///guardincl/Project.toml"), SourceText("""
+    name = "GuardIncl"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef20"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///guardincl/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    # deps.jl doesn't exist (Pkg.build output) — guarded, so no MissingFile.
+    # helper.jl is re-included under an @isdefined guard — idiomatic
+    # double-inclusion PROTECTION, so no DuplicateInclude.
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module GuardIncl
+    isfile(joinpath(@__DIR__, "deps.jl")) && include("deps.jl")
+    include("helper.jl")
+    if !isdefined(@__MODULE__, :HELPER_LOADED)
+        include("helper.jl")
+    end
+    include("really_missing.jl")
+    end
+    """, "julia")))
+    add_file!(jw, TextFile(URI("file:///guardincl/src/helper.jl"), SourceText("const HELPER_LOADED = true\n", "julia")))
+
+    msgs = [d.message for d in get_diagnostic(jw, root_uri)]
+    # The unguarded missing include still reports; the guarded ones don't.
+    @test count(contains("can not be found"), msgs) == 1
+    @test !any(contains("already been included"), msgs)
+end

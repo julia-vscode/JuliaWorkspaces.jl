@@ -17,7 +17,7 @@ Salsa.@derived function derived_file_include_data(rt, uri)
     @debug "derived_file_include_data" uri=uri
 
     tf = derived_text_file_content(rt, uri)
-    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing}}[], computed_ids=Set{UInt64}())
+    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing},Bool}[], computed_ids=Set{UInt64}())
 
     cst = derived_julia_legacy_syntax_tree(rt, uri)
 
@@ -265,7 +265,7 @@ end
 function _collect_include_diagnostics!(rt, uri, stack, visited, result)
     push!(stack, uri)
 
-    for (offset, span, target) in derived_file_include_records(rt, uri)
+    for (offset, span, target, guarded) in derived_file_include_records(rt, uri)
         if target === nothing
             # A computed include path: the target file cannot be attributed,
             # so it is analyzed without this module's context and bare
@@ -278,7 +278,10 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, result)
         end
 
         if derived_text_file_content(rt, target) === nothing
-            push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.MissingFile))
+            # An existence-guarded include (`isfile(deps) && include(deps)`)
+            # of a file that isn't there is the guard doing its job — the
+            # standard shape for Pkg.build-generated deps.jl files.
+            guarded || push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.MissingFile))
             continue
         end
 
@@ -288,7 +291,9 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, result)
         end
 
         if target in visited
-            push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.DuplicateInclude))
+            # `@isdefined(X) || include("x.jl")` re-including a shared helper
+            # is idiomatic double-inclusion PROTECTION, not a double include.
+            guarded || push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.DuplicateInclude))
             continue
         end
 
