@@ -4763,4 +4763,10 @@ end
 
     @test spec_error("x = 1\nfor i in x\nend\n") === SL.IncorrectIterSpec
     @test spec_error("x = \"s\"\nfor i in x\nend\n") === nothing
+
+    # A vararg slurp binds a TUPLE of the annotated type: `ns` is a
+    # `Tuple{Vararg{Integer}}`, perfectly iterable — the declared ELEMENT
+    # type must not trigger the Number flag.
+    @test spec_error("function f(ns::Integer...)\nfor n in ns\nend\nend\n") === nothing
+    @test spec_error("function g(xs...)\nfor x in xs\nend\nend\n") === nothing
 end
