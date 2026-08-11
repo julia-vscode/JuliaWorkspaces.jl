@@ -3,10 +3,28 @@ function arg_type(arg, ismethod, meta_dict, store=nothing)
     # lives on the inner expression in both cases. unwrap_nospecialize handles
     # a bare `@nospecialize` (no inner arg) safely.
     arg = unwrap_nospecialize(arg)
+    issplatted = false
     if CSTParser.issplat(arg) && length(arg.args) >= 1
         arg = arg.args[1]
+        issplatted = true
     end
     if ismethod
+        # A slurp's binding is typed as the tuple it binds, so the type each
+        # trailing argument must match comes from the annotation instead —
+        # resolved like an explicit `::Vararg{T}` element type. An unannotated
+        # `xs...` constrains nothing.
+        if issplatted
+            (store !== nothing && isdeclaration(arg) && length(arg.args) >= 2) || return CoreTypes.Any
+            t = arg.args[2]
+            # A typevar element type (`xs::T...` under `where T<:Integer`) takes
+            # the upper bound, as a non-slurped `x::T` does below.
+            r = isidentifier(t) ? refof(t, meta_dict) : nothing
+            if r isa Binding && CoreTypes.isdatatype(r.type)
+                ub = where_upper_bound_expr(r)
+                return ub === nothing ? CoreTypes.Any : _resolve_type_expr(ub, store, meta_dict)
+            end
+            return _resolve_type_expr(t, store, meta_dict)
+        end
         # A `x::Union{…}` declaration types the binding as the bare `Union`
         # datatype, dropping the members. Resolve the members directly so
         # subtyping keeps working (needs `store` for member lookup).
