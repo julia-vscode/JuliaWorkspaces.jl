@@ -53,6 +53,15 @@ function gotoobjectofref(x::EXPR, meta_dict)
 end
 
 
+# `(a = 1, b = 2)`: a parenthesized tuple whose first arg is an assignment is
+# a NamedTuple literal. Its `name = val` args are field names, not variables:
+# they bind nothing, and their RHS resolves in the enclosing scope (so in
+# `(a = 1, b = a)` the second `a` is the enclosing variable, not the field).
+function is_namedtuple_literal(x)
+    x isa EXPR && CSTParser.istuple(x) && CSTParser.hastrivia(x) &&
+        ispunctuation(x.trivia[1]) && length(x.args) > 0 && isassignment(x.args[1])
+end
+
 """
     mark_bindings!(x::EXPR, state)
 
@@ -72,6 +81,9 @@ function mark_bindings!(x::EXPR, state)
             mark_sig_args!(x.args[1], meta_dict)
         elseif CSTParser.iscurly(x.args[1])
             mark_typealias_bindings!(x, meta_dict)
+        elseif is_namedtuple_literal(parentof(x)) && isidentifier(x.args[1])
+            # NamedTuple literal field name, not a variable — no binding;
+            # resolve_ref gives it a detached self-binding instead
         elseif !is_getfield(x.args[1]) && state.flags & NO_NEW_BINDINGS == 0
             mark_binding!(x.args[1], meta_dict, x)
         end

@@ -3461,6 +3461,55 @@ end
         end""")
 end
 
+@testitem "NamedTuple literal fields are not bindings" setup=[shared_static_lint] begin
+    using JuliaWorkspaces: SymbolServer
+    using JuliaWorkspaces.StaticLint: bindingof, refof, errorof, Binding, UnusedBinding
+
+    # In `(a = 1, b = a)` the RHS `a` refers to the enclosing variable, not
+    # the `a` field: NamedTuple field names don't exist as variables.
+    let (cst, md, _) = parse_and_pass("""
+            function f()
+                a = 5
+                return (a = 1, b = a)
+            end""")
+        local_a, field_a, rhs_a = find_identifiers(cst, "a")
+        outer = bindingof(local_a, md)
+        @test outer isa Binding
+        @test bindingof(field_a, md) === nothing
+        @test refof(field_a, md) !== outer
+        @test refof(rhs_a, md) === outer
+    end
+
+    # Field names are neither missing references nor references to a global
+    # of the same name (`close`).
+    let (cst, md, jw) = parse_and_pass("""
+            function f(x)
+                return (a = x, close = false)
+            end""")
+        @test isempty(collect_hints(cst, md, jw))
+        field_close = only(find_identifiers(cst, "close"))
+        @test !(refof(field_close, md) isa SymbolServer.SymStore)
+    end
+
+    # Same for the `(; ...)` NamedTuple literal form.
+    let (cst, md, jw) = parse_and_pass("""
+            function f(x)
+                return (; a = x, close = false)
+            end""")
+        @test isempty(collect_hints(cst, md, jw))
+    end
+
+    # A parenthesized assignment (no trailing comma) is not a NamedTuple:
+    # `y` is a real, unused local.
+    let (cst, md, jw) = parse_and_pass("""
+            function f()
+                (y = 2)
+                return 1
+            end""")
+        @test any(errorof(x, md) === UnusedBinding for (_, x) in collect_hints(cst, md, jw))
+    end
+end
+
 @testitem "@label is not an unused binding (julia-vscode#3844)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof, UnusedBinding
 

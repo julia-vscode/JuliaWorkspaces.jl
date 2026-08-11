@@ -1606,8 +1606,7 @@ function check_unused_binding(b::Binding, scope::Scope, meta_dict)
         if (isempty(refs) || length(refs) == 1 && refs[1] == b.name) &&
                 !is_sig_arg(b.name) && !is_overwritten_in_loop(b.name, meta_dict) &&
                 !is_overwritten_subsequently(b, scope, meta_dict) && !is_kw_of_macrocall(b) &&
-                !captures_outer_local(b, scope) && !is_label_binding(b) &&
-                !is_namedtuple_field(b)
+                !captures_outer_local(b, scope) && !is_label_binding(b)
             seterror!(b.name, UnusedBinding, meta_dict)
         end
     end
@@ -1632,18 +1631,6 @@ end
 
 function is_kw_of_macrocall(b::Binding)
     b.val isa EXPR && isassignment(b.val) && parentof(b.val) isa EXPR && CSTParser.ismacrocall(parentof(b.val))
-end
-
-# `(name = val, ...)` is a NamedTuple LITERAL: it parses as plain `=`
-# assignments inside a `:tuple`, so `name` gets a Binding — but it is a field
-# name, not a variable, and must never be reported as unused (real-world hits:
-# `(new = new, close = false)`, where the field intentionally repeats an
-# existing variable's name). Destructuring shapes (`(a, b) = f()`,
-# `for (i, j) in ...`) bind with the OUTER expression as `val`, whose parent
-# is not a `:tuple`, so they are unaffected.
-function is_namedtuple_field(b::Binding)
-    b.val isa EXPR && isassignment(b.val) && parentof(b.val) isa EXPR &&
-        headof(parentof(b.val)) === :tuple
 end
 
 # `@label name` introduces a jump target for `@goto`, not a variable, so it
