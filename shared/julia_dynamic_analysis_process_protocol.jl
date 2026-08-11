@@ -9,6 +9,10 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     projectPath::String
     package::Union{Nothing,String}
     storePath::String
+    # Parent-owned dir to persist the materialized environment into. When set,
+    # the child copies the activated Project/Manifest there and returns this
+    # dir instead of the (possibly process-local, temporary) activated one.
+    projectDir::Union{Nothing,String}
 end
 
 @dict_readable struct CreateStandaloneProjectParams <: JSONRPC.Outbound

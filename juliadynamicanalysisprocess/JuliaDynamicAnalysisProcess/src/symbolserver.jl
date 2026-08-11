@@ -41,7 +41,12 @@ function get_store(store_path::String, progress_callback)
     server = Server(store_path, ctx, Dict{UUID,Package}())
 
     written_caches = String[] # List of caches that have already been written
-    toplevel_pkgs = deps(project(ctx)) # First get a list of all package UUIds that we want to cache
+    # Cache every package in the manifest, not just the project's direct deps:
+    # the parent's launch gate and env loader check the whole manifest, and a
+    # transitive dep whose parent is already cached would otherwise never be
+    # loaded here — and then be tombstoned as uncacheable by the loop at the
+    # bottom, permanently suppressing retries.
+    all_pkgs = [(packagename(ctx, uuid), uuid) for uuid in keys(manifest(ctx))]
     packages_to_load = []
 
     # Obtain the directory containing the active Manifest.toml. Any 'develop'ed dependencies
@@ -49,7 +54,7 @@ function get_store(store_path::String, progress_callback)
     manifest_dir = dirname(ctx.env.manifest_file)
 
     # Next make sure the cache is up-to-date for all of these.
-    for (pk_name, uuid) in toplevel_pkgs
+    for (pk_name, uuid) in all_pkgs
         uuid isa UUID || (uuid = UUID(uuid))
         if !isinmanifest(ctx, uuid)
             @info "$pk_name not in manifest, skipping."

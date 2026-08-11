@@ -209,7 +209,8 @@ end
 # The user-facing messages of every failed dynamic work item whose project
 # folder contains the project file at `uri`. A test-env failure and an env
 # failure for the same folder both land on that folder's Project.toml.
-# Sorted for a deterministic diagnostic order.
+# Sorted for a deterministic diagnostic order; identical messages from
+# different keys (e.g. stale content hashes of the same folder) collapse to one.
 Salsa.@derived function derived_environment_error_messages(rt, uri)
     folder_uri = filepath2uri(dirname(uri2filepath(uri)))
     messages = String[]
@@ -219,7 +220,7 @@ Salsa.@derived function derived_environment_error_messages(rt, uri)
             push!(messages, message)
         end
     end
-    return sort!(messages)
+    return unique!(sort!(messages))
 end
 
 Salsa.@derived function derived_diagnostics(rt, uri)

@@ -256,7 +256,7 @@ end
         try
             _send_djp_request(djp, 1,
                 JuliaDynamicAnalysisProtocol.index_project_request_type,
-                JuliaDynamicAnalysisProtocol.IndexProjectParams("/ws/P", nothing, "/tmp/store"))
+                JuliaDynamicAnalysisProtocol.IndexProjectParams("/ws/P", nothing, "/tmp/store", nothing))
         catch e
             err = e
         end

@@ -56,7 +56,20 @@ function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProject
 
         SymbolServer.get_store(params.storePath, progress_reporter(state))
 
-        return dirname(Base.active_project())
+        active_dir = dirname(Base.active_project())
+        params.projectDir === nothing && return active_dir
+
+        # Persist the materialized environment: the TestEnv path activates a
+        # temp dir owned by this (short-lived) process, but the parent parses
+        # the returned Manifest long after this process is gone. Copy the env
+        # into the parent-owned dir and hand that back instead.
+        mkpath(params.projectDir)
+        cp(Base.active_project(), joinpath(params.projectDir, "Project.toml"); force=true)
+        manifest = joinpath(active_dir, "Manifest.toml")
+        if isfile(manifest)
+            cp(manifest, joinpath(params.projectDir, "Manifest.toml"); force=true)
+        end
+        return params.projectDir
     catch err
         err isa InterruptException && rethrow()
         _index_failure(err, catch_backtrace(),
