@@ -37,6 +37,7 @@
     DuplicateInclude,
     FunctionHasNoMethods,
     UnresolvedImport,
+    ComputedInclude,
 )
 
 const LintCodeDescriptions = Dict{LintCodes,String}(
@@ -54,6 +55,7 @@ const LintCodeDescriptions = Dict{LintCodes,String}(
     IncludeLoop => "Circular include detected.",
     DuplicateInclude => "This file has already been included.",
     MissingFile => "The included file can not be found.",
+    ComputedInclude => "The include path could not be determined statically. The included file is analyzed without this module's context, and missing-reference checks are disabled in this module.",
     InvalidModuleName => "Module name matches that of its parent.",
     TypePiracy => "An imported function has been extended without using module defined typed arguments.",
     UnusedFunctionArgument => "An argument is included in a function signature but not used within its body.",

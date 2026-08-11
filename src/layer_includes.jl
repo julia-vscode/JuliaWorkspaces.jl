@@ -17,7 +17,7 @@ Salsa.@derived function derived_file_include_data(rt, uri)
     @debug "derived_file_include_data" uri=uri
 
     tf = derived_text_file_content(rt, uri)
-    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing}}[])
+    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing}}[], computed_ids=Set{UInt64}())
 
     cst = derived_julia_legacy_syntax_tree(rt, uri)
 
@@ -34,6 +34,35 @@ end
 
 Salsa.@derived function derived_include_dict(rt, uri)
     return derived_file_include_data(rt, uri).include_dict
+end
+
+# `objectid`s of this file's computed (statically unresolvable) include calls;
+# consumed by `StaticLint.followinclude` to mark the enclosing module scope.
+Salsa.@derived function derived_computed_include_ids(rt, uri)
+    return derived_file_include_data(rt, uri).computed_ids
+end
+
+"""
+    derived_folder_has_computed_include(rt, folder_uri) -> Bool
+
+Whether any Julia file under `folder_uri` contains an `include` whose path
+could not be determined statically. Used to decide whether an orphan root (a
+file no other file includes) in that folder plausibly is the *target* of such
+an include — in which case it is analyzed without its real module context and
+bare missing-reference reporting there is unreliable. Bool-valued and id-free.
+"""
+Salsa.@derived function derived_folder_has_computed_include(rt, folder_uri)
+    folder_path = uri2filepath(folder_uri)
+    folder_path === nothing && return false
+    prefix = lowercase(folder_path) * Base.Filesystem.path_separator
+
+    for uri in derived_all_julia_files(rt)
+        fp = uri2filepath(uri)
+        fp === nothing && continue
+        startswith(lowercase(fp), prefix) || continue
+        any(r -> r[3] === nothing, derived_file_include_records(rt, uri)) && return true
+    end
+    return false
 end
 
 Salsa.@derived function derived_all_julia_files(rt)
@@ -237,7 +266,16 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, result)
     push!(stack, uri)
 
     for (offset, span, target) in derived_file_include_records(rt, uri)
-        target === nothing && continue
+        if target === nothing
+            # A computed include path: the target file cannot be attributed,
+            # so it is analyzed without this module's context and bare
+            # missing-reference checking is unreliable in this module (see
+            # `derived_module_has_computed_include`). One honest diagnostic
+            # here replaces the storm of false missing_reference positives
+            # the unattributed file would otherwise produce.
+            push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.ComputedInclude))
+            continue
+        end
 
         if derived_text_file_content(rt, target) === nothing
             push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.MissingFile))

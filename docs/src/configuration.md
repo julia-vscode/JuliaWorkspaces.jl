@@ -302,7 +302,7 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `const_decl` | `info` | Invalid `const` declarations and redefinitions |
 | `unused_binding` | `hint` | Variables assigned but never used |
 | `relative_import` | `info` | A relative import with more dots than available nesting |
-| `include_errors` | `warning` | Circular, duplicate, missing or unreadable `include`s |
+| `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
 | `missing_reference` | `warning` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default) |
 | `unresolved_import` | `warning` | Imports whose target could not be resolved |
 

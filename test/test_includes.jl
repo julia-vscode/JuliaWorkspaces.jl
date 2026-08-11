@@ -411,3 +411,200 @@ end
     @test JuliaWorkspaces.derived_has_content(rt, a_uri) == true
     @test isequal(JuliaWorkspaces.derived_include_closure(rt, root_uri), closure_before)
 end
+
+@testitem "computed include: ComputedInclude diagnostic is emitted at the include site" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///computedincl/src/CompIncl.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///computedincl/Project.toml"), SourceText("""
+    name = "CompIncl"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef01"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///computedincl/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module CompIncl
+    for f in readdir(@__DIR__)
+        include(f)
+    end
+    end
+    """, "julia")))
+
+    diags = get_diagnostic(jw, root_uri)
+    @test count(d -> contains(d.message, "could not be determined statically"), diags) == 1
+end
+
+@testitem "computed include: custom include method definitions are not flagged" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///customincl/src/CustIncl.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///customincl/Project.toml"), SourceText("""
+    name = "CustIncl"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef02"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///customincl/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    # FilePathsBase-style: method definitions ON `include` are signatures,
+    # not calls — never flagged. The runtime CALL inside `load`'s body IS a
+    # dynamic include (splices into an unknown module at call time), so it
+    # gets exactly one ComputedInclude.
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module CustIncl
+    struct MyPath end
+    include(path::MyPath) = 1
+    function include(mapexpr::Function, path::MyPath); 2; end
+    load(p) = include(p)
+    end
+    """, "julia")))
+
+    diags = get_diagnostic(jw, root_uri)
+    @test count(d -> contains(d.message, "could not be determined statically"), diags) == 1
+end
+
+@testitem "computed include: function-body includes flag and suppress like computed ones" begin
+    using JuliaWorkspaces: set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    # ColorSchemes-style: literal-looking includes inside a loader function,
+    # data file is an orphan. Both the diagnostic and the orphan suppression
+    # must fire even though no top-level include exists.
+    root_uri = URI("file:///fnincl/src/FnIncl.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///fnincl/Project.toml"), SourceText("""
+    name = "FnIncl"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef06"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///fnincl/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module FnIncl
+    function loadall()
+        datadir = joinpath(dirname(@__DIR__), "data")
+        include(joinpath(datadir, "schemes.jl"))
+    end
+    end
+    """, "julia")))
+    orphan = URI("file:///fnincl/data/schemes.jl")
+    add_file!(jw, TextFile(orphan, SourceText("register(undefined_helper)\n", "julia")))
+
+    set_input_env_ready!(jw.runtime, true)
+
+    @test count(d -> contains(d.message, "could not be determined statically"), get_diagnostic(jw, root_uri)) == 1
+    @test !any(d -> contains(d.message, "undefined_helper"), get_diagnostic(jw, orphan))
+end
+
+@testitem "computed include: missing_reference suppressed in the polluted module only" begin
+    using JuliaWorkspaces: set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///pollutedmod/src/PollutedMod.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///pollutedmod/Project.toml"), SourceText("""
+    name = "PollutedMod"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef03"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///pollutedmod/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module PollutedMod
+    module Polluted
+    for f in ["x.jl"]
+        include(f)
+    end
+    p() = undefined_in_polluted
+    end
+    module Clean
+    c() = undefined_in_clean
+    end
+    end
+    """, "julia")))
+    set_input_env_ready!(jw.runtime, true)
+
+    msgs = [d.message for d in get_diagnostic(jw, root_uri)]
+    @test !any(contains("undefined_in_polluted"), msgs)
+    @test any(contains("undefined_in_clean"), msgs)
+end
+
+@testitem "computed include: orphan roots suppressed only in computed-include packages" begin
+    using JuliaWorkspaces: set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    # Package A: entry has a computed include; data.jl is an orphan (nothing
+    # statically includes it) — it is very likely the computed include's
+    # target, so its bare missing refs are suppressed.
+    add_file!(jw, TextFile(URI("file:///orphA/Project.toml"), SourceText("""
+    name = "OrphA"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef04"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///orphA/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///orphA/src/OrphA.jl"), SourceText("""
+    module OrphA
+    for f in ["data.jl"]
+        include(f)
+    end
+    end
+    """, "julia")))
+    orphan_a = URI("file:///orphA/src/data.jl")
+    add_file!(jw, TextFile(orphan_a, SourceText("a() = undefined_in_orpha\n", "julia")))
+
+    # Package B: fully static; loose.jl is an orphan by accident and keeps
+    # full checking.
+    add_file!(jw, TextFile(URI("file:///orphB/Project.toml"), SourceText("""
+    name = "OrphB"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef05"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///orphB/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///orphB/src/OrphB.jl"), SourceText("module OrphB\nend\n", "julia")))
+    orphan_b = URI("file:///orphB/src/loose.jl")
+    add_file!(jw, TextFile(orphan_b, SourceText("b() = undefined_in_orphb\n", "julia")))
+
+    set_input_env_ready!(jw.runtime, true)
+
+    @test !any(d -> contains(d.message, "undefined_in_orpha"), get_diagnostic(jw, orphan_a))
+    @test any(d -> contains(d.message, "undefined_in_orphb"), get_diagnostic(jw, orphan_b))
+end

@@ -3,6 +3,7 @@ module StaticLint
 import ..derived_has_file
 import ..derived_julia_legacy_syntax_tree
 import ..derived_include_dict
+import ..derived_computed_include_ids
 import ..ItemRef
 import ..MethodArity
 
@@ -568,6 +569,24 @@ or a file exists on the disc that can be loaded.
 If this is successful it traverses the code associated with the loaded file.
 """
 function followinclude(x, state::Toplevel)
+    # A computed include splices UNKNOWN code into the enclosing module: any
+    # bare name there may be defined by the unseen file, so mark the module
+    # scope like an unresolved wildcard `using` (the ComputedInclude
+    # diagnostic at the include site is the user-visible explanation). This
+    # runs in BOTH traversal modes — the flag feeds `collect_hints` either
+    # way — and before the per-file early-return below.
+    if objectid(x) in derived_computed_include_ids(state.runtime, state.uri)
+        scope = retrieve_scope(x, state.meta_dict)
+        while scope isa Scope
+            if CSTParser.defines_module(scope.expr) || !(scope.parent isa Scope)
+                scope.unresolved_wildcard_import = true
+                break
+            end
+            scope = scope.parent
+        end
+        return
+    end
+
     # per-file traversal mode: included files are analyzed separately, their
     # names resolve through the module tree context
     state.follow_includes || return
