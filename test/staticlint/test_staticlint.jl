@@ -5191,6 +5191,8 @@ end
         f(x) where {T >: Missing} = x
         """)
     @test any(SL.errorof(x, meta_dict) === SL.UnusedTypeParameter for (_, x) in collect_hints(cst, meta_dict, jw))
+end
+
 @testitem "small FP batch: static-if toggle, one IndexFromLength per loop" setup=[shared_static_lint] begin
     SL = JuliaWorkspaces.StaticLint
 
@@ -5218,4 +5220,43 @@ end
         end
         """)
     @test count(==(SL.IndexFromLength), e) == 1
+end
+
+@testitem "const_decl: method extension of an unresolved import is not a redefinition" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    errs(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [SL.errorof(x, meta_dict) for (_, x) in collect_hints(cst, meta_dict, jw) if SL.errorof(x, meta_dict) !== nothing]
+    end
+
+    # `Statistics` is unresolvable in this harness env, so `mean` gets a
+    # synthetic import binding — method definitions extend it, they don't
+    # "define a function that already has a value" (ext-file idiom).
+    e = errs("import Statistics: mean\nmean(x::Int) = 1\nmean(x::String) = 2\n")
+    @test !(SL.CannotDefineFuncAlreadyHasValue in e)
+    @test !(SL.InvalidRedefofConst in e)
+end
+
+@testitem "const_decl: local rebinding and quoted priors are not redefinitions" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    errs(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [SL.errorof(x, meta_dict) for (_, x) in collect_hints(cst, meta_dict, jw) if SL.errorof(x, meta_dict) !== nothing]
+    end
+
+    # A local variable holding a type value is an ordinary variable.
+    @test isempty(errs("""
+        function f(c)
+            T = c ? Int : Float64
+            T = Union{T, Missing}
+            T
+        end
+        """))
+    # A definition inside a quoted expression never executed.
+    @test isempty(errs("ex = :(struct MT8 end)\nstruct MT8 end\n"))
+    # Genuine toplevel redefinitions still flag.
+    @test SL.InvalidRedefofConst in errs("struct T2 end\nT2 = 1\n")
+    @test SL.CannotDeclareConst in errs("const x = 1\nconst x = 2\n")
 end
