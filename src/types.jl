@@ -490,6 +490,7 @@ struct JuliaWorkspace
         set_input_resolved_environments!(rt, Dict{ResolveEnvironmentKey,URI}())
         set_input_failed_dynamic_keys!(rt, Set{DJPKey}())
         set_input_dynamic_failure_messages!(rt, Dict{DJPKey,String}())
+        set_input_lowering_lint!(rt, false)
 
         new(rt, dynamic_feature)
     end

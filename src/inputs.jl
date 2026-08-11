@@ -1,5 +1,11 @@
 Salsa.@declare_input input_files(rt)::Set{URI}
 
+# Feature flag (experiment): when true, the vendored-JuliaLowering lint
+# producer takes over the rules in `LOWERING_TAKEOVER_RULES` from StaticLint
+# (see lint_lowering_rules.jl). Default false: exactly the legacy behavior,
+# and nothing in the lowering layer is ever demanded.
+Salsa.@declare_input input_lowering_lint(rt)::Bool
+
 Salsa.@declare_input input_text_file(rt, uri)::Union{TextFile,Nothing}
 
 Salsa.@declare_input input_active_project(rt)::Union{URI,Nothing}

@@ -12,9 +12,8 @@
 #   analysis-layer computation is a bug).
 # - `derived_item_lowering` depends ONLY on `derived_item_lowering_body` —
 #   never on any position map and never on file content directly.
-# - Everything degrades: no vendored modules on Julia < 1.12 (queries return
-#   nothing / an :unavailable value), per-item lowering errors become
-#   `status = :error` findings, never crashes.
+# - Everything degrades: per-item lowering errors become `status = :error`
+#   findings, never crashes.
 
 """
     LoweringFinding(addr, msg)
@@ -38,11 +37,16 @@ anchor module show up as `"JWLoweringAnchor"`.
     id::Int32
     name::String
     kind::Symbol            # :local | :global | :argument | :static_parameter
+    addr::Int32             # declaration site (preorder address; 0 if unknown)
     mod::Union{Nothing,String}
     is_internal::Bool
     is_const::Bool
     is_ssa::Bool
     is_captured::Bool
+    is_read::Bool
+    is_assigned::Bool
+    is_used_undef::Bool
+    is_ambiguous_local::Bool
 end
 
 """
@@ -60,8 +64,7 @@ end
     ItemLowering
 
 Result of running the (macro-free) lowering analysis passes over one item.
-`status` is `:ok`, `:error` (lowering threw; see `findings`), or
-`:unavailable` (vendored lowering not loaded, i.e. Julia < 1.12).
+`status` is `:ok` or `:error` (lowering threw; see `findings`).
 """
 @auto_hash_equals struct ItemLowering
     status::Symbol
@@ -70,13 +73,9 @@ Result of running the (macro-free) lowering analysis passes over one item.
     uses::Vector{BindingUse}
 end
 
-const ITEM_LOWERING_UNAVAILABLE =
-    ItemLowering(:unavailable, LoweringFinding[], LoweredBinding[], BindingUse[])
-
-@static if LOWERING_AVAILABLE
-# `JS2`/`JL2`/`V2Kind` are defined in packagedef.jl's gated block, before this
-# file is included/macro-expanded (the `JS2.K"..."` string macros below need
-# `JS2` bound at expansion time).
+# `JS2`/`JL2`/`V2Kind` are defined in packagedef.jl, before this file is
+# included/macro-expanded (the `JS2.K"..."` string macros below need `JS2`
+# bound at expansion time).
 
 # ── v2 body forest (twin of layer_body_tree.jl, against the v2 parser) ──────
 
@@ -135,6 +134,10 @@ function _foreach_item_v2_node(f, rt, uri)
     _foreach_toplevel_item(cst) do _x, _order, id, _parent_module, offset
         node = get(outermost, offset + 1, nothing)
         node === nothing && return
+        # Module items get no lowering body (mirrors layer_body_tree.jl): the
+        # module-tree layer models module structure; lowering the whole module
+        # would duplicate inner items and error in the per-statement passes.
+        JS2.kind(node) == JS2.K"module" && return
         f(id, node)
     end
     return nothing
@@ -176,27 +179,56 @@ end
 
 # ── materialization (research report section H) ─────────────────────────────
 
-_bt_node_count(bt::BodyTree) =
-    bt.children === nothing ? 1 : 1 + sum(_bt_node_count, bt.children; init=0)
-
 _is_opaque_macrocall(bt::BodyTree{V2Kind}) =
     bt.kind == JS2.K"macrocall" ||
     (bt.kind == JS2.K"do" && bt.children !== nothing && !isempty(bt.children) &&
      bt.children[1].kind == JS2.K"macrocall")
 
+# Semi-transparent handling of an opaque macrocall's subtree: keep every
+# `K"Identifier"` leaf (at its ORIGINAL preorder address) as a plain read.
+# This is StaticLint's transparent-traversal precedent — a macro is assumed
+# to potentially read whatever identifiers appear in its arguments — and is
+# conservative in the right direction for unused-binding analysis (can only
+# cause false negatives, never false positives). NOTE: consequently
+# use-before-definition analysis must not be shipped while macros are opaque
+# (a synthesized read may precede the real assignment).
+function _collect_macrocall_identifiers!(kids::Vector{JS2.SyntaxTree}, bt::BodyTree{V2Kind}, addr::Base.RefValue{Int})
+    myaddr = (addr[] += 1)
+    if bt.children === nothing
+        # Macro names themselves parse as identifiers spelled `@name` (v2
+        # stores identifier names as String); they are not variable reads.
+        if bt.kind == JS2.K"Identifier" &&
+           !(bt.val isa Union{Symbol,AbstractString} && startswith(string(bt.val), "@"))
+            push!(kids, JS2.SyntaxTree(bt.kind, nothing, bt.val, LineNumberNode(myaddr, :body), nothing))
+        end
+        return nothing
+    end
+    for c in bt.children
+        _collect_macrocall_identifiers!(kids, c, addr)
+    end
+    return nothing
+end
+
 # BodyTree → ephemeral v2 SyntaxTree. Every node's `source` is
 # `LineNumberNode(preorder address)`, so pass-output provenance chains
-# terminate at address anchors. Macrocalls are NOT materialized (no macro
-# expansion in-process): they become an opaque `Value(nothing)` leaf carrying
-# the macrocall's address; the address counter still advances across the
-# skipped subtree so numbering stays aligned with the volatile map. This is
-# also the future DJP splice point (M1+).
+# terminate at address anchors. Macrocalls are NOT expanded (no macro
+# expansion in-process): they become a block of identifier reads (see
+# `_collect_macrocall_identifiers!`) ending in a `Value(nothing)` placeholder
+# carrying the macrocall's address; the address counter advances across the
+# whole subtree so numbering stays aligned with the volatile map. This block
+# is also the future DJP splice point (M1+).
 function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int})
     myaddr = (addr[] += 1)
     src = LineNumberNode(myaddr, :body)
     if _is_opaque_macrocall(bt)
-        addr[] += _bt_node_count(bt) - 1
-        return JS2.SyntaxTree(JS2.K"Value", nothing, nothing, src, nothing)
+        kids = Vector{JS2.SyntaxTree}()
+        if bt.children !== nothing
+            for c in bt.children
+                _collect_macrocall_identifiers!(kids, c, addr)
+            end
+        end
+        push!(kids, JS2.SyntaxTree(JS2.K"Value", nothing, nothing, src, nothing))
+        return JS2.SyntaxTree(JS2.K"block", kids, nothing, src, nothing)
     end
     if bt.children === nothing
         return JS2.SyntaxTree(bt.kind, nothing, bt.val, src, nothing)
@@ -233,9 +265,10 @@ end
 function _project!(bindings::Vector{LoweredBinding}, uses::Vector{BindingUse}, ctx3, ex3)
     for b in ctx3.bindings.info
         push!(bindings, LoweredBinding(
-            Int32(b.id), b.name, b.kind,
+            Int32(b.id), b.name, b.kind, _node_addr(b.node_id),
             b.mod === nothing ? nothing : string(nameof(b.mod)),
-            b.is_internal, b.is_const, b.is_ssa, b.is_captured))
+            b.is_internal, b.is_const, b.is_ssa, b.is_captured,
+            b.is_read, b.is_assigned, b.is_used_undef, b.is_ambiguous_local))
     end
     _collect_uses!(uses, ex3)
     return nothing
@@ -295,23 +328,3 @@ Salsa.@derived function derived_item_lowering(rt, ref)
     body === nothing && return nothing
     return _lower_item(body)
 end
-
-else # !LOWERING_AVAILABLE (Julia < 1.12): same query surface, degraded
-
-Salsa.@derived function derived_file_lowering_forest(rt, uri)
-    return nothing
-end
-
-Salsa.@derived function derived_item_lowering_body(rt, ref)
-    return nothing
-end
-
-Salsa.@derived function derived_file_lowering_maps(rt, uri)
-    return nothing
-end
-
-Salsa.@derived function derived_item_lowering(rt, ref)
-    return ITEM_LOWERING_UNAVAILABLE
-end
-
-end # @static if LOWERING_AVAILABLE

@@ -198,6 +198,22 @@ end
     @test isequal(forest[item_id(jw, "f")], body_tree(parse1("f(x) = x").children[1]))
 end
 
+@testitem "body tree: module items get no body tree" setup=[BodyTreeWS] begin
+    src = "module M\ng() = 1\nend\n\nbaremodule B\nend\n"
+    jw = bt_workspace(src)
+    inv = JuliaWorkspaces.derived_file_inventory(jw.runtime, BT_URI)
+    forest = derived_file_body_forest(jw.runtime, BT_URI)
+
+    for name in ["M", "B"]
+        mod_id = only(filter(m -> m.name == name, inv.modules)).id
+        @test !haskey(forest, mod_id)
+        @test derived_item_body(jw.runtime, ItemRef(BT_URI, mod_id)) === nothing
+    end
+
+    # Inner items still get trees.
+    @test haskey(forest, item_id(jw, "g"))
+end
+
 @testitem "body tree: malformed and missing files degrade quietly" setup=[BodyTreeWS] begin
     jw = bt_workspace("f(x = ) := nonsense +\n")
     @test derived_file_body_forest(jw.runtime, BT_URI) isa Dict{Int64,<:BodyTree}

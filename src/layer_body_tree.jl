@@ -152,6 +152,10 @@ function _foreach_item_syntax_node(f, rt, uri)
     _foreach_toplevel_item(cst) do _x, _order, id, _parent_module, offset
         node = get(outermost, offset + 1, nothing)
         node === nothing && return
+        # Module items get no body tree: it would duplicate every inner item's
+        # tree and churn on any edit inside the module. Module structure is the
+        # module-tree layer's job; the walker still yields the inner items.
+        kind(node) == K"module" && return
         f(id, node)
     end
     return nothing

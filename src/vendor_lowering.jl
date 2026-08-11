@@ -1,5 +1,5 @@
-# Vendored JuliaSyntax v2 + JuliaLowering, loaded only on Julia >= 1.12 (see the
-# @static gate in packagedef.jl and packages/VENDOR_JuliaLowering.md).
+# Vendored JuliaSyntax v2 + JuliaLowering (see packages/VENDOR_JuliaLowering.md;
+# requires Julia >= 1.12, which is JW's minimum).
 #
 # The vendored files under packages/ are never patched. This wrapper owns all
 # deviations. The `JuliaLowering` block below MIRRORS

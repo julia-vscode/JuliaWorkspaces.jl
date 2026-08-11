@@ -5,6 +5,7 @@ export JuliaWorkspace,
     remove_file!,
     remove_all_children!,
     set_active_project!,
+    set_lowering_lint!,
     set_indirect_file_content!,
     clear_indirect_file!,
     get_indirect_files,
@@ -448,6 +449,23 @@ end
 # Input-only mutation. Does not drain results or reconcile.
 function _set_active_project!(jw::JuliaWorkspace, uri_or_nothing::Union{URI,Nothing})
     set_input_active_project!(jw.runtime, uri_or_nothing)
+end
+
+"""
+    set_lowering_lint!(jw::JuliaWorkspace, enabled::Bool)
+
+Feature flag (experiment): when `true`, the vendored-JuliaLowering lint
+producer takes over the `unused_binding` / `unused_function_argument` rules
+from StaticLint — same rule ids, severities, and config surface, different
+engine. Default `false`: exactly the legacy behavior; the lowering machinery
+is never demanded.
+"""
+function set_lowering_lint!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_lowering_lint!" enabled=enabled
+
+    process_from_dynamic(jw)
+    set_input_lowering_lint!(jw.runtime, enabled)
+    _reconcile!(jw)
 end
 
 # Projects
