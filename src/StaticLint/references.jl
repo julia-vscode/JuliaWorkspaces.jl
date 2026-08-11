@@ -115,6 +115,14 @@ function resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
             end
         end
         return true
+    elseif isassignment(x) && is_namedtuple_literal(parentof(x)) && isidentifier(x.args[1])
+        # NamedTuple literal field name: like a kwarg name, give it a detached
+        # self-binding so it neither resolves to an enclosing variable nor
+        # reports as a missing reference. The RHS resolves on its own visit.
+        if !hasref(x.args[1], meta_dict)
+            setref!(x.args[1], Binding(x.args[1], nothing, nothing, []), meta_dict)
+        end
+        return true
     elseif is_special_macro_term(x) || new_within_struct(x)
         setref!(x, Binding(noname, nothing, nothing, []), meta_dict)
         return true

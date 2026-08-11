@@ -136,9 +136,6 @@ function introduces_scope(x::EXPR, state)
     elseif CSTParser.iswhere(x)
         # unless in func def signature
         return !_in_func_or_struct_def(x)
-    elseif CSTParser.istuple(x) && CSTParser.hastrivia(x) && ispunctuation(x.trivia[1]) && length(x.args) > 0 && isassignment(x.args[1])
-        # named tuple
-        return true
     elseif headof(x) === :function ||
             headof(x) === :macro ||
             headof(x) === :for ||
