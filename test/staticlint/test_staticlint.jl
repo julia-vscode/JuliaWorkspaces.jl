@@ -1779,6 +1779,38 @@ end
     @test errorof(cst.args[7].args[1].args[2], meta_dict) === InvalidTypeDeclaration
 end
 
+@testitem "const type aliases are valid in type declarations" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidTypeDeclaration
+
+    any_error(x, meta_dict, err) =
+        errorof(x, meta_dict) === err ||
+        (x.args !== nothing && any(a -> any_error(a, meta_dict, err), x.args))
+
+    # `const Alias = SomeType` resolves to a Binding whose inferred type is
+    # not DataType (env types resolve to their constructor FunctionStore),
+    # but the alias IS a type and must be accepted in declarations.
+    cst, meta_dict = parse_and_pass("""
+        const ReturnCode = Int16
+        g(r::ReturnCode) = r
+        """)
+    @test !any_error(cst, meta_dict, InvalidTypeDeclaration)
+
+    # Parameterised alias of a local struct, `where`-wrapped.
+    cst, meta_dict = parse_and_pass("""
+        struct A{T, N} end
+        const AVec = A{T, 1} where T
+        g(v::AVec) = v
+        """)
+    @test !any_error(cst, meta_dict, InvalidTypeDeclaration)
+
+    # A genuine non-type still flags.
+    cst, meta_dict = parse_and_pass("""
+        const notatype = sin
+        g(x::notatype) = x
+        """)
+    @test any_error(cst, meta_dict, InvalidTypeDeclaration)
+end
+
 @testitem "interpret @eval" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: scopeof, scopehasbinding, errorof, IncorrectCallArgs
 

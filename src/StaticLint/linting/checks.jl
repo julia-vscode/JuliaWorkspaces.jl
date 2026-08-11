@@ -1010,11 +1010,40 @@ function is_never_datatype(b::Binding, env::ExternalEnv)
     return false
 end
 
+# A `const Alias = SomeType` binding IS a type even though the binding's
+# inferred `type` slot is not the DataType lattice value: its assigned VALUE
+# is a type. Unwraps `where`/`curly` so parameterised aliases
+# (`const OffsetVector = OffsetArray{T, 1} where T`) count too.
+function _binding_assigned_from_type(b::Binding, env::ExternalEnv, meta_dict)
+    (b.val isa EXPR && CSTParser.isassignment(b.val) && length(b.val.args) == 2) || return false
+    rhs = b.val.args[2]
+    while rhs isa EXPR && (headof(rhs) === :where || headof(rhs) === :curly) &&
+            rhs.args !== nothing && !isempty(rhs.args)
+        rhs = rhs.args[1]
+    end
+    rhs isa EXPR || return false
+    r = refof_maybe_getfield(rhs, meta_dict)
+    r isa SymbolServer.DataTypeStore && return true
+    # Env types commonly resolve to their CONSTRUCTOR FunctionStore
+    # (`Int16`) — `resolves_to_datatype` follows `extends` to the type.
+    r isa SymbolServer.FunctionStore && return resolves_to_datatype(r, env)
+    r isa Binding || return false
+    return CoreTypes.isdatatype(r.type) ||
+        r.val isa SymbolServer.DataTypeStore ||
+        (r.val isa EXPR && CSTParser.defines_datatype(r.val))
+end
+
 function check_datatype_decl(x::EXPR, env::ExternalEnv, meta_dict)
     # Only call in function signatures?
     if isdeclaration(x) && parentof(x) isa EXPR && iscall(parentof(x))
         if (dt = refof_maybe_getfield(last(x.args), meta_dict)) !== nothing
-            if is_never_datatype(dt, env)
+            # const type aliases (`const ReturnCode = Int16`) resolve to a
+            # Binding whose inferred type is not DataType — but they are
+            # valid in declarations, and were ~all of this rule's sampled
+            # false positives in a top-100 registry sweep.
+            if dt isa Binding && _binding_assigned_from_type(dt, env, meta_dict)
+                # valid type alias
+            elseif is_never_datatype(dt, env)
                 seterror!(x, InvalidTypeDeclaration, meta_dict)
             end
         elseif CSTParser.isliteral(last(x.args))
