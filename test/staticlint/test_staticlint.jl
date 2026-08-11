@@ -1467,6 +1467,44 @@ end
     @test !any_error(cst, meta_dict, CannotDeclareConst)
 end
 
+@testitem "const decls in exclusive if branches are not redeclarations" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDeclareConst
+
+    any_error(x, meta_dict, err) =
+        errorof(x, meta_dict) === err ||
+        (x.args !== nothing && any(a -> any_error(a, meta_dict, err), x.args))
+
+    # The standard platform/version-conditional idiom: only one branch ever
+    # executes, so one `const` per branch is a single declaration.
+    cst, meta_dict = parse_and_pass("""
+        if Sys.iswindows()
+            const libpath = "a.dll"
+        else
+            const libpath = "a.so"
+        end
+        """)
+    @test !any_error(cst, meta_dict, CannotDeclareConst)
+
+    # Mixed shapes across branches (const in one, function in the other).
+    cst, meta_dict = parse_and_pass("""
+        @static if VERSION >= v"1.12"
+            const task_local_thing = 1
+        else
+            function task_local_thing end
+        end
+        """)
+    @test !any_error(cst, meta_dict, CannotDeclareConst)
+
+    # Two consts in the SAME branch still flag.
+    cst, meta_dict = parse_and_pass("""
+        if Sys.iswindows()
+            const zz = 1
+            const zz = 2
+        end
+        """)
+    @test any_error(cst, meta_dict, CannotDeclareConst)
+end
+
 @testitem "const redefinition invalid redefinition" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: getmeta, InvalidRedefofConst
 

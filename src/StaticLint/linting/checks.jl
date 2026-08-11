@@ -1449,6 +1449,15 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
 
     b.val isa Binding && return check_const_decl(name, b.val, scope, meta_dict)
     if b.val isa EXPR && (CSTParser.defines_datatype(b.val) || is_const(b))
+        # Mutually exclusive `if`/`elseif`/`else` branches (the standard
+        # platform/version-conditional `const` idiom, usually under
+        # `@static if`) never both execute, so a const/datatype declared once
+        # per branch is not a redeclaration — the same exemption the
+        # InvalidRedefofConst arm below already applies.
+        prev = scope.names[name]
+        if prev isa Binding && prev.val isa EXPR && !in_same_if_branch(b.val, prev.val)
+            return
+        end
         seterror!(b.name, CannotDeclareConst, meta_dict)
     else
         prev = scope.names[name]
