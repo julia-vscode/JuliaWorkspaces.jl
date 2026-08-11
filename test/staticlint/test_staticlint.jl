@@ -3395,6 +3395,21 @@ end
             return x
         end""")
 
+    # NamedTuple literal fields are field names, not variables: they parse
+    # as `=` inside a `:tuple` and must never be reported as unused — even
+    # when the field name shadows nothing else (`close`), or repeats an
+    # existing variable's name (`new = new`).
+    @test !has_unused("""
+        function f(new, oldstream)
+            return (new = new, close = false, old = oldstream)
+        end""")
+    # Genuine unused locals nearby still flag.
+    @test has_unused("""
+        function f(x)
+            unused_local = 1
+            return (a = x, b = 2)
+        end""")
+
     # Closure capturing/reassigning an outer local.
     @test !has_unused("""
         function f()
