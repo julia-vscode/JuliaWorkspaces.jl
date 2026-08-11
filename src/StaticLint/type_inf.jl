@@ -74,7 +74,13 @@ function infer_type(binding::Binding, scope, state)
                 end
             elseif CSTParser.issplat(binding.val) && length(binding.val.args) >= 1 &&
                    binding.val.args[1].head isa EXPR && valof(binding.val.args[1].head) == "::"
-                infer_type_decl(binding, binding.val.args[1].args[2], state, scope)
+                # `f(xs::T...)` slurps a TUPLE of `T`s, so the binding's type is
+                # `Tuple`, not the declared ELEMENT type `T` (which would make
+                # `xs` look like a `T` to every consumer — e.g. `for x in xs`
+                # read as iterating a `Number` for `xs::Integer...`). The
+                # element type stays available to method matching through the
+                # annotation (`arg_type`).
+                settype!(binding, CoreTypes.Tuple)
             elseif iswhere(parentof(binding.val))
                 settype!(binding, CoreTypes.DataType)
             end

@@ -1012,6 +1012,47 @@ end
     @test JuliaWorkspaces.StaticLint.errorof(cst[2], meta_dict) === nothing
 end
 
+@testitem "a slurped arg is typed as a tuple" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # `ns` in `f(ns::Integer...)` is a `Tuple` of `Integer`s, not an `Integer`.
+    # The binding sits on the `ns::Integer` declaration, not on the identifier.
+    cst, meta_dict = parse_and_pass("""
+    f(ns::Integer...) = ns
+    """)
+    decl = find_first(cst, x -> SL.CSTParser.isdeclaration(x))
+    b = decl === nothing ? nothing : SL.bindingof(decl, meta_dict)
+    @test b isa SL.Binding
+    @test SL.CoreTypes.iscoretype(b.type, :Tuple)
+
+    # The element type stays available to method matching: a trailing argument
+    # must still match `Integer`.
+    cst, meta_dict = parse_and_pass("""
+    f(ns::Integer...) = 1
+    f(1, 2)
+    f("a")
+    """)
+    @test SL.errorof(cst[2], meta_dict) === nothing
+    @test SL.errorof(cst[3], meta_dict) === SL.IncorrectCallArgs
+
+    # Same for the element type spelled as a `Union` or a `where` typevar.
+    cst, meta_dict = parse_and_pass("""
+    f(xs::Union{Int,String}...) = 1
+    f(1, "a")
+    f(1.5)
+    """)
+    @test SL.errorof(cst[2], meta_dict) === nothing
+    @test SL.errorof(cst[3], meta_dict) === SL.IncorrectCallArgs
+
+    cst, meta_dict = parse_and_pass("""
+    f(xs::T...) where T<:Integer = 1
+    f(1)
+    f("a")
+    """)
+    @test SL.errorof(cst[2], meta_dict) === nothing
+    @test SL.errorof(cst[3], meta_dict) === SL.IncorrectCallArgs
+end
+
 @testitem "check_call keyword default reference" setup=[shared_static_lint] begin
     (cst, meta_dict) = parse_and_pass("""
     function f(a, b; kw = kw) end
@@ -4764,9 +4805,8 @@ end
     @test spec_error("x = 1\nfor i in x\nend\n") === SL.IncorrectIterSpec
     @test spec_error("x = \"s\"\nfor i in x\nend\n") === nothing
 
-    # A vararg slurp binds a TUPLE of the annotated type: `ns` is a
-    # `Tuple{Vararg{Integer}}`, perfectly iterable — the declared ELEMENT
-    # type must not trigger the Number flag.
+    # A slurped arg is a tuple, so it is iterable whatever its element type is
+    # annotated as.
     @test spec_error("function f(ns::Integer...)\nfor n in ns\nend\nend\n") === nothing
     @test spec_error("function g(xs...)\nfor x in xs\nend\nend\n") === nothing
 end

@@ -881,11 +881,6 @@ function check_incorrect_iter_spec(x, body, env, meta_dict)
                 end
             end
         elseif hasref(rng, meta_dict) && refof(rng, meta_dict) isa Binding && refof(rng, meta_dict).type !== nothing
-            # A vararg slurp (`f(ns::Integer...)`) binds a TUPLE of the
-            # annotated type — the declared ELEMENT type (here `Integer`)
-            # says nothing about the tuple's iterability, so `for n in ns`
-            # must not be flagged as iterating a Number.
-            _binding_is_vararg_slurp(refof(rng, meta_dict)) && return
             type = get_eventual_datatype(refof(rng, meta_dict).type, env)
             try
                 if type !== nothing && _issubtype(type, getsymbols(env)[:Core][:Number], env.symbols, meta_dict) === true
@@ -897,18 +892,6 @@ function check_incorrect_iter_spec(x, body, env, meta_dict)
             end
         end
     end
-end
-
-# Whether `b` is bound by a vararg slurp in a signature: `ns...` (name's
-# parent is the `...` operator) or `ns::Integer...` (name's parent is the
-# `::` declaration wrapped in the `...` operator).
-function _binding_is_vararg_slurp(b::Binding)
-    b.name isa EXPR || return false
-    p = parentof(b.name)
-    if p isa EXPR && CSTParser.isdeclaration(p)
-        p = parentof(p)
-    end
-    return p isa EXPR && CSTParser.issplat(p)
 end
 
 function check_is_used_in_getindex(expr, lhs, arr, meta_dict)
