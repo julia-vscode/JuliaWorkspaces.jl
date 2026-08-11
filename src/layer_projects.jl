@@ -238,11 +238,13 @@ Salsa.@derived function derived_project(rt, uri)
             uuid_of_stdlib_package !== nothing || continue
 
             version_of_stdlib_package = get(v_entry[1], "version", nothing)
-            # A stdlib recorded with a stale version is keyed by the bundled one.
-            if version_of_stdlib_package !== nothing
-                stdlib_ver = _stdlib_cache_version(uuid_of_stdlib_package)
-                stdlib_ver !== nothing && (version_of_stdlib_package = string(stdlib_ver))
-            end
+            # A stdlib recorded with a stale version — or with no version at
+            # all, the common shape in manifests — is keyed by the bundled
+            # version, matching the child's cache writer. Without this a
+            # versionless stdlib entry stays `nothing` and is skipped by every
+            # cache-loading site, so its symbols never resolve.
+            stdlib_ver = _stdlib_cache_version(uuid_of_stdlib_package)
+            stdlib_ver !== nothing && (version_of_stdlib_package = string(stdlib_ver))
 
             stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_stdlib_package, version_of_stdlib_package)
         else

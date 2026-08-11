@@ -42,12 +42,21 @@ end
         tomlmiss = only(filter(p -> p.name == "TOML", missing))
         @test tomlmiss.git_tree_sha1 === nothing
         @test tomlmiss.version == string(sv)
-        @test !any(p -> p.name == "Dates", missing)     # versionless stdlib still skipped
 
-        # A jstore at the bundled-version key (what the child writes) satisfies it.
+        # A versionless stdlib is missing too, keyed by ITS bundled version —
+        # skipping it would mean a declared stdlib is never indexed.
+        datesmiss = only(filter(p -> p.name == "Dates", missing))
+        @test datesmiss.git_tree_sha1 === nothing
+        @test datesmiss.version == string(_stdlib_cache_version(UUID(dates)))
+
+        # A jstore at the bundled-version key (what the child writes) satisfies both.
         jdir = joinpath(store, "T", "TOML", toml); mkpath(jdir)
         touch(joinpath(jdir, "$(sv).jstore"))
-        @test !any(p -> p.name == "TOML", _get_missing_packages(proj, store))
+        ddir = joinpath(store, "D", "Dates", dates); mkpath(ddir)
+        touch(joinpath(ddir, "$(_stdlib_cache_version(UUID(dates))).jstore"))
+        after = _get_missing_packages(proj, store)
+        @test !any(p -> p.name == "TOML", after)
+        @test !any(p -> p.name == "Dates", after)
     end
 end
 

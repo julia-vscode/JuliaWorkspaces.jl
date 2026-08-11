@@ -120,7 +120,7 @@ function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, reque
     end
 end
 
-function index_project(djp::DynamicJuliaProcess, store_path::String, timeout_seconds::Int=0)
+function index_project(djp::DynamicJuliaProcess, store_path::String, timeout_seconds::Int=0, project_dir::Union{Nothing,String}=nothing)
     _send_djp_request(
         djp,
         timeout_seconds,
@@ -128,7 +128,8 @@ function index_project(djp::DynamicJuliaProcess, store_path::String, timeout_sec
         JuliaDynamicAnalysisProtocol.IndexProjectParams(
             djp.project_path,
             djp.package,
-            store_path
+            store_path,
+            project_dir
         )
     )
 end
@@ -579,14 +580,17 @@ end
 # characters (e.g. `Pkg` vs `Pkg-extra`).
 #
 # `(parent, prefix, dir)` — pure, no filesystem mutation.
-function _standalone_dir_components(df::DynamicFeature, key::ScratchProjectKey)
+function _standalone_dir_components(df::DynamicFeature, key::Union{ScratchProjectKey,WatchTestEnvironmentKey})
     parent = joinpath(dirname(df.store_path), "standalone-projects")
     path = _key_path(key)
     name = basename(path)
     path_hash = string(hash(path) % UInt32, base=16, pad=8)
-    # The `env-` tag keeps a package and a same-basename env from ever sharing
-    # a prefix, and makes the dirs self-describing on disk.
-    tag = key isa ResolveEnvironmentKey ? "env-" : ""
+    # The `env-`/`test-env-` tags keep a package and a same-basename env from
+    # ever sharing a prefix, and make the dirs self-describing on disk. A
+    # package's test env carries the same path as its main env, so it needs
+    # its own tag to get a distinct dir.
+    tag = key isa ResolveEnvironmentKey ? "env-" :
+        key isa WatchTestEnvironmentKey ? "test-env-" : ""
     prefix = string(tag, name, "-", path_hash, "-")
     dir = joinpath(parent, string(prefix, string(key.content_hash, base=16, pad=16)))
     return (parent, prefix, dir)
@@ -596,7 +600,7 @@ end
 # call OFF the reactor (e.g. from a `ProcessLaunchedMsg` async task, where the
 # destructive `_prepare_standalone_project_dir!` would race a concurrent
 # resolve into a sibling content-hash's live dir).
-_standalone_project_dir_path(df::DynamicFeature, key::ScratchProjectKey) =
+_standalone_project_dir_path(df::DynamicFeature, key::Union{ScratchProjectKey,WatchTestEnvironmentKey}) =
     _standalone_dir_components(df, key)[3]
 
 # Reactor-only: prepare the dir. Sibling dirs for the same package *path* under
@@ -604,7 +608,7 @@ _standalone_project_dir_path(df::DynamicFeature, key::ScratchProjectKey) =
 # and growth stays bounded), then the dir is `mkpath`ed. MUST run on the
 # reactor — the `rm(...; recursive=true)` would otherwise delete a sibling
 # dir that a newer content hash's child is actively resolving into.
-function _prepare_standalone_project_dir!(df::DynamicFeature, key::ScratchProjectKey)
+function _prepare_standalone_project_dir!(df::DynamicFeature, key::Union{ScratchProjectKey,WatchTestEnvironmentKey})
     parent, prefix, dir = _standalone_dir_components(df, key)
     if isdir(parent)
         for other in readdir(parent; join=true)
@@ -691,10 +695,14 @@ function _get_missing_packages(project_path::String, store_path::String)
         uuid = tryparse(UUID, uuid_str)
         uuid === nothing && continue
 
-        stdlib_ver = haskey(entry, "version") ? _stdlib_cache_version(uuid) : nothing
+        stdlib_ver = _stdlib_cache_version(uuid)
         if stdlib_ver !== nothing
-            # A stdlib recorded as registered (git-tree-sha1) or with a stale
-            # version is resolved to the bundled stdlib by the child; key it there.
+            # A stdlib recorded as registered (git-tree-sha1), with a stale
+            # version, or with no version at all is resolved to the bundled
+            # stdlib by the child; key it there. Versionless entries must be
+            # counted too — otherwise a declared stdlib (`Test`, `Pkg`, …) is
+            # never requested for indexing and every `using` of it degrades to
+            # "declared dependency but its symbols could not be indexed".
             filename = replace(string(stdlib_ver), '+'=>'_')
             cache_path = joinpath(store_path, uppercase(k_entry[1:1]), k_entry, string(uuid), string(filename, ".jstore"))
             if !isfile(cache_path)
@@ -979,6 +987,13 @@ end
 # so `input_failed_dynamic_keys` records it, which is what lets the readiness
 # gates in `derived_file_env_ready` stop waiting. Skipping it in the reconcile
 # spawn loop instead would suppress diagnostics for those files forever.
+
+# Infrastructure failures — the tool couldn't cope, the project is fine. A
+# request timeout (huge env, slow disk, cold registry) says nothing about the
+# user's Project.toml, unlike e.g. an unsatisfiable-requirements Pkg error.
+# Infra failures are logged, get one free retry, and never surface as
+# `environment_errors` diagnostics on the user's project files.
+_is_infra_failure(err) = err isa DJPRequestTimeoutException
 
 # Whether work for `key` must not be attempted again.
 function _is_exhausted(df::DynamicFeature, key::DJPKey)
@@ -1286,6 +1301,12 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
         return false
     end
 
+    # Prepare the persistent dir the child will copy the materialized test
+    # environment into (TestEnv activates a child-local temp dir that dies
+    # with the process). Reactor-only, like the scratch-project prep: the
+    # stale-sibling cleanup must not race a live child.
+    _prepare_standalone_project_dir!(df, key)
+
     _report_progress(df, _progress_key("index", key), "Starting indexer for the test environment of $(key.package_name)...", 0)
     _request_launch!(df, key)
 
@@ -1392,6 +1413,11 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
             create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
         elseif key isa ResolveEnvironmentKey
             resolve_environment(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
+        elseif key isa WatchTestEnvironmentKey
+            # Persist the materialized test env: TestEnv activates a
+            # child-local temp dir, so the child copies the result into this
+            # parent-owned dir (prepared by the WatchTestEnvironmentMsg handler).
+            index_project(djp, df.store_path, df.djp_request_timeout_seconds, _standalone_project_dir_path(df, key))
         else
             index_project(djp, df.store_path, df.djp_request_timeout_seconds)
         end
@@ -1518,18 +1544,45 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
     end
 
     message = _humanize_djp_failure(key, msg.err)
-    @warn message
     @debug "DynamicJuliaProcess failed" key exception=(msg.err, catch_backtrace())
-    # Bar this exact key from ever being retried, and charge the project's
-    # failure budget so a re-keying edit can't buy unlimited fresh attempts.
-    _record_failure!(df, key, message)
-    put!(df.out_channel, FailedResult(key, message))
 
     djp = get(df.procs, key, nothing)
     if djp !== nothing
         try kill(djp) catch; end
         delete!(df.procs, key)
     end
+
+    if _is_infra_failure(msg.err)
+        # The tool couldn't cope; the project is not at fault. Charge the
+        # budget (so this can't loop), but retry once while budget remains,
+        # and — retrying or not — never surface the failure as a diagnostic
+        # on the user's project files: log it instead. `failure_messages`
+        # holds "" so an exhausted-skip replay stays diagnostic-free too.
+        id = _djp_identity(key)
+        attempts = get(df.failure_attempts, id, 0) + 1
+        df.failure_attempts[id] = attempts
+        df.failure_messages[id] = ""
+        # Exactly one retry — even with an unlimited failure budget, looping
+        # 300 s timeouts would wedge readiness indefinitely.
+        if attempts == 1 && (df.max_failure_attempts <= 0 || df.max_failure_attempts >= 2)
+            @warn "$message Retrying."
+            _free_slot!(df, key)
+            _request_launch!(df, key)
+            return false
+        end
+        @warn message
+        push!(df.failed_projects, key)
+        put!(df.out_channel, FailedResult(key))
+        _complete_work_item!(df, key)
+        _free_slot!(df, key)
+        return false
+    end
+
+    @warn message
+    # Bar this exact key from ever being retried, and charge the project's
+    # failure budget so a re-keying edit can't buy unlimited fresh attempts.
+    _record_failure!(df, key, message)
+    put!(df.out_channel, FailedResult(key, message))
 
     # Same ordering rationale as ProcessIndexedMsg: decrement before draining.
     _complete_work_item!(df, key)
@@ -1554,14 +1607,27 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     end
 
     # A termination while the work item is still in flight means the process
-    # died before its index request completed — treat as a failure.
+    # died before its index request completed — treat as a failure. Like
+    # timeouts, this is an infra failure (the tool's child died; the project
+    # is not at fault): one retry, logged, never a user-facing diagnostic.
     if key in df.inflight && state(djp.fsm) in (DynamicProcessStarting, DynamicProcessConnected, DynamicProcessIndexing)
-        @warn "Dynamic process terminated unexpectedly" key
         message = _humanize_djp_termination(key)
-        _record_failure!(df, key, message)
-        put!(df.out_channel, FailedResult(key, message))
         try kill(djp) catch; end
         delete!(df.procs, key)
+
+        id = _djp_identity(key)
+        attempts = get(df.failure_attempts, id, 0) + 1
+        df.failure_attempts[id] = attempts
+        df.failure_messages[id] = ""
+        if attempts == 1 && (df.max_failure_attempts <= 0 || df.max_failure_attempts >= 2)
+            @warn "$message Retrying." key
+            _free_slot!(df, key)
+            _request_launch!(df, key)
+            return false
+        end
+        @warn message key
+        push!(df.failed_projects, key)
+        put!(df.out_channel, FailedResult(key))
         _complete_work_item!(df, key)
     end
 

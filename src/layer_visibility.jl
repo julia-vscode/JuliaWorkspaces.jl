@@ -1117,10 +1117,17 @@ end
 
 # Resolvability of one wildcard `using`'s target, mirroring what the
 # visibility passes would do with it: `:tree` targets always resolve;
-# `:external`/`:workspace_package` targets resolve iff their store/root
-# exists; `:unresolved` targets get the same bounded pass-2 re-attempt as
-# `_visible_names_impl` — and a re-attempt that lands on an external/package
-# target is still checked for store/root existence.
+# `:external` targets resolve iff their store exists; `:unresolved` targets
+# get the same bounded pass-2 re-attempt as `_visible_names_impl`.
+#
+# A `:workspace_package` target always counts as UNRESOLVED here: the
+# package's export view is analyzed from source, and that view is incomplete
+# whenever its include graph has computed `include` paths or it re-exports
+# names from its own deps — reporting bare missing references against it
+# produces storms of false positives (every export defined in a
+# computed-include file). Same conservatism as `_mark_cst_wildcard_using!`
+# on the whole-closure pass; drop both once the CST module view chases
+# computed includes and re-exports.
 function _wildcard_using_unresolved(rt, root, path::Vector{String}, ri::ResolvedImport)
     t = ri.target
     if t.sort === :tree
@@ -1128,12 +1135,12 @@ function _wildcard_using_unresolved(rt, root, path::Vector{String}, ri::Resolved
     elseif t.sort === :external
         return _resolve_external_module(rt, root, t.path) === nothing
     elseif t.sort === :workspace_package
-        return !haskey(derived_workspace_package_roots(rt), t.path[1])
+        return true
     else # :unresolved
         re = _reattempt_unresolved(rt, root, path, ri, Set{URI}())
         re === nothing && return true
         re.sort === :external && return _resolve_external_module(rt, root, re.path) === nothing
-        re.sort === :workspace_package && return !haskey(derived_workspace_package_roots(rt), re.path[1])
+        re.sort === :workspace_package && return true
         return false
     end
 end

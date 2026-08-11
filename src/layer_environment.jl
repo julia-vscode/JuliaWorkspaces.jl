@@ -253,6 +253,23 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
 
     active_project = input_active_project(rt)
 
+    package_folder_uri = derived_package_for_file(rt, uri)
+
+    # Files that belong to a package's test suite prefer the merged test
+    # environment: it holds the package's own deps, the `[extras]`/test-target
+    # deps (or test/Project.toml when present), and the package itself — which
+    # a resolved copy of a bare test/Project.toml need not contain.
+    if package_folder_uri !== nothing
+        pkg = derived_package(rt, package_folder_uri)
+        if pkg !== nothing && _file_needs_test_env(rt, uri2filepath(package_folder_uri), uri)
+            test_env_key = _test_environment_key(rt, package_folder_uri, pkg)
+            if test_env_key !== nothing
+                test_project_uri = derived_ready_test_environment(rt, test_env_key)
+                test_project_uri !== nothing && return test_project_uri
+            end
+        end
+    end
+
     # A non-package env folder (Project.toml, no manifest, no name/uuid) that is
     # deeper than any enclosing project/package folder owns its files once its
     # resolved scratch copy is ready. While resolution is still pending, fall
@@ -272,7 +289,6 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
     # use it directly. This handles cases like benchmark/ sub-projects that aren't packages
     # but define their own environment.
     project_folder_uri = derived_project_for_file(rt, uri)
-    package_folder_uri = derived_package_for_file(rt, uri)
 
     if project_folder_uri !== nothing
         project_is_more_specific = package_folder_uri === nothing ||
@@ -283,27 +299,8 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
     end
 
     if package_folder_uri!==nothing
-        package_folder = uri2filepath(package_folder_uri)
-        runtests_path = joinpath(package_folder, "test", "runtests.jl")
-
         pkg = derived_package(rt, package_folder_uri)
         pkg_content_hash = pkg === nothing ? UInt64(0) : pkg.content_hash
-
-        # TODO Is this lowercase the right move? On Windows for sure, not clear about other platforms
-        file_needs_test_env = lowercase(uri2filepath(uri)) == lowercase(runtests_path) ||
-            _file_has_testitems(rt, uri)
-
-        if file_needs_test_env && pkg !== nothing
-            test_env_key = _test_environment_key(rt, package_folder_uri, pkg)
-
-            if test_env_key !== nothing
-                test_project_uri = derived_ready_test_environment(rt, test_env_key)
-
-                if test_project_uri !== nothing
-                    return test_project_uri
-                end
-            end
-        end
 
         # If the file belongs to a workspace package, use the package's own project
         if package_folder_uri in derived_project_folders(rt)
@@ -398,8 +395,8 @@ Per-project gating: each file's *own* project must be settled — either its
 environment finished indexing (or failed, which is terminal too), or no work
 item is scheduled for it at all, in which case there is nothing to wait for.
 
-Files that need a test environment (`test/runtests.jl` or files with
-`@testitem`) additionally require the test-env work item to have produced a
+Files that need a test environment (anything under the package's `test/`
+folder, or files with `@testitem`) additionally require the test-env work item to have produced a
 merged test project URI, unless that item is not scheduled or failed
 terminally. Otherwise missing-ref diagnostics for test-only deps
 (TestItemRunner, Test, @testitem, @test, …) would flash as false positives
@@ -443,10 +440,7 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
     pkg = derived_package(rt, package_folder_uri)
     pkg === nothing && return true
 
-    runtests_path = joinpath(uri2filepath(package_folder_uri), "test", "runtests.jl")
-    file_needs_test_env = lowercase(uri2filepath(uri)) == lowercase(runtests_path) ||
-        _file_has_testitems(rt, uri)
-    file_needs_test_env || return true
+    _file_needs_test_env(rt, uri2filepath(package_folder_uri), uri) || return true
 
     test_env_key = _test_environment_key(rt, package_folder_uri, pkg)
     test_env_key === nothing && return true
@@ -454,6 +448,24 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
     derived_ready_test_environment(rt, test_env_key) === nothing || return true
     # No test project yet: only gate while one can still arrive.
     return !derived_test_environment_pending(rt, test_env_key)
+end
+
+"""
+    _file_needs_test_env(rt, package_folder, uri)
+
+Whether a root should be analyzed against the package's merged test
+environment: any file under `<package_folder>/test/`, or a file containing
+`@testitem`s. Test-only dependencies declared via `[extras]`+`[targets]` are
+visible only in that environment, and helper files under `test/` routinely
+become their own roots (computed `include` paths in `runtests.jl`), so the
+whole folder gets the test environment — not just `test/runtests.jl`.
+
+Must stay in agreement with the gating in `derived_file_env_ready`.
+"""
+function _file_needs_test_env(rt, package_folder::AbstractString, uri)
+    # TODO Is this lowercase the right move? On Windows for sure, not clear about other platforms
+    test_dir = lowercase(joinpath(package_folder, "test")) * Base.Filesystem.path_separator
+    return startswith(lowercase(uri2filepath(uri)), test_dir) || _file_has_testitems(rt, uri)
 end
 
 """
@@ -469,6 +481,29 @@ function _file_has_testitems(rt, uri)
     catch
         return false
     end
+end
+
+"""
+    _covering_test_env_key(rt, env_uri) -> Union{Nothing,WatchTestEnvironmentKey}
+
+The test-environment work item that already covers the non-package env folder
+at `env_uri`, i.e. the key of the enclosing package's test env when `env_uri`
+is that package's `test/` folder and a `test/runtests.jl` exists. `nothing`
+when no test-env item covers the folder.
+"""
+function _covering_test_env_key(rt, env_uri)
+    env_path = uri2filepath(env_uri)
+    lowercase(basename(env_path)) == "test" || return nothing
+
+    package_path = dirname(env_path)
+    package_uri = filepath2uri(package_path)
+    package_uri in derived_package_folders(rt) || return nothing
+    isfile(joinpath(env_path, "runtests.jl")) || return nothing
+
+    pkg = derived_package(rt, package_uri)
+    pkg === nothing && return nothing
+
+    return _test_environment_key(rt, package_uri, pkg)
 end
 
 Salsa.@derived function derived_required_dynamic_projects(rt)
@@ -507,6 +542,18 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
     for env_uri in derived_nonpackage_env_folders(rt)
         env = derived_nonpackage_env(rt, env_uri)
         env === nothing && continue
+
+        # A `<pkg>/test` folder is already covered by the package's test-env
+        # work item, which honors test/Project.toml and additionally devs the
+        # package itself. Resolving it separately would duplicate the Pkg work
+        # and, on failure, the environment_errors diagnostics. Schedule the
+        # resolve item only as a fallback once the test-env item has failed
+        # terminally.
+        covering_key = _covering_test_env_key(rt, env_uri)
+        if covering_key !== nothing && !(covering_key in input_failed_dynamic_keys(rt))
+            continue
+        end
+
         push!(required, ResolveEnvironmentKey(
             uri2filepath(env_uri),
             env.content_hash,

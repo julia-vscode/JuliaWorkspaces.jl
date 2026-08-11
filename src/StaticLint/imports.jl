@@ -158,8 +158,10 @@ function _mark_import_arg(arg, par, state, usinged, meta_dict)
                 add_to_imported_modules(state.scope, Symbol(valofid(arg)), par.val)
             elseif par isa Binding && par.val isa EXPR && CSTParser.defines_module(par.val)
                 add_to_imported_modules(state.scope, Symbol(valofid(arg)), scopeof(par.val, meta_dict))
+                _mark_cst_wildcard_using!(state.scope)
             elseif par isa Binding && par.val isa Binding && par.val.val isa EXPR && CSTParser.defines_module(par.val.val)
                 add_to_imported_modules(state.scope, Symbol(valofid(arg)), scopeof(par.val.val, meta_dict))
+                _mark_cst_wildcard_using!(state.scope)
             end
         else
            # import binds the name in the current scope — except under `as`,
@@ -172,6 +174,17 @@ function _mark_import_arg(arg, par, state, usinged, meta_dict)
 end
 
 
+
+# A wildcard `using` that attached a CST-scope module (a module analyzed from
+# source — an in-workspace deved package or an included module) supplies an
+# export view that is incomplete whenever the module's include graph has
+# computed `include` paths or the module re-exports names from its own deps.
+# Reporting bare missing references against that view produces storms of false
+# positives (every export defined in a computed-include file), so treat the
+# scope like one with an unresolved wildcard: names that DO resolve keep all
+# checks, unknown bare names are not reported. Remove once the CST module view
+# chases computed includes and re-exports.
+_mark_cst_wildcard_using!(scope::Scope) = (scope.unresolved_wildcard_import = true)
 
 function add_to_imported_modules(scope::Scope, name::Symbol, val)
     if scope.modules isa Dict

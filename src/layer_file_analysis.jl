@@ -348,11 +348,30 @@ function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged
     end
     if usinged
         if !StaticLint.is_module_toplevel_scope(state.scope)
+            # @testitem/@testsnippet bodies and other non-module-toplevel
+            # `using` sites: the export-filtered injection is the designed
+            # behavior there (macros.jl marks the scope itself when the export
+            # list is unknown), so no extra conservatism here.
             exps = StaticLint.context_exported_names(par)
             if exps !== nothing
                 nm = StaticLint.valofid(arg)
                 nm !== nothing && StaticLint.add_to_imported_modules(
                     state.scope, Symbol(nm), StaticLint.ExportFilteredContext(par, Set{String}(exps)))
+            end
+        else
+            # Module-toplevel wildcard `using` of a module from ANOTHER root
+            # (a workspace package): the bring-ins come from an export view
+            # analyzed from source, which is incomplete under computed
+            # `include` paths and re-exports (`@reexport`). Suppress bare
+            # missing-ref hints in this scope like an unresolved wildcard —
+            # the same conservatism as `_mark_cst_wildcard_using!`
+            # (whole-closure pass) and `_wildcard_using_unresolved`
+            # (file-root splice path); this covers `module TestFoo ... using
+            # Foo ... end` wrappers declared inside the analyzed file, whose
+            # module boundary stops the file-root flag.
+            ctx = StaticLint.enclosing_tree_context(state.scope)
+            if !(ctx isa TreeModuleContext) || ctx.root != par.root
+                StaticLint._mark_cst_wildcard_using!(state.scope)
             end
         end
     else
