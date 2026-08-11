@@ -1115,6 +1115,38 @@ Salsa.@derived function derived_module_unresolved_wildcard_using(rt, root, path)
     return false
 end
 
+"""
+    derived_module_has_computed_include(rt, root, path) -> Bool
+
+Whether module `path` in `root`'s tree contains an `include` whose path could
+not be determined statically (any declaring file). Such an include splices
+UNKNOWN code into exactly this module — any bare name used in the module may
+be defined by the unseen file — so bare missing-reference reporting there is
+meaningless noise, the same situation as an unresolved wildcard `using`
+(`derived_module_unresolved_wildcard_using` above). Consumers treat the two
+flags identically. Pollution does not propagate to nested modules: a Julia
+`module` does not inherit its parent's bindings, mirroring the module-boundary
+stop in `in_unresolved_wildcard_import_scope`.
+
+The user-visible explanation is the `ComputedInclude` diagnostic emitted at
+the include site (`_collect_include_diagnostics!`, layer_includes.jl).
+
+Bool-valued and id-free, like its wildcard sibling.
+"""
+Salsa.@derived function derived_module_has_computed_include(rt, root, path)
+    @debug "derived_module_has_computed_include" root=root path=path
+
+    tree = derived_module_tree(rt, root)
+    for (file_uri, file_splice) in tree.file_modules
+        inv = derived_file_inventory(rt, file_uri)
+        for inc in inv.includes
+            inc.target === nothing || continue
+            vcat(file_splice, inc.parent_module) == path && return true
+        end
+    end
+    return false
+end
+
 # Resolvability of one wildcard `using`'s target, mirroring what the
 # visibility passes would do with it: `:tree` targets always resolve;
 # `:external` targets resolve iff their store exists; `:unresolved` targets
@@ -1126,8 +1158,14 @@ end
 # names from its own deps — reporting bare missing references against it
 # produces storms of false positives (every export defined in a
 # computed-include file). Same conservatism as `_mark_cst_wildcard_using!`
-# on the whole-closure pass; drop both once the CST module view chases
-# computed includes and re-exports.
+# on the whole-closure pass.
+#
+# Deliberately NOT narrowed to `derived_module_has_computed_include(target)`:
+# that would cover the computed-include half but not macro-opaque re-exports
+# (`@reexport using InvertedIndices` — DataFrames' `Not`), which the
+# inventory cannot see. Narrow both together once export opacity is tracked;
+# drop entirely once the CST module view chases computed includes and
+# re-exports.
 function _wildcard_using_unresolved(rt, root, path::Vector{String}, ri::ResolvedImport)
     t = ri.target
     if t.sort === :tree

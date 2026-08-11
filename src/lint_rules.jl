@@ -164,6 +164,7 @@ const LINT_RULES = LintRule[
             StaticLint.IncludePathContainsNULL,
             StaticLint.FileTooBig,
             StaticLint.FileNotAvailable,
+            StaticLint.ComputedInclude,
         ]),
     LintRule(id = :missing_reference, tier = TierSemantic,
         severity_default = :warning, severity_strict = :warning,
