@@ -990,19 +990,53 @@ function check_lazy(x::EXPR, meta_dict)
     end
 end
 
-is_never_datatype(b, env::ExternalEnv) = false
-is_never_datatype(b::SymbolServer.DataTypeStore, env::ExternalEnv) = false
-function is_never_datatype(b::SymbolServer.FunctionStore, env::ExternalEnv)
+# The resolved ref of `b`'s assignment RHS (`const Foo = Int16` → `Int16`'s
+# ref), unwrapping `where`s and curlies (`const Foo = Vector{Int}` → `Vector`).
+# `nothing` when `b` isn't a plain assignment or the RHS isn't a name.
+function _aliased_type_ref(b::Binding, meta_dict)
+    v = b.val
+    (v isa EXPR && isassignment(v) && v.args !== nothing && length(v.args) == 2) || return nothing
+    rhs = CSTParser.rem_wheres_decls(v.args[2])
+    if iscurly(rhs) && rhs.args !== nothing && length(rhs.args) >= 1
+        rhs = rhs.args[1]
+    end
+    if isidentifier(rhs)
+        return refof(rhs, meta_dict)
+    elseif is_getfield_w_quotenode(rhs)
+        return refof_maybe_getfield(rhs, meta_dict)
+    end
+    return nothing
+end
+
+is_never_datatype(b, env::ExternalEnv, meta_dict=nothing) = false
+is_never_datatype(b::SymbolServer.DataTypeStore, env::ExternalEnv, meta_dict=nothing) = false
+function is_never_datatype(b::SymbolServer.FunctionStore, env::ExternalEnv, meta_dict=nothing)
     !(SymbolServer._lookup(b.extends, getsymbols(env)) isa SymbolServer.DataTypeStore)
 end
-function is_never_datatype(b::Binding, env::ExternalEnv)
+function is_never_datatype(b::Binding, env::ExternalEnv, meta_dict=nothing, depth=0)
+    depth > 20 && return false
     if b.val isa Binding
-        return is_never_datatype(b.val, env)
+        return is_never_datatype(b.val, env, meta_dict, depth + 1)
     elseif b.val isa SymbolServer.FunctionStore
         return is_never_datatype(b.val, env)
     elseif CoreTypes.isdatatype(b.type)
         return false
-    elseif b.type !== nothing
+    end
+    # `Foo = Int16` / `const A = B` chains: what the alias names decides — the
+    # binding's own inferred type can't (a store type's name resolves to its
+    # constructor FunctionStore, so the alias infers as `Function`).
+    if meta_dict !== nothing && (r = _aliased_type_ref(b, meta_dict)) !== nothing
+        if r isa TreeRef
+            # a cross-file alias target (an inventory item) can't be inspected;
+            # an external one resolves through the env like a direct annotation
+            r.kind === :external_symbol || return false
+            r = resolve_treeref_store(r, env)
+            r === nothing && return false
+        end
+        r isa Binding && return is_never_datatype(r, env, meta_dict, depth + 1)
+        return is_never_datatype(r, env)
+    end
+    if b.type !== nothing
         if !any(x -> x isa SymbolServer.DataTypeStore, get_eventual_datatype(ref, env) for ref in b.refs)
             return true
         end
@@ -1014,7 +1048,7 @@ function check_datatype_decl(x::EXPR, env::ExternalEnv, meta_dict)
     # Only call in function signatures?
     if isdeclaration(x) && parentof(x) isa EXPR && iscall(parentof(x))
         if (dt = refof_maybe_getfield(last(x.args), meta_dict)) !== nothing
-            if is_never_datatype(dt, env)
+            if is_never_datatype(dt, env, meta_dict)
                 seterror!(x, InvalidTypeDeclaration, meta_dict)
             end
         elseif CSTParser.isliteral(last(x.args))
