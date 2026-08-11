@@ -1058,12 +1058,39 @@ function is_never_datatype(b::Binding, env::ExternalEnv, meta_dict=nothing, dept
         r isa Binding && return is_never_datatype(r, env, meta_dict, depth + 1)
         return is_never_datatype(r, env)
     end
+    # A curly-parameterised function definition (`Fill{T, N}(x) = ...`) is a
+    # CONSTRUCTOR: its name necessarily denotes a type. `@eval` constructor
+    # loops hoist such definitions as bindings that SHADOW the type's own
+    # binding with an assignment inferred as `Function` (FillArrays'
+    # `$STYPE{T, N}(F::$TYPE{T, N}) = F` shadowed `AbstractFill`, flagging
+    # all 53 later `::AbstractFill` declarations in the file), so a
+    # constructor-shaped `val` must count as a type, not a function.
+    if b.val isa EXPR && _defines_constructor_method(b.val)
+        return false
+    end
     if b.type !== nothing
         if !any(x -> x isa SymbolServer.DataTypeStore, get_eventual_datatype(ref, env) for ref in b.refs)
             return true
         end
     end
     return false
+end
+
+# Whether `x` defines a method whose signature name is curly-parameterised
+# (`Name{...}(...)`) — an unambiguous constructor definition.
+function _defines_constructor_method(x::EXPR)
+    CSTParser.defines_function(x) || return false
+    sig = CSTParser.get_sig(x)
+    while sig isa EXPR && (headof(sig) === :where || isbracketed(sig)) &&
+            sig.args !== nothing && !isempty(sig.args)
+        sig = sig.args[1]
+    end
+    (sig isa EXPR && iscall(sig) && sig.args !== nothing && !isempty(sig.args)) || return false
+    name = sig.args[1]
+    while name isa EXPR && isbracketed(name) && name.args !== nothing && !isempty(name.args)
+        name = name.args[1]
+    end
+    return name isa EXPR && headof(name) === :curly
 end
 
 function check_datatype_decl(x::EXPR, env::ExternalEnv, meta_dict)

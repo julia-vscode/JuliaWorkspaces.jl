@@ -1858,6 +1858,35 @@ end
     @test errorof(cst.args[7].args[1].args[2], meta_dict) === InvalidTypeDeclaration
 end
 
+@testitem "constructor definitions do not shadow the type in declarations" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidTypeDeclaration
+
+    any_error(x, meta_dict, err) =
+        errorof(x, meta_dict) === err ||
+        (x.args !== nothing && any(a -> any_error(a, meta_dict, err), x.args))
+
+    # A curly-parameterised method (`Fill{T, N}(x) = ...`) is a constructor;
+    # even when an @eval loop hoists it as a binding that shadows the type's
+    # own binding (inferred `Function`), the name still denotes a type.
+    cst, meta_dict = parse_and_pass("""
+        abstract type AbstractFill{T, N} end
+        struct Fill{T, N} <: AbstractFill{T, N} end
+        for TYPE in (:Fill,)
+            @eval (AbstractFill{T, N}(F::(\$TYPE){T, N}) where {T, N}) = F
+        end
+        g(A::AbstractFill) = A
+        h(F::Fill) = F
+        """)
+    @test !any_error(cst, meta_dict, InvalidTypeDeclaration)
+
+    # A genuine non-type is still flagged.
+    cst, meta_dict = parse_and_pass("""
+        notype() = 1
+        g(x::notype) = x
+        """)
+    @test any_error(cst, meta_dict, InvalidTypeDeclaration)
+end
+
 @testitem "interpret @eval" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: scopeof, scopehasbinding, errorof, IncorrectCallArgs
 
