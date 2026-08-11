@@ -1147,6 +1147,33 @@ Salsa.@derived function derived_module_has_computed_include(rt, root, path)
     return false
 end
 
+"""
+    derived_module_has_opaque_macrocall(rt, root, path) -> Bool
+
+Whether module `path` in `root`'s tree contains a top-level macrocall whose
+effects the analyzer does not model (`InventoryOpaqueMacro`,
+layer_inventory.jl). Such an expansion may define arbitrary names in exactly
+this module — invocation shape carries no information about that
+(`@with_kw struct Para ... end` also generates a hidden `@unpack_Para`) — so
+bare missing-reference reporting there is unreliable, the same situation as
+[`derived_module_has_computed_include`](@ref) above; consumers treat all
+these flags identically. Pollution does not cross module boundaries.
+
+Bool-valued and id-free, like its siblings.
+"""
+Salsa.@derived function derived_module_has_opaque_macrocall(rt, root, path)
+    @debug "derived_module_has_opaque_macrocall" root=root path=path
+
+    tree = derived_module_tree(rt, root)
+    for (file_uri, file_splice) in tree.file_modules
+        inv = derived_file_inventory(rt, file_uri)
+        for om in inv.opaque_macros
+            vcat(file_splice, om.parent_module) == path && return true
+        end
+    end
+    return false
+end
+
 # Resolvability of one wildcard `using`'s target, mirroring what the
 # visibility passes would do with it: `:tree` targets always resolve;
 # `:external` targets resolve iff their store exists; `:unresolved` targets

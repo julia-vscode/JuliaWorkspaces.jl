@@ -4540,8 +4540,10 @@ end
         @test isempty(collect_hints(cst, meta_dict, jw))
     end
 
-    # Function definitions re-enable checking: macros wrapping a function
-    # (`@inline`-style) rarely rewrite its body.
+    # An unknown-effect macrocall at TOP LEVEL marks the whole toplevel
+    # scope (its expansion may define arbitrary names in the module — see
+    # handle_macro's fall-through), so even the wrapped function's body
+    # reports no bare missing refs. Known macros (next case) keep checking.
     let (cst, meta_dict, jw) = parse_and_pass("""
         macro foo(x)
             x
@@ -4550,9 +4552,7 @@ end
             undefined_in_body
         end
         """)
-        hints = collect_hints(cst, meta_dict, jw)
-        @test length(hints) == 1
-        @test CSTParser.valof(hints[1][2]) == "undefined_in_body"
+        @test isempty(collect_hints(cst, meta_dict, jw))
     end
 
     # Base macros with normal semantics keep function bodies fully linted.

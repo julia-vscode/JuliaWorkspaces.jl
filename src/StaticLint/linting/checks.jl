@@ -131,6 +131,19 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
     # may contain invalid code
     is_test_throws_macrocall(x, env, meta_dict) && return
 
+    # Value-semantics checks are meaningless inside the arguments of a macro
+    # whose expansion the analyzer does not model: the argument code may be a
+    # DSL (match/capture patterns, recipe attributes, rewrite rules) with
+    # entirely different semantics, and every rule below has measured
+    # 90-100% false-positive rates there. Known macros
+    # (`EFFECT_FREE_MACROS`/`HANDLED_MACROS`, string macros) keep full
+    # checking of their pass-through arguments; the doc wrapper
+    # (`:globalrefdoc`) never matches `ismacroname` and stays transparent.
+    if CSTParser.ismacrocall(x) && x.args !== nothing && length(x.args) >= 1 &&
+            CSTParser.ismacroname(x.args[1]) && !_macro_effects_known(x.args[1])
+        return
+    end
+
     # Do checks
     opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
     opts.iter && check_loop_iter(x, env, meta_dict)

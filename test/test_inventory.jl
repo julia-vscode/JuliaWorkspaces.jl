@@ -1,6 +1,6 @@
 @testitem "inventory types: structural equality across separately built instances" begin
     using JuliaWorkspaces: FileInventory, InventoryItem, InventoryImport, InventoryExport,
-        InventoryInclude, InventoryModule, ImportSymbol
+        InventoryInclude, InventoryModule, InventoryOpaqueMacro, ImportSymbol
     using JuliaWorkspaces.URIs2: URI
 
     make() = FileInventory(
@@ -10,6 +10,7 @@
         [InventoryExport(4, 104, :export, ["f"], String[])],
         [InventoryInclude(5, 105, URI("file:///pkg/src/a.jl"), String[])],
         [InventoryModule(6, 106, "M", false, String[])],
+        [InventoryOpaqueMacro(7, 107, ["M"])],
     )
 
     a = make()
@@ -20,7 +21,7 @@
 
     c = FileInventory(
         [InventoryItem(1, 101, "g", String[], :function, "g(x)", String[], String[])],
-        a.imports, a.exports, a.includes, a.modules)
+        a.imports, a.exports, a.includes, a.modules, a.opaque_macros)
     @test !isequal(a, c)
 end
 
@@ -909,17 +910,21 @@ end
         push!(visited, (order=order, id=id, head=CSTParser.headof(x), offset=offset))
     end
 
-    # 3 item-like nodes: foo's `function` (unwrapped from the macrocall),
-    # baz's assignment (unwrapped from the call-form macrocall, past the
-    # opening paren), and the `@testset` macrocall itself (isolating scope —
-    # stays opaque; `inner` is never visited).
-    @test [v.order for v in visited] == collect(1:3)
+    # 5 nodes: `Salsa.@derived` and `@bar` are effect-unknown macros, so each
+    # emits its macrocall row (for `opaque_macros`) BEFORE its transparently
+    # walked contents — foo's `function` and baz's assignment (past the
+    # call-form's opening paren). `@testset` is a KNOWN isolating-scope macro:
+    # one opaque item, no extra row, `inner` never visited.
+    @test [v.order for v in visited] == collect(1:5)
     @test allunique([v.id for v in visited])
-    @test visited[1].head === :function
-    @test src[visited[1].offset + 1] == 'f'   # `function ...`
-    @test src[visited[2].offset + 1] == 'b'   # `baz() = 1`
-    @test visited[3].head === :macrocall
-    @test length(visited) == 3
+    @test visited[1].head === :macrocall
+    @test src[visited[1].offset + 1] == 'S'   # `Salsa.@derived ...`
+    @test visited[2].head === :function
+    @test src[visited[2].offset + 1] == 'f'   # `function ...`
+    @test visited[3].head === :macrocall      # `@bar(...)`
+    @test src[visited[4].offset + 1] == 'b'   # `baz() = 1`
+    @test visited[5].head === :macrocall      # `@testset`
+    @test length(visited) == 5
 end
 
 @testitem "inventory extraction: macro-wrapped declarations, imports, and includes surface" setup=[InventoryWS] begin
