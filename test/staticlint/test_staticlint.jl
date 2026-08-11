@@ -3010,6 +3010,18 @@ end
     cst, meta_dict, jw = parse_and_pass("arr = []; [i for i in 1:length(arr)]")
     @test length(collect_hints(cst, meta_dict, jw)) == 0
 
+    # A range that doesn't start at 1 has no `eachindex`/`axes` rewrite
+    # (look-back loops, Horner tails) — not flagged.
+    cst, meta_dict, jw = parse_and_pass("arr = []; [arr[i] + arr[i-1] for i in 2:length(arr)]")
+    @test isempty(collect_hints(cst, meta_dict, jw))
+    cst, meta_dict, jw = parse_and_pass("""
+    arr = []
+    for i in 2:length(arr)
+        arr[i]
+    end
+    """)
+    @test isempty(collect_hints(cst, meta_dict, jw))
+
     cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for _ in 1:length(arr)

@@ -285,7 +285,7 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `environment_errors` | `info` | A project/test environment that could not be resolved, reported on its `Project.toml` |
 | `incorrect_call_args` | `info` | Wrong argument count/type; calls to method-less functions |
 | `incorrect_iter_spec` | `info` | Loop iterators that will likely error |
-| `index_from_length` | `info` | Indexing off `length`/`size` instead of `eachindex`/`axes` |
+| `index_from_length` | `info` | Indexing off `1:length(...)`/`1:size(...)` instead of `eachindex`/`axes`. Ranges that don't start at 1 (`2:length(x)`) are not flagged — they have no direct rewrite |
 | `nothing_comparison` | `info` | `== nothing` / `!= nothing` instead of `isnothing`/`===` |
 | `const_if_condition` | `info` | Boolean literal or unbracketed assignment as an `if` condition |
 | `pointless_boolean` | `info` | `&&`/`\|\|` whose first argument is a boolean literal |

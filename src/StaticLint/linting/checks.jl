@@ -860,6 +860,12 @@ function check_incorrect_iter_spec(x, body, env, meta_dict)
         elseif iscall(rng) && valof(rng.args[1]) == ":" &&
             length(rng.args) === 3 &&
             headof(rng.args[2]) === :INTEGER &&
+            # Only `1:length(x)` has an `eachindex`/`axes` rewrite. A range
+            # starting elsewhere (`2:length(x)` — Horner tails, look-back
+            # loops using `x[i-1]`) cannot take the suggested fix, so the
+            # diagnostic would only be noise (40% of the flags in a top-100
+            # registry sweep were of this shape).
+            valof(rng.args[2]) == "1" &&
             iscall(rng.args[3]) &&
             length(rng.args[3].args) > 1 && (
                 refof(rng.args[3].args[1], meta_dict) === getsymbols(env)[:Base][:length] ||
