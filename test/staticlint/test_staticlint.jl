@@ -3508,6 +3508,16 @@ end
             end""")
         @test any(errorof(x, md) === UnusedBinding for (_, x) in collect_hints(cst, md, jw))
     end
+
+    # An assignment inside a field *value* is a normal local of the enclosing
+    # scope: the literal introduces no scope of its own.
+    let (cst, md, jw) = parse_and_pass("""
+            function f()
+                nt = (a = begin y = 2; y end, b = 3)
+                return nt, y
+            end""")
+        @test isempty(collect_hints(cst, md, jw))
+    end
 end
 
 @testitem "@label is not an unused binding (julia-vscode#3844)" setup=[shared_static_lint] begin
