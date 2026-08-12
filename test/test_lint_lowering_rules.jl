@@ -160,6 +160,55 @@ end
     @test isempty(ll_codes(jw, :unused_binding))
 end
 
+@testitem "lowering lint: test blocks are analysed in their own scope" setup=[LoweringLintWS] begin
+    # A test block is ordinary code, so its bindings are worth checking. The
+    # body must be materialised as a SCOPE though: at module level its
+    # assignments would be globals, which this rule ignores by design.
+    jw = ll_workspace("@testset \"t\" begin\n    q = 1\n    @test true\nend\n")
+    @test length(ll_codes(jw, :unused_binding)) == 1
+
+    jw = ll_workspace("@testitem \"t\" begin\n    f(a, b) = a\n    @test f(1, 2) == 1\nend\n")
+    codes = ll_codes(jw, :unused_function_argument)
+    @test length(codes) == 1
+    @test occursin("`b`", codes[1].message)
+
+    # Used bindings stay quiet.
+    jw = ll_workspace("@testset \"t\" begin\n    q = 1\n    @test q == 1\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+
+    # `@testset for` binds its loop variable in the macro, not the block, so
+    # that shape stays opaque rather than inventing bindings.
+    jw = ll_workspace("@testset \"t\" for i in 1:2\n    @test true\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+end
+
+@testitem "lowering lint: definitions inside unexpandable macros are left alone" setup=[LoweringLintWS] begin
+    # Below a macrocall we cannot expand, the macro decides what its arguments
+    # mean. `@define_diffrule Base.:+(x) = :(1)` looks like a method definition
+    # but `x` is pattern syntax that cannot be removed — analysing it as a
+    # signature produced false positives.
+    jw = ll_workspace("@define_diffrule Base.:+(x) = :(1)\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    jw = ll_workspace("@with_kw struct S\n    a::Int = 1\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+
+    # Macros we DO understand stay analysable.
+    jw = ll_workspace("@inline f(x, y) = x\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 1
+
+    # This must stay a NARROW blocklist. Suppressing every definition under a
+    # macro we cannot expand was measured on the corpus and cost far more than
+    # it saved — a docstring is a `Core.@doc` macrocall, so it blinded the
+    # analysis to every documented definition (~353 false negatives to remove
+    # ~13 false positives).
+    jw = ll_workspace("\"\"\"\ndocs\n\"\"\"\nis_fw(T::Type) = false\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 1
+
+    jw = ll_workspace("@static if true\n    f(x, y) = x\nend\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 1
+end
+
 @testitem "lowering lint: names mentioned inside a quote count as used" setup=[LoweringLintWS] begin
     # A quote lowers to inert data, so a name mentioned only inside one is not
     # lexically read — but renaming it changes what the quoted code means, and

@@ -101,18 +101,62 @@ end
 # and only the widest is the whole item. Relying on preorder order alone picked
 # the inner `call` for `@inline f(x, y) = x`, which materialised the signature
 # without its body and hid every binding in it.
-function _index_outermost_by_first_byte_v2!(dict::Dict{Int,JS2.SyntaxTree}, st, content::AbstractString)
+function _index_outermost_by_first_byte_v2!(dict::Dict{Int,JS2.SyntaxTree}, st, content::AbstractString,
+                                            under_opaque::Bool = false)
     fb = _content_start(content, Int(JS2.first_byte(st)))
-    prev = get(dict, fb, nothing)
-    if prev === nothing || JS2.last_byte(st) > JS2.last_byte(prev)
-        dict[fb] = st
+    if !under_opaque
+        prev = get(dict, fb, nothing)
+        if prev === nothing || JS2.last_byte(st) > JS2.last_byte(prev)
+            dict[fb] = st
+        end
     end
     if !JS2.is_leaf(st)
+        # Below a macrocall we cannot expand, the macro decides what its
+        # arguments mean, so a nested definition must not be analysed as one:
+        # `@define_diffrule Base.:+(x) = :(1)` looks like a method but `x` is
+        # pattern syntax that cannot be removed. Transparent and test-block
+        # macros are exempt — those we do understand.
+        child_opaque = under_opaque || _is_uninterpretable_macrocall(st)
         for c in JS2.children(st)
-            _index_outermost_by_first_byte_v2!(dict, c, content)
+            _index_outermost_by_first_byte_v2!(dict, c, content, child_opaque)
         end
     end
     return dict
+end
+
+# Macros whose argument merely LOOKS like a definition. `@define_diffrule
+# Base.:+(x) = :(1)` is a rule-table entry, not a method: `x` is pattern syntax
+# and cannot be removed, so analysing it as a signature invents findings.
+#
+# Deliberately a blocklist, not "everything we cannot expand". The broad rule
+# was measured on the corpus and cost far more than it saved: it also suppressed
+# definitions under `@static if …` and — worst — under `Core.@doc`, i.e. every
+# docstring'd definition, adding ~353 false negatives to remove ~13 false
+# positives. Add names here only with sweep evidence.
+const DEFINITION_SHAPED_DSL_MACROS = Set([
+    "define_diffrule", "with_kw", "with_kw_noshow", "attributes",
+])
+
+function _is_uninterpretable_macrocall(st)
+    JS2.kind(st) == JS2.K"macrocall" || return false
+    cs = JS2.children(st)
+    (cs === nothing || isempty(cs)) && return false
+    nm = _macro_name_from_syntax(cs[1])
+    nm === nothing && return false
+    return nm in DEFINITION_SHAPED_DSL_MACROS
+end
+
+function _macro_name_from_syntax(st)
+    node = st
+    while !JS2.is_leaf(node)
+        cs = JS2.children(node)
+        (cs === nothing || isempty(cs)) && return nothing
+        node = cs[end]
+    end
+    v = node.value
+    v isa Union{Symbol,AbstractString} || return nothing
+    s = string(v)
+    return startswith(s, "@") ? s[2:end] : s
 end
 
 # Same association scheme as `_foreach_item_syntax_node`: inventory item ids
@@ -214,6 +258,17 @@ const TRANSPARENT_MACRO_NAMES = Set([
     "nospecialize", "specialize", "inbounds",
 ])
 
+# Test-block macros wrap ordinary code in a scope. The body is worth analysing —
+# test code is code — so the lowering frame materialises the trailing block.
+#
+# This is deliberately NOT the same judgement as the inventory's
+# `_is_isolated_scope_macrocall` (layer_inventory.jl:384), which governs whether
+# definitions inside the block become module-level ITEMS. They stay isolated
+# there; only what this layer looks inside of changes.
+const TEST_BLOCK_MACRO_NAMES = Set([
+    "testitem", "testset", "safetestset", "testmodule", "testsnippet",
+])
+
 function _macro_name_string(bt::BodyTree{V2Kind})
     node = bt
     # `Base.@propagate_inbounds` nests the name inside a `.`; take the trailing leaf.
@@ -231,9 +286,23 @@ function _transparent_macro_target(bt::BodyTree{V2Kind})
     bt.kind == JS2.K"macrocall" || return nothing
     (bt.children === nothing || length(bt.children) < 2) && return nothing
     nm = _macro_name_string(bt.children[1])
-    (nm === nothing || !(nm in TRANSPARENT_MACRO_NAMES)) && return nothing
+    nm === nothing && return nothing
     # The wrapped form is always last: `@assume_effects :total function f() end`.
-    return bt.children[end]
+    return nm in TRANSPARENT_MACRO_NAMES ? bt.children[end] : nothing
+end
+
+"""
+The block a test-block macro wraps (`@testset "name" begin … end`), else
+`nothing`. Only the block form qualifies: `@testset for i in …` binds its loop
+variable in the macro, not in the block, so that shape stays opaque.
+"""
+function _test_block_target(bt::BodyTree{V2Kind})
+    bt.kind == JS2.K"macrocall" || return nothing
+    (bt.children === nothing || length(bt.children) < 2) && return nothing
+    nm = _macro_name_string(bt.children[1])
+    (nm === nothing || !(nm in TEST_BLOCK_MACRO_NAMES)) && return nothing
+    last = bt.children[end]
+    return last.kind == JS2.K"block" ? last : nothing
 end
 
 # Semi-transparent handling of an opaque macrocall's subtree: keep every
@@ -296,6 +365,19 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
                 addr[] += _bt_node_count(c)
             end
             return _materialize(target, addr, qdepth)
+        end
+        test_block = _test_block_target(bt)
+        if test_block !== nothing
+            for c in bt.children[1:end-1]
+                addr[] += _bt_node_count(c)
+            end
+            body = _materialize(test_block, addr, qdepth)
+            # A test block runs in its own scope, so its assignments are locals,
+            # not module globals. `let … end` is the smallest source-level form
+            # that says so; the wrapper nodes are synthetic and consume no
+            # addresses.
+            bindings = JS2.SyntaxTree(JS2.K"block", JS2.SyntaxTree[], nothing, src, nothing)
+            return JS2.SyntaxTree(JS2.K"let", JS2.SyntaxTree[bindings, body], nothing, src, nothing)
         end
     end
     if qdepth == 0 && _is_opaque_macrocall(bt)
