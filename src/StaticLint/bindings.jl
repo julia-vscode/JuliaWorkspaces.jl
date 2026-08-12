@@ -197,6 +197,14 @@ function mark_binding!(x::EXPR, meta_dict, val=x)
         # `isidentifier` guard keeps function-definition assignments (`f() = 0`,
         # whose LHS is a call) on the get_name path below.
         mark_binding!(x.args[1], meta_dict, val)
+    elseif isbinarysyntax(x) && valof(headof(x)) == ">:" && length(x.args) == 2 && isidentifier(x.args[1])
+        # `T >: Missing` in a `where` clause: a LOWER-bounded typevar.
+        # `CSTParser.issubtypedecl`/`get_name` only understand `<:`, so the
+        # generic fallback below would create a NAMELESS binding — `T` then
+        # neither resolves in the signature/body (missing_reference) nor
+        # registers as used (unused_type_parameter).
+        ensuremeta(x, meta_dict)
+        getmeta(x, meta_dict).binding = Binding(x.args[1], val, nothing, [])
     elseif !(isunarysyntax(x) && valof(headof(x)) == "::")
         ensuremeta(x, meta_dict)
         getmeta(x, meta_dict).binding = Binding(CSTParser.get_name(x), val, nothing, [])
