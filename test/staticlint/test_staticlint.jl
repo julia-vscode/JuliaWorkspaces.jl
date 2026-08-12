@@ -5097,3 +5097,48 @@ end
         end
         """))
 end
+
+@testitem "type_piracy credits types defined in sibling files" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!, get_diagnostic, set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    piracy(files...) = begin
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///tpp/Project.toml"), SourceText("""
+        name = "TPP"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef30"
+        version = "0.1.0"
+        """, "toml")))
+        add_file!(jw, TextFile(URI("file:///tpp/Manifest.toml"), SourceText("""
+        julia_version = "1.11.0"
+        manifest_format = "2.0"
+        project_hash = "abc"
+
+        [deps]
+        """, "toml")))
+        for (path, src) in files
+            add_file!(jw, TextFile(URI("file:///tpp/src/" * path), SourceText(src, "julia")))
+        end
+        set_input_env_ready!(jw.runtime, true)
+        n = 0
+        for (path, _) in files
+            n += count(d -> contains(d.message, "imported function has been extended"),
+                       get_diagnostic(jw, URI("file:///tpp/src/" * path)))
+        end
+        n
+    end
+
+    # A method whose signature mentions a type defined in a SIBLING included
+    # file (resolved as a TreeRef in per-file mode) extends over an owned
+    # type — not piracy, even with a literal type parameter.
+    @test piracy(
+        "TPP.jl" => "module TPP\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        "a.jl" => "struct Stream{T} end\n",
+        "b.jl" => "import Base: getindex\ngetindex(s::Stream{true}, i) = 1\n") == 0
+
+    # Extending an imported Base function over entirely foreign types is
+    # still piracy.
+    @test piracy(
+        "TPP.jl" => "module TPP\nimport Base: length\nlength(x::Vector{Int}) = 1\nend\n") == 1
+end

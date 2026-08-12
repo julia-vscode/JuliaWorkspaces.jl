@@ -1545,7 +1545,16 @@ end
 
 function refers_to_nonimported_type(arg::EXPR, meta_dict)
     arg = CSTParser.rem_wheres(arg)
-    if hasref(arg, meta_dict) && refof(arg, meta_dict) isa Binding
+    r = hasref(arg, meta_dict) ? refof(arg, meta_dict) : nothing
+    if r isa Binding
+        return true
+    elseif r isa TreeRef && r.kind !== :external_symbol
+        # Per-file traversal mode: a type resolved through the module tree
+        # (defined in a SIBLING file of this package — `HTTP.Stream` used in
+        # http_stream.jl but defined in http_server.jl) is owned by the
+        # package just like a same-file `Binding`; a method mentioning it is
+        # not piracy. `:external_symbol` stand-ins are genuinely foreign and
+        # keep the check.
         return true
     elseif isunarysyntax(arg) && (valof(headof(arg)) == "::" || valof(headof(arg)) == "<:")
         return refers_to_nonimported_type(arg.args[1], meta_dict)
