@@ -993,7 +993,19 @@ end
 # user's Project.toml, unlike e.g. an unsatisfiable-requirements Pkg error.
 # Infra failures are logged, get one free retry, and never surface as
 # `environment_errors` diagnostics on the user's project files.
-_is_infra_failure(err) = err isa DJPRequestTimeoutException
+_is_infra_failure(err) = err isa DJPRequestTimeoutException || _is_depot_lock_failure(err)
+
+# A depot file-lock collision (`IOError: stat(...manifest_usage.toml.pid...):
+# permission denied (EACCES)` during concurrent Pkg operations) says nothing
+# about the analyzed project — same infra class as a request timeout.
+function _is_depot_lock_failure(err)
+    msg = try
+        sprint(showerror, err)
+    catch
+        return false
+    end
+    return occursin("IOError", msg) && (occursin("EACCES", msg) || occursin("EBUSY", msg))
+end
 
 # Whether work for `key` must not be attempted again.
 function _is_exhausted(df::DynamicFeature, key::DJPKey)

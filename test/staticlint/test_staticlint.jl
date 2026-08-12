@@ -3117,7 +3117,7 @@ end
     cst, meta_dict, jw = parse_and_pass("arr = []; [1 for _ in 1:length(arr)]")
     @test isempty(collect_hints(cst, meta_dict, jw))
     cst, meta_dict, jw = parse_and_pass("arr = []; [arr[i] for i in 1:length(arr)]")
-    @test length(collect_hints(cst, meta_dict, jw)) == 2
+    @test length(collect_hints(cst, meta_dict, jw)) == 1
     cst, meta_dict, jw = parse_and_pass("arr = []; [i for i in 1:length(arr)]")
     @test length(collect_hints(cst, meta_dict, jw)) == 0
 
@@ -3145,7 +3145,7 @@ end
         arr[i]
     end
     """)
-    @test length(collect_hints(cst, meta_dict, jw)) == 2
+    @test length(collect_hints(cst, meta_dict, jw)) == 1
     cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for i in 1:length(arr)
@@ -3166,7 +3166,7 @@ end
         arr[i] + arr[j]
     end
     """)
-    @test length(collect_hints(cst, meta_dict, jw)) == 4
+    @test length(collect_hints(cst, meta_dict, jw)) == 2
     cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for i in 1:length(arr), j in 1:length(arr)
@@ -3218,7 +3218,7 @@ end
         end
     end
     """)
-    @test length(collect_hints(cst, meta_dict, jw)) == 4
+    @test length(collect_hints(cst, meta_dict, jw)) == 2
 
     cst, meta_dict, jw = parse_and_pass("""
     function f(arr)
@@ -3227,7 +3227,7 @@ end
         end
     end
     """)
-    @test length(collect_hints(cst, meta_dict, jw)) == 4
+    @test length(collect_hints(cst, meta_dict, jw)) == 2
 end
 
 @testitem "assigned but not used with loops" setup=[shared_static_lint] begin
@@ -5191,4 +5191,27 @@ end
         f(x) where {T >: Missing} = x
         """)
     @test any(SL.errorof(x, meta_dict) === SL.UnusedTypeParameter for (_, x) in collect_hints(cst, meta_dict, jw))
+@testitem "small FP batch: static-if toggle, one IndexFromLength per loop" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    errs(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [SL.errorof(x, meta_dict) for (_, x) in collect_hints(cst, meta_dict, jw) if SL.errorof(x, meta_dict) !== nothing]
+    end
+
+    # `@static if false` is a deliberate compile-time toggle.
+    @test !(SL.ConstIfCondition in errs("@static if false\n    f() = 1\nend\n"))
+    # A bare `if false` still flags.
+    @test SL.ConstIfCondition in errs("if false\n    f() = 1\nend\n")
+
+    # One diagnostic per 1:length loop, not one at the iterator spec AND one
+    # at each use site.
+    e = errs("""
+        function g(args)
+            for i = 1:length(args)
+                println(args[i])
+            end
+        end
+        """)
+    @test count(==(SL.IndexFromLength), e) == 1
 end
