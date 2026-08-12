@@ -372,17 +372,6 @@ function maybe_getfield(k::Symbol, m::ModuleStore, envstore)
                 end
             end
         end
-        # Every non-bare `module` implicitly does `using Base`, but store
-        # builders frequently miss it in `used_modules` (Base.Meta records
-        # only `[:Core]` while its runtime usings are `[Base]`). Qualified
-        # access through that implicit using is valid Julia (`Meta.dump` is
-        # Base's `dump`), so consult Base's exports as a final fallback.
-        if :Base ∉ m.used_modules && envstore isa EnvStore && haskey(envstore, :Base)
-            bs = envstore[:Base]
-            if bs isa ModuleStore && k in bs.exportednames && haskey(bs.vals, k)
-                return bs.vals[k]
-            end
-        end
     end
 end
 
