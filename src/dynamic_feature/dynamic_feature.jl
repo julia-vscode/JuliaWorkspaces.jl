@@ -997,23 +997,38 @@ _is_infra_failure(err) = err isa DJPRequestTimeoutException || _is_depot_lock_fa
 
 # A depot file-lock collision (`IOError: stat(...manifest_usage.toml.pid...):
 # permission denied (EACCES)` during concurrent Pkg operations) says nothing
-# about the analyzed project — same infra class as a request timeout.
+# about the analyzed project - same infra class as a request timeout. Errors on
+# arbitrary project files still belong to the project, even when their errno is
+# EACCES or EBUSY.
 #
 # The parent hits the same contention on its own store work (`isfile` under an
 # unreadable store, `mkpath`/`mktempdir` of the download dir), and there the
 # real exception is in hand, so match on its type and errno. A failure raised in
 # the child only crosses the process boundary as rendered text inside a
 # `JSONRPCError`, so that one case has no type left to compare.
+function _mentions_infrastructure_path(msg::AbstractString)
+    occursin(r"(?:manifest|artifact|scratch|preferences)_usage\.toml\.pid", msg) ||
+        occursin("_downloads", msg)
+end
+
 function _is_depot_lock_failure(err)
     if err isa Base.IOError
-        return err.code == Base.UV_EACCES || err.code == Base.UV_EBUSY
+        (err.code == Base.UV_EACCES || err.code == Base.UV_EBUSY) || return false
+        msg = try
+            sprint(showerror, err)
+        catch
+            return false
+        end
+        return _mentions_infrastructure_path(msg)
     elseif err isa JSONRPC.JSONRPCError
         msg = try
             sprint(showerror, err)
         catch
             return false
         end
-        return occursin("IOError", msg) && (occursin("EACCES", msg) || occursin("EBUSY", msg))
+        return occursin("IOError", msg) &&
+            (occursin("EACCES", msg) || occursin("EBUSY", msg)) &&
+            _mentions_infrastructure_path(msg)
     end
     return false
 end
