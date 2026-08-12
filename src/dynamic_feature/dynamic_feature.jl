@@ -998,13 +998,24 @@ _is_infra_failure(err) = err isa DJPRequestTimeoutException || _is_depot_lock_fa
 # A depot file-lock collision (`IOError: stat(...manifest_usage.toml.pid...):
 # permission denied (EACCES)` during concurrent Pkg operations) says nothing
 # about the analyzed project — same infra class as a request timeout.
+#
+# The parent hits the same contention on its own store work (`isfile` under an
+# unreadable store, `mkpath`/`mktempdir` of the download dir), and there the
+# real exception is in hand, so match on its type and errno. A failure raised in
+# the child only crosses the process boundary as rendered text inside a
+# `JSONRPCError`, so that one case has no type left to compare.
 function _is_depot_lock_failure(err)
-    msg = try
-        sprint(showerror, err)
-    catch
-        return false
+    if err isa Base.IOError
+        return err.code == Base.UV_EACCES || err.code == Base.UV_EBUSY
+    elseif err isa JSONRPC.JSONRPCError
+        msg = try
+            sprint(showerror, err)
+        catch
+            return false
+        end
+        return occursin("IOError", msg) && (occursin("EACCES", msg) || occursin("EBUSY", msg))
     end
-    return occursin("IOError", msg) && (occursin("EACCES", msg) || occursin("EBUSY", msg))
+    return false
 end
 
 # Whether work for `key` must not be attempted again.
