@@ -351,8 +351,18 @@ function maybe_getfield(k::Symbol, m::ModuleStore, envstore)
         return m.vals[k]
     else
         for v in m.used_modules
-            !haskey(m.vals, v) && continue
-            submod = m.vals[v]
+            # A used module need not be stored inside `m` itself: `Meta`'s
+            # implicit `using Base` records `:Base` in `used_modules`, but
+            # Base is a TOP-LEVEL entry of the env store. Qualified access
+            # (`Meta.dump` → Base's `dump`) resolves through usings in
+            # Julia, so fall back to the env store for the used module.
+            submod = if haskey(m.vals, v)
+                m.vals[v]
+            elseif envstore isa EnvStore && haskey(envstore, v)
+                envstore[v]
+            else
+                continue
+            end
             if submod isa ModuleStore && k in submod.exportednames && haskey(submod.vals, k)
                 return submod.vals[k]
             elseif submod isa VarRef
@@ -360,6 +370,17 @@ function maybe_getfield(k::Symbol, m::ModuleStore, envstore)
                 if submod isa ModuleStore && k in submod.exportednames && haskey(submod.vals, k)
                     return submod.vals[k]
                 end
+            end
+        end
+        # Every non-bare `module` implicitly does `using Base`, but store
+        # builders frequently miss it in `used_modules` (Base.Meta records
+        # only `[:Core]` while its runtime usings are `[Base]`). Qualified
+        # access through that implicit using is valid Julia (`Meta.dump` is
+        # Base's `dump`), so consult Base's exports as a final fallback.
+        if :Base ∉ m.used_modules && envstore isa EnvStore && haskey(envstore, :Base)
+            bs = envstore[:Base]
+            if bs isa ModuleStore && k in bs.exportednames && haskey(bs.vals, k)
+                return bs.vals[k]
             end
         end
     end

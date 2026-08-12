@@ -5270,3 +5270,16 @@ end
     @test SL.InvalidRedefofConst in errs("struct T2 end\nT2 = 1\n")
     @test SL.CannotDeclareConst in errs("const x = 1\nconst x = 2\n")
 end
+
+@testitem "qualified access resolves through a module's usings" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # `Meta.dump` is Base's `dump` reached through Meta's implicit
+    # `using Base` — Julia resolves qualified access through usings, so the
+    # store lookup must too (used modules live at the env-store top level,
+    # not inside the module's own vals).
+    for src in ("f(x) = Base.Meta.dump(x)\n", "f(x) = Meta.dump(x)\n")
+        cst, meta_dict, jw = parse_and_pass(src)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
