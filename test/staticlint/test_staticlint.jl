@@ -5273,13 +5273,25 @@ end
 
 @testitem "qualified access resolves through a module's usings" setup=[shared_static_lint] begin
     SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
 
     # `Meta.dump` is Base's `dump` reached through Meta's implicit
     # `using Base` — Julia resolves qualified access through usings, so the
-    # store lookup must too (used modules live at the env-store top level,
-    # not inside the module's own vals).
-    for src in ("f(x) = Base.Meta.dump(x)\n", "f(x) = Meta.dump(x)\n")
-        cst, meta_dict, jw = parse_and_pass(src)
+    # store lookup must too. Runtime using provenance is what distinguishes
+    # this from a module that genuinely does not use Base.
+    parsed = [parse_and_pass(src) for src in
+        ("f(x) = Base.Meta.dump(x)\n", "f(x) = Meta.dump(x)\n")]
+    for (cst, meta_dict, jw) in parsed
         @test isempty(collect_hints(cst, meta_dict, jw))
     end
+
+    env = get_env(parsed[1][3])
+    meta_store = env.symbols[:Base][:Meta]
+    @test :Base in meta_store.used_modules
+
+    # A baremodule implicitly uses Core, not Base. Its store must not inherit
+    # every Base export merely because Base exists in the environment.
+    bare_store = SS.ModuleStore(SS.VarRef(nothing, :Bare), Dict{Symbol,Any}(),
+        "", Symbol[], Symbol[], [:Core])
+    @test SS.maybe_getfield(:sin, bare_store, env.symbols) === nothing
 end
