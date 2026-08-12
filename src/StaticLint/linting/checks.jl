@@ -1618,6 +1618,28 @@ function overwrites_imported_function(b::Binding)
     return false
 end
 
+function _is_direct_eval_quote(q::EXPR)
+    p = parentof(q)
+    while p isa EXPR && isbracketed(p)
+        p = parentof(p)
+    end
+    p isa EXPR && iscall(p) && p.args !== nothing && !isempty(p.args) || return false
+    callee = p.args[1]
+    if isidentifier(callee)
+        return valofid(callee) == "eval"
+    elseif CSTParser.is_getfield_w_quotenode(callee)
+        rhs = rhs_of_getfield(callee)
+        return rhs isa EXPR && valofid(rhs) == "eval"
+    end
+    return false
+end
+
+function _is_in_inert_quote(x::EXPR)
+    q = maybe_get_parent_fexpr(x, quoted)
+    q === nothing && return false
+    return !_is_direct_eval_quote(q)
+end
+
 # Now called from add_binding
 # Should return true/false indicating whether the binding should actually be added?
 function check_const_decl(name::String, b::Binding, scope, meta_dict)
@@ -1632,10 +1654,10 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
         # struct is hoisted by `interpret_eval` AND traversed — and a
         # definition is never a redefinition of itself.
         prev_b.val !== nothing && prev_b.val === b.val && return
-        # A "previous definition" inside a quoted expression
-        # (`:(struct MT8 end)`) never executed; it cannot make this
-        # declaration a redefinition.
-        prev_b.val isa EXPR && is_in_fexpr(prev_b.val, quoted) && return
+        # A previous definition in an inert quote cannot make this declaration
+        # a redefinition. A quote passed directly to `eval` does execute and
+        # must retain the warning.
+        prev_b.val isa EXPR && _is_in_inert_quote(prev_b.val) && return
     end
 
     b.val isa Binding && return check_const_decl(name, b.val, scope, meta_dict)

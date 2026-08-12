@@ -5256,6 +5256,16 @@ end
         """))
     # A definition inside a quoted expression never executed.
     @test isempty(errs("ex = :(struct MT8 end)\nstruct MT8 end\n"))
+    # Passing the quote to eval does execute the first definition, so the
+    # following struct is a genuine constant redefinition.
+    @test SL.CannotDeclareConst in errs("""
+        eval(:(struct EvaluatedType
+            x::Int
+        end))
+        struct EvaluatedType
+            y::String
+        end
+        """)
     # Genuine toplevel redefinitions still flag.
     @test SL.InvalidRedefofConst in errs("struct T2 end\nT2 = 1\n")
     @test SL.CannotDeclareConst in errs("const x = 1\nconst x = 2\n")
