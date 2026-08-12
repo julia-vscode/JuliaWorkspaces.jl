@@ -148,7 +148,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
     opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
-    opts.constif && check_if_conds(x, meta_dict)
+    opts.constif && check_if_conds(x, env, meta_dict)
     opts.lazy && check_lazy(x, meta_dict)
     opts.datadecl && check_datatype_decl(x, env, meta_dict)
     opts.typeparam && check_typeparams(x, meta_dict)
@@ -989,16 +989,17 @@ function _get_global_scope(s::Scope)
     end
 end
 
-function check_if_conds(x::EXPR, meta_dict)
+function check_if_conds(x::EXPR, env::ExternalEnv, meta_dict)
     if headof(x) === :if
         cond = x.args[1]
         if headof(cond) === :TRUE || headof(cond) === :FALSE
             # `@static if false ... end` is a deliberate compile-time toggle
-            # (dead-code switch), not an accidental constant condition.
+            # (dead-code switch), not an accidental constant condition. Resolved
+            # by identity, so a local macro that merely shares the name doesn't
+            # buy the same suppression.
             p = parentof(x)
             if p isa EXPR && CSTParser.ismacrocall(p) && length(p.args) >= 1 &&
-                    (valof(p.args[1]) == "@static" ||
-                     (CSTParser.is_getfield_w_quotenode(p.args[1]) && valof(rhs_of_getfield(p.args[1])) == "@static"))
+                    _points_to_Base_macro(p.args[1], Symbol("@static"), env, meta_dict)
                 return
             end
             seterror!(cond, ConstIfCondition, meta_dict)

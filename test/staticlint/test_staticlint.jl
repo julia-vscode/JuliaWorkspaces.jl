@@ -5201,8 +5201,12 @@ end
 
     # `@static if false` is a deliberate compile-time toggle.
     @test !(SL.ConstIfCondition in errs("@static if false\n    f() = 1\nend\n"))
+    @test !(SL.ConstIfCondition in errs("Base.@static if false\n    f() = 1\nend\n"))
     # A bare `if false` still flags.
     @test SL.ConstIfCondition in errs("if false\n    f() = 1\nend\n")
+    # Suppression is keyed on Base's macro, not on the name: a local macro that
+    # happens to be called `@static` says nothing about the condition.
+    @test SL.ConstIfCondition in errs("macro static(ex) end\n@static if false\n    f() = 1\nend\n")
 
     # One diagnostic per 1:length loop, not one at the iterator spec AND one
     # at each use site.
