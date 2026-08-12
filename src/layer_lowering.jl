@@ -96,11 +96,20 @@ function _build_body_tree_v2!(ranges::Union{Nothing,Vector{UnitRange{Int}}}, st)
     end
 end
 
-function _index_outermost_by_first_byte_v2!(dict::Dict{Int,JS2.SyntaxTree}, st)
-    get!(dict, JS2.first_byte(st), st)
+# Keep the WIDEST node for each starting byte, not merely the first one seen:
+# several nodes share a first byte (`f(x, y) = x` starts `=` and `call` at `f`)
+# and only the widest is the whole item. Relying on preorder order alone picked
+# the inner `call` for `@inline f(x, y) = x`, which materialised the signature
+# without its body and hid every binding in it.
+function _index_outermost_by_first_byte_v2!(dict::Dict{Int,JS2.SyntaxTree}, st, content::AbstractString)
+    fb = _content_start(content, Int(JS2.first_byte(st)))
+    prev = get(dict, fb, nothing)
+    if prev === nothing || JS2.last_byte(st) > JS2.last_byte(prev)
+        dict[fb] = st
+    end
     if !JS2.is_leaf(st)
         for c in JS2.children(st)
-            _index_outermost_by_first_byte_v2!(dict, c)
+            _index_outermost_by_first_byte_v2!(dict, c, content)
         end
     end
     return dict
@@ -122,17 +131,18 @@ function _foreach_item_v2_node(f, rt, uri)
         return nothing
     end
 
+    content = tf.content.content
     outermost = Dict{Int,JS2.SyntaxTree}()
     if !JS2.is_leaf(st) && JS2.kind(st) == JS2.K"toplevel"
         for c in JS2.children(st)
-            _index_outermost_by_first_byte_v2!(outermost, c)
+            _index_outermost_by_first_byte_v2!(outermost, c, content)
         end
     else
-        _index_outermost_by_first_byte_v2!(outermost, st)
+        _index_outermost_by_first_byte_v2!(outermost, st, content)
     end
 
     _foreach_toplevel_item(cst) do _x, _order, id, _parent_module, offset
-        node = get(outermost, offset + 1, nothing)
+        node = get(outermost, _content_start(content, offset + 1), nothing)
         node === nothing && return
         # Module items get no lowering body (mirrors layer_body_tree.jl): the
         # module-tree layer models module structure; lowering the whole module
@@ -184,6 +194,48 @@ _is_opaque_macrocall(bt::BodyTree{V2Kind}) =
     (bt.kind == JS2.K"do" && bt.children !== nothing && !isempty(bt.children) &&
      bt.children[1].kind == JS2.K"macrocall")
 
+_bt_node_count(bt::BodyTree) =
+    bt.children === nothing ? 1 : 1 + sum(_bt_node_count, bt.children; init = 0)
+
+# Macros that wrap a definition or expression and hand it through structurally:
+# expanding them would return the argument essentially unchanged, so they can be
+# unwrapped without executing anything. Mirrors StaticLint's
+# `SIGNATURE_PRESERVING_MACROS` (StaticLint/linting/checks.jl:234) plus the
+# argument annotations. Without this, `@inline f(x, y) = x` hides the whole
+# definition and `f(@nospecialize(x::Int), y) = 1` hides the whole signature —
+# between them the largest single source of missed bindings in the 2026-08-11
+# corpus sweep.
+#
+# Stored without the leading `@` and matched on the trailing name, so
+# `Base.@propagate_inbounds` matches too.
+const TRANSPARENT_MACRO_NAMES = Set([
+    "inline", "noinline", "propagate_inbounds", "generated",
+    "assume_effects", "constprop", "pure", "nospecializeinfer",
+    "nospecialize", "specialize", "inbounds",
+])
+
+function _macro_name_string(bt::BodyTree{V2Kind})
+    node = bt
+    # `Base.@propagate_inbounds` nests the name inside a `.`; take the trailing leaf.
+    while node.children !== nothing && !isempty(node.children)
+        node = node.children[end]
+    end
+    v = node.val
+    v isa Union{Symbol,AbstractString} || return nothing
+    s = string(v)
+    return startswith(s, "@") ? s[2:end] : s
+end
+
+"The wrapped argument of a structurally transparent macrocall, else `nothing`."
+function _transparent_macro_target(bt::BodyTree{V2Kind})
+    bt.kind == JS2.K"macrocall" || return nothing
+    (bt.children === nothing || length(bt.children) < 2) && return nothing
+    nm = _macro_name_string(bt.children[1])
+    (nm === nothing || !(nm in TRANSPARENT_MACRO_NAMES)) && return nothing
+    # The wrapped form is always last: `@assume_effects :total function f() end`.
+    return bt.children[end]
+end
+
 # Semi-transparent handling of an opaque macrocall's subtree: keep every
 # `K"Identifier"` leaf (at its ORIGINAL preorder address) as a plain read.
 # This is StaticLint's transparent-traversal precedent — a macro is assumed
@@ -234,6 +286,18 @@ end
 function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::Int = 0)
     myaddr = (addr[] += 1)
     src = LineNumberNode(myaddr, :body)
+    # Structurally transparent macros unwrap to the form they wrap. The skipped
+    # children still consume their addresses so the preorder numbering stays
+    # aligned with `derived_file_lowering_maps`.
+    if qdepth == 0
+        target = _transparent_macro_target(bt)
+        if target !== nothing
+            for c in bt.children[1:end-1]
+                addr[] += _bt_node_count(c)
+            end
+            return _materialize(target, addr, qdepth)
+        end
+    end
     if qdepth == 0 && _is_opaque_macrocall(bt)
         kids = Vector{JS2.SyntaxTree}()
         if bt.children !== nothing
@@ -252,8 +316,45 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
         for c in bt.children
             push!(kids, _materialize(c, addr, child_depth))
         end
-        return JS2.SyntaxTree(bt.kind, kids, bt.val, src, nothing)
+        node = JS2.SyntaxTree(bt.kind, kids, bt.val, src, nothing)
+
+        # Entering a quote from evaluated code: the quote's contents lower to
+        # inert data, so a variable mentioned only inside it would look unused.
+        # Lexically that is true, but it is the wrong answer for a linter —
+        # renaming the variable changes what the quoted code means, and for
+        # `@generated` bodies it breaks the generated method outright. So pair
+        # the quote with reads of the identifiers it mentions, the same
+        # treatment opaque macrocalls get. The quote stays last so the block's
+        # value is still the quote's.
+        if qdepth == 0 && child_depth > qdepth
+            reads = Vector{JS2.SyntaxTree}()
+            _collect_quoted_identifiers!(reads, bt, Ref(myaddr))
+            if !isempty(reads)
+                push!(reads, node)
+                return JS2.SyntaxTree(JS2.K"block", reads, nothing, src, nothing)
+            end
+        end
+        return node
     end
+end
+
+# Identifier leaves mentioned anywhere inside a quote, emitted as plain reads.
+# Addresses are not meaningful here (the real nodes were already materialized
+# with their own addresses), so everything anchors to the quote itself; these
+# nodes exist only to mark the names as used.
+function _collect_quoted_identifiers!(reads::Vector{JS2.SyntaxTree}, bt::BodyTree{V2Kind}, addr::Base.RefValue{Int})
+    if bt.children === nothing
+        if bt.kind == JS2.K"Identifier" &&
+           !(bt.val isa Union{Symbol,AbstractString} && startswith(string(bt.val), "@"))
+            push!(reads, JS2.SyntaxTree(bt.kind, nothing, bt.val,
+                                        LineNumberNode(addr[], :body), nothing))
+        end
+        return nothing
+    end
+    for c in bt.children
+        _collect_quoted_identifiers!(reads, c, addr)
+    end
+    return nothing
 end
 
 # ── the frame ───────────────────────────────────────────────────────────────

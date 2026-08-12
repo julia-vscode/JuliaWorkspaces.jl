@@ -111,6 +111,23 @@ end
 # Index every syntax node by its first byte, keeping the OUTERMOST node per
 # byte (preorder visits parents before children, so `get!` keeps the parent —
 # e.g. for `f(x) = 1` the whole definition, not the `f(x)` call or `f`).
+"""
+    _content_start(content, b)
+
+`b` advanced past whitespace. A node's byte range can begin on the trivia
+before its first token (`@inline f(x) = x` starts the `=` node on the space
+before `f`), while inventory offsets point at the token itself; normalising
+both sides to the first content byte makes the two agree.
+"""
+function _content_start(content::AbstractString, b::Int)
+    n = ncodeunits(content)
+    i = b
+    while i <= n && codeunit(content, i) in (0x20, 0x09, 0x0d, 0x0a)
+        i += 1
+    end
+    return i
+end
+
 function _index_outermost_by_first_byte!(dict::Dict{Int,SyntaxNode}, node::SyntaxNode)
     get!(dict, first_byte(node), node)
     if !JuliaSyntax.is_leaf(node)

@@ -130,6 +130,54 @@ end
     @test length(ll_codes(jw, :unused_binding)) == 2
 end
 
+@testitem "lowering lint: annotation macros are structurally transparent" setup=[LoweringLintWS] begin
+    # `@inline` and friends hand their argument through unchanged, so they are
+    # unwrapped without executing anything. Before this, `@inline f(x, y) = x`
+    # hid the definition entirely and `@nospecialize` in argument position hid
+    # the whole signature — together the largest source of missed bindings in
+    # the top-100 corpus sweep.
+    for src in ("@inline f(x, y) = x\n",
+                "@inline function f(x, y)\n    return x\nend\n",
+                "@noinline function f(x, y)\n    return x\nend\n",
+                "Base.@propagate_inbounds function f(x, y)\n    return x\nend\n")
+        jw = ll_workspace(src)
+        codes = ll_codes(jw, :unused_function_argument)
+        @test length(codes) == 1
+        @test occursin("`y`", codes[1].message)
+    end
+
+    # `@nospecialize` sits in argument position: unwrapping it must leave the
+    # signature intact, so BOTH unused arguments are still seen.
+    jw = ll_workspace("f(@nospecialize(x::Int), y) = 1\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 2
+
+    # A local inside an `@inbounds` block is ordinary code.
+    jw = ll_workspace("function f(x)\n    @inbounds begin\n        z = 1\n    end\n    return x\nend\n")
+    @test length(ll_codes(jw, :unused_binding)) == 1
+
+    # A macro NOT in the table stays opaque, and its identifiers count as reads.
+    jw = ll_workspace("function f()\n    x = 1\n    @show x\n    nothing\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+end
+
+@testitem "lowering lint: names mentioned inside a quote count as used" setup=[LoweringLintWS] begin
+    # A quote lowers to inert data, so a name mentioned only inside one is not
+    # lexically read — but renaming it changes what the quoted code means, and
+    # for `@generated` bodies it breaks the generated method. Treat mentions
+    # inside a quote as uses, the same way opaque macrocalls are treated.
+    jw = ll_workspace("@generated function f(x, n)\n    return quote\n        x + 1\n    end\nend\n")
+    codes = ll_codes(jw, :unused_function_argument)
+    @test length(codes) == 1              # `n` only
+    @test occursin("`n`", codes[1].message)
+
+    jw = ll_workspace("function f(x)\n    return :(x + 1)\nend\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # An argument mentioned nowhere — quote or otherwise — is still reported.
+    jw = ll_workspace("@generated function f(x, n)\n    return quote\n        99\n    end\nend\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 2
+end
+
 @testitem "lowering lint: default-valued arguments are still checked" setup=[LoweringLintWS] begin
     # An argument with a default desugars into a forwarding method that reads
     # the argument only to pass it on. That synthesized read carries the
