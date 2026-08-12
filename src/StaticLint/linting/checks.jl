@@ -1626,6 +1626,18 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
     # imported/using-ed bindings are never const decls
     is_in_fexpr(b.name, x -> headof(x) === :import || headof(x) === :using) && return
 
+    prev_b = scope.names[name]
+    if prev_b isa Binding
+        # The same definition can reach `add_binding` twice — an `@eval`'d
+        # struct is hoisted by `interpret_eval` AND traversed — and a
+        # definition is never a redefinition of itself.
+        prev_b.val !== nothing && prev_b.val === b.val && return
+        # A "previous definition" inside a quoted expression
+        # (`:(struct MT8 end)`) never executed; it cannot make this
+        # declaration a redefinition.
+        prev_b.val isa EXPR && is_in_fexpr(prev_b.val, quoted) && return
+    end
+
     b.val isa Binding && return check_const_decl(name, b.val, scope, meta_dict)
     if b.val isa EXPR && (CSTParser.defines_datatype(b.val) || is_const(b))
         # Mutually exclusive `if`/`elseif`/`else` branches (the standard
@@ -1639,6 +1651,16 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
         end
         seterror!(b.name, CannotDeclareConst, meta_dict)
     else
+        # Implicit-const redefinition (reassigning a name that holds a
+        # datatype) only exists at module/file top level. In any local-ish
+        # scope (functions, `@generated` bodies, `@testset`/`@testitem`
+        # blocks) reassigning a variable is ordinary rebinding, even when it
+        # happens to hold a type value (`T = c ? Int : Float64; T = ...`).
+        # Explicit `const` redeclarations take the arm above and stay
+        # flagged everywhere.
+        if !(scope.expr isa EXPR && (CSTParser.defines_module(scope.expr) || headof(scope.expr) === :file))
+            return
+        end
         prev = scope.names[name]
         if (CoreTypes.isdatatype(prev.type) && !is_mask_binding_of_datatype(prev, meta_dict)) || is_const(prev)
             if b.val isa EXPR && prev.val isa EXPR && !in_same_if_branch(b.val, prev.val)

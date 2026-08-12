@@ -470,6 +470,15 @@ function add_binding(x, state, scope=state.scope)
                         # do nothing name of `x` will resolve to the root method
                     elseif is_bare_local_decl(existing_binding)
                         # a bare local decl does not assign a value
+                    elseif is_synthetic_import_binding(tls.names[name])
+                        # an UNRESOLVED `import M: f` bound the name
+                        # synthetically ("assumed to exist and will not be
+                        # checked"): it is almost certainly a function being
+                        # extended (`import Statistics: mean` in an extension
+                        # file whose weakdeps env is unavailable). Flagging
+                        # would turn one unresolvable import into a
+                        # "function already has a value" diagnostic per
+                        # method definition.
                     else
                         seterror!(x, CannotDefineFuncAlreadyHasValue, meta_dict)
                     end
