@@ -1865,14 +1865,17 @@ end
         errorof(x, meta_dict) === err ||
         (x.args !== nothing && any(a -> any_error(a, meta_dict, err), x.args))
 
-    # A curly-parameterised method (`Fill{T, N}(x) = ...`) is a constructor;
-    # even when an @eval loop hoists it as a binding that shadows the type's
-    # own binding (inferred `Function`), the name still denotes a type.
+    # Reproduce FillArrays' constructor loop: both the constructor name and its
+    # argument type are interpolated. The hoisted `$STYPE{...}` definition can
+    # shadow either type's own binding with one inferred as `Function`.
     cst, meta_dict = parse_and_pass("""
         abstract type AbstractFill{T, N} end
         struct Fill{T, N} <: AbstractFill{T, N} end
-        for TYPE in (:Fill,)
-            @eval (AbstractFill{T, N}(F::(\$TYPE){T, N}) where {T, N}) = F
+        for TYPE in (:Fill, :AbstractFill), STYPE in (:AbstractArray, :AbstractFill)
+            @eval begin
+                @inline \$STYPE{T}(F::\$TYPE{T}) where T = F
+                @inline \$STYPE{T, N}(F::\$TYPE{T, N}) where {T, N} = F
+            end
         end
         g(A::AbstractFill) = A
         h(F::Fill) = F
