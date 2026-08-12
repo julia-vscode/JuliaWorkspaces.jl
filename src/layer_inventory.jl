@@ -629,10 +629,11 @@ end
 # Match by macro *name* rather than `StaticLint._points_to_Base_macro`, which
 # needs resolution state (a `Binding` ref pointing at the real `Base.@enum`)
 # that the inventory must not depend on — see the module docstring's firewall
-# note. A user shadowing `@enum` with an unrelated macro of the same name will
-# misclassify identically to how `mark_bindings!`'s conservatism already
-# accepts false positives elsewhere; this is a deliberate, spec-directed
-# deviation from macros.jl:55, not an oversight.
+# note. That firewall defers identity, it does not drop it: `MacroDeclarationRule`
+# records an owner and has it confirmed in layer_visibility.jl
+# (`_macro_owner_confirmed`), which is what rules out a local macro shadowing
+# the name. `@enum` rows carry no spelling, so nothing confirms them and a
+# shadowing `@enum` misclassifies — a known hole, not a constraint of this layer.
 _is_enum_macro(x::CSTParser.EXPR) = _macro_name_string(x.args[1]) == "@enum"
 
 # An `@enum` member/type-name argument may be wrapped in an explicit-value

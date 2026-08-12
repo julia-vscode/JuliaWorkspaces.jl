@@ -148,7 +148,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
     opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
-    opts.constif && check_if_conds(x, meta_dict)
+    opts.constif && check_if_conds(x, env, meta_dict)
     opts.lazy && check_lazy(x, meta_dict)
     opts.datadecl && check_datatype_decl(x, env, meta_dict)
     opts.typeparam && check_typeparams(x, meta_dict)
@@ -922,7 +922,9 @@ function check_is_used_in_getindex(expr, lhs, arr, meta_dict)
         if hasref(this_arr, meta_dict) && hasref(arr, meta_dict) && refof(this_arr, meta_dict) == refof(arr, meta_dict)
             for index_arg in expr.args[2:end]
                 if hasref(index_arg, meta_dict) && hasref(lhs, meta_dict) && refof(index_arg, meta_dict) == refof(lhs, meta_dict)
-                    seterror!(expr, IndexFromLength, meta_dict)
+                    # One diagnostic per loop: the caller marks the iterator
+                    # spec; marking the use site too reported every such loop
+                    # twice.
                     return true
                 end
             end
@@ -987,10 +989,19 @@ function _get_global_scope(s::Scope)
     end
 end
 
-function check_if_conds(x::EXPR, meta_dict)
+function check_if_conds(x::EXPR, env::ExternalEnv, meta_dict)
     if headof(x) === :if
         cond = x.args[1]
         if headof(cond) === :TRUE || headof(cond) === :FALSE
+            # `@static if false ... end` is a deliberate compile-time toggle
+            # (dead-code switch), not an accidental constant condition. Resolved
+            # by identity, so a local macro that merely shares the name doesn't
+            # buy the same suppression.
+            p = parentof(x)
+            if p isa EXPR && CSTParser.ismacrocall(p) && length(p.args) >= 1 &&
+                    _points_to_Base_macro(p.args[1], Symbol("@static"), env, meta_dict)
+                return
+            end
             seterror!(cond, ConstIfCondition, meta_dict)
         elseif isassignment(cond)
             seterror!(cond, EqInIfConditional, meta_dict)
