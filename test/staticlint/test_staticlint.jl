@@ -5142,3 +5142,21 @@ end
     @test piracy(
         "TPP.jl" => "module TPP\nimport Base: length\nlength(x::Vector{Int}) = 1\nend\n") == 1
 end
+
+@testitem "where lower-bound typevars bind and count as used" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # `T >: Missing` must bind `T` exactly like `T <: Integer` does: uses in
+    # the signature and body resolve, and the parameter counts as used.
+    cst, meta_dict, jw = parse_and_pass("""
+        missings(::Type{T}, dims) where {T >: Missing} = Array{T}(undef, dims)
+        """)
+    @test isempty(collect_hints(cst, meta_dict, jw))
+
+    # A genuinely unused lower-bounded parameter still flags.
+    cst, meta_dict, jw = parse_and_pass("""
+        f(x) where {T >: Missing} = x
+        """)
+    @test any(SL.errorof(x, meta_dict) === SL.UnusedTypeParameter for (_, x) in collect_hints(cst, meta_dict, jw))
+end
