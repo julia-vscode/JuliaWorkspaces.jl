@@ -281,12 +281,15 @@ end
     # Raised by the parent's own store work, so the exception itself is
     # available to inspect: `mkpath`/`mktempdir`/`isfile` all throw `IOError`.
     @test _is_infra_failure(Base.IOError("mkdir(\"…/_downloads\"): permission denied (EACCES)", Base.UV_EACCES))
-    @test _is_infra_failure(Base.IOError("unlink: resource busy or locked (EBUSY)", Base.UV_EBUSY))
+    @test _is_infra_failure(Base.IOError("unlink(\"…/manifest_usage.toml.pid\"): resource busy or locked (EBUSY)", Base.UV_EBUSY))
     @test !_is_infra_failure(Base.IOError("open: no such file or directory (ENOENT)", Base.UV_ENOENT))
+    @test !_is_infra_failure(Base.IOError("open(\"/workspace/Project.toml\"): permission denied (EACCES)", Base.UV_EACCES))
 
     # Raised in the child, where only the rendered text crosses the boundary.
     @test _is_infra_failure(JSONRPC.JSONRPCError(-32000,
         "Failed to index project at /ws/P: IOError: stat(\"…/manifest_usage.toml.pid\"): permission denied (EACCES)", nothing))
+    @test !_is_infra_failure(JSONRPC.JSONRPCError(-32000,
+        "Failed to index project at /ws/P: IOError: open(\"/ws/P/Project.toml\"): permission denied (EACCES)", nothing))
     @test !_is_infra_failure(JSONRPC.JSONRPCError(-32000,
         "Failed to index project at /ws/P: Unsatisfiable requirements detected", nothing))
 
