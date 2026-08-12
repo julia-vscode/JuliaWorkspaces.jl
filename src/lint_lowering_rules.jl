@@ -36,16 +36,48 @@ Salsa.@derived function derived_item_semantic_findings(rt, ref)
     result = SemanticFinding[]
     low = derived_item_lowering(rt, ref)
     (low === nothing || low.status !== :ok) && return result
+
+    # One source declaration can produce SEVERAL lowered bindings, because
+    # desugaring duplicates a pattern into each closure or method it generates.
+    # Two cases pull in opposite directions:
+    #
+    #   [f(n) for (n, c) in d if g(c)]   -> filter closure + body closure, each
+    #                                       binding both names and reading one;
+    #                                       the variable IS used.
+    #   f(a, b = default) = ...          -> a forwarding method `f(a) = f(a, d)`
+    #                                       that reads `a` purely to pass it on;
+    #                                       an unused `a` IS still unused.
+    #
+    # What separates them is WHERE the read happens: a genuine use sits at a
+    # different node than the declaration, whereas a synthesized forwarding read
+    # is derived from the signature and so carries the declaration's own address.
+    # So a declaration counts as used only when one of its bindings is read at
+    # some other address.
+    decl_of = Dict{Int32,Int32}()
+    for b in low.bindings
+        b.is_read && (decl_of[b.id] = b.addr)
+    end
+    used_addrs = Set{Int32}()
+    for u in low.uses
+        d = get(decl_of, u.binding, Int32(0))
+        (d != Int32(0) && u.addr != d) && push!(used_addrs, d)
+    end
+
+    emitted = Set{Int32}()
     for b in low.bindings
         b.is_internal && continue
         b.is_read && continue
         b.addr == Int32(0) && continue
+        b.addr in used_addrs && continue
+        b.addr in emitted && continue
         # `_`-prefixed names are the intentionally-unused convention.
         (isempty(b.name) || startswith(b.name, "_")) && continue
         if b.kind === :local
+            push!(emitted, b.addr)
             push!(result, (addr=b.addr, rule_id=:unused_binding,
                 msg="Variable `$(b.name)` has been assigned but not used."))
         elseif b.kind === :argument
+            push!(emitted, b.addr)
             push!(result, (addr=b.addr, rule_id=:unused_function_argument,
                 msg="Argument `$(b.name)` is never used within the function body."))
         end

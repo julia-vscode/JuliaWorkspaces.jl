@@ -209,6 +209,14 @@ function _collect_macrocall_identifiers!(kids::Vector{JS2.SyntaxTree}, bt::BodyT
     return nothing
 end
 
+# Quote nesting depth, tracked exactly as JuliaLowering's own
+# `collect_unquoted!` does: `quote` deepens, `$` unwraps one level.
+function _quote_depth(k, qdepth::Int)
+    (k == JS2.K"quote" || k == JS2.K"syntaxquote") && return qdepth + 1
+    (k == JS2.K"$" || k == JS2.K"syntaxunquote") && return max(qdepth - 1, 0)
+    return qdepth
+end
+
 # BodyTree → ephemeral v2 SyntaxTree. Every node's `source` is
 # `LineNumberNode(preorder address)`, so pass-output provenance chains
 # terminate at address anchors. Macrocalls are NOT expanded (no macro
@@ -217,10 +225,16 @@ end
 # carrying the macrocall's address; the address counter advances across the
 # whole subtree so numbering stays aligned with the volatile map. This block
 # is also the future DJP splice point (M1+).
-function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int})
+#
+# That substitution only applies in EVALUATED positions (`qdepth == 0`). Inside
+# a `quote` a macrocall is data — it is never expanded — and flattening it
+# would destroy the `$` interpolation nodes that the quote's own expansion
+# needs, making interpolated variables look unused (e.g. `T` in
+# `macro m(T); quote; @generated f($(esc(T))) = 1; end; end`).
+function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::Int = 0)
     myaddr = (addr[] += 1)
     src = LineNumberNode(myaddr, :body)
-    if _is_opaque_macrocall(bt)
+    if qdepth == 0 && _is_opaque_macrocall(bt)
         kids = Vector{JS2.SyntaxTree}()
         if bt.children !== nothing
             for c in bt.children
@@ -233,9 +247,10 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int})
     if bt.children === nothing
         return JS2.SyntaxTree(bt.kind, nothing, bt.val, src, nothing)
     else
+        child_depth = _quote_depth(bt.kind, qdepth)
         kids = Vector{JS2.SyntaxTree}()
         for c in bt.children
-            push!(kids, _materialize(c, addr))
+            push!(kids, _materialize(c, addr, child_depth))
         end
         return JS2.SyntaxTree(bt.kind, kids, bt.val, src, nothing)
     end

@@ -97,6 +97,56 @@ end
     @test isempty(derived_semantic_lint_findings(jw.runtime, LL_URI))
 end
 
+@testitem "lowering lint: interpolation inside a quoted macrocall is a read" setup=[LoweringLintWS] begin
+    # A macrocall inside a `quote` is data — never expanded — so it must be
+    # materialized faithfully. Flattening it would destroy the `$` nodes and
+    # make the interpolated variable look unused (both engines' worst FP class
+    # in the 2026-08-11 top-100 sweep).
+    jw = ll_workspace("macro m(T)\n    quote\n        @generated f(\$(esc(T))) = 1\n    end\nend\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # Same shape without the nested macrocall, as a control.
+    jw = ll_workspace("macro m(T)\n    quote\n        f(\$(esc(T))) = 1\n    end\nend\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # A macro argument that really is unused must still be reported.
+    jw = ll_workspace("macro m(x)\n    quote\n        1 + 1\n    end\nend\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 1
+end
+
+@testitem "lowering lint: one finding per source declaration" setup=[LoweringLintWS] begin
+    # Desugaring duplicates a destructuring pattern into the filter closure and
+    # the body closure; each reads only one name, but each read sits at a real
+    # use site, so the variable counts as used.
+    jw = ll_workspace("f(d) = [String(n) for (n, c) in d if c isa Int]\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+
+    # Without the filter, `c` genuinely is unused.
+    jw = ll_workspace("f(d) = [String(n) for (n, c) in d]\n")
+    @test length(ll_codes(jw, :unused_binding)) == 1
+
+    # Genuinely-unused names under a filter are still reported, once each.
+    jw = ll_workspace("f(d) = [1 for (n, c) in d if true]\n")
+    @test length(ll_codes(jw, :unused_binding)) == 2
+end
+
+@testitem "lowering lint: default-valued arguments are still checked" setup=[LoweringLintWS] begin
+    # An argument with a default desugars into a forwarding method that reads
+    # the argument only to pass it on. That synthesized read carries the
+    # declaration's own address, so it must not count as a use — otherwise
+    # every optional positional argument and keyword argument silently stops
+    # being checked.
+    jw = ll_workspace("f(a, b = 2) = 3\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 2
+
+    jw = ll_workspace("f(x; verbose=false, pad=\"\") = x\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 2
+
+    # ... and a default-valued argument that IS used stays quiet.
+    jw = ll_workspace("f(a, b = 2) = a + b\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+end
+
 @testitem "lowering lint: findings backdate across position-only edits" setup=[LoweringLintWS] begin
     jw = ll_workspace(UNUSED_SRC)
     ref = ll_item_ref(jw, "f")
