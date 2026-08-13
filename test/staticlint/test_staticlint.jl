@@ -5295,3 +5295,82 @@ end
         "", Symbol[], Symbol[], [:Core])
     @test SS.maybe_getfield(:sin, bare_store, env.symbols) === nothing
 end
+
+@testitem "const/function pairs in mutually exclusive branches" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue, CannotDeclareConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # `const` in one branch, assignment-form function in the other (Parsers'
+    # OncePerTask fallback idiom): only one branch ever runs.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        if isdefined(Base, :OncePerTask)
+            const _get_bigint = Base.OncePerTask{BigInt}(() -> BigInt())
+        else
+            _get_bigint() = 1
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    # `using Base: @x` in one @static branch, `const var"@x" = ...` in the
+    # other (StaticArrays' @_inline_meta shim).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @static if VERSION < v"1.8.0-DEV.410"
+            using Base: @_inline_meta
+        else
+            const var"@_inline_meta" = Base.var"@inline"
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDeclareConst)
+    end
+
+    # A genuine same-branch clash is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        const f = 1
+        f() = 2
+        """)
+        @test has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
+@testitem "let-global function with additional top-level methods" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # UnicodeFun's closure-capture idiom: `global f` + `function f(...)` inside
+    # `let`, plus more methods of `f` at top level. All are method additions.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        let subscript_map = Dict('a' => 'b')
+            global to_subscript
+            function to_subscript(x::Char)
+                subscript_map[x]
+            end
+        end
+        function to_subscript(x::Int)
+            Char(x)
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
+@testitem "const rebinding of an imported name" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDeclareConst, InvalidRedefofConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # `import HDF5; const HDF5 = Base.get_extension(...).HDF5` — an egal
+    # rebind of the imported module, legal at runtime.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        import Printf
+        const Printf = Base.get_extension(Main, :Whatever).Printf
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDeclareConst)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+end

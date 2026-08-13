@@ -163,8 +163,10 @@ function mark_bindings!(x::EXPR, state)
 end
 
 function is_bare_local_decl(b)
+    # a bare `global x` declaration (`let ...; global f; function f() ... end`)
+    # assigns no value either — same exemption as bare `local x`
     b isa Binding && b.type === nothing && b.val isa EXPR && isidentifier(b.val) &&
-        parentof(b.val) isa EXPR && headof(parentof(b.val)) === :local
+        parentof(b.val) isa EXPR && (headof(parentof(b.val)) === :local || headof(parentof(b.val)) === :global)
 end
 
 function mark_binding!(x::EXPR, meta_dict, val=x)
@@ -479,6 +481,13 @@ function add_binding(x, state, scope=state.scope)
                         # would turn one unresolvable import into a
                         # "function already has a value" diagnostic per
                         # method definition.
+                    elseif existing_binding isa Binding && existing_binding.val isa EXPR &&
+                           !in_same_if_branch(x, existing_binding.val)
+                        # `if isdefined(...) const f = ... else f() = ... end`:
+                        # mutually exclusive branches never both execute, so the
+                        # function definition does not clash with the other
+                        # branch's value — the same exemption check_const_decl
+                        # applies to const/const branch pairs.
                     else
                         seterror!(x, CannotDefineFuncAlreadyHasValue, meta_dict)
                     end
