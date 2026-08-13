@@ -127,6 +127,19 @@ function mark_bindings!(x::EXPR, state)
         if CSTParser.defines_struct(x) # mark field block
             for arg in x.args[3].args
                 CSTParser.defines_function(arg) && continue
+                # A field modifier wraps the declaration in a macrocall whose
+                # last argument is the field (`@atomic a::Int`, or a docstring
+                # via :globalrefdoc). Only macros known to leave the field
+                # declaration in place are unwrapped: an arbitrary macro may
+                # expand to anything, and fabricating a field binding from it
+                # would suppress genuine missing-reference reports. Structs
+                # with unknown macro-wrapped members are instead treated as not
+                # statically enumerable (`struct_fields_statically_enumerable`).
+                if CSTParser.ismacrocall(arg) && arg.args !== nothing && length(arg.args) > 1 &&
+                   (headof(arg.args[1]) === :globalrefdoc ||
+                    _points_to_Base_macro(arg.args[1], Symbol("@atomic"), state))
+                    arg = last(arg.args)
+                end
                 if arg.head === :const
                     arg = arg.args[1]
                 end

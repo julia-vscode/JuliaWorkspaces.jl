@@ -5295,3 +5295,91 @@ end
         "", Symbol[], Symbol[], [:Core])
     @test SS.maybe_getfield(:sin, bare_store, env.symbols) === nothing
 end
+
+@testitem "struct fields behind field-modifier macros are not missing references" setup=[shared_static_lint] begin
+    # `@atomic` is a known field modifier: the wrapped declaration still gets a
+    # field binding, so accesses resolve and are not hinted.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        mutable struct T
+            @atomic field::Int
+        end
+        f(arg::T) = arg.field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Same for a docstring-wrapped field.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            "a documented field"
+            field::Int
+        end
+        f(arg::T) = arg.field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # A member wrapped in an arbitrary macro may declare fields the binding
+    # pass cannot see, so the struct's field set is not enumerable: accesses to
+    # unknown names must not be flagged...
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro addfield(x)
+            esc(x)
+        end
+        struct T
+            @addfield hidden
+            x::Int
+        end
+        f(arg::T) = arg.hidden
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # ...but a plain struct without macro members still flags unknown fields.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            x::Int
+        end
+        f(arg::T) = arg.missing_field
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+    end
+
+    # A docstring-wrapped field keeps the struct enumerable: unknown fields on
+    # a documented struct are still flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            "a documented field"
+            field::Int
+        end
+        f(arg::T) = arg.missing_field
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+    end
+end
+
+@testitem "getfield inside macro args is not a missing reference" setup=[shared_static_lint] begin
+    # The plain-identifier arm already suppresses names inside opaque macro
+    # calls; the getfield arm must do the same for `a.b` field names.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro m(x)
+        end
+        struct T
+            x::Int
+        end
+        t = T(1)
+        @m t.some_field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
+
+@testitem "NamedTuple field access is not a missing reference" setup=[shared_static_lint] begin
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        f(nt::NamedTuple) = nt.some_key
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
