@@ -80,11 +80,21 @@ end
 # outermost-first, read off the scope chain (works after
 # `strip_module_contexts!` — module nesting survives the handle strip).
 # `vcat(splice_path, this)` is `x`'s absolute module path.
+#
+# A `@testitem`/`@testmodule`/`@testsnippet` body is a module too (it opens a
+# `:testitem` node in the tree), but its scope's `expr` is a MACROCALL, so
+# `defines_module` cannot see it — the segment is read from the scope's own
+# `testitem_segment`, recorded by `_seed_testitem_tree_context!`. Without this,
+# every consumer computing an absolute path for a call site inside a test item
+# (the method-set and arity lints, hover, references, completions) would look
+# in the ENCLOSING module and miss everything the test item includes.
 function _in_file_module_names(x, meta_dict)
     names = String[]
     s = StaticLint.retrieve_scope(x, meta_dict)
     while s isa StaticLint.Scope
-        if s.expr isa CSTParser.EXPR && CSTParser.defines_module(s.expr)
+        if s.testitem_segment !== nothing
+            pushfirst!(names, s.testitem_segment)
+        elseif s.expr isa CSTParser.EXPR && CSTParser.defines_module(s.expr)
             mn = CSTParser.get_name(s.expr)
             nm = mn isa CSTParser.EXPR && CSTParser.isidentifier(mn) ? StaticLint.valofid(mn) : nothing
             nm !== nothing && pushfirst!(names, nm)
@@ -335,8 +345,8 @@ end
 # For `using` at module toplevel no `scope.modules` entry is needed: the
 # bring-ins are part of the module's `derived_module_visible_names` face and
 # the seeded `:__tree__` context covers them. A `using` anywhere else (a
-# `@testitem`/`@testset` body — those macrocalls are opaque to the
-# inventory) has no face to lean on, so its exported names are materialized
+# `@testset` body, or a non-toplevel `using` in a testitem-family body) has
+# no face to lean on, so its exported names are materialized
 # as an export-filtered context on the current scope; the wrapper holds a
 # runtime handle and is removed by `strip_module_contexts!` before freezing.
 function StaticLint._mark_import_arg(arg, par::TreeModuleContext, state, usinged, meta_dict)
@@ -823,9 +833,20 @@ Salsa.@derived function derived_file_analysis(rt, root, file)
     # somewhere is very likely the *target* of that include — its real module
     # context (and the usings that come with it) is unknown, so bare
     # missing-ref reporting against the bare context is unreliable.
+    # Fifth case: the file is spliced INTO a test-item body (a helper a
+    # `@testitem` `include`s). At runtime that body also runs `using Test` and
+    # `using <the package under test>`, which `_inject_testitem_default_imports!`
+    # simulates on the TEST ITEM's scope — but those are not written anywhere in
+    # the tree, so they are invisible from the helper's own analysis, which would
+    # otherwise report `@test` and every package name in it as missing. Worse,
+    # the same helper is typically included from many test items with different
+    # `setup=[...]`, so the real context is not even single-valued. The honest
+    # answer is the same as for an orphan root: names resolve, bare missing-ref
+    # reporting does not.
     if derived_module_unresolved_wildcard_using(rt, root, path) ||
             derived_module_has_computed_include(rt, root, path) ||
             derived_module_has_opaque_macrocall(rt, root, path) ||
+            is_testitem_path(rt, root, path) ||
             (root == file && pkg_folder !== nothing &&
                 !_is_recognized_entry_point(rt, file) &&
                 derived_folder_has_computed_include(rt, pkg_folder))

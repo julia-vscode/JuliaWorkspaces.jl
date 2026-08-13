@@ -4,6 +4,7 @@ import ..derived_has_file
 import ..derived_julia_legacy_syntax_tree
 import ..derived_include_dict
 import ..derived_computed_include_ids
+import ..derived_testitem_segments
 import ..ItemRef
 import ..MethodArity
 
@@ -309,6 +310,13 @@ mutable struct Toplevel{RT} <: TraverseState
     # data, and where a nested `@testitem setup=[...]` (including one
     # swallowed into an unclosed enclosing block by parser recovery) would
     # otherwise re-enter this same query and cycle.
+    #
+    # Deliberately does NOT gate `_seed_testitem_tree_context!`: that seeds
+    # the body's own module-tree node, which is structure rather than runtime
+    # simulation, and its dependency chain (`derived_testitem_segments` and
+    # the `derived_module_*` selectors) reaches only the inventory and the
+    # CST — never `derived_test_setups_in_file` or `derived_file_analysis` —
+    # so the re-entry this flag guards against cannot happen there.
     simulate_testitem_runtime::Bool
     flags::Int
     meta_dict::Dict{UInt64,Meta}
@@ -578,7 +586,12 @@ function followinclude(x, state::Toplevel)
     if objectid(x) in derived_computed_include_ids(state.runtime, state.uri)
         scope = retrieve_scope(x, state.meta_dict)
         while scope isa Scope
-            if CSTParser.defines_module(scope.expr) || !(scope.parent isa Scope)
+            # A testitem-family body is its own module at runtime, so a computed
+            # include there splices unknown code into THAT body — stopping only
+            # at a `module`/the file root would suppress every other test item
+            # in the file too.
+            if CSTParser.defines_module(scope.expr) || _is_testitem_scope_macrocall(scope.expr) ||
+                    !(scope.parent isa Scope)
                 scope.unresolved_wildcard_import = true
                 break
             end
