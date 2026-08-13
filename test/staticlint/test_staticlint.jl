@@ -5295,3 +5295,60 @@ end
         "", Symbol[], Symbol[], [:Core])
     @test SS.maybe_getfield(:sin, bare_store, env.symbols) === nothing
 end
+
+@testitem "eval-loop constructors do not shadow their types" setup=[shared_static_lint] begin
+    # `for FT in (:A, :B) @eval $FT(x) = ... end` hoists constructor
+    # definitions; they must not replace the DataType bindings, or every later
+    # `::A` annotation reports InvalidTypeDeclaration.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct AType{T} end
+        struct BType{T} end
+        const AVec{T} = AType{T}
+        for FT in (:AType, :BType)
+            @eval \$FT(x::Int) = [x]
+        end
+        f(a::AType) = a
+        g(b::BType) = b
+        h(v::AVec) = v
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Single interpolated name (`name = :AType`) takes the other interpret_eval
+    # arm; same rule applies.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct AType{T} end
+        name = :AType
+        @eval \$name(x::Int) = [x]
+        f(a::AType) = a
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Negative control: a genuine non-type annotation still flags.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        foo() = 1
+        f(x::foo) = x
+        """)
+        @test length(collect_hints(cst, meta_dict, jw)) == 1
+    end
+end
+
+@testitem "struct plus outer constructor inside a block scope" setup=[shared_static_lint] begin
+    # A function definition over a SAME-scope struct (inside @testset/let) is a
+    # method addition; it must not shadow the type.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        using Test
+        @testset "t" begin
+            struct Flipped <: AbstractVector{Float64}
+                x::Float64
+            end
+            Flipped(t::Tuple) = Flipped(t[1])
+            Base.getindex(a::Flipped, i::Int) = a.x
+        end
+        """)
+        SL = JuliaWorkspaces.StaticLint
+        hints = collect_hints(cst, meta_dict, jw)
+        @test !any(h -> SL.errorof(h[2], meta_dict) === SL.InvalidTypeDeclaration, hints)
+    end
+end

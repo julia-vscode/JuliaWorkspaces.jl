@@ -386,9 +386,7 @@ function interpret_eval(x::EXPR, state)
                     toplevel_binding = Binding(rhs, b.val, nothing, [])
                     settype!(toplevel_binding, b.type)
                     infer_type(toplevel_binding, tls, state)
-                    if scopehasbinding(tls, valofid(toplevel_binding.name))
-                        tls.names[valofid(toplevel_binding.name)] = toplevel_binding # TODO: do we need to check whether this adds a method?
-                    else
+                    if !_eval_binding_is_method_addition(tls, valofid(toplevel_binding.name), toplevel_binding.val)
                         tls.names[valofid(toplevel_binding.name)] = toplevel_binding
                     end
                 elseif is_loop_iterator(ref.val) && (names = maybe_quoted_list(rhs_of_iterator(ref.val))) !== nothing
@@ -397,9 +395,7 @@ function interpret_eval(x::EXPR, state)
                         toplevel_binding = Binding(name, b.val, nothing, [])
                         settype!(toplevel_binding, b.type)
                         infer_type(toplevel_binding, tls, state)
-                        if scopehasbinding(tls, valofid(toplevel_binding.name))
-                            tls.names[valofid(toplevel_binding.name)] = toplevel_binding # TODO: do we need to check whether this adds a method?
-                        else
+                        if !_eval_binding_is_method_addition(tls, valofid(toplevel_binding.name), toplevel_binding.val)
                             tls.names[valofid(toplevel_binding.name)] = toplevel_binding
                         end
                     end
@@ -409,6 +405,23 @@ function interpret_eval(x::EXPR, state)
     end
 end
 
+
+# An `@eval`-hoisted function definition over an existing function or type
+# binding is a METHOD ADDITION and must not replace the toplevel binding.
+# `for FT in (:OffsetArray, :OffsetVector) @eval $FT(x) = ... end` constructor
+# loops otherwise retype the DataType binding as a Function, turning every
+# later `::OffsetArray` annotation into an InvalidTypeDeclaration. Mirrors the
+# "do nothing, name resolves to the root method" arm of `add_binding`.
+function _eval_binding_is_method_addition(tls, name_str, newval)
+    (newval isa EXPR && CSTParser.defines_function(newval)) || return false
+    scopehasbinding(tls, name_str) || return false
+    existing = tls.names[name_str]
+    if existing isa Binding && (existing.val isa Binding || existing.val isa SymbolServer.FunctionStore || existing.val isa SymbolServer.DataTypeStore)
+        existing = existing.val
+    end
+    return (existing isa Binding && (CoreTypes.isfunction(existing.type) || CoreTypes.isdatatype(existing.type))) ||
+           existing isa SymbolServer.FunctionStore || existing isa SymbolServer.DataTypeStore
+end
 
 function rhs_of_iterator(x::EXPR)
     if isassignment(x)

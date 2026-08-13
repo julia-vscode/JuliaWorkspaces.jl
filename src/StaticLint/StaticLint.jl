@@ -148,6 +148,19 @@ never called) in the whole-closure pass.
 function tree_context_declares_datatype end
 
 """
+    tree_context_imports_datatype(ctx::AbstractModuleContext, name::String, env) -> Bool
+
+Companion to [`tree_context_declares_datatype`](@ref) for IMPORTED names:
+whether the module tree resolves `name` in `ctx`'s module to an EXTERNAL
+symbol whose store is a datatype (`import StaticArraysCore: Size` in a
+sibling file). A method extension `Size(::Type{...}) = ...` in this file must
+not shadow the imported type with a local function binding for the same
+reason as the sibling-declaration case. The generic fallback is `false`;
+the concrete context type implements the store lookup.
+"""
+tree_context_imports_datatype(ctx, name, env) = false
+
+"""
     TreeRef
 
 Plain-data reference target for a name resolved through the module tree in

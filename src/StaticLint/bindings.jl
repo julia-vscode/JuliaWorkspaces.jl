@@ -482,7 +482,8 @@ function add_binding(x, state, scope=state.scope)
                     else
                         seterror!(x, CannotDefineFuncAlreadyHasValue, meta_dict)
                     end
-                elseif is_toplevel_scope(tls) && (ctx = enclosing_tree_context(tls)) !== nothing && tree_context_declares_datatype(ctx, name)
+                elseif is_toplevel_scope(tls) && (ctx = enclosing_tree_context(tls)) !== nothing &&
+                        (tree_context_declares_datatype(ctx, name) || tree_context_imports_datatype(ctx, name, state.env))
                     # Per-file traversal mode: `name` is a DATATYPE declared in
                     # a SIBLING file of this module — visible only through the
                     # module tree, so the `scopehasbinding(tls, name)` arm above
@@ -503,6 +504,14 @@ function add_binding(x, state, scope=state.scope)
                     # a local function binding here would shadow the struct and
                     # make in-file `::name` annotations resolve to a
                     # non-DataType (a false `InvalidTypeDeclaration`).
+                elseif scopehasbinding(scope, name) && scope.names[name] isa Binding && CoreTypes.isdatatype(scope.names[name].type)
+                    # A function definition over a SAME-scope datatype binding
+                    # (a struct + outer constructor inside a @testset/let
+                    # block) is a method addition: keep the type binding, or
+                    # every later `::name` annotation in the block resolves to
+                    # a non-DataType (a false InvalidTypeDeclaration). The
+                    # `tls` arm above only sees toplevel/function scopes, so
+                    # block scopes never reach it.
                 else
                     scope.names[name] = b
                     if !hasref(b.name, meta_dict)

@@ -1104,6 +1104,16 @@ function _defines_constructor_method(x::EXPR)
     return name isa EXPR && headof(name) === :curly
 end
 
+# Read-only re-run of `check_datatype_decl`'s decision with the final
+# (post-inference) bindings; used by `collect_hints` to drop stale errors.
+function datatype_decl_still_invalid(x::EXPR, env::ExternalEnv, meta_dict)
+    (isdeclaration(x) && x.args !== nothing && !isempty(x.args)) || return true
+    if (dt = refof_maybe_getfield(last(x.args), meta_dict)) !== nothing
+        return is_never_datatype(dt, env, meta_dict)
+    end
+    return true
+end
+
 function check_datatype_decl(x::EXPR, env::ExternalEnv, meta_dict)
     # Only call in function signatures?
     if isdeclaration(x) && parentof(x) isa EXPR && iscall(parentof(x))
@@ -1370,7 +1380,14 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
             # existence guard, which is the missing-reference report for
             # using/import statements and is suppressed like the bare names
             # below. Other lint codes don't depend on which branch runs.
-            if !(errorof(x, meta_dict) === UnresolvedImport && in_existence_guarded_branch(x, env, meta_dict))
+            if errorof(x, meta_dict) === UnresolvedImport && in_existence_guarded_branch(x, env, meta_dict)
+            elseif errorof(x, meta_dict) === InvalidTypeDeclaration && !datatype_decl_still_invalid(x, env, meta_dict)
+                # The error was set during the semantic pass, but import
+                # resolution and by-use inference may only settle a binding's
+                # type afterwards (`import StaticArraysCore: Size` +
+                # `Size(::Type{...}) = ...` method extensions transiently
+                # shadow the type). Re-validate against the final bindings.
+            else
                 push!(errs, (pos, x))
             end
         elseif missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&
