@@ -64,13 +64,29 @@ function _is_include_guard(cond::EXPR)
     return any(a -> a isa EXPR && _is_include_guard(a), cond.args)
 end
 
+# Whether `x` is a call to one of the TestItems.jl macros that run their body in
+# a fresh module at runtime (`@testitem`, `@testmodule`, `@testsnippet`), in
+# either the bare or the qualified `Mod.@testitem` form. `@testset`/
+# `@safetestset` are deliberately not included: they do not introduce a module,
+# so includes inside them share the enclosing file structure.
+function _is_testitem_family_macrocall(x::EXPR)
+    CSTParser.ismacrocall(x) || return false
+    (x.args === nothing || isempty(x.args)) && return false
+    name = x.args[1]
+    name isa EXPR || return false
+    return _is_testitem_macro(name) || _is_testmodule_macro(name) || _is_testsnippet_macro(name)
+end
+
 # Shared walker for include-call analyses. Calls `f(x, pos, target, in_function,
-# guarded)` for every `include(...)`/`includet(...)` call, where `pos` is the
-# 0-based byte offset of the call EXPR, `target` the resolved target `URI` or
-# `nothing`, and `guarded` whether the call sits under an existence-guarded
-# conditional (see below). `file_dir` may be `nothing` (a file without a
-# filesystem path, e.g. an unsaved buffer), in which case only absolute include
-# paths resolve.
+# guarded, testitem_ctx)` for every `include(...)`/`includet(...)` call, where
+# `pos` is the 0-based byte offset of the call EXPR, `target` the resolved target
+# `URI` or `nothing`, and `guarded` whether the call sits under an
+# existence-guarded conditional (see below). `testitem_ctx` is `nothing` for
+# ordinary calls, or the byte offset of the enclosing testitem-family macrocall
+# for a call inside one — each such body is its own module at runtime, so
+# duplicate-include detection scopes to it instead of to the include graph as a
+# whole. `file_dir` may be `nothing` (a file without a filesystem path, e.g. an
+# unsaved buffer), in which case only absolute include paths resolve.
 #
 # Calls inside function/macro bodies are reported with `in_function = true` and
 # always `target = nothing`: a runtime `include` splices into whichever module
@@ -79,7 +95,7 @@ end
 # "file structure not statically resolvable" signal (ComputedInclude). The
 # *signature* of such a definition is excluded, so custom `include` methods
 # (`include(p::AbstractPath) = ...`, FilePathsBase-style) are not reported.
-function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false, skip::Union{Nothing,EXPR}=nothing, guarded::Bool=false)
+function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false, skip::Union{Nothing,EXPR}=nothing, guarded::Bool=false, testitem_ctx::Union{Nothing,Int}=nothing)
     x === skip && return nothing
 
     if (CSTParser.fcall_name(x) == "include" || CSTParser.fcall_name(x) == "includet") && length(x.args) == 2
@@ -95,7 +111,7 @@ function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false,
             end
         end
 
-        f(x, pos, target, in_function, guarded)
+        f(x, pos, target, in_function, guarded, testitem_ctx)
     elseif CSTParser.defines_function(x) || CSTParser.defines_macro(x)
         sig = try
             CSTParser.get_sig(x)
@@ -110,7 +126,7 @@ function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false,
 
         p = pos
         for i in 1:length(x)
-            _walk_include_calls(f, x[i], file_dir, p, true, sig, guarded)
+            _walk_include_calls(f, x[i], file_dir, p, true, sig, guarded, testitem_ctx)
             p += x[i].fullspan
         end
     elseif !(headof(x) === :export || headof(x) === :public)
@@ -131,10 +147,16 @@ function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false,
             cond = x.args[1]
         end
 
+        # Each testitem-family body is evaluated in a fresh module, so includes
+        # below this point belong to that module rather than to the enclosing
+        # file. Nested testitems keep the outermost context: the inner body is
+        # part of the same runtime module.
+        child_ctx = testitem_ctx === nothing && _is_testitem_family_macrocall(x) ? pos : testitem_ctx
+
         p = pos
         for i in 1:length(x)
             child_guarded = guarded || (cond !== nothing && x[i] !== cond)
-            _walk_include_calls(f, x[i], file_dir, p, in_function, skip, child_guarded)
+            _walk_include_calls(f, x[i], file_dir, p, in_function, skip, child_guarded, child_ctx)
             p += x[i].fullspan
         end
     end
@@ -160,7 +182,7 @@ e.g. an unsaved buffer) still resolves absolute include paths.
 """
 function collect_include_calls(cst::EXPR, file_path::Union{Nothing,String})
     results = Tuple{Int,Int,Union{URI,Nothing}}[]
-    _walk_include_calls(cst, _include_file_dir(file_path), 0) do x, pos, target, in_function, _
+    _walk_include_calls(cst, _include_file_dir(file_path), 0) do x, pos, target, in_function, _, _
         # Top-level calls only, matching this function's historical contract;
         # function-body (runtime) includes are an analysis signal, not part of
         # the include graph.
@@ -181,12 +203,14 @@ Single-pass include analysis for one file. Walks `cst` once and returns a
     include-call EXPR to its target, for use by the semantic pass while
     traversing this exact CST instance. These objectids are only valid for the
     CST they were built from and must not outlive it.
-  - `records::Vector` — `(offset, span, target, guarded)` tuples for every
-    include call (including unresolved ones), in source order, for
+  - `records::Vector` — `(offset, span, target, guarded, testitem_ctx)` tuples
+    for every include call (including unresolved ones), in source order, for
     include-graph diagnostics. `guarded` marks calls under an existence guard
     (`isfile`/`isdefined`/`@isdefined` condition): they are conditional at
     runtime, so MissingFile/DuplicateInclude/ComputedInclude are not reported
-    for them.
+    for them. `testitem_ctx` is the offset of the enclosing testitem-family
+    macrocall (`@testitem`/`@testmodule`/`@testsnippet`) for calls inside one
+    and `nothing` otherwise, so duplicate detection can scope to that body.
   - `computed_ids::Set{UInt64}` — the `objectid`s of include-call EXPRs whose
     path could NOT be determined statically (computed includes), for the
     semantic pass to mark the enclosing module scope. Same lifetime caveat as
@@ -195,14 +219,14 @@ Single-pass include analysis for one file. Walks `cst` once and returns a
 function collect_include_analysis(cst::EXPR, file_path::Union{Nothing,String})
     edges = Set{URI}()
     include_dict = Dict{UInt64,URI}()
-    records = Tuple{Int,Int,Union{URI,Nothing},Bool}[]
+    records = Tuple{Int,Int,Union{URI,Nothing},Bool,Union{Nothing,Int}}[]
     computed_ids = Set{UInt64}()
-    _walk_include_calls(cst, _include_file_dir(file_path), 0) do x, pos, target, _, guarded
+    _walk_include_calls(cst, _include_file_dir(file_path), 0) do x, pos, target, _, guarded, testitem_ctx
         # Function-body includes carry `target === nothing` by construction
         # (see `_walk_include_calls`), so they land in `records` as computed
         # includes — ComputedInclude diagnostics + suppression signals — but
         # never become include-graph edges.
-        push!(records, (pos, x.span, target, guarded))
+        push!(records, (pos, x.span, target, guarded, testitem_ctx))
         if target !== nothing
             push!(edges, target)
             include_dict[UInt64(objectid(x))] = target

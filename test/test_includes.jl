@@ -32,10 +32,13 @@ end
     a_uri = filepath2uri("/abs/a.jl")
     rel_uri = filepath2uri("/abs/missing_relative.jl")
 
-    # Both calls are recorded (including the resolved relative one).
+    # Both calls are recorded (including the resolved relative one), as
+    # `(offset, span, target, guarded, testitem_ctx)`.
     @test length(analysis.records) == 2
+    @test all(r -> length(r) == 5, analysis.records)
     @test analysis.records[1][3] == a_uri
     @test analysis.records[2][3] == rel_uri
+    @test all(r -> r[4] === false && r[5] === nothing, analysis.records)
 
     # Edges only contain resolved targets.
     @test analysis.edges == Set([a_uri, rel_uri])
@@ -661,4 +664,134 @@ end
     @test count(contains("already been included"), msgs) == 1
     # Only the unguarded computed include reports.
     @test count(contains("could not be determined statically"), msgs) == 1
+end
+
+@testitem "collect_include_analysis tags includes inside testitem-family macros" begin
+    using JuliaWorkspaces: StaticLint, CSTParser
+
+    source = """
+    include("top.jl")
+    @testitem "a" begin
+        include("shared.jl")
+    end
+    TestItems.@testitem "b" begin
+        include("shared.jl")
+    end
+    @testmodule M begin
+        include("shared.jl")
+    end
+    @testset "ts" begin
+        include("shared.jl")
+    end
+    """
+    cst = CSTParser.parse(source, true)
+    records = StaticLint.collect_include_analysis(cst, "/abs/entry.jl").records
+
+    @test length(records) == 5
+    # Top-level and `@testset` includes carry no testitem context; each
+    # testitem-family body gets its own, distinct from the others.
+    @test records[1][5] === nothing
+    @test records[5][5] === nothing
+    ctxs = [r[5] for r in records[2:4]]
+    @test all(!isnothing, ctxs)
+    @test length(unique(ctxs)) == 3
+end
+
+@testitem "testitem includes: sharing a helper across test items is not a duplicate" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///tiincl/Project.toml"), SourceText("""
+    name = "TIIncl"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef21"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///tiincl/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///tiincl/src/TIIncl.jl"), SourceText("module TIIncl\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///tiincl/shared.jl"), SourceText("const SHARED = true\n", "julia")))
+
+    runtests_uri = URI("file:///tiincl/test/runtests.jl")
+    add_file!(jw, TextFile(runtests_uri, SourceText("""
+    include("test_a.jl")
+    include("test_b.jl")
+    """, "julia")))
+
+    # Each test item is its own module at runtime, so both may include the same
+    # helper — and so may the enclosing file at top level.
+    a_uri = URI("file:///tiincl/test/test_a.jl")
+    add_file!(jw, TextFile(a_uri, SourceText("""
+    include("../shared.jl")
+    @testitem "a1" begin
+        include("../shared.jl")
+    end
+    @testitem "a2" begin
+        include("../shared.jl")
+    end
+    """, "julia")))
+
+    # The qualified form, plus the other two module-introducing testitem macros.
+    b_uri = URI("file:///tiincl/test/test_b.jl")
+    add_file!(jw, TextFile(b_uri, SourceText("""
+    TestItems.@testitem "b1" begin
+        include("../shared.jl")
+    end
+    @testmodule Setup begin
+        include("../shared.jl")
+    end
+    @testsnippet Snip begin
+        include("../shared.jl")
+    end
+    """, "julia")))
+
+    @test isempty([d for d in get_diagnostic(jw, a_uri) if contains(d.message, "already been included")])
+    @test isempty([d for d in get_diagnostic(jw, b_uri) if contains(d.message, "already been included")])
+    @test isempty([d for d in get_diagnostic(jw, runtests_uri) if contains(d.message, "already been included")])
+end
+
+@testitem "testitem includes: duplicates inside one test item still report" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///tidup/Project.toml"), SourceText("""
+    name = "TIDup"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef22"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///tidup/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///tidup/src/TIDup.jl"), SourceText("module TIDup\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///tidup/shared.jl"), SourceText("const SHARED = true\n", "julia")))
+
+    # A test item's body is one module: including the same file twice there is a
+    # genuine duplicate, and a missing include is still missing. An `@testset`
+    # introduces no module, so its includes share the file's structure.
+    test_uri = URI("file:///tidup/test/runtests.jl")
+    add_file!(jw, TextFile(test_uri, SourceText("""
+    @testitem "dup" begin
+        include("../shared.jl")
+        include("../shared.jl")
+    end
+    @testitem "gone" begin
+        include("../nonexistent.jl")
+    end
+    @testset "ts" begin
+        include("../shared.jl")
+        include("../shared.jl")
+    end
+    """, "julia")))
+
+    msgs = [d.message for d in get_diagnostic(jw, test_uri)]
+    @test count(contains("already been included"), msgs) == 2
+    @test count(contains("can not be found"), msgs) == 1
 end
