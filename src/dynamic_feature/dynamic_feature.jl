@@ -399,7 +399,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
 end
 
 function Base.kill(djp::DynamicJuliaProcess)
-    @debug "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
+    @info "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
 
     # Killing the child process is done exclusively through the cancellation
     # source: `start` registers a callback on this source's token that performs
@@ -1082,7 +1082,7 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
         # binary can't be executed), which would otherwise die silently with the
         # task and leave the work item inflight forever.
         # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
-        @debug "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
+        @info "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err))
     end
     return
@@ -1260,7 +1260,7 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
         put!(df.in_channel, EnvironmentPrepDoneMsg(key, !isempty(missing_pkgs)))
     catch err
         # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
-        @debug "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
+        @info "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -1381,7 +1381,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
         put!(df.in_channel, StandaloneProjectPrepDoneMsg(key, fast_lane))
     catch err
         # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
-        @debug "Standalone project prep failed" key exception=(err, catch_backtrace())
+        @info "Standalone project prep failed" key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -1463,7 +1463,7 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
     catch err
         # Internal detail: the user-facing report is emitted once, by the
         # `ProcessIndexFailedMsg` handler.
-        @debug "Dynamic index request failed" key exception=(err, catch_backtrace())
+        @info "Dynamic index request failed" key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -1563,7 +1563,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         # The served stale environment keeps working; do not poison
         # failed_projects over a refresh.
         @warn "Background refresh of $(_failure_subject(key)) failed: $(_failure_reason(msg.err)) The previously served environment stays in use."
-        @debug "Background environment refresh failed" key exception=(msg.err,)
+        @info "Background environment refresh failed" key exception=(msg.err,)
         delete!(df.refreshing, key)
         delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
@@ -1582,7 +1582,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
     end
 
     message = _humanize_djp_failure(key, msg.err)
-    @debug "DynamicJuliaProcess failed" key exception=(msg.err, catch_backtrace())
+    @info "DynamicJuliaProcess failed" key exception=(msg.err, catch_backtrace())
 
     djp = get(df.procs, key, nothing)
     if djp !== nothing
