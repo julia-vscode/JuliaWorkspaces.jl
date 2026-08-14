@@ -79,6 +79,38 @@ function testitem_relative_path(package_uri::Union{URI,Nothing}, uri::URI)
     return string(uri)
 end
 
+"""
+    testitem_id_scope(package, package_uri, uri) -> String
+
+The location half of a test item id: the file's path within its package, qualified by
+the package it belongs to.
+
+The package qualifier is `<name>@<first 8 hex of the uuid>`. The name is what a human
+recognises in a JUnit classname or an MCP call; the uuid fragment separates two
+*different* packages that happen to share a name, such as a vendored copy sitting
+beside a dev checkout. Both are always available — a folder is only a package when its
+Project.toml carries a name, a uuid and a version.
+
+Deliberately scoped to the package rather than the workspace. The *same* package cloned
+into two folders produces the same id from both clones, because the only thing that
+tells those apart is their location, and location differs between a dev checkout and a
+CI runner. An id cannot be both workspace-unique and portable; this one keeps
+portability, and callers that need uniqueness key on `(package_uri, id)` — which is why
+`TestEnvironment` carries the package uri.
+
+Falls back to the bare URI when there is no filesystem path, since a URI is already
+unique on its own and `MyPkg@abcd1234/file:///…` would help nobody.
+"""
+function testitem_id_scope(package, package_uri::Union{URI,Nothing}, uri::URI)
+    relpath = testitem_relative_path(package_uri, uri)
+
+    # The fallback fired: `relpath` is the whole URI, so there is nothing to qualify.
+    package === nothing && return relpath
+    relpath == string(uri) && return relpath
+
+    return string(package.name, '@', first(string(package.uuid), 8), '/', relpath)
+end
+
 function _label_counts(labels)
     counts = Dict{String,Int}()
     for label in labels
@@ -158,12 +190,18 @@ Salsa.@derived function derived_testitems(rt, uri)
         ) for (i,te) in enumerate(testerrors)
     ]
 
-    # Ids are `<path relative to the package>::<label>`, so inserting a test item
-    # above another one no longer renumbers it. A label used more than once in one
-    # file is a definition error, but the run must still degrade rather than break,
-    # so *every* occurrence gets a `#N` suffix — that keeps ids unique, keeps each
-    # item individually addressable, and makes the error state visible in the id.
-    relpath = testitem_relative_path(package_uri, uri)
+    # Ids are `<package>/<path relative to the package>::<label>`, so inserting a test
+    # item above another one no longer renumbers it, and two packages that both contain
+    # `test/runtests.jl` no longer mint the same id. A label used more than once in one
+    # file is a definition error, but the run must still degrade rather than break, so
+    # *every* occurrence gets a `#N` suffix — that keeps ids unique within the file,
+    # keeps each item individually addressable, and makes the error state visible in
+    # the id.
+    relpath = testitem_id_scope(
+        package_uri === nothing ? nothing : derived_package(rt, package_uri),
+        package_uri,
+        uri,
+    )
 
     item_labels = String[ti.name for ti in testitems]
     item_counts = _label_counts(item_labels)
