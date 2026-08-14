@@ -19,6 +19,8 @@ Details of a test item.
 - `option_default_imports`::Bool
 - option_tags::Vector{Symbol}
 - option_setup::Vector{Symbol}
+- `option_skip`::Union{Bool,String} — a literal `true`/`false`, or the source text of an
+  expression that the test process evaluates just before the test item would run.
 """
 struct TestItemDetail
     uri::URI
@@ -30,8 +32,9 @@ struct TestItemDetail
     option_default_imports::Bool
     option_tags::Vector{Symbol}
     option_setup::Vector{Symbol}
+    option_skip::Union{Bool,String}
 end
-_key(x::TestItemDetail) = (x.uri, x.id, x.name, x.code, _range_key(x.range), _range_key(x.code_range), x.option_default_imports, x.option_tags, x.option_setup)
+_key(x::TestItemDetail) = (x.uri, x.id, x.name, x.code, _range_key(x.range), _range_key(x.code_range), x.option_default_imports, x.option_tags, x.option_setup, x.option_skip)
 Base.:(==)(a::TestItemDetail, b::TestItemDetail) = _key(a) == _key(b)
 Base.isequal(a::TestItemDetail, b::TestItemDetail) = isequal(_key(a), _key(b))
 Base.hash(x::TestItemDetail, h::UInt) = hash(_key(x), hash(TestItemDetail, h))

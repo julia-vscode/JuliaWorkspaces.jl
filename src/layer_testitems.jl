@@ -57,6 +57,36 @@ Salsa.@derived function derived_testitems_selected(rt, uri)
     return path_selected(parse_path_filter!(discard, toml_content), relpath)
 end
 
+"""
+    testitem_relative_path(package_uri, uri) -> String
+
+The path of `uri` relative to its package root, with `/` separators. This is the
+first half of a test item id, so it must be stable across machines: relative so a
+dev checkout and a CI runner agree, `/`-separated so Windows and Linux do. Falls
+back to the full URI when there is no filesystem path to work with.
+"""
+function testitem_relative_path(package_uri::Union{URI,Nothing}, uri::URI)
+    if package_uri !== nothing
+        package_path = uri2filepath(package_uri)
+        file_path = uri2filepath(uri)
+
+        if package_path !== nothing && file_path !== nothing
+            relpath = config_relative_path(package_path, file_path)
+            relpath === nothing || return relpath
+        end
+    end
+
+    return string(uri)
+end
+
+function _label_counts(labels)
+    counts = Dict{String,Int}()
+    for label in labels
+        counts[label] = get(counts, label, 0) + 1
+    end
+    return counts
+end
+
 Salsa.@derived function derived_testitems(rt, uri)
     @debug "derived_testitems" uri=uri
 
@@ -118,17 +148,71 @@ Salsa.@derived function derived_testitems(rt, uri)
         )
     end
 
+    all_testerrors = TestErrorDetail[
+        TestErrorDetail(
+            uri,
+            "$uri:error$i",
+            string(te.name),
+            te.message,
+            te.range
+        ) for (i,te) in enumerate(testerrors)
+    ]
+
+    # Ids are `<path relative to the package>::<label>`, so inserting a test item
+    # above another one no longer renumbers it. A label used more than once in one
+    # file is a definition error, but the run must still degrade rather than break,
+    # so *every* occurrence gets a `#N` suffix — that keeps ids unique, keeps each
+    # item individually addressable, and makes the error state visible in the id.
+    relpath = testitem_relative_path(package_uri, uri)
+
+    item_labels = String[ti.name for ti in testitems]
+    item_counts = _label_counts(item_labels)
+    seen_items = Dict{String,Int}()
+    item_ids = Vector{String}(undef, length(testitems))
+
+    for (i, label) in enumerate(item_labels)
+        if item_counts[label] > 1
+            occurrence = seen_items[label] = get(seen_items, label, 0) + 1
+            item_ids[i] = "$relpath::$label#$occurrence"
+
+            push!(all_testerrors, TestErrorDetail(
+                uri,
+                "$uri:error$(length(all_testerrors) + 1)",
+                label,
+                "The test item name \"$label\" is used more than once in this file. Test item names must be unique within a file.",
+                testitems[i].range
+            ))
+        else
+            item_ids[i] = "$relpath::$label"
+        end
+    end
+
+    setup_counts = _label_counts(String[string(ts.name) for ts in testsetups])
+
+    for ts in testsetups
+        if setup_counts[string(ts.name)] > 1
+            push!(all_testerrors, TestErrorDetail(
+                uri,
+                "$uri:error$(length(all_testerrors) + 1)",
+                string(ts.name),
+                "The test setup name `$(ts.name)` is used more than once in this file. Test setup names must be unique within a file.",
+                ts.range
+            ))
+        end
+    end
+
     return TestDetails(
         [TestItemDetail(
             uri,
-            "$uri:$i",
+            item_ids[i],
             ti.name,
             text_file.content.content[ti.code_range],
             ti.range,
             ti.code_range,
             ti.option_default_imports,
             ti.option_tags,
-            ti.option_setup
+            ti.option_setup,
+            ti.option_skip isa Bool ? ti.option_skip : text_file.content.content[ti.option_skip]
             ) for (i,ti) in enumerate(testitems)],
         [TestSetupDetail(
             uri,
@@ -138,13 +222,7 @@ Salsa.@derived function derived_testitems(rt, uri)
             i.range,
             i.code_range
             ) for i in testsetups],
-        [TestErrorDetail(
-            uri,
-            "$uri:error$i",
-            string(te.name),
-            te.message,
-            te.range
-            ) for (i,te) in enumerate(testerrors)]
+        all_testerrors
     )
 end
 
