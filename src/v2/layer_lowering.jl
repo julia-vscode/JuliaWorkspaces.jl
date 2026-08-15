@@ -3,12 +3,12 @@
 # expansion exists) over per-item value trees built with the vendored
 # JuliaSyntax v2 parser.
 #
-# Contracts (mirroring layer_body_tree.jl):
+# Contracts (mirroring body_tree.jl and layer_inventory_v2.jl):
 # - `ItemLowering` values are position-free plain data with structural
 #   equality: whitespace/comment/move edits reproduce `isequal` values so
 #   Salsa backdates. Findings/uses reference nodes by PREORDER ADDRESS into
 #   the item's v2 body tree; ranges are reattached exclusively via
-#   `derived_file_lowering_maps` (volatile; depending on it from an
+#   `derived_v2_file_maps` (volatile; depending on it from an
 #   analysis-layer computation is a bug).
 # - `derived_item_lowering` depends ONLY on `derived_item_lowering_body` —
 #   never on any position map and never on file content directly.
@@ -77,158 +77,25 @@ end
 # included/macro-expanded (the `JS2.K"..."` string macros below need `JS2`
 # bound at expansion time).
 
-# ── v2 body forest (twin of layer_body_tree.jl, against the v2 parser) ──────
-
-_range_v2(st) = _to_exclusive_end(JS2.byte_range(st))
-
-function _build_body_tree_v2!(ranges::Union{Nothing,Vector{UnitRange{Int}}}, st)
-    ranges !== nothing && push!(ranges, _range_v2(st))
-    k = JS2.kind(st)
-    if JS2.is_leaf(st)
-        return BodyTree(k, st.value, nothing)
-    else
-        cs = Vector{BodyTree{V2Kind}}()
-        for c in JS2.children(st)
-            push!(cs, _build_body_tree_v2!(ranges, c))
-        end
-        # Interior nodes keep their `value` too, so materialization is faithful.
-        return BodyTree(k, st.value, cs)
-    end
-end
-
-# Keep the WIDEST node for each starting byte, not merely the first one seen:
-# several nodes share a first byte (`f(x, y) = x` starts `=` and `call` at `f`)
-# and only the widest is the whole item. Relying on preorder order alone picked
-# the inner `call` for `@inline f(x, y) = x`, which materialised the signature
-# without its body and hid every binding in it.
-function _index_outermost_by_first_byte_v2!(dict::Dict{Int,JS2.SyntaxTree}, st, content::AbstractString,
-                                            under_opaque::Bool = false)
-    fb = _content_start(content, Int(JS2.first_byte(st)))
-    if !under_opaque
-        prev = get(dict, fb, nothing)
-        if prev === nothing || JS2.last_byte(st) > JS2.last_byte(prev)
-            dict[fb] = st
-        end
-    end
-    if !JS2.is_leaf(st)
-        # Below a macrocall we cannot expand, the macro decides what its
-        # arguments mean, so a nested definition must not be analysed as one:
-        # `@define_diffrule Base.:+(x) = :(1)` looks like a method but `x` is
-        # pattern syntax that cannot be removed. Transparent and test-block
-        # macros are exempt — those we do understand.
-        child_opaque = under_opaque || _is_uninterpretable_macrocall(st)
-        for c in JS2.children(st)
-            _index_outermost_by_first_byte_v2!(dict, c, content, child_opaque)
-        end
-    end
-    return dict
-end
-
-# Macros whose argument merely LOOKS like a definition. `@define_diffrule
-# Base.:+(x) = :(1)` is a rule-table entry, not a method: `x` is pattern syntax
-# and cannot be removed, so analysing it as a signature invents findings.
+# ── per-item lowering bodies ────────────────────────────────────────────────
 #
-# Deliberately a blocklist, not "everything we cannot expand". The broad rule
-# was measured on the corpus and cost far more than it saved: it also suppressed
-# definitions under `@static if …` and — worst — under `Core.@doc`, i.e. every
-# docstring'd definition, adding ~353 false negatives to remove ~13 false
-# positives. Add names here only with sweep evidence.
-const DEFINITION_SHAPED_DSL_MACROS = Set([
-    "define_diffrule", "with_kw", "with_kw_noshow", "attributes",
-])
+# The body forest, the address maps and item identity all come from the walker
+# in layer_inventory_v2.jl — one parse, one traversal, no cross-parser byte
+# matching. This layer only decides WHICH items are worth lowering.
 
-function _is_uninterpretable_macrocall(st)
-    JS2.kind(st) == JS2.K"macrocall" || return false
-    cs = JS2.children(st)
-    (cs === nothing || isempty(cs)) && return false
-    nm = _macro_name_from_syntax(cs[1])
-    nm === nothing && return false
-    return nm in DEFINITION_SHAPED_DSL_MACROS
-end
-
-function _macro_name_from_syntax(st)
-    node = st
-    while !JS2.is_leaf(node)
-        cs = JS2.children(node)
-        (cs === nothing || isempty(cs)) && return nothing
-        node = cs[end]
-    end
-    v = node.value
-    v isa Union{Symbol,AbstractString} || return nothing
-    s = string(v)
-    return startswith(s, "@") ? s[2:end] : s
-end
-
-# Same association scheme as `_foreach_item_syntax_node`: inventory item ids
-# from the CST walker, matched to v2 nodes by first byte, root excluded.
-function _foreach_item_v2_node(f, rt, uri)
-    derived_has_content(rt, uri) || return nothing
-    tf = derived_text_file_content(rt, uri)
-    tf === nothing && return nothing
-    cst = derived_julia_legacy_syntax_tree(rt, uri)
-    (cst isa CSTParser.EXPR && CSTParser.headof(cst) === :file) || return nothing
-
-    st = try
-        JS2.parseall(JS2.SyntaxTree, tf.content.content; filename=string(uri))
-    catch err
-        err isa InterruptException && rethrow()
-        return nothing
-    end
-
-    content = tf.content.content
-    outermost = Dict{Int,JS2.SyntaxTree}()
-    if !JS2.is_leaf(st) && JS2.kind(st) == JS2.K"toplevel"
-        for c in JS2.children(st)
-            _index_outermost_by_first_byte_v2!(outermost, c, content)
-        end
-    else
-        _index_outermost_by_first_byte_v2!(outermost, st, content)
-    end
-
-    _foreach_toplevel_item(cst) do _x, _order, id, _parent_module, offset
-        node = get(outermost, _content_start(content, offset + 1), nothing)
-        node === nothing && return
-        # Module items get no lowering body (mirrors layer_body_tree.jl): the
-        # module-tree layer models module structure; lowering the whole module
-        # would duplicate inner items and error in the per-statement passes.
-        JS2.kind(node) == JS2.K"module" && return
-        f(id, node)
-    end
-    return nothing
-end
-
-Salsa.@derived function derived_file_lowering_forest(rt, uri)
-    @debug "derived_file_lowering_forest" uri=uri
-
-    result = Dict{Int64,BodyTree{V2Kind}}()
-    _foreach_item_v2_node(rt, uri) do id, node
-        result[id] = _build_body_tree_v2!(nothing, node)
-    end
-    return result
-end
-
-Salsa.@derived function derived_item_lowering_body(rt, ref)
-    forest = derived_file_lowering_forest(rt, ref.file)
-    return get(forest, ref.id, nothing)
-end
-
+# Rows the walker marked non-interpretable sit under a macrocall whose argument
+# merely LOOKS like a definition (`DEFINITION_SHAPED_DSL_MACROS`); lowering them
+# invents findings about pattern syntax. Modules and body-less statements
+# (imports, exports, includes) never carry a body in the first place.
 """
-    derived_file_lowering_maps(rt, uri) -> Dict{Int64,Vector{UnitRange{Int}}}
+    derived_item_lowering_body(rt, ref) -> Union{Nothing,BodyTree{V2Kind}}
 
-Address→byte-range maps for the v2 lowering forest. Volatile leaf, exactly
-like `derived_file_body_maps`: only last-mile position reattachment may read
-it; depending on it from an analysis-layer computation is a bug.
+The body to lower for `ref`, or `nothing` when the item has none or is not
+interpretable. Position-free, so it backdates across position-only edits.
 """
-Salsa.@derived function derived_file_lowering_maps(rt, uri)
-    @debug "derived_file_lowering_maps" uri=uri
-
-    result = Dict{Int64,Vector{UnitRange{Int}}}()
-    _foreach_item_v2_node(rt, uri) do id, node
-        ranges = UnitRange{Int}[]
-        _build_body_tree_v2!(ranges, node)
-        result[id] = ranges
-    end
-    return result
+Salsa.@derived function derived_item_lowering_body(rt, ref::V2ItemRef)
+    ref.id in derived_v2_noninterpretable_ids(rt, ref.file) && return nothing
+    return derived_v2_item_body(rt, ref)
 end
 
 # ── materialization (research report section H) ─────────────────────────────
@@ -237,9 +104,6 @@ _is_opaque_macrocall(bt::BodyTree{V2Kind}) =
     bt.kind == JS2.K"macrocall" ||
     (bt.kind == JS2.K"do" && bt.children !== nothing && !isempty(bt.children) &&
      bt.children[1].kind == JS2.K"macrocall")
-
-_bt_node_count(bt::BodyTree) =
-    bt.children === nothing ? 1 : 1 + sum(_bt_node_count, bt.children; init = 0)
 
 # Macros that wrap a definition or expression and hand it through structurally:
 # expanding them would return the argument essentially unchanged, so they can be
@@ -357,19 +221,19 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
     src = LineNumberNode(myaddr, :body)
     # Structurally transparent macros unwrap to the form they wrap. The skipped
     # children still consume their addresses so the preorder numbering stays
-    # aligned with `derived_file_lowering_maps`.
+    # aligned with `derived_v2_file_maps`.
     if qdepth == 0
         target = _transparent_macro_target(bt)
         if target !== nothing
             for c in bt.children[1:end-1]
-                addr[] += _bt_node_count(c)
+                addr[] += bt_node_count(c)
             end
             return _materialize(target, addr, qdepth)
         end
         test_block = _test_block_target(bt)
         if test_block !== nothing
             for c in bt.children[1:end-1]
-                addr[] += _bt_node_count(c)
+                addr[] += bt_node_count(c)
             end
             body = _materialize(test_block, addr, qdepth)
             # A test block runs in its own scope, so its assignments are locals,
@@ -521,7 +385,7 @@ The (macro-free) lowering analysis of one item. `nothing` when the item has
 no lowering body (missing file/item or parser divergence). Backdates across
 position-only edits: its only dependency is the position-free body value.
 """
-Salsa.@derived function derived_item_lowering(rt, ref)
+Salsa.@derived function derived_item_lowering(rt, ref::V2ItemRef)
     body = derived_item_lowering_body(rt, ref)
     body === nothing && return nothing
     return _lower_item(body)

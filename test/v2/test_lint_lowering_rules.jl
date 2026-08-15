@@ -2,7 +2,7 @@
     using JuliaWorkspaces
     using JuliaWorkspaces: LOWERING_TAKEOVER_RULES,
         derived_item_semantic_findings, derived_semantic_lint_findings,
-        derived_file_inventory, ItemRef, update_file!
+        derived_v2_file_inventory, V2ItemRef, update_file!
     using JuliaWorkspaces.URIs2: URI
 
     const LL_URI = URI("file:///ll/src/F.jl")
@@ -20,8 +20,8 @@
     ll_codes(jw, code) = filter(d -> d.code === code, get_diagnostic(jw, LL_URI))
 
     function ll_item_ref(jw, name; uri=LL_URI)
-        inv = derived_file_inventory(jw.runtime, uri)
-        return ItemRef(uri, only(filter(i -> i.name == name, inv.items)).id)
+        inv = derived_v2_file_inventory(jw.runtime, uri)
+        return V2ItemRef(uri, only(filter(i -> i.name == name, inv.items)).id)
     end
 
     const UNUSED_SRC = """

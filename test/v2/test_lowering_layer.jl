@@ -1,9 +1,9 @@
 @testsnippet LoweringWS begin
     using JuliaWorkspaces
     using JuliaWorkspaces: BodyTree, ItemLowering, LoweringFinding, LoweredBinding,
-        BindingUse, derived_file_lowering_forest, derived_item_lowering_body,
-        derived_file_lowering_maps, derived_item_lowering,
-        derived_file_inventory, ItemRef, update_file!
+        BindingUse, derived_v2_file_bodies, derived_item_lowering_body,
+        derived_v2_file_maps, derived_item_lowering,
+        derived_v2_file_inventory, derived_v2_file_skeleton, V2ItemRef, update_file!
     using JuliaWorkspaces.URIs2: URI
 
     const LW_URI = URI("file:///lw/src/F.jl")
@@ -15,8 +15,8 @@
     end
 
     function lw_item_ref(jw, name; uri=LW_URI)
-        inv = derived_file_inventory(jw.runtime, uri)
-        return ItemRef(uri, only(filter(i -> i.name == name, inv.items)).id)
+        inv = derived_v2_file_inventory(jw.runtime, uri)
+        return V2ItemRef(uri, only(filter(i -> i.name == name, inv.items)).id)
     end
 end
 
@@ -44,7 +44,7 @@ end
     # Uses reference existing bindings at real addresses.
     @test !isempty(low.uses)
     @test all(u -> haskey(names, u.binding), low.uses)
-    naddrs = length(derived_file_lowering_maps(jw.runtime, LW_URI)[ref.id])
+    naddrs = length(derived_v2_file_maps(jw.runtime, LW_URI)[ref.id])
     @test all(u -> 0 <= u.addr <= naddrs, low.uses)
 end
 
@@ -55,7 +55,7 @@ end
 
     low1 = derived_item_lowering(jw.runtime, ref)
     body1 = derived_item_lowering_body(jw.runtime, ref)
-    maps1 = derived_file_lowering_maps(jw.runtime, LW_URI)[ref.id]
+    maps1 = derived_v2_file_maps(jw.runtime, LW_URI)[ref.id]
     @test low1.status == :ok
 
     # Whitespace above + comment inside: same value, shifted map.
@@ -63,7 +63,7 @@ end
         "# header\n\n\nfunction f(a)\n    # note\n    a + 1\nend\n", "julia")))
     low2 = derived_item_lowering(jw.runtime, ref)
     body2 = derived_item_lowering_body(jw.runtime, ref)
-    maps2 = derived_file_lowering_maps(jw.runtime, LW_URI)[ref.id]
+    maps2 = derived_v2_file_maps(jw.runtime, LW_URI)[ref.id]
 
     @test isequal(body1, body2)
     @test isequal(low1, low2)
@@ -75,6 +75,42 @@ end
     low3 = derived_item_lowering(jw.runtime, ref)
     @test low3.status == :ok
     @test !isequal(low1, low3)
+end
+
+@testitem "lowering layer: items containing macrocalls are position-free" setup=[LoweringWS] begin
+    # Regression: EST macrocalls carry an Expr-style `LineNumberNode` (file + line)
+    # as their second child's value. Stored verbatim it landed in `BodyTree.hash`,
+    # so ~40% of real items stopped backdating on a line shift and their hash
+    # depended on the file's name. See `_normalize_v2_value`.
+    src = "function h()\n    @assert 1 == 1\n    return 2\nend\n"
+    jw = lw_workspace(src)
+    ref = lw_item_ref(jw, "h")
+    body1 = derived_item_lowering_body(jw.runtime, ref)
+    @test body1 !== nothing
+
+    # A pure line shift must leave the value identical.
+    update_file!(jw, TextFile(LW_URI, SourceText("# pad\n\n" * src, "julia")))
+    body2 = derived_item_lowering_body(jw.runtime, ref)
+    @test isequal(body1, body2)
+    @test body1.hash == body2.hash
+
+    # The same source in a DIFFERENT file must produce the same value too.
+    other = URI("file:///lw/src/Other.jl")
+    jw2 = lw_workspace(src; uri=other)
+    body3 = derived_item_lowering_body(jw2.runtime, lw_item_ref(jw2, "h"; uri=other))
+    @test isequal(body1, body3)
+
+    # No LineNumberNode carrying a real position survives anywhere in the tree.
+    function each_leaf(f, bt)
+        if bt.children === nothing
+            f(bt)
+        else
+            for c in bt.children; each_leaf(f, c); end
+        end
+    end
+    each_leaf(body1) do leaf
+        leaf.val isa LineNumberNode && @test leaf.val == LineNumberNode(0, :body)
+    end
 end
 
 @testitem "lowering layer: macrocalls are opaque, not fatal" setup=[LoweringWS] begin
@@ -96,10 +132,10 @@ end
     @test !any(b -> b.name == "@show", low.bindings)
 
     # A bare top-level macrocall item lowers as pure opaque without error.
-    inv = derived_file_inventory(jw.runtime, LW_URI)
+    inv = derived_v2_file_inventory(jw.runtime, LW_URI)
     mc = filter(i -> i.kind == :opaque_macrocall || i.kind == :macrocall, inv.items)
     if !isempty(mc)
-        mlow = derived_item_lowering(jw.runtime, ItemRef(LW_URI, first(mc).id))
+        mlow = derived_item_lowering(jw.runtime, V2ItemRef(LW_URI, first(mc).id))
         @test mlow === nothing || mlow.status == :ok
     end
 end
@@ -118,12 +154,12 @@ end
 
 @testitem "lowering layer: module items are excluded, inner items lower" setup=[LoweringWS] begin
     jw = lw_workspace("module M\ng(x) = x + 1\nend\n")
-    inv = derived_file_inventory(jw.runtime, LW_URI)
+    inv = derived_v2_file_inventory(jw.runtime, LW_URI)
 
     mod_id = only(filter(m -> m.name == "M", inv.modules)).id
-    @test derived_item_lowering_body(jw.runtime, ItemRef(LW_URI, mod_id)) === nothing
-    @test derived_item_lowering(jw.runtime, ItemRef(LW_URI, mod_id)) === nothing
-    @test !haskey(derived_file_lowering_forest(jw.runtime, LW_URI), mod_id)
+    @test derived_item_lowering_body(jw.runtime, V2ItemRef(LW_URI, mod_id)) === nothing
+    @test derived_item_lowering(jw.runtime, V2ItemRef(LW_URI, mod_id)) === nothing
+    @test !haskey(derived_v2_file_bodies(jw.runtime, LW_URI), mod_id)
 
     glow = derived_item_lowering(jw.runtime, lw_item_ref(jw, "g"))
     @test glow !== nothing && glow.status == :ok
@@ -131,11 +167,11 @@ end
 
 @testitem "lowering layer: missing files and items degrade quietly" setup=[LoweringWS] begin
     jw = lw_workspace("f(x) = x\n")
-    missing_ref = ItemRef(URI("file:///lw/src/Missing.jl"), Int64(1))
+    missing_ref = V2ItemRef(URI("file:///lw/src/Missing.jl"), Int64(1))
     @test derived_item_lowering(jw.runtime, missing_ref) === nothing
     @test derived_item_lowering_body(jw.runtime, missing_ref) === nothing
 
     # Malformed file: no crash.
     update_file!(jw, TextFile(LW_URI, SourceText("f(x = ) := +\n", "julia")))
-    @test derived_file_lowering_forest(jw.runtime, LW_URI) isa Dict
+    @test derived_v2_file_bodies(jw.runtime, LW_URI) isa Dict
 end

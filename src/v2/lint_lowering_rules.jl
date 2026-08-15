@@ -32,7 +32,7 @@ projection. Backdates across position-only edits (its only dependency is the
 position-free `derived_item_lowering`). Empty when lowering is unavailable,
 errored, or absent — degradation is silence, never noise.
 """
-Salsa.@derived function derived_item_semantic_findings(rt, ref)
+Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
     result = SemanticFinding[]
     low = derived_item_lowering(rt, ref)
     (low === nothing || low.status !== :ok) && return result
@@ -89,22 +89,26 @@ end
     derived_semantic_lint_findings(rt, uri) -> Vector{LintFinding}
 
 The volatile emission join: per-item findings reattached to byte ranges via
-`derived_file_lowering_maps`. Volatile by design (recomputes on every reparse,
-like `derived_item_positions`); only `derived_diagnostics` may depend on it.
-Returns an empty vector without demanding ANY lowering machinery when the
-feature flag is off or no takeover rule is enabled.
+`derived_v2_file_maps`. Volatile by design (recomputes on every reparse, like
+`derived_item_positions`); only `derived_diagnostics` may depend on it. Returns
+an empty vector without demanding ANY lowering machinery when the feature flag
+is off or no takeover rule is enabled.
+
+Iterates the v2 SKELETON, which carries exactly one row per item id. (v1's
+`items` can carry several rows for one id — one per name of a tuple destructure
+or `@enum` — which made this loop query, and emit, the same findings repeatedly.)
 """
 Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     result = LintFinding[]
     derived_lowering_lint_active(rt, uri) || return result
 
-    maps = derived_file_lowering_maps(rt, uri)
-    maps === nothing && return result
+    maps = derived_v2_file_maps(rt, uri)
+    isempty(maps) && return result
 
-    for item in derived_file_inventory(rt, uri).items
-        item_findings = derived_item_semantic_findings(rt, ItemRef(uri, item.id))
+    for row in derived_v2_file_skeleton(rt, uri).items
+        item_findings = derived_item_semantic_findings(rt, V2ItemRef(uri, row.id))
         isempty(item_findings) && continue
-        ranges = get(maps, item.id, nothing)
+        ranges = get(maps, row.id, nothing)
         ranges === nothing && continue
         for f in item_findings
             1 <= f.addr <= length(ranges) || continue
