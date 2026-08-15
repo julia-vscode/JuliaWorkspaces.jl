@@ -722,12 +722,12 @@ end
     @test test_results.testitems[1].option_skip == "VERSION < v\"1.11\""
 end
 
-@testitem "test item ids are package relative and label based" setup=[TestItemPackage] begin
+@testitem "test item ids are package qualified, package relative and label based" setup=[TestItemPackage] begin
     jw, uri = workspace_with("""@testitem "foo" begin end\n@testitem "bar" begin end""")
 
     test_results = get_test_items(jw, uri)
 
-    @test [ti.id for ti in test_results.testitems] == ["test/bar.jl::foo", "test/bar.jl::bar"]
+    @test [ti.id for ti in test_results.testitems] == ["Foo@12345678/test/bar.jl::foo", "Foo@12345678/test/bar.jl::bar"]
 end
 
 @testitem "test item ids are invariant under inserting an item above" setup=[TestItemPackage] begin
@@ -737,7 +737,7 @@ end
     id1 = only(get_test_items(jw1, uri).testitems).id
     id2 = get_test_items(jw2, uri).testitems[2].id
 
-    @test id1 == id2 == "test/bar.jl::foo"
+    @test id1 == id2 == "Foo@12345678/test/bar.jl::foo"
 end
 
 @testitem "duplicate test item labels get numbered ids and a definition error" setup=[TestItemPackage] begin
@@ -747,7 +747,7 @@ end
 
     # Every occurrence is suffixed, not just the second one, so the error state is
     # visible in the id itself and each item stays individually addressable.
-    @test [ti.id for ti in test_results.testitems] == ["test/bar.jl::foo#1", "test/bar.jl::foo#2", "test/bar.jl::bar"]
+    @test [ti.id for ti in test_results.testitems] == ["Foo@12345678/test/bar.jl::foo#1", "Foo@12345678/test/bar.jl::foo#2", "Foo@12345678/test/bar.jl::bar"]
 
     @test length(test_results.testerrors) == 2
     @test all(te -> te.name == "foo", test_results.testerrors)
@@ -788,4 +788,79 @@ end
 
     @test length(test_results.testitems) == 0
     @test length(test_results.testerrors) == 1
+end
+
+@testitem "test items in different packages get different ids" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: URI
+
+    # The bug this format exists to fix. Both packages contain `test/runtests.jl` with a
+    # test item called "shared", so a package-relative id alone made them byte-identical —
+    # and the runner keys work by id, so one of the two silently never ran.
+    jw = JuliaWorkspace()
+    for (folder, name, uuid) in (
+            ("alpha", "Alpha", "aaaaaaaa-1234-1234-1234-123456789012"),
+            ("beta", "Beta", "bbbbbbbb-1234-1234-1234-123456789012"))
+        add_file!(jw, TextFile(URI("file:///home/$folder/Project.toml"),
+            SourceText("name = \"$name\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/src/$name.jl"),
+            SourceText("module $name\nend\n", "julia")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/test/runtests.jl"),
+            SourceText("""@testitem "shared" begin end""", "julia")))
+    end
+
+    id_a = only(get_test_items(jw, URI("file:///home/alpha/test/runtests.jl")).testitems).id
+    id_b = only(get_test_items(jw, URI("file:///home/beta/test/runtests.jl")).testitems).id
+
+    @test id_a == "Alpha@aaaaaaaa/test/runtests.jl::shared"
+    @test id_b == "Beta@bbbbbbbb/test/runtests.jl::shared"
+    @test id_a != id_b
+end
+
+@testitem "same-named packages with different uuids get different ids" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: URI
+
+    # A vendored copy sitting beside a dev checkout: same name, different package. The uuid
+    # fragment is what separates them.
+    jw = JuliaWorkspace()
+    for (folder, uuid) in (("dev", "aaaaaaaa-1234-1234-1234-123456789012"),
+                           ("vendor", "bbbbbbbb-1234-1234-1234-123456789012"))
+        add_file!(jw, TextFile(URI("file:///home/$folder/Project.toml"),
+            SourceText("name = \"Same\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/src/Same.jl"),
+            SourceText("module Same\nend\n", "julia")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/test/runtests.jl"),
+            SourceText("""@testitem "x" begin end""", "julia")))
+    end
+
+    id_dev = only(get_test_items(jw, URI("file:///home/dev/test/runtests.jl")).testitems).id
+    id_vendor = only(get_test_items(jw, URI("file:///home/vendor/test/runtests.jl")).testitems).id
+
+    @test id_dev != id_vendor
+end
+
+@testitem "the same package cloned twice mints the same id, by design" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: URI
+
+    # Two worktrees of one package share a name AND a uuid, so their ids are identical.
+    # That is deliberate and not a bug to "fix" here: the only thing separating two clones
+    # is their location, and location differs between a dev checkout and a CI runner, so an
+    # id cannot be both workspace-unique and portable. This one keeps portability; callers
+    # that need uniqueness key on `(package_uri, id)`.
+    jw = JuliaWorkspace()
+    for folder in ("wt-a", "wt-b")
+        add_file!(jw, TextFile(URI("file:///home/$folder/Project.toml"),
+            SourceText("name = \"Clone\"\nuuid = \"cccccccc-1234-1234-1234-123456789012\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/src/Clone.jl"),
+            SourceText("module Clone\nend\n", "julia")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/test/runtests.jl"),
+            SourceText("""@testitem "x" begin end""", "julia")))
+    end
+
+    id_a = only(get_test_items(jw, URI("file:///home/wt-a/test/runtests.jl")).testitems).id
+    id_b = only(get_test_items(jw, URI("file:///home/wt-b/test/runtests.jl")).testitems).id
+
+    @test id_a == id_b == "Clone@cccccccc/test/runtests.jl::x"
 end
