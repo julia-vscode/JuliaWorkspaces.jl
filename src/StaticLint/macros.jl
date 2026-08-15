@@ -10,10 +10,10 @@ function handle_macro(x::EXPR, state)
                 end
             elseif CSTParser.is_func_call(x.args[4])
                 sig = (x.args[4])
-                if sig isa EXPR 
+                if sig isa EXPR
                     hasscope(sig, meta_dict) && return # We've already done this, don't repeat
                     setscope!(sig, Scope(sig), meta_dict)
-                    mark_sig_args!(sig, meta_dict)                    
+                    mark_sig_args!(sig, meta_dict)
                 end
                 if state isa Toplevel
                     push!(state.resolveonly, x)
@@ -176,10 +176,15 @@ end
 # beyond what the plain-Julia traversal of their arguments already registers
 # (pass-through wrappers, logging/timing/testing, value-producing macros).
 #
-# Name-based on purpose (like `_is_symbolics_vardef_macro`): resolution can
-# tell where a macro comes from, never what it expands to, so a curated list
-# of implemented/vetted semantics is the only legitimate "known". Future
-# escape hatch: user-declared macro effects in JuliaLint.toml.
+# Curated because resolution can say where a macro comes from, never what it
+# expands to. Testing membership by NAME is the separate, weaker choice: a user
+# macro shadowing `@inline`/`@show` buys the same treatment. Identity could
+# rule that out for the two resolving callers (checks.jl, `handle_macro` above)
+# but not for the inventory walk (layer_inventory.jl) — and only ever as a
+# disqualifier, since an unresolved name must keep its name verdict: "effects
+# unknown" marks the module like a wildcard `using` and would otherwise flip as
+# indexing completes. Future escape hatch: call-site or definition-site annotations
+# that define which symbols/methods etc get defined by the macro
 const EFFECT_FREE_MACROS = Set{String}([
     # Base/Core annotations & wrappers
     "@inline", "@noinline", "@propagate_inbounds", "@generated",

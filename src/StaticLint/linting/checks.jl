@@ -148,7 +148,7 @@ function check_all(x::EXPR, opts::LintOptions, env::ExternalEnv, meta_dict, tree
     opts.call && check_call(x, env, meta_dict, tree_visible, tree_extended, tree_arities, tree_in_scope)
     opts.iter && check_loop_iter(x, env, meta_dict)
     opts.nothingcomp && check_nothing_equality(x, env, meta_dict)
-    opts.constif && check_if_conds(x, meta_dict)
+    opts.constif && check_if_conds(x, env, meta_dict)
     opts.lazy && check_lazy(x, meta_dict)
     opts.datadecl && check_datatype_decl(x, env, meta_dict)
     opts.typeparam && check_typeparams(x, meta_dict)
@@ -922,7 +922,9 @@ function check_is_used_in_getindex(expr, lhs, arr, meta_dict)
         if hasref(this_arr, meta_dict) && hasref(arr, meta_dict) && refof(this_arr, meta_dict) == refof(arr, meta_dict)
             for index_arg in expr.args[2:end]
                 if hasref(index_arg, meta_dict) && hasref(lhs, meta_dict) && refof(index_arg, meta_dict) == refof(lhs, meta_dict)
-                    seterror!(expr, IndexFromLength, meta_dict)
+                    # One diagnostic per loop: the caller marks the iterator
+                    # spec; marking the use site too reported every such loop
+                    # twice.
                     return true
                 end
             end
@@ -987,10 +989,19 @@ function _get_global_scope(s::Scope)
     end
 end
 
-function check_if_conds(x::EXPR, meta_dict)
+function check_if_conds(x::EXPR, env::ExternalEnv, meta_dict)
     if headof(x) === :if
         cond = x.args[1]
         if headof(cond) === :TRUE || headof(cond) === :FALSE
+            # `@static if false ... end` is a deliberate compile-time toggle
+            # (dead-code switch), not an accidental constant condition. Resolved
+            # by identity, so a local macro that merely shares the name doesn't
+            # buy the same suppression.
+            p = parentof(x)
+            if p isa EXPR && CSTParser.ismacrocall(p) && length(p.args) >= 1 &&
+                    _points_to_Base_macro(p.args[1], Symbol("@static"), env, meta_dict)
+                return
+            end
             seterror!(cond, ConstIfCondition, meta_dict)
         elseif isassignment(cond)
             seterror!(cond, EqInIfConditional, meta_dict)
@@ -1058,12 +1069,39 @@ function is_never_datatype(b::Binding, env::ExternalEnv, meta_dict=nothing, dept
         r isa Binding && return is_never_datatype(r, env, meta_dict, depth + 1)
         return is_never_datatype(r, env)
     end
+    # A curly-parameterised function definition (`Fill{T, N}(x) = ...`) is a
+    # CONSTRUCTOR: its name necessarily denotes a type. `@eval` constructor
+    # loops hoist such definitions as bindings that SHADOW the type's own
+    # binding with an assignment inferred as `Function` (FillArrays'
+    # `$STYPE{T, N}(F::$TYPE{T, N}) = F` shadowed `AbstractFill`, flagging
+    # all 53 later `::AbstractFill` declarations in the file), so a
+    # constructor-shaped `val` must count as a type, not a function.
+    if b.val isa EXPR && _defines_constructor_method(b.val)
+        return false
+    end
     if b.type !== nothing
         if !any(x -> x isa SymbolServer.DataTypeStore, get_eventual_datatype(ref, env) for ref in b.refs)
             return true
         end
     end
     return false
+end
+
+# Whether `x` defines a method whose signature name is curly-parameterised
+# (`Name{...}(...)`) — an unambiguous constructor definition.
+function _defines_constructor_method(x::EXPR)
+    CSTParser.defines_function(x) || return false
+    sig = CSTParser.get_sig(x)
+    while sig isa EXPR && (headof(sig) === :where || isbracketed(sig)) &&
+            sig.args !== nothing && !isempty(sig.args)
+        sig = sig.args[1]
+    end
+    (sig isa EXPR && iscall(sig) && sig.args !== nothing && !isempty(sig.args)) || return false
+    name = sig.args[1]
+    while name isa EXPR && isbracketed(name) && name.args !== nothing && !isempty(name.args)
+        name = name.args[1]
+    end
+    return name isa EXPR && headof(name) === :curly
 end
 
 function check_datatype_decl(x::EXPR, env::ExternalEnv, meta_dict)
@@ -1545,7 +1583,16 @@ end
 
 function refers_to_nonimported_type(arg::EXPR, meta_dict)
     arg = CSTParser.rem_wheres(arg)
-    if hasref(arg, meta_dict) && refof(arg, meta_dict) isa Binding
+    r = hasref(arg, meta_dict) ? refof(arg, meta_dict) : nothing
+    if r isa Binding
+        return true
+    elseif r isa TreeRef && r.kind !== :external_symbol
+        # Per-file traversal mode: a type resolved through the module tree
+        # (defined in a SIBLING file of this package — `HTTP.Stream` used in
+        # http_stream.jl but defined in http_server.jl) is owned by the
+        # package just like a same-file `Binding`; a method mentioning it is
+        # not piracy. `:external_symbol` stand-ins are genuinely foreign and
+        # keep the check.
         return true
     elseif isunarysyntax(arg) && (valof(headof(arg)) == "::" || valof(headof(arg)) == "<:")
         return refers_to_nonimported_type(arg.args[1], meta_dict)
@@ -1571,6 +1618,28 @@ function overwrites_imported_function(b::Binding)
     return false
 end
 
+function _is_direct_eval_quote(q::EXPR)
+    p = parentof(q)
+    while p isa EXPR && isbracketed(p)
+        p = parentof(p)
+    end
+    p isa EXPR && iscall(p) && p.args !== nothing && !isempty(p.args) || return false
+    callee = p.args[1]
+    if isidentifier(callee)
+        return valofid(callee) == "eval"
+    elseif CSTParser.is_getfield_w_quotenode(callee)
+        rhs = rhs_of_getfield(callee)
+        return rhs isa EXPR && valofid(rhs) == "eval"
+    end
+    return false
+end
+
+function _is_in_inert_quote(x::EXPR)
+    q = maybe_get_parent_fexpr(x, quoted)
+    q === nothing && return false
+    return !_is_direct_eval_quote(q)
+end
+
 # Now called from add_binding
 # Should return true/false indicating whether the binding should actually be added?
 function check_const_decl(name::String, b::Binding, scope, meta_dict)
@@ -1578,6 +1647,18 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
 
     # imported/using-ed bindings are never const decls
     is_in_fexpr(b.name, x -> headof(x) === :import || headof(x) === :using) && return
+
+    prev_b = scope.names[name]
+    if prev_b isa Binding
+        # The same definition can reach `add_binding` twice — an `@eval`'d
+        # struct is hoisted by `interpret_eval` AND traversed — and a
+        # definition is never a redefinition of itself.
+        prev_b.val !== nothing && prev_b.val === b.val && return
+        # A previous definition in an inert quote cannot make this declaration
+        # a redefinition. A quote passed directly to `eval` does execute and
+        # must retain the warning.
+        prev_b.val isa EXPR && _is_in_inert_quote(prev_b.val) && return
+    end
 
     b.val isa Binding && return check_const_decl(name, b.val, scope, meta_dict)
     if b.val isa EXPR && (CSTParser.defines_datatype(b.val) || is_const(b))
@@ -1592,6 +1673,16 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
         end
         seterror!(b.name, CannotDeclareConst, meta_dict)
     else
+        # Implicit-const redefinition (reassigning a name that holds a
+        # datatype) only exists at module/file top level. In any local-ish
+        # scope (functions, `@generated` bodies, `@testset`/`@testitem`
+        # blocks) reassigning a variable is ordinary rebinding, even when it
+        # happens to hold a type value (`T = c ? Int : Float64; T = ...`).
+        # Explicit `const` redeclarations take the arm above and stay
+        # flagged everywhere.
+        if !(scope.expr isa EXPR && (CSTParser.defines_module(scope.expr) || headof(scope.expr) === :file))
+            return
+        end
         prev = scope.names[name]
         if (CoreTypes.isdatatype(prev.type) && !is_mask_binding_of_datatype(prev, meta_dict)) || is_const(prev)
             if b.val isa EXPR && prev.val isa EXPR && !in_same_if_branch(b.val, prev.val)

@@ -197,6 +197,14 @@ function mark_binding!(x::EXPR, meta_dict, val=x)
         # `isidentifier` guard keeps function-definition assignments (`f() = 0`,
         # whose LHS is a call) on the get_name path below.
         mark_binding!(x.args[1], meta_dict, val)
+    elseif isbinarysyntax(x) && valof(headof(x)) == ">:" && length(x.args) == 2 && isidentifier(x.args[1])
+        # `T >: Missing` in a `where` clause: a LOWER-bounded typevar.
+        # `CSTParser.issubtypedecl`/`get_name` only understand `<:`, so the
+        # generic fallback below would create a NAMELESS binding — `T` then
+        # neither resolves in the signature/body (missing_reference) nor
+        # registers as used (unused_type_parameter).
+        ensuremeta(x, meta_dict)
+        getmeta(x, meta_dict).binding = Binding(x.args[1], val, nothing, [])
     elseif !(isunarysyntax(x) && valof(headof(x)) == "::")
         ensuremeta(x, meta_dict)
         getmeta(x, meta_dict).binding = Binding(CSTParser.get_name(x), val, nothing, [])
@@ -462,6 +470,15 @@ function add_binding(x, state, scope=state.scope)
                         # do nothing name of `x` will resolve to the root method
                     elseif is_bare_local_decl(existing_binding)
                         # a bare local decl does not assign a value
+                    elseif is_synthetic_import_binding(tls.names[name])
+                        # an UNRESOLVED `import M: f` bound the name
+                        # synthetically ("assumed to exist and will not be
+                        # checked"): it is almost certainly a function being
+                        # extended (`import Statistics: mean` in an extension
+                        # file whose weakdeps env is unavailable). Flagging
+                        # would turn one unresolvable import into a
+                        # "function already has a value" diagnostic per
+                        # method definition.
                     else
                         seterror!(x, CannotDefineFuncAlreadyHasValue, meta_dict)
                     end

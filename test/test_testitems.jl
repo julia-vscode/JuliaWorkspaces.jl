@@ -658,8 +658,8 @@ end
     @test !isequal(te_a, te_b)
     @test hash(te_a) != hash(te_b)
 
-    ti_a = TestItemDetail(u, "id", "n", "code", 24:23, 24:23, true, Symbol[], Symbol[])
-    ti_b = TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[])
+    ti_a = TestItemDetail(u, "id", "n", "code", 24:23, 24:23, true, Symbol[], Symbol[], false)
+    ti_b = TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[], false)
     @test ti_a != ti_b
     @test !isequal(ti_a, ti_b)
     @test hash(ti_a) != hash(ti_b)
@@ -672,8 +672,97 @@ end
 
     # Identical values still compare equal (backdating must still work).
     @test te_b == TestErrorDetail(u, "id", "n", "msg", 23:22)
-    @test isequal(ti_b, TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[]))
+    @test isequal(ti_b, TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[], false))
     @test hash(ts_b) == hash(TestSetupDetail(u, :n, :k, "code", 23:22, 23:22))
+end
+
+@testsnippet TestItemPackage begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: @uri_str, URI
+
+    # A minimal in-memory package, so that test items in `test/bar.jl` resolve to a
+    # package root and therefore get an id relative to it.
+    function workspace_with(content)
+        jw = JuliaWorkspace()
+
+        add_file!(jw, TextFile(uri"file:///home/foo/Project.toml", SourceText("name = \"Foo\"\nuuid = \"12345678-1234-1234-1234-123456789012\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(uri"file:///home/foo/src/Foo.jl", SourceText("module Foo\nend\n", "julia")))
+        add_file!(jw, TextFile(uri"file:///home/foo/test/bar.jl", SourceText(content, "julia")))
+
+        return jw, uri"file:///home/foo/test/bar.jl"
+    end
+end
+
+@testitem "skip defaults to false" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testitems) == 1
+    @test test_results.testitems[1].option_skip === false
+end
+
+@testitem "skip literal is carried through" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" skip=true begin end\n@testitem "bar" skip=false begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testerrors) == 0
+    @test test_results.testitems[1].option_skip === true
+    @test test_results.testitems[2].option_skip === false
+end
+
+@testitem "skip expression is carried through as source text" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" skip=(VERSION < v"1.11") begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testerrors) == 0
+    # Parentheses are trivia to JuliaSyntax, so only the expression itself is sliced.
+    @test test_results.testitems[1].option_skip == "VERSION < v\"1.11\""
+end
+
+@testitem "test item ids are package relative and label based" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" begin end\n@testitem "bar" begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test [ti.id for ti in test_results.testitems] == ["test/bar.jl::foo", "test/bar.jl::bar"]
+end
+
+@testitem "test item ids are invariant under inserting an item above" setup=[TestItemPackage] begin
+    jw1, uri = workspace_with("""@testitem "foo" begin end""")
+    jw2, _ = workspace_with("""@testitem "inserted" begin end\n@testitem "foo" begin end""")
+
+    id1 = only(get_test_items(jw1, uri).testitems).id
+    id2 = get_test_items(jw2, uri).testitems[2].id
+
+    @test id1 == id2 == "test/bar.jl::foo"
+end
+
+@testitem "duplicate test item labels get numbered ids and a definition error" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" begin end\n@testitem "foo" begin end\n@testitem "bar" begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    # Every occurrence is suffixed, not just the second one, so the error state is
+    # visible in the id itself and each item stays individually addressable.
+    @test [ti.id for ti in test_results.testitems] == ["test/bar.jl::foo#1", "test/bar.jl::foo#2", "test/bar.jl::bar"]
+
+    @test length(test_results.testerrors) == 2
+    @test all(te -> te.name == "foo", test_results.testerrors)
+    @test all(te -> occursin("used more than once", te.message), test_results.testerrors)
+    @test allunique(te.id for te in test_results.testerrors)
+end
+
+@testitem "duplicate test setup names produce a definition error" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testmodule Foo begin end\n@testsnippet Foo begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testsetups) == 2
+    @test length(test_results.testerrors) == 2
+    @test all(te -> te.name == "Foo", test_results.testerrors)
 end
 
 @testitem "get_test_items on untitled (non-file) URI" begin

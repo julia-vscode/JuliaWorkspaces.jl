@@ -399,7 +399,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
 end
 
 function Base.kill(djp::DynamicJuliaProcess)
-    @debug "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
+    @info "Killing DynamicJuliaProcess" kind=djp.kind project_path=djp.project_path package=djp.package
 
     # Killing the child process is done exclusively through the cancellation
     # source: `start` registers a callback on this source's token that performs
@@ -993,7 +993,45 @@ end
 # user's Project.toml, unlike e.g. an unsatisfiable-requirements Pkg error.
 # Infra failures are logged, get one free retry, and never surface as
 # `environment_errors` diagnostics on the user's project files.
-_is_infra_failure(err) = err isa DJPRequestTimeoutException
+_is_infra_failure(err) = err isa DJPRequestTimeoutException || _is_depot_lock_failure(err)
+
+# A depot file-lock collision (`IOError: stat(...manifest_usage.toml.pid...):
+# permission denied (EACCES)` during concurrent Pkg operations) says nothing
+# about the analyzed project - same infra class as a request timeout. Errors on
+# arbitrary project files still belong to the project, even when their errno is
+# EACCES or EBUSY.
+#
+# The parent hits the same contention on its own store work (`isfile` under an
+# unreadable store, `mkpath`/`mktempdir` of the download dir), and there the
+# real exception is in hand, so match on its type and errno. A failure raised in
+# the child only crosses the process boundary as rendered text inside a
+# `JSONRPCError`, so that one case has no type left to compare.
+function _mentions_infrastructure_path(msg::AbstractString)
+    occursin(r"(?:manifest|artifact|scratch|preferences)_usage\.toml\.pid", msg) ||
+        occursin("_downloads", msg)
+end
+
+function _is_depot_lock_failure(err)
+    if err isa Base.IOError
+        (err.code == Base.UV_EACCES || err.code == Base.UV_EBUSY) || return false
+        msg = try
+            sprint(showerror, err)
+        catch
+            return false
+        end
+        return _mentions_infrastructure_path(msg)
+    elseif err isa JSONRPC.JSONRPCError
+        msg = try
+            sprint(showerror, err)
+        catch
+            return false
+        end
+        return occursin("IOError", msg) &&
+            (occursin("EACCES", msg) || occursin("EBUSY", msg)) &&
+            _mentions_infrastructure_path(msg)
+    end
+    return false
+end
 
 # Whether work for `key` must not be attempted again.
 function _is_exhausted(df::DynamicFeature, key::DJPKey)
@@ -1044,7 +1082,7 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
         # binary can't be executed), which would otherwise die silently with the
         # task and leave the work item inflight forever.
         # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
-        @debug "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
+        @info "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err))
     end
     return
@@ -1222,7 +1260,7 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
         put!(df.in_channel, EnvironmentPrepDoneMsg(key, !isempty(missing_pkgs)))
     catch err
         # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
-        @debug "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
+        @info "Environment prep failed" project_path=project_path exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -1343,7 +1381,7 @@ function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
         put!(df.in_channel, StandaloneProjectPrepDoneMsg(key, fast_lane))
     catch err
         # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
-        @debug "Standalone project prep failed" key exception=(err, catch_backtrace())
+        @info "Standalone project prep failed" key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -1425,7 +1463,7 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
     catch err
         # Internal detail: the user-facing report is emitted once, by the
         # `ProcessIndexFailedMsg` handler.
-        @debug "Dynamic index request failed" key exception=(err, catch_backtrace())
+        @info "Dynamic index request failed" key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(key, err))
     end
 
@@ -1525,7 +1563,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         # The served stale environment keeps working; do not poison
         # failed_projects over a refresh.
         @warn "Background refresh of $(_failure_subject(key)) failed: $(_failure_reason(msg.err)) The previously served environment stays in use."
-        @debug "Background environment refresh failed" key exception=(msg.err,)
+        @info "Background environment refresh failed" key exception=(msg.err,)
         delete!(df.refreshing, key)
         delete!(df.child_progress, key)
         djp = get(df.procs, key, nothing)
@@ -1544,7 +1582,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
     end
 
     message = _humanize_djp_failure(key, msg.err)
-    @debug "DynamicJuliaProcess failed" key exception=(msg.err, catch_backtrace())
+    @info "DynamicJuliaProcess failed" key exception=(msg.err, catch_backtrace())
 
     djp = get(df.procs, key, nothing)
     if djp !== nothing

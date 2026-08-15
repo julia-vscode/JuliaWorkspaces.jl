@@ -1858,6 +1858,38 @@ end
     @test errorof(cst.args[7].args[1].args[2], meta_dict) === InvalidTypeDeclaration
 end
 
+@testitem "constructor definitions do not shadow the type in declarations" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, InvalidTypeDeclaration
+
+    any_error(x, meta_dict, err) =
+        errorof(x, meta_dict) === err ||
+        (x.args !== nothing && any(a -> any_error(a, meta_dict, err), x.args))
+
+    # Reproduce FillArrays' constructor loop: both the constructor name and its
+    # argument type are interpolated. The hoisted `$STYPE{...}` definition can
+    # shadow either type's own binding with one inferred as `Function`.
+    cst, meta_dict = parse_and_pass("""
+        abstract type AbstractFill{T, N} end
+        struct Fill{T, N} <: AbstractFill{T, N} end
+        for TYPE in (:Fill, :AbstractFill), STYPE in (:AbstractArray, :AbstractFill)
+            @eval begin
+                @inline \$STYPE{T}(F::\$TYPE{T}) where T = F
+                @inline \$STYPE{T, N}(F::\$TYPE{T, N}) where {T, N} = F
+            end
+        end
+        g(A::AbstractFill) = A
+        h(F::Fill) = F
+        """)
+    @test !any_error(cst, meta_dict, InvalidTypeDeclaration)
+
+    # A genuine non-type is still flagged.
+    cst, meta_dict = parse_and_pass("""
+        notype() = 1
+        g(x::notype) = x
+        """)
+    @test any_error(cst, meta_dict, InvalidTypeDeclaration)
+end
+
 @testitem "interpret @eval" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: scopeof, scopehasbinding, errorof, IncorrectCallArgs
 
@@ -3085,7 +3117,7 @@ end
     cst, meta_dict, jw = parse_and_pass("arr = []; [1 for _ in 1:length(arr)]")
     @test isempty(collect_hints(cst, meta_dict, jw))
     cst, meta_dict, jw = parse_and_pass("arr = []; [arr[i] for i in 1:length(arr)]")
-    @test length(collect_hints(cst, meta_dict, jw)) == 2
+    @test length(collect_hints(cst, meta_dict, jw)) == 1
     cst, meta_dict, jw = parse_and_pass("arr = []; [i for i in 1:length(arr)]")
     @test length(collect_hints(cst, meta_dict, jw)) == 0
 
@@ -3113,7 +3145,7 @@ end
         arr[i]
     end
     """)
-    @test length(collect_hints(cst, meta_dict, jw)) == 2
+    @test length(collect_hints(cst, meta_dict, jw)) == 1
     cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for i in 1:length(arr)
@@ -3134,7 +3166,7 @@ end
         arr[i] + arr[j]
     end
     """)
-    @test length(collect_hints(cst, meta_dict, jw)) == 4
+    @test length(collect_hints(cst, meta_dict, jw)) == 2
     cst, meta_dict, jw = parse_and_pass("""
     arr = []
     for i in 1:length(arr), j in 1:length(arr)
@@ -3186,7 +3218,7 @@ end
         end
     end
     """)
-    @test length(collect_hints(cst, meta_dict, jw)) == 4
+    @test length(collect_hints(cst, meta_dict, jw)) == 2
 
     cst, meta_dict, jw = parse_and_pass("""
     function f(arr)
@@ -3195,7 +3227,7 @@ end
         end
     end
     """)
-    @test length(collect_hints(cst, meta_dict, jw)) == 4
+    @test length(collect_hints(cst, meta_dict, jw)) == 2
 end
 
 @testitem "assigned but not used with loops" setup=[shared_static_lint] begin
@@ -5096,4 +5128,170 @@ end
             only_when_defined()
         end
         """))
+end
+
+@testitem "type_piracy credits types defined in sibling files" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!, get_diagnostic, set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    piracy(files...) = begin
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///tpp/Project.toml"), SourceText("""
+        name = "TPP"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef30"
+        version = "0.1.0"
+        """, "toml")))
+        add_file!(jw, TextFile(URI("file:///tpp/Manifest.toml"), SourceText("""
+        julia_version = "1.11.0"
+        manifest_format = "2.0"
+        project_hash = "abc"
+
+        [deps]
+        """, "toml")))
+        for (path, src) in files
+            add_file!(jw, TextFile(URI("file:///tpp/src/" * path), SourceText(src, "julia")))
+        end
+        set_input_env_ready!(jw.runtime, true)
+        n = 0
+        for (path, _) in files
+            n += count(d -> contains(d.message, "imported function has been extended"),
+                       get_diagnostic(jw, URI("file:///tpp/src/" * path)))
+        end
+        n
+    end
+
+    # A method whose signature mentions a type defined in a SIBLING included
+    # file (resolved as a TreeRef in per-file mode) extends over an owned
+    # type — not piracy, even with a literal type parameter.
+    @test piracy(
+        "TPP.jl" => "module TPP\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        "a.jl" => "struct Stream{T} end\n",
+        "b.jl" => "import Base: getindex\ngetindex(s::Stream{true}, i) = 1\n") == 0
+
+    # Extending an imported Base function over entirely foreign types is
+    # still piracy.
+    @test piracy(
+        "TPP.jl" => "module TPP\nimport Base: length\nlength(x::Vector{Int}) = 1\nend\n") == 1
+end
+
+@testitem "where lower-bound typevars bind and count as used" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    CSTParser = JuliaWorkspaces.CSTParser
+
+    # `T >: Missing` must bind `T` exactly like `T <: Integer` does: uses in
+    # the signature and body resolve, and the parameter counts as used.
+    cst, meta_dict, jw = parse_and_pass("""
+        missings(::Type{T}, dims) where {T >: Missing} = Array{T}(undef, dims)
+        """)
+    @test isempty(collect_hints(cst, meta_dict, jw))
+
+    # A genuinely unused lower-bounded parameter still flags.
+    cst, meta_dict, jw = parse_and_pass("""
+        f(x) where {T >: Missing} = x
+        """)
+    @test any(SL.errorof(x, meta_dict) === SL.UnusedTypeParameter for (_, x) in collect_hints(cst, meta_dict, jw))
+end
+
+@testitem "small FP batch: static-if toggle, one IndexFromLength per loop" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    errs(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [SL.errorof(x, meta_dict) for (_, x) in collect_hints(cst, meta_dict, jw) if SL.errorof(x, meta_dict) !== nothing]
+    end
+
+    # `@static if false` is a deliberate compile-time toggle.
+    @test !(SL.ConstIfCondition in errs("@static if false\n    f() = 1\nend\n"))
+    @test !(SL.ConstIfCondition in errs("Base.@static if false\n    f() = 1\nend\n"))
+    # A bare `if false` still flags.
+    @test SL.ConstIfCondition in errs("if false\n    f() = 1\nend\n")
+    # Suppression is keyed on Base's macro, not on the name: a local macro that
+    # happens to be called `@static` says nothing about the condition.
+    @test SL.ConstIfCondition in errs("macro static(ex) end\n@static if false\n    f() = 1\nend\n")
+
+    # One diagnostic per 1:length loop, not one at the iterator spec AND one
+    # at each use site.
+    e = errs("""
+        function g(args)
+            for i = 1:length(args)
+                println(args[i])
+            end
+        end
+        """)
+    @test count(==(SL.IndexFromLength), e) == 1
+end
+
+@testitem "const_decl: method extension of an unresolved import is not a redefinition" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    errs(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [SL.errorof(x, meta_dict) for (_, x) in collect_hints(cst, meta_dict, jw) if SL.errorof(x, meta_dict) !== nothing]
+    end
+
+    # `Statistics` is unresolvable in this harness env, so `mean` gets a
+    # synthetic import binding — method definitions extend it, they don't
+    # "define a function that already has a value" (ext-file idiom).
+    e = errs("import Statistics: mean\nmean(x::Int) = 1\nmean(x::String) = 2\n")
+    @test !(SL.CannotDefineFuncAlreadyHasValue in e)
+    @test !(SL.InvalidRedefofConst in e)
+end
+
+@testitem "const_decl: local rebinding and quoted priors are not redefinitions" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    errs(src) = begin
+        cst, meta_dict, jw = parse_and_pass(src)
+        [SL.errorof(x, meta_dict) for (_, x) in collect_hints(cst, meta_dict, jw) if SL.errorof(x, meta_dict) !== nothing]
+    end
+
+    # A local variable holding a type value is an ordinary variable.
+    @test isempty(errs("""
+        function f(c)
+            T = c ? Int : Float64
+            T = Union{T, Missing}
+            T
+        end
+        """))
+    # A definition inside a quoted expression never executed.
+    @test isempty(errs("ex = :(struct MT8 end)\nstruct MT8 end\n"))
+    # Passing the quote to eval does execute the first definition, so the
+    # following struct is a genuine constant redefinition.
+    @test SL.CannotDeclareConst in errs("""
+        eval(:(struct EvaluatedType
+            x::Int
+        end))
+        struct EvaluatedType
+            y::String
+        end
+        """)
+    # Genuine toplevel redefinitions still flag.
+    @test SL.InvalidRedefofConst in errs("struct T2 end\nT2 = 1\n")
+    @test SL.CannotDeclareConst in errs("const x = 1\nconst x = 2\n")
+end
+
+@testitem "qualified access resolves through a module's usings" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    SS = JuliaWorkspaces.SymbolServer
+
+    # `Meta.dump` is Base's `dump` reached through Meta's implicit
+    # `using Base` — Julia resolves qualified access through usings, so the
+    # store lookup must too. Runtime using provenance is what distinguishes
+    # this from a module that genuinely does not use Base.
+    parsed = [parse_and_pass(src) for src in
+        ("f(x) = Base.Meta.dump(x)\n", "f(x) = Meta.dump(x)\n")]
+    for (cst, meta_dict, jw) in parsed
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    env = get_env(parsed[1][3])
+    meta_store = env.symbols[:Base][:Meta]
+    @test :Base in meta_store.used_modules
+
+    # A baremodule implicitly uses Core, not Base. Its store must not inherit
+    # every Base export merely because Base exists in the environment.
+    bare_store = SS.ModuleStore(SS.VarRef(nothing, :Bare), Dict{Symbol,Any}(),
+        "", Symbol[], Symbol[], [:Core])
+    @test SS.maybe_getfield(:sin, bare_store, env.symbols) === nothing
 end

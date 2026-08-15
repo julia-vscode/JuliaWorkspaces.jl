@@ -513,6 +513,8 @@ function usedby(outer, inner)
 end
 istoplevelmodule(m) = parentmodule(m) === m || parentmodule(m) === Main
 
+_module_usings(m::Module) = ccall(:jl_module_usings, Array{Any,1}, (Any,), m)
+
 function getmoduletree(m::Module, amn, visited = Base.IdSet{Module}())
     push!(visited, m)
     cache = ModuleStore(m)
@@ -530,6 +532,16 @@ function getmoduletree(m::Module, amn, visited = Base.IdSet{Module}())
             end
         end
     end
+    # Preserve the runtime's actual `using` provenance. Inferring it from
+    # visible bindings misses implicit usings in submodules such as Base.Meta,
+    # while adding Base during lookup makes bare modules see names they do not
+    # have.
+    for x in _module_usings(m)
+        x isa Module || continue
+        n = nameof(x)
+        haskey(cache, n) || (cache[n] = VarRef(x))
+        n in cache.used_modules || push!(cache.used_modules, n)
+    end
     for n in amn
         if n !== nameof(m) && _isdefinedglobal(m, n)
             ok, x = _try_getglobal(m, n)
@@ -537,9 +549,6 @@ function getmoduletree(m::Module, amn, visited = Base.IdSet{Module}())
             if x isa Module
                 if !haskey(cache, n)
                     cache[n] = VarRef(x)
-                end
-                if x !== Main && usedby(m, x)
-                    push!(cache.used_modules, n)
                 end
             end
         end

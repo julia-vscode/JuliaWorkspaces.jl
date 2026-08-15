@@ -351,8 +351,18 @@ function maybe_getfield(k::Symbol, m::ModuleStore, envstore)
         return m.vals[k]
     else
         for v in m.used_modules
-            !haskey(m.vals, v) && continue
-            submod = m.vals[v]
+            # A used module need not be stored inside `m` itself: `Meta`'s
+            # implicit `using Base` records `:Base` in `used_modules`, but
+            # Base is a TOP-LEVEL entry of the env store. Qualified access
+            # (`Meta.dump` → Base's `dump`) resolves through usings in
+            # Julia, so fall back to the env store for the used module.
+            submod = if haskey(m.vals, v)
+                m.vals[v]
+            elseif envstore isa EnvStore && haskey(envstore, v)
+                envstore[v]
+            else
+                continue
+            end
             if submod isa ModuleStore && k in submod.exportednames && haskey(submod.vals, k)
                 return submod.vals[k]
             elseif submod isa VarRef
