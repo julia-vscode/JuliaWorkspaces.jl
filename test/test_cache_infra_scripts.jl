@@ -1,12 +1,12 @@
 # Integration tests for scripts/regen_symbolcache.sh and scripts/reconcile_symbolcache.sh.
 #
-# Each @testitem gates on rclone availability.  All scratch dirs live under
-# mktempdir() and are cleaned up automatically.  The local rclone backend
-# (:local:<dir>) is used — no R2 credentials or Docker required.
+# Each @testitem gates on rclone and a unix platform — the scripts are bash and
+# also need tar/gzip.  All scratch dirs live under mktempdir() and are cleaned up
+# automatically.  The local rclone backend (:local:<dir>) is used — no R2
+# credentials or Docker required.
 #
-# Run selectively:
-#   using TestItemRunner
-#   @run_package_tests filter=ti->occursin("cache-infra", ti.name)
+# CI installs rclone on the linux and macOS workers (.github/ci_prep.jl), so
+# these run for real there; elsewhere they skip.
 
 @testitem "cache-infra: the shell STORE_VERSION matches CACHE_STORE_VERSION" begin
     using JuliaWorkspaces
@@ -26,8 +26,8 @@ end
 
 @testitem "cache-infra regen: full run against empty remote" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
 
     # ---- helpers (inline so no @testmodule dependency) --------------------
@@ -108,8 +108,8 @@ end
 
 @testitem "cache-infra regen: incremental run preserves index union" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -175,8 +175,8 @@ end
 
 @testitem "cache-infra regen: incremental tombstone merge" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -246,8 +246,8 @@ end
 
 @testitem "cache-infra regen: full-mode shard preserves other shards' tombstones" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -320,8 +320,8 @@ end
 
 @testitem "cache-infra regen: full-mode retry graduates a tombstone that now succeeds" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -385,8 +385,8 @@ end
 
 @testitem "cache-infra regen: cancelled status excluded from tombstones" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -450,8 +450,8 @@ end
 
 @testitem "cache-infra seed: publishes artifacts + index + tombstones from a store" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -518,8 +518,8 @@ end
 
 @testitem "cache-infra reconcile: index recovery + stale tombstone drop" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -588,8 +588,8 @@ end
 
 @testitem "cache-infra reconcile: layer-1 abort on rclone list failure" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -628,8 +628,8 @@ end
 
 @testitem "cache-infra reconcile: layer-2 abort on empty list with existing index" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -671,8 +671,8 @@ end
 
 @testitem "cache-infra reconcile: genuine-empty first run produces 0-entry index" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.isunix() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on a unix platform"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")

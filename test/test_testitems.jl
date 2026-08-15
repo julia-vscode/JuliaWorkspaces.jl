@@ -438,9 +438,9 @@ end
     @test tsd.code_range == (length("@testsnippet Foo begin ") + 1):(40 - 4)
 end
 
-@testitem "@testitem project detection" tags=[:skip] begin
+@testitem "@testitem project detection" begin
     using Pkg
-    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace
+    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace, get_test_env
     using JuliaWorkspaces.URIs2: @uri_str, filepath2uri
 
     old = Base.active_project()
@@ -449,6 +449,9 @@ end
         mktempdir() do root_path
             cp(joinpath(@__DIR__, "..", "testdata", "project_detection"), joinpath(root_path, "project_detection"))
 
+            # Three packages, three ways of belonging to an environment: one
+            # instantiated on its own, one dev'd into the enclosing project, and
+            # one that no environment resolves at all.
             Pkg.activate(joinpath(root_path, "project_detection", "TestPackage2"))
             Pkg.instantiate()
 
@@ -461,6 +464,10 @@ end
             file1_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage2", "src", "TestPackage2.jl"))
             file2_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage3", "src", "TestPackage3.jl"))
             file3_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage4", "src", "TestPackage4.jl"))
+
+            @test get_test_env(jw, file1_uri).project_uri == filepath2uri(joinpath(root_path, "project_detection", "TestPackage2"))
+            @test get_test_env(jw, file2_uri).project_uri == filepath2uri(joinpath(root_path, "project_detection"))
+            @test get_test_env(jw, file3_uri).project_uri === nothing
         end
     finally
         Base.set_active_project(old)
