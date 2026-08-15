@@ -24,7 +24,7 @@ module VendoredLowering
 
 # The v2 parser+porcelain. Self-contained (stdlib imports only), so the
 # upstream file is included verbatim; it declares `module JuliaSyntax`.
-include("../packages/JuliaSyntax/src/JuliaSyntax.jl")
+include("../../packages/JuliaSyntax/src/JuliaSyntax.jl")
 
 baremodule JuliaLowering
 
@@ -53,25 +53,25 @@ const MacroSource = isdefined(Core, :MacroSource) ? Core.MacroSource : Union{}
 
 const TypeEqOf = isdefined(Core, :TypeEqOf) ? "TypeEqOf" : "Typeof"
 
-_include("../packages/JuliaLowering/src/kinds.jl")
+_include("../../packages/JuliaLowering/src/kinds.jl")
 _register_kinds()
 
-_include("../packages/JuliaLowering/src/ast.jl")
-_include("../packages/JuliaLowering/src/bindings.jl")
-_include("../packages/JuliaLowering/src/utils.jl")
-_include("../packages/JuliaLowering/src/validation.jl")
+_include("../../packages/JuliaLowering/src/ast.jl")
+_include("../../packages/JuliaLowering/src/bindings.jl")
+_include("../../packages/JuliaLowering/src/utils.jl")
+_include("../../packages/JuliaLowering/src/validation.jl")
 
-_include("../packages/JuliaLowering/src/macro_expansion.jl")
-_include("../packages/JuliaLowering/src/desugaring.jl")
-_include("../packages/JuliaLowering/src/scope_analysis.jl")
-_include("../packages/JuliaLowering/src/binding_analysis.jl")
-_include("../packages/JuliaLowering/src/closure_conversion.jl")
-_include("../packages/JuliaLowering/src/linear_ir.jl")
-_include("../packages/JuliaLowering/src/runtime.jl")
+_include("../../packages/JuliaLowering/src/macro_expansion.jl")
+_include("../../packages/JuliaLowering/src/desugaring.jl")
+_include("../../packages/JuliaLowering/src/scope_analysis.jl")
+_include("../../packages/JuliaLowering/src/binding_analysis.jl")
+_include("../../packages/JuliaLowering/src/closure_conversion.jl")
+_include("../../packages/JuliaLowering/src/linear_ir.jl")
+_include("../../packages/JuliaLowering/src/runtime.jl")
 
-_include("../packages/JuliaLowering/src/eval.jl")
-_include("../packages/JuliaLowering/src/compat.jl")
-_include("../packages/JuliaLowering/src/hooks.jl")
+_include("../../packages/JuliaLowering/src/eval.jl")
+_include("../../packages/JuliaLowering/src/compat.jl")
+_include("../../packages/JuliaLowering/src/hooks.jl")
 
 end # baremodule JuliaLowering
 

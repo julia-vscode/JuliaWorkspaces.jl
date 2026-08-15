@@ -1,10 +1,14 @@
 Salsa.@declare_input input_files(rt)::Set{URI}
 
-# Feature flag (experiment): when true, the vendored-JuliaLowering lint
+# Feature flag (experiment): when true, the v2 static analysis framework's lint
 # producer takes over the rules in `LOWERING_TAKEOVER_RULES` from StaticLint
-# (see lint_lowering_rules.jl). Default false: exactly the legacy behavior,
-# and nothing in the lowering layer is ever demanded.
-Salsa.@declare_input input_lowering_lint(rt)::Bool
+# (see v2/lint_lowering_rules.jl). Lazily defaults to false: exactly the legacy
+# behavior, and nothing in the v2 lowering layer is ever demanded. Declared lazy
+# rather than initialized in the `JuliaWorkspace` constructor so that the whole
+# v2 opt-in lives here and `src/types.jl` needs no knowledge of it.
+Salsa.@declare_input input_lowering_lint(rt)::Bool function(_ctx)
+    false
+end
 
 Salsa.@declare_input input_text_file(rt, uri)::Union{TextFile,Nothing}
 

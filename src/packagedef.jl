@@ -26,19 +26,7 @@ include("layer_syntax_trees.jl")
 include("layer_includes.jl")
 include("layer_inventory.jl")
 include("layer_module_tree.jl")
-include("layer_body_tree.jl")
-
-# Vendored JuliaSyntax v2 + JuliaLowering (packages/, see VENDOR_JuliaLowering.md).
-include("vendor_lowering.jl")
-# Defined here (not in layer_lowering.jl) so they exist BEFORE that file is
-# macro-expanded: its qualified string macros (`JS2.K"..."`) resolve `JS2` at
-# expansion time.
-const JS2 = VendoredLowering.JuliaSyntax
-const JL2 = VendoredLowering.JuliaLowering
-const V2Kind = JS2.Kind
-include("layer_lowering.jl")
-include("lint_lowering_rules.jl")
-
+include("v2/v2.jl")
 include("layer_visibility.jl")
 include("layer_scope_modules.jl")
 

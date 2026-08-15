@@ -309,9 +309,9 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         # run on the JuliaSyntax tree alone.
         foreach(emit_finding!, derived_syntax_lint_findings(rt, uri))
 
-        # Lowering-backed rules (experiment, behind `input_lowering_lint`; see
-        # lint_lowering_rules.jl). Empty unless the flag is on and a takeover
-        # rule is enabled.
+        # Lowering-backed rules from the v2 framework (experiment, behind
+        # `input_lowering_lint`; see v2/lint_lowering_rules.jl). Empty unless
+        # the flag is on and a takeover rule is enabled.
         foreach(emit_finding!, derived_semantic_lint_findings(rt, uri))
 
         # Include-graph diagnostics (DuplicateInclude / IncludeLoop /

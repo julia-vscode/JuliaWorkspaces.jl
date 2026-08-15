@@ -454,11 +454,11 @@ end
 """
     set_lowering_lint!(jw::JuliaWorkspace, enabled::Bool)
 
-Feature flag (experiment): when `true`, the vendored-JuliaLowering lint
-producer takes over the `unused_binding` / `unused_function_argument` rules
-from StaticLint — same rule ids, severities, and config surface, different
-engine. Default `false`: exactly the legacy behavior; the lowering machinery
-is never demanded.
+Feature flag (experiment): when `true`, the lint producer of the v2 static
+analysis framework (`src/v2/`, JuliaLowering-backed) takes over the
+`unused_binding` / `unused_function_argument` rules from StaticLint — same rule
+ids, severities, and config surface, different engine. Default `false`: exactly
+the legacy behavior; the v2 machinery is never demanded.
 """
 function set_lowering_lint!(jw::JuliaWorkspace, enabled::Bool)
     @debug "set_lowering_lint!" enabled=enabled
