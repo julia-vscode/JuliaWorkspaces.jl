@@ -31,6 +31,7 @@ TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]
+TestItemRunner = "1.2"
 TestItemDetection = "1.2"
 JuliaSyntax = "0.4, 1"
 PrecompileTools = "1.2"

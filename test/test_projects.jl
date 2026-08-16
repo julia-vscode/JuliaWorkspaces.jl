@@ -25,8 +25,8 @@
     @test length(projects) == 0
 end
 
-@testitem "Manifest details" tags=[:skip] begin
-    using UUIDs, Pkg
+@testitem "Manifest details" begin
+    using UUIDs, Pkg, TOML
 
     old = Base.active_project()
     try
@@ -45,11 +45,18 @@ end
 
             project_details = JuliaWorkspaces.derived_project(jw.runtime, project_uri)
 
+            # The fixture ships no Manifest.toml, so `instantiate` resolves fresh
+            # against the registry every run. Compare against what Pkg just wrote
+            # rather than a pinned version — what this asserts is that our manifest
+            # parsing agrees with Pkg's, not which 0.3.x the registry currently has.
+            manifest = TOML.parsefile(joinpath(pkg_root, "Manifest.toml"))
+            juliasyntax = only(manifest["deps"]["JuliaSyntax"])
+
             @test haskey(project_details.regular_packages, "JuliaSyntax") === true
             @test project_details.regular_packages["JuliaSyntax"].name == "JuliaSyntax"
-            @test project_details.regular_packages["JuliaSyntax"].git_tree_sha1 == "e09bf943597f83cc7a1fe3ae6c01c2c008d8cde7"
+            @test project_details.regular_packages["JuliaSyntax"].git_tree_sha1 == juliasyntax["git-tree-sha1"]
             @test project_details.regular_packages["JuliaSyntax"].uuid == UUID("70703baa-626e-46a2-a12c-08ffd08c73b4")
-            @test project_details.regular_packages["JuliaSyntax"].version == "0.3.5"
+            @test project_details.regular_packages["JuliaSyntax"].version == juliasyntax["version"]
 
             @test haskey(project_details.stdlib_packages, "Dates") === true
             @test project_details.stdlib_packages["Dates"].name == "Dates"
