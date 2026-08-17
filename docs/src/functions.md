@@ -45,6 +45,7 @@ position_at
 ```@docs
 get_julia_syntax_tree
 get_toml_syntax_tree
+parse_files_blocking
 ```
 
 ## Diagnostics
