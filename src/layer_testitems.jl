@@ -308,11 +308,26 @@ Salsa.@derived function derived_testenv(rt, uri)
         project_uri = nothing
     end
 
+    # The test process is only restarted when this hash changes, so it must
+    # cover every input the test environment is built from: the chosen
+    # project (Project + Manifest), the package's own Project.toml and
+    # Manifest, and the package's test/Project.toml and test/Manifest.toml
+    # (see julia-vscode/julia-vscode#3022).
     env_content_hash = isnothing(project_uri) ? hash(nothing) : derived_project(rt, project_uri).content_hash
     if package_uri===nothing
         env_content_hash = hash(nothing, env_content_hash)
     else
-        env_content_hash = hash(derived_package(rt, package_uri).content_hash)
+        env_content_hash = hash(derived_package(rt, package_uri).content_hash, env_content_hash)
+
+        package_project = derived_project(rt, package_uri)
+        env_content_hash = hash(package_project === nothing ? nothing : package_project.content_hash, env_content_hash)
+
+        test_folder_uri = filepath2uri(joinpath(uri2filepath(package_uri), "test"))
+        test_toml_files = derived_project_toml_files(rt, test_folder_uri)
+        for file in (test_toml_files.project_file, test_toml_files.manifest_file)
+            text_file = file === nothing ? nothing : derived_text_file_content(rt, file)
+            env_content_hash = hash(text_file === nothing ? nothing : text_file.content.content, env_content_hash)
+        end
     end
 
     # We construct a string for the env content hash here so that later when we

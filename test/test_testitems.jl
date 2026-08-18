@@ -611,6 +611,105 @@ version = "0.1.0"
     end
 end
 
+@testitem "test env content hash covers manifests and test project files" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, update_file!, TextFile, SourceText, get_test_env
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    [deps]
+    Inner = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    """
+
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+
+    [[deps.Inner]]
+    deps = []
+    path = "Inner"
+    uuid = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    version = "2.0.0"
+    """
+
+    inner_project = """
+    name = "Inner"
+    uuid = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    version = "2.0.0"
+    """
+
+    inner_test_project = """
+    [deps]
+    Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+    """
+
+    # Scenario 1: the package is deved into an active project (no manifest of its own)
+    outer_manifest_uri = URI("file:///hashenv/Manifest.toml")
+    inner_test_project_uri = URI("file:///hashenv/Inner/test/Project.toml")
+    inner_src_uri = URI("file:///hashenv/Inner/src/Inner.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hashenv/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(outer_manifest_uri, SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hashenv/Inner/Project.toml"), SourceText(inner_project, "toml")))
+    add_file!(jw, TextFile(inner_test_project_uri, SourceText(inner_test_project, "toml")))
+    add_file!(jw, TextFile(inner_src_uri, SourceText("module Inner end", "julia")))
+    JuliaWorkspaces.set_input_active_project!(jw.runtime, URI("file:///hashenv"))
+
+    env0 = get_test_env(jw, inner_src_uri)
+    @test env0.package_uri == URI("file:///hashenv/Inner")
+    @test env0.project_uri == URI("file:///hashenv")
+    hash0 = env0.env_content_hash
+    @test hash0 isa String
+    @test startswith(hash0, "x")
+
+    # Stable when nothing relevant changes, and across an unrelated src edit
+    @test get_test_env(jw, inner_src_uri).env_content_hash == hash0
+    update_file!(jw, TextFile(inner_src_uri, SourceText("module Inner
+x = 1
+end", "julia")))
+    @test get_test_env(jw, inner_src_uri).env_content_hash == hash0
+
+    # (a) the active project's Manifest.toml changes
+    update_file!(jw, TextFile(outer_manifest_uri, SourceText(manifest_toml * "
+# edited
+", "toml")))
+    hash1 = get_test_env(jw, inner_src_uri).env_content_hash
+    @test hash1 != hash0
+
+    # (b) test/Project.toml under the package changes
+    update_file!(jw, TextFile(inner_test_project_uri, SourceText(inner_test_project * "
+# edited
+", "toml")))
+    hash2 = get_test_env(jw, inner_src_uri).env_content_hash
+    @test hash2 != hash1
+    @test hash2 != hash0
+
+    # Scenario 2: a standalone package with its own Manifest.toml
+    pkg_manifest = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    """
+    pkg_manifest_uri = URI("file:///hashpkg/Manifest.toml")
+    pkg_src_uri = URI("file:///hashpkg/src/Inner.jl")
+
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(URI("file:///hashpkg/Project.toml"), SourceText(inner_project, "toml")))
+    add_file!(jw2, TextFile(pkg_manifest_uri, SourceText(pkg_manifest, "toml")))
+    add_file!(jw2, TextFile(pkg_src_uri, SourceText("module Inner end", "julia")))
+
+    env3 = get_test_env(jw2, pkg_src_uri)
+    @test env3.package_uri == URI("file:///hashpkg")
+    hash3 = env3.env_content_hash
+    @test get_test_env(jw2, pkg_src_uri).env_content_hash == hash3
+
+    # (c) the package folder's own Manifest.toml changes
+    update_file!(jw2, TextFile(pkg_manifest_uri, SourceText(pkg_manifest * "
+# edited
+", "toml")))
+    hash4 = get_test_env(jw2, pkg_src_uri).env_content_hash
+    @test hash4 != hash3
+end
+
 @testitem "derived_testenv for a file in a deved package of a project" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_env
     using JuliaWorkspaces.URIs2: URI
