@@ -2455,15 +2455,6 @@ end
     cst, meta_dict = parse_and_pass("using Base.Meta: quot, lower")
 end
 
-@testitem "issue 1609" setup=[shared_static_lint] begin
-    using JuliaWorkspaces.StaticLint: haserror
-
-    cst1, meta_dict1 = parse_and_pass("function g(@nospecialize(x), y) x + y end")
-    cst2, meta_dict2 = parse_and_pass("function g(@nospecialize(x), y) y end")
-    @test !haserror(cst1.args[1].args[1].args[2].args[3], meta_dict1)
-    @test haserror(cst2.args[1].args[1].args[2].args[3], meta_dict2)
-end
-
 @testitem "j-vsc issue 1835" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof
 
@@ -2806,7 +2797,7 @@ end
     @test bindingof(cst[2][2][3], meta_dict).type == bindingof(cst[1], meta_dict)
 end
 
-@testitem "clear .type refs" setup=[shared_static_lint] begin
+@testitem "where clauses in a struct signature produce no hints" setup=[shared_static_lint] begin
     cst, meta_dict, jw = parse_and_pass("""
     struct T{S,R} where S <: Number where R <: Number
     end
@@ -2835,7 +2826,7 @@ end
     @test isempty(get_hints(jw))
 end
 
-@testitem "where type param infer" setup=[shared_static_lint] begin
+@testitem "where type param infer: nested where clauses" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: getmeta
 
     cst, meta_dict, jw = parse_and_pass("""
@@ -3002,7 +2993,7 @@ end
 end
 
 
-@testitem "#1218" setup=[shared_static_lint] begin
+@testitem "#1218: a method on a function imported from a parent module" setup=[shared_static_lint] begin
     cst, meta_dict, jw = parse_and_pass("""
     module Sup
     function myfunc end

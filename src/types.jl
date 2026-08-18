@@ -380,6 +380,36 @@ end
 
 SContext(dynamic_feature) = SContext(dynamic_feature, nothing)
 
+# Scratch.jl appends an entry to ~/.julia/logs/scratch_usage.toml on the first
+# get_scratch! of every process, without any locking. With many short-lived
+# processes hitting this at once (parallel test workers constructing
+# JuliaWorkspace) the append races Pkg.gc's non-atomic rewrite of the same
+# file and corrupts it. Let the append through at most once per day
+# machine-wide — a marker file inside the scratch dir carries the
+# cross-process state — and suppress it otherwise. The daily append is still
+# needed so Pkg.gc keeps considering the scratch space in use.
+function get_scratch_rate_limited(scratch_key)
+    marker = joinpath(first(Base.DEPOT_PATH), "scratchspaces",
+        string(Base.PkgId(@__MODULE__).uuid), scratch_key, ".usage_stamped")
+    stamped_recently = try
+        isfile(marker) && time() - mtime(marker) < 24 * 60 * 60
+    catch
+        false
+    end
+    if stamped_recently
+        return withenv("JULIA_SCRATCH_TRACK_ACCESS" => "0") do
+            Scratch.@get_scratch!(scratch_key)
+        end
+    else
+        path = Scratch.@get_scratch!(scratch_key)
+        try
+            touch(marker)
+        catch
+        end
+        return path
+    end
+end
+
 """
     struct JuliaWorkspace
 
@@ -436,36 +466,6 @@ Create an empty workspace. To build one directly from folders on disc, use
   projects or test environments are created; only real project environments
   are watched. Defaults to `true`.
 """
-# Scratch.jl appends an entry to ~/.julia/logs/scratch_usage.toml on the first
-# get_scratch! of every process, without any locking. With many short-lived
-# processes hitting this at once (parallel test workers constructing
-# JuliaWorkspace) the append races Pkg.gc's non-atomic rewrite of the same
-# file and corrupts it. Let the append through at most once per day
-# machine-wide — a marker file inside the scratch dir carries the
-# cross-process state — and suppress it otherwise. The daily append is still
-# needed so Pkg.gc keeps considering the scratch space in use.
-function get_scratch_rate_limited(scratch_key)
-    marker = joinpath(first(Base.DEPOT_PATH), "scratchspaces",
-        string(Base.PkgId(@__MODULE__).uuid), scratch_key, ".usage_stamped")
-    stamped_recently = try
-        isfile(marker) && time() - mtime(marker) < 24 * 60 * 60
-    catch
-        false
-    end
-    if stamped_recently
-        return withenv("JULIA_SCRATCH_TRACK_ACCESS" => "0") do
-            Scratch.@get_scratch!(scratch_key)
-        end
-    else
-        path = Scratch.@get_scratch!(scratch_key)
-        try
-            touch(marker)
-        catch
-        end
-        return path
-    end
-end
-
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
