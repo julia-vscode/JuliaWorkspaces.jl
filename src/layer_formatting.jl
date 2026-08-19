@@ -1,10 +1,10 @@
 # Formatting layer
 #
 # Native source-code formatting driven by a `JuliaFormat.toml` configuration
-# file. The configuration model (nearest file governs its subtree wholesale,
-# shared `include`/`exclude` globs, `[[override]]` blocks) mirrors the lint
-# configuration in layer_diagnostics.jl; the shared machinery lives in
-# config_common.jl.
+# file. The configuration model (nearest file governs its subtree's settings
+# wholesale, shared `include`/`exclude` globs composing over the whole ancestor
+# chain, `[[override]]` blocks) mirrors the lint configuration in
+# layer_diagnostics.jl; the shared machinery lives in config_common.jl.
 #
 # Supported styles are the JuliaFormatter.jl styles ("default", "yas", "blue",
 # "sciml", "minimal") plus "runic", which routes formatting through Runic.jl.
@@ -25,10 +25,13 @@ const _FORMAT_STYLES_WITHOUT_OPTIONS = ("runic",)
 
 const _FORMAT_CONFIG_TOP_LEVEL_KEYS = ["config-version", "style", "include", "exclude", "options", "override"]
 
+# Sorted: this vector is now a dependency of every file's scope, and
+# `derived_text_files` is a `Set`, so an unsorted result would change on
+# unrelated file adds and defeat Salsa's backdating.
 Salsa.@derived function derived_formatconfig_files(rt)
     files = derived_text_files(rt)
 
-    return [file for file in files if file.scheme=="file" && is_path_formatconfig_file(uri2filepath(file))]
+    return sort!([file for file in files if file.scheme=="file" && is_path_formatconfig_file(uri2filepath(file))], by=string)
 end
 
 # Formatter knobs used to sit at the top level; they now live under `[options]`.
@@ -125,18 +128,38 @@ function _read_format_options(table)
     return out
 end
 
+"""
+    derived_format_path_filter(rt, config_uri) -> PathFilter
+
+The `include`/`exclude` globs of one `JuliaFormat.toml`, kept separate from the
+style and options so that scope and settings invalidate independently.
+"""
+Salsa.@derived function derived_format_path_filter(rt, config_uri)
+    discard = Diagnostic[]   # diagnostics are reported by derived_formatconfig_diagnostics
+
+    return parse_path_filter!(discard, derived_toml_syntax_tree(rt, config_uri))
+end
+
 Salsa.@derived function derived_format_configuration(rt, uri)
     @debug "derived_format_configuration" uri=uri
 
     # Non-file buffers have no folder-based config; defaults apply.
     uri.scheme == "file" || return EffectiveFormatConfig()
 
-    config_uri = nearest_config(derived_formatconfig_files(rt), uri)
-    config_uri === nothing && return EffectiveFormatConfig()
+    # Scope composes over every enclosing `JuliaFormat.toml`, so it is resolved
+    # before the nearest-file lookup that decides style and options.
+    config_files = derived_formatconfig_files(rt)
+    selected = scope_selected(
+        ancestor_configs(config_files, uri), uri2filepath(uri),
+        c -> derived_format_path_filter(rt, c),
+    )
+
+    config_uri = nearest_config(config_files, uri)
+    config_uri === nothing && return EffectiveFormatConfig(_FORMAT_DEFAULT_STYLE, Dict{Symbol,Any}(), selected)
 
     toml_content = derived_toml_syntax_tree(rt, config_uri)
     relpath = config_relative_path(config_dir_of(config_uri), uri2filepath(uri))
-    relpath === nothing && return EffectiveFormatConfig()
+    relpath === nothing && return EffectiveFormatConfig(_FORMAT_DEFAULT_STYLE, Dict{Symbol,Any}(), selected)
 
     style = get(toml_content, "style", _FORMAT_DEFAULT_STYLE)
     (style isa AbstractString && style in _FORMAT_STYLES) || (style = _FORMAT_DEFAULT_STYLE)
@@ -144,7 +167,6 @@ Salsa.@derived function derived_format_configuration(rt, uri)
     options = _read_format_options(get(toml_content, "options", nothing))
 
     discard = Diagnostic[]
-    filter = parse_path_filter!(discard, toml_content)
     overrides = parse_overrides!(discard, toml_content, (_, _) -> nothing)
 
     for ov in applicable_overrides(overrides, relpath)
@@ -155,7 +177,7 @@ Salsa.@derived function derived_format_configuration(rt, uri)
         merge!(options, _read_format_options(get(ov, "options", nothing)))
     end
 
-    return EffectiveFormatConfig(String(style), options, path_selected(filter, relpath))
+    return EffectiveFormatConfig(String(style), options, selected)
 end
 
 function _format_style_object(style::AbstractString)

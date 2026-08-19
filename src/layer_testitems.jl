@@ -16,10 +16,13 @@ end
 # tag filters) are deliberately not part of it yet.
 const _TESTITEMS_CONFIG_TOP_LEVEL_KEYS = ["config-version", "include", "exclude"]
 
+# Sorted: this vector is now a dependency of every file's scope, and
+# `derived_text_files` is a `Set`, so an unsorted result would change on
+# unrelated file adds and defeat Salsa's backdating.
 Salsa.@derived function derived_testitemsconfig_files(rt)
     files = derived_text_files(rt)
 
-    return [file for file in files if file.scheme=="file" && is_path_testitemsconfig_file(uri2filepath(file))]
+    return sort!([file for file in files if file.scheme=="file" && is_path_testitemsconfig_file(uri2filepath(file))], by=string)
 end
 
 Salsa.@derived function derived_testitemsconfig_diagnostics(rt, uri)
@@ -29,7 +32,10 @@ Salsa.@derived function derived_testitemsconfig_diagnostics(rt, uri)
 
     validate_key_set!(res, toml_content, _TESTITEMS_CONFIG_TOP_LEVEL_KEYS, Dict{String,String}(), "test items configuration key")
     validate_config_version!(res, toml_content)
-    shadowing_diagnostic!(res, derived_testitemsconfig_files(rt), uri, "JuliaTestItems.toml")
+    # No `shadowing_diagnostic!` here: v1 of this file has nothing but scope keys,
+    # and scope composes over the whole ancestor chain rather than being replaced
+    # by the nearest file, so a nested `JuliaTestItems.toml` supersedes nothing.
+    # Reinstate the call if execution settings are ever added to the schema.
     parse_glob_list!(res, toml_content, "include")
     parse_glob_list!(res, toml_content, "exclude")
 
@@ -37,24 +43,33 @@ Salsa.@derived function derived_testitemsconfig_diagnostics(rt, uri)
 end
 
 """
+    derived_testitems_path_filter(rt, config_uri) -> PathFilter
+
+The `include`/`exclude` globs of one `JuliaTestItems.toml`. Split out from
+`derived_testitems_selected` so a config is parsed once rather than once per
+file it governs, and so editing a config only invalidates the files whose scope
+actually depends on it.
+"""
+Salsa.@derived function derived_testitems_path_filter(rt, config_uri)
+    discard = Diagnostic[]   # diagnostics are reported by derived_testitemsconfig_diagnostics
+
+    return parse_path_filter!(discard, derived_toml_syntax_tree(rt, config_uri))
+end
+
+"""
     derived_testitems_selected(rt, uri) -> Bool
 
-Whether test items are discovered in `uri` at all, per the governing
-`JuliaTestItems.toml`.
+Whether test items are discovered in `uri` at all. Every `JuliaTestItems.toml`
+enclosing `uri` must admit it: a nested config can narrow discovery further, but
+it cannot resurrect a subtree an enclosing config excluded.
 """
 Salsa.@derived function derived_testitems_selected(rt, uri)
     uri.scheme == "file" || return true
 
-    config_uri = nearest_config(derived_testitemsconfig_files(rt), uri)
-    config_uri === nothing && return true
+    chain = ancestor_configs(derived_testitemsconfig_files(rt), uri)
+    isempty(chain) && return true
 
-    relpath = config_relative_path(config_dir_of(config_uri), uri2filepath(uri))
-    relpath === nothing && return true
-
-    toml_content = derived_toml_syntax_tree(rt, config_uri)
-    discard = Diagnostic[]
-
-    return path_selected(parse_path_filter!(discard, toml_content), relpath)
+    return scope_selected(chain, uri2filepath(uri), c -> derived_testitems_path_filter(rt, c))
 end
 
 """
