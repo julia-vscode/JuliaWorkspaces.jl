@@ -313,7 +313,11 @@ Salsa.@derived function derived_testenv(rt, uri)
     # project (Project + Manifest), the package's own Project.toml and
     # Manifest, and the package's test/Project.toml and test/Manifest.toml
     # (see julia-vscode/julia-vscode#3022).
-    env_content_hash = isnothing(project_uri) ? hash(nothing) : derived_project(rt, project_uri).content_hash
+    # We fold everything with `hash(x, h)`, whose seed argument must be a
+    # `UInt` (32 bit on 32 bit platforms), while `content_hash` fields are
+    # `UInt64`. Keep the accumulator at native `UInt` width by hashing the
+    # stored hash instead of seeding with it directly.
+    env_content_hash = isnothing(project_uri) ? hash(nothing) : hash(derived_project(rt, project_uri).content_hash)
     if package_uri===nothing
         env_content_hash = hash(nothing, env_content_hash)
     else
