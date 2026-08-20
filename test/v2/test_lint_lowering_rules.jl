@@ -89,11 +89,18 @@ end
     @test length(db) == 1
     @test db[1].severity === :warning
 
-    # Both takeover rules off => the gate is closed, nothing is produced.
+    # The unused rules off: their diagnostics disappear, but the gate stays
+    # open (other lowering-backed rules are still enabled), so raw findings
+    # keep being produced and materialization filters them.
     jw = ll_workspace(UNUSED_SRC;
         config="[rules]\nunused_binding = \"off\"\nunused_function_argument = \"off\"\n")
     @test isempty(ll_codes(jw, :unused_binding))
     @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # EVERY gate rule off => the gate is closed, nothing is produced at all.
+    all_off = join(("$(id) = \"off\"" for id in
+        Iterators.flatten((JuliaWorkspaces.LOWERING_TAKEOVER_RULES, JuliaWorkspaces.LOWERING_OWN_RULES))), "\n")
+    jw = ll_workspace(UNUSED_SRC; config="[rules]\n" * all_off * "\n")
     @test isempty(derived_semantic_lint_findings(jw.runtime, LL_URI))
 end
 

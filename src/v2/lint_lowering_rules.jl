@@ -11,7 +11,11 @@
 # emission join (`derived_semantic_lint_findings`) that is the only reader of
 # the address→range maps.
 
-const LOWERING_TAKEOVER_RULES = Set([:unused_binding, :unused_function_argument])
+const LOWERING_TAKEOVER_RULES = Set([
+    :unused_binding, :unused_function_argument,
+    # Routed from LoweringError messages (see LOWERING_MESSAGE_RULE_IDS):
+    :duplicate_function_argument, :break_continue, :global_const_decl,
+])
 
 # Rules this producer OWNS (no StaticLint counterpart, so no suppression):
 # checks only JuliaLowering computes.
@@ -28,10 +32,28 @@ lower one snippet per entry and assert the mapped id, so a
 silently demoting a takeover finding.
 """
 const LOWERING_MESSAGE_RULE_IDS = Dict{String,Symbol}(
-    # scope_analysis.jl — filled by the takeover-routing commit
+    # scope_analysis.jl:144 (`_var_str` variants for other kinds stay unrouted —
+    # v1 has no rule for a duplicate static parameter / typevar)
+    "function argument name not unique"                    => :duplicate_function_argument,
+    # validation.jl:344-348
+    "`continue` outside of a `while` or `for` loop"        => :break_continue,
+    "unlabeled `break` outside of a `while` or `for` loop" => :break_continue,
+    "labeled `break` outside of loop or symbolic block"    => :break_continue,
+    # validation.jl:239/242 + scope_analysis.jl:635/641 + validation.jl:485
+    "unsupported `const` inside function"                  => :global_const_decl,
+    "unsupported `const` declaration on local variable"    => :global_const_decl,
+    "unsupported `const local` declaration"                => :global_const_decl,
 )
 
-_lowering_error_rule_id(msg::AbstractString) = get(LOWERING_MESSAGE_RULE_IDS, msg, :lowering_errors)
+function _lowering_error_rule_id(msg::AbstractString)
+    routed = get(LOWERING_MESSAGE_RULE_IDS, msg, nothing)
+    routed === nothing || return routed
+    # A duplicate destructured argument reports a PARAMETERIZED message
+    # ("destructured argument name `a` conflicts with an existing …"), so it
+    # cannot live in the exact-string table; the refresh gate pins the prefix.
+    startswith(msg, "destructured argument name ") && return :duplicate_function_argument
+    return :lowering_errors
+end
 
 # The gate both producers consult. Evaluation order matters: with the flag off
 # the only Salsa dependency is the flag input itself, so config edits do not
