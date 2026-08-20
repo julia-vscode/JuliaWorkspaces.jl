@@ -407,9 +407,45 @@ never `Module` objects. `derived_item_lowering` depends on
 `derived_item_lowering_body` and nothing else — no map, no file content — which
 is what makes it backdate across position-only edits.
 
-**Macro expansion is skipped.** There is no expansion of user macros; macrocalls
-are opaque placeholders until DJP-side expansion exists. Three mitigations keep
-that from being crippling:
+**Macro expansion is out-of-process** (M1a, 2026-08-20, behind
+`input_macro_expansion`, lazily false; requires `DynamicPersistent`). The LS
+process never invokes a macro: opaque macrocalls are expanded by the
+**persistent env child** — the DJP process that indexed the environment and
+therefore already has its packages loaded — via the `expandMacros` batch
+request, and spliced back into materialization. The moving parts:
+
+- **Content-addressed cache** (`ExpansionKey = (env_hash, ctx_hash, mac_hash)`):
+  the env's Project/Manifest content hash, a module-context hash over the
+  module's sorted canonical import statements *plus the own package's
+  macro-definition body hashes* (so editing a deved macro re-keys exactly the
+  affected sites; the child runs `Revise.revise()` before every batch so
+  re-expansions see the new definition), and the macrocall's `BodyTree.hash`.
+  Position edits and unrelated edits re-key nothing. Settled results — `:ok`
+  with expansion text, or `:failed` as the negative cache — live in
+  `input_macro_expansions`, read per key through `derived_macro_expansion`.
+- **The harvest** ([`src/v2/layer_expansion.jl`](../../src/v2/layer_expansion.jl))
+  collects opaque macrocall sites position-free with `_materialize`'s exact
+  address accounting; the HOST-side `_reconcile_expansions!` reattaches source
+  text at the last mile (a legitimate reader of the volatile maps, like the
+  emission joins) and sends capped batches. Batches ride the env's existing
+  child through a per-key FIFO (the process FSM gained its one new edge,
+  `Done → Indexing`); a cache-hit env that never launched a child gets one
+  revived on demand through the refresh machinery, at most once. Batches are
+  not work items: they never touch `pending_count`, launch slots, or the env's
+  failure budget; a hanging macro times out (60 s), kills the child, and
+  negative-caches its batch.
+- **The splice with the union guard**: an `:ok` expansion is re-parsed with the
+  vendored JuliaSyntax into a position-free `BodyTree` and spliced at
+  **address 0** as the placeholder block's value — while KEEPING the
+  identifier-read fallback below. Address 0 means macro-generated bindings are
+  rule-exempt and macro-generated reads count as genuine uses, so the splice
+  can only improve fidelity; and because the fallback reads survive, a macro
+  that *drops* an argument (`@static if false`) can never turn "mentioned in
+  the call" into a false-positive unused binding. `:failed`, pending, and
+  unparseable results keep today's behavior bit for bit.
+
+For macrocalls without a settled expansion, the three original mitigations
+still apply:
 
 - *Structurally transparent macros* (`TRANSPARENT_MACRO_NAMES`: `@inline`,
   `@propagate_inbounds`, `@nospecialize`, …) are unwrapped without executing
@@ -503,7 +539,7 @@ This is the honest answer to "how far off is the switchover".
 
 | Missing | Consequence |
 | --- | --- |
-| Macro expansion | macrocalls are opaque; no use-before-definition rules |
+| Macro expansion (general case shipped M1a: DJP-side, flag-gated; see §8) | without both flags macrocalls stay opaque; use-before-definition rules remain blocked until expansion is on and gated (`derived_file_expansion_ready`, M1c) |
 | Environment / SymbolServer seam | nothing external resolves; no missing-reference or call-arity checks |
 | A visibility layer (v1's `layer_visibility.jl`) | no cross-module name resolution |
 | Feature layers | hover, completions, references, signatures, symbols, navigation, actions, formatting are **all** v1-only |
