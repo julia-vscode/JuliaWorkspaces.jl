@@ -218,6 +218,43 @@ Salsa.@derived function derived_item_expansions(rt, ref::V2ItemRef)
     return isempty(out) ? _EMPTY_EXPANSIONS : out
 end
 
+# ── readiness gating ────────────────────────────────────────────────────────
+
+"""
+    derived_file_expansion_ready(rt, uri) -> Bool
+
+Whether every expansion the file's lowering could use has SETTLED — `:ok` or
+`:failed`, either counts (the `derived_file_env_ready` doctrine: gate only
+while a result can still arrive; failure is terminal readiness). `true` when
+the flag is off, when the file is outside the v2 lint, or when it has no
+expansion sites.
+
+The shipping rules stay best-effort and do not consult this; it exists for
+future rules of the use-before-definition class, which must not run against
+the identifier-read fallback (a synthesized read may precede the real
+assignment). Under a non-persistent mode the reactor settles every batch
+entry `:failed` immediately, so this cannot gate forever wherever a dynamic
+feature exists. (Flag on with NO dynamic feature is a misconfiguration and
+gates macro-bearing files indefinitely — which today gates nothing.)
+"""
+Salsa.@derived function derived_file_expansion_ready(rt, uri)
+    input_macro_expansion(rt) || return true
+    derived_lowering_lint_active(rt, uri) || return true
+    env = derived_v2_expansion_env(rt, uri)
+    env === nothing && return true          # no env: expansion impossible, settled
+    ctx = derived_v2_expansion_context(rt, uri)
+    ctx === nothing && return true
+
+    settled = input_macro_expansions(rt)
+    for row in derived_v2_file_skeleton(rt, uri).items
+        for s in derived_v2_item_expansion_sites(rt, V2ItemRef(uri, row.id))
+            key = ExpansionKey((env.env_hash, ctx.ctx_hash, s.mac_hash))
+            haskey(settled, key) || return false
+        end
+    end
+    return true
+end
+
 # ── the harvest ─────────────────────────────────────────────────────────────
 
 "One expansion the workspace still needs, with everything the host must know to request it."

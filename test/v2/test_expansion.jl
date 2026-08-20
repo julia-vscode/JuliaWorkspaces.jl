@@ -142,3 +142,30 @@ end
     @test key3.ctx_hash != key2.ctx_hash
     @test key3.mac_hash == key2.mac_hash
 end
+
+@testitem "expansion: readiness gate settles on ok, failed, and impossibility" setup=[ExpansionWS] begin
+    jw, uri = exp_make_jw("""
+    function f(x)
+        @somemacro x
+        return 1
+    end
+    """)
+    key = JW.derived_required_macro_expansions(jw.runtime)[1].key
+
+    # Pending: not ready. Settled (either way): ready.
+    @test !JW.derived_file_expansion_ready(jw.runtime, uri)
+    settle!(jw, key => (status=:failed, text=""))
+    @test JW.derived_file_expansion_ready(jw.runtime, uri)
+    settle!(jw, key => (status=:ok, text="x + 1"))
+    @test JW.derived_file_expansion_ready(jw.runtime, uri)
+
+    # Flag off: always ready.
+    JW.set_macro_expansion!(jw, false)
+    settle!(jw)
+    @test JW.derived_file_expansion_ready(jw.runtime, uri)
+
+    # No expansion sites: ready even while the flag is on.
+    jw2, uri2 = exp_make_jw("plain() = 1\n")
+    @test JW.derived_file_expansion_ready(jw2.runtime, uri2)
+end
+

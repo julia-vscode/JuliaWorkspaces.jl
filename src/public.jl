@@ -143,11 +143,25 @@ derived value ever depends on positions. Cheap when the flag is off or nothing
 changed (`derived_required_macro_expansions` is memoized).
 """
 function _reconcile_expansions!(jw::JuliaWorkspace)
+    # No dynamic feature at all: nothing to send batches to. Keys stay pending
+    # (the flag together with no dynamic feature is a misconfiguration — and
+    # the process-free test seam).
     df = jw.dynamic_feature
     df === nothing && return
-    df.djp_mode == DynamicPersistent || return
     input_macro_expansion(jw.runtime) || return
 
+    # Prune bookkeeping for envs that left the workspace (env edits re-key
+    # everything under a new env_hash, so stale entries only cost memory).
+    live_env_hashes = Set{UInt64}(k.content_hash for k in derived_required_dynamic_projects(jw.runtime))
+    if any(k -> !(k.env_hash in live_env_hashes), keys(input_macro_expansions(jw.runtime)))
+        set_input_macro_expansions!(jw.runtime,
+            filter(p -> p.first.env_hash in live_env_hashes, input_macro_expansions(jw.runtime)))
+    end
+    filter!(k -> k.env_hash in live_env_hashes, df.requested_expansions)
+
+    # Batches are sent regardless of mode: under a non-persistent mode the
+    # reactor settles every entry `:failed` immediately, which is exactly what
+    # the readiness gate and the negative cache need to stay honest.
     required = derived_required_macro_expansions(jw.runtime)
     isempty(required) && return
 
