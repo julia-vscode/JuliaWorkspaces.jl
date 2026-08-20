@@ -737,12 +737,19 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
         # EST encodes bare-ness as child 1: `module` → true, `baremodule` → false.
         not_bare = length(cs) >= 1 && cs[1].val === true
         name !== nothing && push!(skel.modules, V2Module(order, id, name, !not_bare, pm))
-        # Module items get no body: it would duplicate every inner item's tree
+        # Module items get no BODY: it would duplicate every inner item's tree
         # and churn on any edit inside the module. Module structure is the
         # module-tree layer's job; the walker still yields the inner items.
+        # The address MAP is stored though (volatile anyway), so module-level
+        # findings — `module_name` — can be emitted at the name's range
+        # (preorder address 3: children are [bare-flag, name, block]).
+        state.maps[id] = ranges
         return order, id, bt
     elseif k == JS2.K"using" || k == JS2.K"import"
         _v2_emit_import!(skel, bt, order, id, pm)
+        # Map (not body) stored, so import-level findings — `relative_import` —
+        # can be emitted at the statement's range.
+        state.maps[id] = ranges
         return order, id, bt
     elseif k == JS2.K"export" || k == JS2.K"public"
         names = String[]
@@ -996,7 +1003,9 @@ Salsa.@derived derived_v2_file_bodies(rt, uri) = derived_v2_file_walk(rt, uri).b
     derived_v2_file_maps(rt, uri) -> Dict{Int64,Vector{UnitRange{Int}}}
 
 For each item id, the address map of its `BodyTree`: entry `i` is the 1-based,
-exclusive-end byte range of the node at preorder address `i`. VOLATILE by design
+exclusive-end byte range of the node at preorder address `i`. Module and
+`using`/`import` rows have a map too (though no body), so module- and
+import-level findings can be emitted at real ranges. VOLATILE by design
 — it recomputes on every reparse. Analysis layers depend on `derived_v2_item_body`
 (position-free) only; this exists solely to reattach locations at the last mile.
 Depending on it from an analysis-layer computation is a bug.

@@ -490,3 +490,42 @@ end
     @test ("g", "M") in names
     @test any(m -> m.name == "M", inv.modules)
 end
+
+@testitem "v2 inventory: module and import rows carry address maps, not bodies" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: URI
+
+    src = """
+    module Outer
+    using ..Somewhere
+    module Outer
+    end
+    end
+    """
+    jw = JuliaWorkspace()
+    uri = URI("file:///pr/src/a.jl")
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+
+    skel = JW.derived_v2_file_skeleton(jw.runtime, uri)
+    maps = JW.derived_v2_file_maps(jw.runtime, uri)
+    bodies = JW.derived_v2_file_bodies(jw.runtime, uri)
+
+    @test length(skel.modules) == 2
+    @test length(skel.imports) == 1
+    for m in skel.modules
+        @test haskey(maps, m.id)
+        @test !haskey(bodies, m.id)
+        # Module EST children are [bare-flag, name, block]: preorder address 3
+        # is the name token. Pinned here because `module_name` findings report
+        # at that address.
+        rng = maps[m.id][3]
+        @test src[first(rng):last(rng)-1] == "Outer"
+    end
+    imp = skel.imports[1]
+    @test haskey(maps, imp.id)
+    @test !haskey(bodies, imp.id)
+    rng = maps[imp.id][1]
+    @test src[first(rng):last(rng)-1] == "using ..Somewhere"
+end
