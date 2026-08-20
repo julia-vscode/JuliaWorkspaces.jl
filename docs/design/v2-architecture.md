@@ -283,6 +283,13 @@ O(file) walk that *always* fails, since the maps shift on any position edit.
 Default `==` is `===`, so that comparison is O(1) and the real early cutoff
 happens in the three projections.
 
+The parse runs with `ignore_errors=true`: a syntax error yields JuliaSyntax's
+**recovered** tree rather than an empty walk, so intact items — test items
+included — survive an error elsewhere in the file, matching the robustness
+CSTParser's recovery gives v1. `K"error"` nodes flow into `BodyTree`s like any
+other kind (the lowering layer's per-item degrade contains them), and the error
+itself is still reported to the user by `derived_julia_syntax_diagnostics`.
+
 **Classification** is one Salsa hop away. The skeleton's `V2ItemRow.kind` is the
 *coarse* head kind and is deliberately body-independent (`:struct` covers both
 mutabilities) so the skeleton stays insensitive to body edits and the id key stays
@@ -963,7 +970,7 @@ prove the walker sees exactly what the external detector sees.
 > external package sweep → make the v2 path unconditional, drop
 > `raw_test_details` from `JuliaParseProducts`, and remove the
 > `TestItemDetection` dependency. Only then is the third parse *deleted*
-> rather than shared. One known behavioural edge to decide before flipping: a
-> file whose parse fails outright yields an empty v2 walk (no test items),
-> whereas `TestItemDetection` walks JuliaSyntax's recovered tree and may still
-> find items below the error.
+> rather than shared. (An earlier edge here — a file whose parse fails
+> outright losing all its test items — is closed: the walk now parses with
+> `ignore_errors=true`, see §6, and broken-file shapes are parity-tested
+> against the legacy engine.)

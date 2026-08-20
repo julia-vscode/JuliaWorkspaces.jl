@@ -949,6 +949,13 @@ const EMPTY_V2_FILE_WALK = V2FileWalk(
 
 The single v2 parse of `uri`, walked once into skeleton + bodies + maps.
 Consumers depend on the projections below, never on this.
+
+Parses with `ignore_errors=true`, so a syntax error yields JuliaSyntax's
+RECOVERED tree rather than an empty walk — the same robustness CSTParser's
+recovery gives v1. Intact items (test items included) survive an error
+elsewhere in the file; `K"error"` nodes flow into `BodyTree`s like any other
+kind, and the error itself is still reported by
+`derived_julia_syntax_diagnostics`. For a clean file the flag changes nothing.
 """
 Salsa.@derived function derived_v2_file_walk(rt, uri)
     @debug "derived_v2_file_walk" uri=uri
@@ -958,7 +965,7 @@ Salsa.@derived function derived_v2_file_walk(rt, uri)
     tf === nothing && return EMPTY_V2_FILE_WALK
 
     root = try
-        JS2.parseall(JS2.SyntaxTree, tf.content.content; filename=string(uri))
+        JS2.parseall(JS2.SyntaxTree, tf.content.content; filename=string(uri), ignore_errors=true)
     catch err
         err isa InterruptException && rethrow()
         return EMPTY_V2_FILE_WALK

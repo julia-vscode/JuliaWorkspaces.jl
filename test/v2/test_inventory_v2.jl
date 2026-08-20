@@ -461,3 +461,32 @@ end
     end
     @test offenders == String[]
 end
+
+@testitem "v2 inventory: a syntax error yields the recovered tree, not an empty walk" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: URI
+
+    # The walk parses with `ignore_errors=true`: definitions after (and around)
+    # a syntax error stay in the inventory, matching CSTParser's recovery in v1.
+    src = """
+    function broken(x
+        y = 1
+    end
+
+    f() = 2
+    module M
+    g() = 3
+    end
+    """
+    jw = JuliaWorkspace()
+    uri = URI("file:///pr/src/a.jl")
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+
+    inv = JW.derived_v2_file_inventory(jw.runtime, uri)
+    names = Set((i.name, join(i.parent_module, ".")) for i in inv.items)
+    @test ("f", "") in names
+    @test ("g", "M") in names
+    @test any(m -> m.name == "M", inv.modules)
+end

@@ -194,3 +194,24 @@ end
     r = get_test_items(jw, uri)
     @test isempty(r.testitems) && isempty(r.testerrors)
 end
+
+@testitem "v2 test items: syntax errors elsewhere do not lose intact items" setup=[TestItemsV2Parity] begin
+    # The v2 walk parses with `ignore_errors=true`, so it sees JuliaSyntax's
+    # recovered tree — the same robustness the legacy engine gets from
+    # `parse_julia_syntax_tree` never throwing. Every case is exact parity,
+    # verified empirically: both parsers recover these shapes identically.
+    for src in [
+        # a broken function above an intact item
+        "function broken(x\n    y = 1\nend\n\n@testitem \"still here\" tags=[:a] begin\n    @test true\nend\n",
+        # garbage inside the first item's block; the second item is intact
+        "@testitem \"one\" begin\n    ]]]garbage\nend\n@testitem \"two\" begin\n    @test true\nend\n",
+        # garbage between two intact items
+        "@testitem \"one\" begin end\n)(\n@testitem \"two\" begin end\n",
+        # truncated at EOF inside the block
+        "@testitem \"trunc\" begin\n",
+        "@testitem \"trunc2\" tags=[:a] begin\n    @test true\n",
+    ]
+        r = ti_assert_parity(src)
+        @test !isempty(r.testitems)
+    end
+end
