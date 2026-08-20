@@ -12,7 +12,7 @@
 # the address→range maps.
 
 const LOWERING_TAKEOVER_RULES = Set([
-    :unused_binding, :unused_function_argument,
+    :unused_binding, :unused_function_argument, :unused_type_parameter,
     # Routed from LoweringError messages (see LOWERING_MESSAGE_RULE_IDS):
     :duplicate_function_argument, :break_continue, :global_const_decl,
 ])
@@ -151,6 +151,31 @@ Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
             push!(result, (addr=b.addr, rule_id=:unused_function_argument,
                 msg="Argument `$(b.name)` is never used within the function body."))
         end
+    end
+
+    # `where`-clause type parameters mint TWO bindings at the declaration
+    # address: a `:typevar` whose reads are the SIGNATURE uses, and a
+    # `:static_parameter` whose reads are the BODY uses. The parameter is
+    # unused only when both are unread. Struct/alias parameters lower as
+    # `:local` and are deliberately not covered — matching v1, whose
+    # `check_typeparams` fires on `where` clauses only.
+    tp_read = Dict{Int32,Bool}()
+    tp_name = Dict{Int32,String}()
+    for b in low.bindings
+        b.kind in (:typevar, :static_parameter) || continue
+        b.addr == Int32(0) && continue
+        tp_read[b.addr] = get(tp_read, b.addr, false) | b.is_read
+        haskey(tp_name, b.addr) || (tp_name[b.addr] = b.name)
+    end
+    for addr in sort!(collect(keys(tp_read)))
+        tp_read[addr] && continue
+        addr in used_addrs && continue
+        addr in emitted && continue
+        name = tp_name[addr]
+        (isempty(name) || startswith(name, "_")) && continue
+        push!(emitted, addr)
+        push!(result, (addr=addr, rule_id=:unused_type_parameter,
+            msg="A DataType parameter has been specified but not used."))
     end
     return result
 end

@@ -261,3 +261,42 @@ end
     f2 = derived_item_semantic_findings(jw.runtime, ref)
     @test isequal(f1, f2)
 end
+
+@testitem "lowering lint: unused type parameters flagged, used and struct params spared" setup=[LoweringLintWS] begin
+    # Unread `where` parameter: flagged at the parameter, v1 message wording.
+    jw = ll_workspace("f(x) where T = x\n")
+    d = ll_codes(jw, :unused_type_parameter)
+    @test length(d) == 1
+    @test d[1].message == "A DataType parameter has been specified but not used."
+    @test d[1].source == "JuliaWorkspaces.jl"
+
+    # Used in the signature: spared.
+    jw = ll_workspace("f(x::T) where T = x\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+
+    # Used only in the body: spared.
+    jw = ll_workspace("function g(x) where T\n    return x isa T\nend\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+
+    # Multiple parameters: only the unused one is flagged.
+    jw = ll_workspace("function g(x::T) where {T, S}\n    return x\nend\n")
+    d = ll_codes(jw, :unused_type_parameter)
+    @test length(d) == 1
+    src = "function g(x::T) where {T, S}\n    return x\nend\n"
+    @test src[first(d[1].range):last(d[1].range)-1] == "S"
+
+    # Struct and type-alias parameters lower as locals and are not covered,
+    # matching v1's where-clause-only semantics.
+    jw = ll_workspace("struct Foo{T}\n    a::Int\nend\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+    jw = ll_workspace("const V{T} = Vector{T}\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+
+    # `_`-prefixed names are the intentional-unused convention.
+    jw = ll_workspace("f(x) where _T = x\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+
+    # Config: rule off silences it.
+    jw = ll_workspace("f(x) where T = x\n"; config="[rules]\nunused_type_parameter = \"off\"\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+end
