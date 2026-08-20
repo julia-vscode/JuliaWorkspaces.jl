@@ -43,8 +43,14 @@
     end
     @test length(files) > 50   # the corpus is actually there
 
+    # v1's inventory (since the test-item analysis work) descends into
+    # `@testitem`/`@testsnippet`/`@testmodule` bodies as synthetic scopes named
+    # `#testitem#<label>#N` etc. v2 deliberately keeps those macrocalls opaque at
+    # the inventory level — their bodies are handled by the lowering layer — so
+    # anything inside a synthetic test scope is excluded from the comparison.
+    in_test_scope(pm) = any(startswith(seg, "#test") for seg in pm)
     proj(items) = sort([(i.name, i.kind, join(i.parent_module, "."), join(i.qualifier, "."))
-                        for i in items])
+                        for i in items if !in_test_scope(i.parent_module)])
 
     saw_v1_only = Set{Symbol}()
     saw_v2_only = Set{Symbol}()
@@ -74,22 +80,27 @@
                 push!(problems, "$rel: v2-only $(x)")
         end
 
-        m1 = sort([(m.name, m.bare, join(m.parent_module, ".")) for m in v1.modules])
+        m1 = sort([(m.name, m.bare, join(m.parent_module, ".")) for m in v1.modules
+                   if !in_test_scope(m.parent_module) && !startswith(m.name, "#test")])
         m2 = sort([(m.name, m.bare, join(m.parent_module, ".")) for m in v2.modules])
         m1 == m2 || push!(problems, "$rel: modules differ: $(symdiff(m1, m2))")
 
-        e1 = sort([(e.kind, sort(e.names), join(e.parent_module, ".")) for e in v1.exports])
+        e1 = sort([(e.kind, sort(e.names), join(e.parent_module, ".")) for e in v1.exports
+                   if !in_test_scope(e.parent_module)])
         e2 = sort([(e.kind, sort(e.names), join(e.parent_module, ".")) for e in v2.exports])
         e1 == e2 || push!(problems, "$rel: exports differ: $(symdiff(e1, e2))")
 
-        i1 = sort([(i.kind, i.path, i.symbols, i.alias, join(i.parent_module, ".")) for i in v1.imports])
-        i2 = sort([(i.kind, i.path, i.symbols, i.alias, join(i.parent_module, ".")) for i in v2.imports])
+        # `alias` can be `nothing`, which tuples cannot order — sort by repr.
+        i1 = sort([(i.kind, i.path, i.symbols, i.alias, join(i.parent_module, ".")) for i in v1.imports
+                   if !in_test_scope(i.parent_module)], by=repr)
+        i2 = sort([(i.kind, i.path, i.symbols, i.alias, join(i.parent_module, ".")) for i in v2.imports], by=repr)
         i1 == i2 || push!(problems, "$rel: imports differ: $(symdiff(i1, i2))")
 
         # v2 defers resolving an include to a URI (that is the module tree's
         # job), so only the edge COUNT is comparable here.
-        length(v1.includes) == length(v2.includes) ||
-            push!(problems, "$rel: include count v1=$(length(v1.includes)) v2=$(length(v2.includes))")
+        n1 = count(inc -> !in_test_scope(inc.parent_module), v1.includes)
+        n1 == length(v2.includes) ||
+            push!(problems, "$rel: include count v1=$n1 v2=$(length(v2.includes))")
     end
 
     isempty(problems) || println("Unexpected v1/v2 divergences:\n  " *
