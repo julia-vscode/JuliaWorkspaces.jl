@@ -137,6 +137,49 @@ transparently, so visible definitions inside it stay in `items`.
 end
 
 """
+    V2TestItem
+
+One `@testitem`/`@testmodule`/`@testsnippet`, as the walker sees it (design doc
+§13.4). Position-free BY OMISSION: no ranges and no `code` string, so the record
+backdates on any edit that does not change the label, an option, or the item
+set. Ranges and the code slice are reattached from `derived_v2_file_maps` at the
+emission join (`derived_v2_testitem_details`), the same last-mile split the lint
+findings use.
+
+`id` is the walker's item id — the one id authority — so "did this test's body
+change?" is `derived_v2_item_body_hash` on the same ref.
+
+`option_skip` deviates from a literal port of `TestItemDetection`: a non-literal
+skip expression is `nothing` here rather than a source range, because its source
+text can only come from file text + map, which is the join's job.
+"""
+@auto_hash_equals struct V2TestItem
+    order::Int
+    id::Int64
+    kind::Symbol                 # :testitem | :testsetup_module | :testsetup_snippet
+    label::String
+    parent_module::Vector{String}
+    option_default_imports::Bool
+    option_tags::Vector{Symbol}
+    option_setup::Vector{Symbol}
+    option_skip::Union{Bool,Nothing}   # nothing ⇒ non-literal skip expr; the JOIN slices its text
+end
+
+"""
+    V2TestError
+
+A malformed test macro. The message is a position-free fact about the
+macrocall's shape (the exact strings `TestItemDetection` emits); the range it is
+reported at is always the whole macrocall, reattached in the join.
+"""
+@auto_hash_equals struct V2TestError
+    order::Int
+    id::Int64
+    name::String                 # the label when it parsed, else "Test definition error"
+    message::String
+end
+
+"""
     V2FileSkeleton
 
 The body-free API shape of one file. Structural equality is the early-cutoff
@@ -150,10 +193,13 @@ regardless of body edits, whitespace, comments, or docstrings.
     includes::Vector{V2Include}
     modules::Vector{V2Module}
     opaque_macros::Vector{V2OpaqueMacro}
+    testitems::Vector{V2TestItem}
+    testerrors::Vector{V2TestError}
 end
 
 const EMPTY_V2_SKELETON = V2FileSkeleton(
-    V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[], V2OpaqueMacro[])
+    V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[], V2OpaqueMacro[],
+    V2TestItem[], V2TestError[])
 
 # ── classification records (derived from an item's BodyTree) ────────────────
 
@@ -371,6 +417,189 @@ const DEFINITION_SHAPED_DSL_MACROS = Set([
 
 _v2_is_doc_macro(name) = name == "@doc"
 
+# ── test macro scanning ─────────────────────────────────────────────────────
+
+# The label of `@testitem "…"`. A plain literal is a `String` LEAF in the EST
+# (no wrapper node); an interpolated label is a lowercase `string` node whose
+# first chunk carries the name — the same "first child's value" rule
+# `TestItemDetection` applies (`node[2][1].val`), including its stringified
+# `nothing` when the first chunk is not a literal.
+_v2_is_string_label(bt::BodyTree) = bt.kind == JS2.K"String" || bt.kind == JS2.K"string"
+
+function _v2_string_label(bt::BodyTree)
+    bt.kind == JS2.K"String" && return something(_v2_leaf_string(bt), "nothing")
+    cs = _v2_children(bt)
+    isempty(cs) && return "nothing"
+    return something(_v2_leaf_string(cs[1]), "nothing")
+end
+
+"""
+    _v2_scan_test_macro!(skel, bt, name, order, id, pm)
+
+`TestItemDetection.find_test_detail!`'s per-macrocall argument checks, ported
+onto the position-free `BodyTree` (same shapes accepted, same error strings).
+Pushes exactly one `V2TestItem` or one `V2TestError` for the macrocall.
+
+Everything here is a fact about the macrocall's SHAPE: ranges and the `code`
+slice are reattached from the address map at the emission join. This looks
+inside an isolated-scope macrocall, but enumeration is untouched — nothing in
+the body binds outward, exactly as before.
+"""
+function _v2_scan_test_macro!(skel::V2FileSkeleton, bt::BodyTree, name::String,
+                              order::Int, id::Int64, pm::Vector{String})
+    args = _v2_macro_args(bt)
+    err(n, msg) = (push!(skel.testerrors, V2TestError(order, id, n, msg)); nothing)
+
+    if name == "@testitem"
+        if isempty(args)
+            return err("Test definition error", "Your @testitem is missing a name and code block.")
+        elseif !_v2_is_string_label(args[1])
+            return err("Test definition error", "Your @testitem must have a first argument that is of type String for the name.")
+        end
+        label = _v2_string_label(args[1])
+        if length(args) == 1
+            return err(label, "Your @testitem is missing a code block argument.")
+        elseif args[end].kind != JS2.K"block"
+            return err(label, "The final argument of a @testitem must be a begin end block.")
+        end
+
+        option_tags = nothing
+        option_default_imports = nothing
+        option_setup = nothing
+        # `nothing` is a VALUE for skip (the non-literal sentinel), so presence
+        # gets its own flag rather than the `=== nothing` test the others use.
+        option_skip = false
+        skip_seen = false
+
+        for kw in args[2:end-1]
+            if kw.kind != JS2.K"=" || _v2_nchildren(kw) != 2
+                return err(label, "The arguments to a @testitem must be in keyword format.")
+            end
+            kcs = _v2_children(kw)
+            key = kcs[1].kind == JS2.K"Identifier" ? _v2_leaf_string(kcs[1]) : nothing
+            value = kcs[2]
+
+            if key == "tags"
+                option_tags === nothing ||
+                    return err(label, "The keyword argument tags cannot be specified more than once.")
+                value.kind == JS2.K"vect" ||
+                    return err(label, "The keyword argument tags only accepts a vector of symbols.")
+                option_tags = Symbol[]
+                for el in _v2_children(value)
+                    # `:a` quotes as `(inert (Identifier "a"))` in the EST.
+                    (el.kind == JS2.K"inert" && _v2_nchildren(el) == 1 &&
+                     _v2_children(el)[1].kind == JS2.K"Identifier") ||
+                        return err(label, "The keyword argument tags only accepts a vector of symbols.")
+                    push!(option_tags, Symbol(_v2_leaf_string(_v2_children(el)[1])))
+                end
+            elseif key == "default_imports"
+                option_default_imports === nothing ||
+                    return err(label, "The keyword argument default_imports cannot be specified more than once.")
+                value.val in (true, false) ||
+                    return err(label, "The keyword argument default_imports only accepts bool values.")
+                option_default_imports = value.val
+            elseif key == "setup"
+                option_setup === nothing ||
+                    return err(label, "The keyword argument setup cannot be specified more than once.")
+                value.kind == JS2.K"vect" ||
+                    return err(label, "The keyword argument `setup` only accepts a vector of `@testsetup module` names.")
+                option_setup = Symbol[]
+                for el in _v2_children(value)
+                    el.kind == JS2.K"Identifier" ||
+                        return err(label, "The keyword argument `setup` only accepts a vector of `@testsetup module` names.")
+                    push!(option_setup, Symbol(_v2_leaf_string(el)))
+                end
+            elseif key == "skip"
+                skip_seen &&
+                    return err(label, "The keyword argument skip cannot be specified more than once.")
+                skip_seen = true
+                # A literal Bool is resolved here; anything else is the `nothing`
+                # sentinel — the join slices its source text by address.
+                option_skip = value.val in (true, false) ? value.val : nothing
+            else
+                return err(label, "Unknown keyword argument.")
+            end
+        end
+
+        push!(skel.testitems, V2TestItem(
+            order, id, :testitem, label, copy(pm),
+            something(option_default_imports, true),
+            something(option_tags, Symbol[]),
+            something(option_setup, Symbol[]),
+            option_skip))
+    else
+        kind = name == "@testmodule" ? :testsetup_module : :testsetup_snippet
+        if isempty(args)
+            return err("Test definition error", "Your $name is missing a name and code block.")
+        elseif args[1].kind != JS2.K"Identifier"
+            return err("Test definition error", "Your $name must have a first argument that is an identifier for the name.")
+        end
+        label = something(_v2_leaf_string(args[1]), "")
+        if length(args) == 1
+            return err(label, "Your $name is missing a code block argument.")
+        elseif args[end].kind != JS2.K"block"
+            return err(label, "The final argument of a $name must be a begin end block.")
+        end
+        for kw in args[2:end-1]
+            kw.kind == JS2.K"=" ||
+                return err(label, "The arguments to a $name must be in keyword format.")
+            return err(label, "Unknown keyword argument.")
+        end
+        push!(skel.testitems, V2TestItem(
+            order, id, kind, label, copy(pm), true, Symbol[], Symbol[], false))
+    end
+    return nothing
+end
+
+# ── preorder addresses for the test-item emission join ──────────────────────
+
+_v2_subtree_size(bt::BodyTree) =
+    1 + (bt.children === nothing ? 0 : sum(_v2_subtree_size(c) for c in bt.children; init=0))
+
+"Preorder addresses of `bt`'s direct children, given `bt`'s own address."
+function _v2_child_addresses(bt::BodyTree, addr::Int)
+    out = Int[]
+    a = addr + 1
+    for c in _v2_children(bt)
+        push!(out, a)
+        a += _v2_subtree_size(c)
+    end
+    return out
+end
+
+"""
+    _v2_test_macro_addresses(bt) -> NamedTuple | nothing
+
+The preorder addresses the test-item emission join needs from a test macrocall's
+`BodyTree`: the trailing block, its first and last children (`nothing` when the
+block is empty), and the value of a non-literal `skip` kwarg (`nothing`
+otherwise). Addresses index `derived_v2_file_maps(rt, uri)[id]`, whose entries
+`_build_body_tree_v2!` numbers with this same preorder walk.
+"""
+function _v2_test_macro_addresses(bt::BodyTree)
+    cs = _v2_children(bt)
+    isempty(cs) && return nothing
+    addrs = _v2_child_addresses(bt, 1)
+    block = cs[end]
+    block.kind == JS2.K"block" || return nothing
+    block_addr = addrs[end]
+    baddrs = _v2_child_addresses(block, block_addr)
+
+    skip_addr = nothing
+    for (i, c) in enumerate(cs)
+        (c.kind == JS2.K"=" && _v2_nchildren(c) == 2) || continue
+        kcs = _v2_children(c)
+        _v2_leaf_string(kcs[1]) == "skip" || continue
+        kcs[2].val in (true, false) && continue
+        skip_addr = _v2_child_addresses(c, addrs[i])[2]
+    end
+
+    return (block = block_addr,
+            block_first = isempty(baddrs) ? nothing : baddrs[1],
+            block_last = isempty(baddrs) ? nothing : baddrs[end],
+            skip_value = skip_addr)
+end
+
 # ── include detection ───────────────────────────────────────────────────────
 
 # `include("f.jl")` → `(call (Identifier "include") (String "f.jl"))`.
@@ -465,7 +694,8 @@ mutable struct _V2WalkState
     alloc::_V2ItemIdAllocator
 end
 _V2WalkState() = _V2WalkState(
-    V2FileSkeleton(V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[], V2OpaqueMacro[]),
+    V2FileSkeleton(V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[], V2OpaqueMacro[],
+                   V2TestItem[], V2TestError[]),
     Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator())
 
 """
@@ -663,9 +893,15 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
         return _v2_walk_one!(state, cs[4], parent_module, interpretable)
     end
 
-    # `@enum` and the isolating test macros are single opaque items.
+    # `@enum` and the isolating test macros are single opaque items. The test
+    # macros additionally get their argument shape SCANNED into native
+    # `V2TestItem` records — the walker looks inside them, but still emits one
+    # item and never descends, so the isolation rule is untouched.
     if name == "@enum" || (name !== nothing && name in V2_ISOLATED_SCOPE_MACROS)
-        return _v2_emit_plain!(state, node, parent_module, interpretable)
+        order, id, bt = _v2_emit!(state, node, parent_module, interpretable)
+        name in ("@testitem", "@testmodule", "@testsnippet") &&
+            _v2_scan_test_macro!(state.skeleton, bt, name, order, id, parent_module)
+        return nothing
     end
 
     # Effects we do not model: record the macrocall itself, then still walk its
@@ -777,6 +1013,25 @@ Salsa.@derived function derived_v2_noninterpretable_ids(rt, uri)
         row.interpretable || push!(ids, row.id)
     end
     return ids
+end
+
+"The test items and test definition errors of one file, as a comparable value."
+@auto_hash_equals struct V2FileTestItems
+    testitems::Vector{V2TestItem}
+    testerrors::Vector{V2TestError}
+end
+
+"""
+    derived_v2_file_testitems(rt, uri) -> V2FileTestItems
+
+Projection of the skeleton's test records, so consumers backdate on any edit
+that does not change a label, an option, or the set of items — including every
+position-only edit and every body edit. The volatile half (ranges, `code`) is
+reattached in `derived_v2_testitem_details` (layer_testitems.jl).
+"""
+Salsa.@derived function derived_v2_file_testitems(rt, uri)
+    skel = derived_v2_file_skeleton(rt, uri)
+    return V2FileTestItems(skel.testitems, skel.testerrors)
 end
 
 """
