@@ -144,14 +144,14 @@ Salsa.@derived function derived_testitems(rt, uri)
         return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
     end
 
-    testitems = []
-    testsetups = []
-    testerrors = []
-
     text_file = derived_text_file_content(rt, uri)
-    syntax_tree, _ = parse_julia_syntax_tree(text_file.content.content)
 
-    TestItemDetection.find_test_detail!(syntax_tree, testitems, testsetups, testerrors)
+    # Detection comes out of the fused parse (layer_parse_products.jl); the
+    # parse is shared with syntax diagnostics and the syntax lint tier.
+    raw = derived_raw_test_details(rt, uri)
+    testitems = raw.testitems
+    testsetups = raw.testsetups
+    testerrors = raw.testerrors
 
     package_uri = derived_package_for_file(rt, uri)
 

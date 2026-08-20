@@ -223,3 +223,33 @@ end
     @test length(d2) == 1
     @test d2[1].severity === :error
 end
+
+@testitem "Syntax rules: fused parse runs every check, config filters" begin
+    using JuliaWorkspaces.URIs2: URI
+    const JW = JuliaWorkspaces
+
+    # The fused parse (`derived_julia_parse_products`) runs ALL syntax checks
+    # unconditionally, so its findings are independent of the lint config; the
+    # enabled set is applied as a filter in `derived_syntax_lint_findings`.
+    jw = JuliaWorkspace()
+    uri = URI("file:///pr/src/a.jl")
+    add_file!(jw, TextFile(uri, SourceText("f(x) = x == NaN\ng() = @async h()\n", "julia")))
+
+    # No config at all: the unfiltered findings still contain both rules...
+    all_findings = JW.derived_all_syntax_lint_findings(jw.runtime, uri)
+    @test Set(f.rule_id for f in all_findings) == Set([:nan_comparison, :async_task])
+
+    # ...while the filtered query reports nothing (both rules default to off).
+    @test isempty(JW.derived_syntax_lint_findings(jw.runtime, uri))
+
+    # Enabling one rule surfaces exactly that one.
+    add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
+        SourceText("[rules]\nnan_comparison = \"error\"\n", "toml")))
+    filtered = JW.derived_syntax_lint_findings(jw.runtime, uri)
+    @test [f.rule_id for f in filtered] == [:nan_comparison]
+
+    # And the test-detail product comes out of the same parse: this file has
+    # no test items, so the raw details are empty rather than missing.
+    raw = JW.derived_raw_test_details(jw.runtime, uri)
+    @test isempty(raw.testitems) && isempty(raw.testsetups) && isempty(raw.testerrors)
+end

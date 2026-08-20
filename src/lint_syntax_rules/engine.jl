@@ -207,8 +207,9 @@ Salsa.@derived function derived_syntax_lint_findings(rt, uri)
     enabled = derived_enabled_syntax_rules(rt, uri)
     isempty(enabled) && return LintFinding[]
 
-    tf = derived_text_file_content(rt, uri)
-    tree, _ = parse_julia_syntax_tree(tf.content.content)
+    # The fused parse (layer_parse_products.jl) runs every check; enabling is a
+    # filter here, so a config edit never re-runs the parse.
+    all_findings = derived_all_syntax_lint_findings(rt, uri)
 
-    return run_syntax_rules(tree, enabled, SyntaxRuleContext(uri))
+    return LintFinding[f for f in all_findings if f.rule_id in enabled]
 end
