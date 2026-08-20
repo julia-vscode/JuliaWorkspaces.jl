@@ -453,9 +453,14 @@ plus a volatile per-file emission join:
 
 - `derived_item_semantic_findings(rt, ref)` — position-free, backdates, depends
   only on `derived_item_lowering`. Degradation is silence, never noise.
-- `derived_semantic_lint_findings(rt, uri)` — the **only** reader of
-  `derived_v2_file_maps` in the stack, joining addresses to byte ranges. Returns
+- `derived_semantic_lint_findings(rt, uri)` — a reader of
+  `derived_v2_file_maps`, joining addresses to byte ranges. Returns
   an empty vector without demanding *any* lowering machinery when the flag is off.
+
+There are exactly **two** legitimate readers of the maps in the stack: this
+emission join, and `derived_v2_testitem_details` (§13, the test-item join in
+[`src/layer_testitems.jl`](../../src/layer_testitems.jl)) — both last-mile
+position reattachment, nothing else.
 
 One heuristic deserves a note, because it is the subtle part of unused-binding
 analysis on lowered code. One source declaration can produce several lowered
@@ -649,7 +654,14 @@ same shape applies here: one `derived_julia_parse_products(uri)` producing synta
 diagnostics, test details and syntax-rule findings, each behind its own selector
 so they keep their independent early cutoff. That removes the redundancy without
 putting a `SyntaxNode` into the memo table — the tree stays a local of the fused
-query and is collected when it returns. This is the recommended follow-up.
+query and is collected when it returns.
+
+> **Done** (2026-08-20): [`src/layer_parse_products.jl`](../../src/layer_parse_products.jl)
+> implements exactly this. The selectors are `derived_julia_syntax_diagnostics`,
+> `derived_raw_test_details` and `derived_all_syntax_lint_findings`; the fused
+> query runs *all* syntax checks unconditionally, and enabling became a filter in
+> `derived_syntax_lint_findings`, so a lint-config edit no longer reaches the
+> parse at all.
 
 ### 12.2 Would returning green nodes make more sense?
 
@@ -925,3 +937,33 @@ existing flag, (2) the volatile join, (3) point `derived_testitems` at them and
 drop the private parse. Steps 1 and 2 are additive and testable against today's
 `TestItemDetection` output item for item, which is the cheapest possible way to
 prove the walker sees exactly what the external detector sees.
+
+> **Done** (2026-08-20), all three steps, with two deliberate deviations:
+>
+> - `V2TestItem.option_skip` is `Union{Bool,Nothing}` rather than §13.4's
+>   `Union{Bool,String}`: a non-literal skip expression's source text can only
+>   come from file text + map, so the *join* slices it; the record carries the
+>   `nothing` sentinel. `_v2_test_macro_addresses` supplies the preorder
+>   addresses (block, first/last block child, skip value) the join needs.
+> - Step 3 is **flag-gated**, not unconditional: `derived_testitems` reads
+>   `derived_v2_testitem_details` only when `input_lowering_lint` is on. With
+>   the flag off the v2 walk is never otherwise demanded, and retaining
+>   `V2FileWalk` bundles (~11.6× source, §4.2) for users who get nothing else
+>   from v2 would be the §4 trade in reverse. Flag-off users already lost the
+>   redundant parse to §12.1's fused query, so nothing is lost by waiting.
+>
+> The join reuses everything below detection — ids, the outside-package check,
+> duplicate labels, slicing — via `_assemble_test_details`, shared verbatim with
+> the legacy path. Parity is enforced by unit tests over every well-formed and
+> malformed macro shape plus a corpus-wide differential
+> ([`test/v2/test_testitems_v2_differential.jl`](../../test/v2/test_testitems_v2_differential.jl)),
+> currently with an empty divergence allowlist.
+>
+> **Flip criterion**: differential green over this repo plus at least one
+> external package sweep → make the v2 path unconditional, drop
+> `raw_test_details` from `JuliaParseProducts`, and remove the
+> `TestItemDetection` dependency. Only then is the third parse *deleted*
+> rather than shared. One known behavioural edge to decide before flipping: a
+> file whose parse fails outright yields an empty v2 walk (no test items),
+> whereas `TestItemDetection` walks JuliaSyntax's recovered tree and may still
+> find items below the error.
