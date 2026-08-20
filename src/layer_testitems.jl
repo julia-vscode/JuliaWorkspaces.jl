@@ -144,15 +144,29 @@ Salsa.@derived function derived_testitems(rt, uri)
         return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
     end
 
+    # Under the v2 flag, detection comes off the v2 skeleton: position-only and
+    # body edits backdate at `derived_v2_file_testitems` instead of re-detecting.
+    input_lowering_lint(rt) && return derived_v2_testitem_details(rt, uri)
+
     text_file = derived_text_file_content(rt, uri)
 
     # Detection comes out of the fused parse (layer_parse_products.jl); the
     # parse is shared with syntax diagnostics and the syntax lint tier.
     raw = derived_raw_test_details(rt, uri)
-    testitems = raw.testitems
-    testsetups = raw.testsetups
-    testerrors = raw.testerrors
 
+    return _assemble_test_details(rt, uri, text_file.content.content,
+                                  raw.testitems, raw.testsetups, raw.testerrors)
+end
+
+"""
+    _assemble_test_details(rt, uri, text, testitems, testsetups, testerrors) -> TestDetails
+
+Everything below the detection step, shared by the legacy and the v2 paths: the
+outside-package check, id minting, duplicate-label errors, and the `code`/skip
+slicing. Inputs are `RawTest*Detail`-shaped records whose ranges are
+string-index ranges with an inclusive end.
+"""
+function _assemble_test_details(rt, uri, text, testitems, testsetups, testerrors)
     package_uri = derived_package_for_file(rt, uri)
 
     if isnothing(package_uri) && (!isempty(testitems) || !isempty(testsetups))
@@ -259,24 +273,99 @@ Salsa.@derived function derived_testitems(rt, uri)
             uri,
             item_ids[i],
             ti.name,
-            text_file.content.content[ti.code_range],
+            text[ti.code_range],
             ti.range,
             ti.code_range,
             ti.option_default_imports,
             ti.option_tags,
             ti.option_setup,
-            ti.option_skip isa Bool ? ti.option_skip : text_file.content.content[ti.option_skip]
+            ti.option_skip isa Bool ? ti.option_skip : text[ti.option_skip]
             ) for (i,ti) in enumerate(testitems)],
         [TestSetupDetail(
             uri,
             i.name,
             i.kind,
-            text_file.content.content[i.code_range],
+            text[i.code_range],
             i.range,
             i.code_range
             ) for i in testsetups],
         all_testerrors
     )
+end
+
+"""
+    derived_v2_testitem_details(rt, uri) -> TestDetails
+
+The v2 emission join (design doc §13): `derived_v2_file_testitems` carries the
+position-free facts, and this query — mirroring `derived_semantic_lint_findings`
+— reattaches what only positions can provide: `range`, `code_range`, the `code`
+slice, and a non-literal skip expression's source text. Volatile by design; it
+is one of the two legitimate readers of `derived_v2_file_maps`.
+
+Lives here rather than in `src/v2/` because ids and the outside-package check
+need `derived_package_for_file` and `testitem_id_scope`, which the v2 layer must
+not touch.
+"""
+Salsa.@derived function derived_v2_testitem_details(rt, uri)
+    @debug "derived_v2_testitem_details" uri=uri
+
+    if !derived_testitems_selected(rt, uri)
+        return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
+    end
+
+    recs = derived_v2_file_testitems(rt, uri)
+    if isempty(recs.testitems) && isempty(recs.testerrors)
+        return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
+    end
+
+    text_file = derived_text_file_content(rt, uri)
+    text = text_file.content.content
+    maps = derived_v2_file_maps(rt, uri)
+    bodies = derived_v2_file_bodies(rt, uri)
+
+    # Map ranges are byte ranges with an exclusive end; the raw detail shape
+    # wants string-index ranges with an inclusive end (`our_range`).
+    incl(r) = first(r):prevind(text, last(r))
+
+    testitems = RawTestItemDetail[]
+    testsetups = RawTestSetupDetail[]
+    for t in recs.testitems
+        rngs = get(maps, t.id, nothing)
+        body = get(bodies, t.id, nothing)
+        (rngs === nothing || body === nothing) && continue
+        addrs = _v2_test_macro_addresses(body)
+        addrs === nothing && continue
+
+        range = incl(rngs[1])
+        code_range = if addrs.block_first === nothing
+            # The legacy shape for `begin end`: skip past the keywords.
+            block = incl(rngs[addrs.block])
+            (first(block) + 5):(last(block) - 3)
+        else
+            first(rngs[addrs.block_first]):last(incl(rngs[addrs.block_last]))
+        end
+
+        if t.kind === :testitem
+            skip = if t.option_skip === nothing
+                addrs.skip_value === nothing ? false : incl(rngs[addrs.skip_value])
+            else
+                t.option_skip
+            end
+            push!(testitems, RawTestItemDetail(
+                t.label, range, code_range, t.option_default_imports,
+                t.option_tags, t.option_setup, skip))
+        else
+            push!(testsetups, RawTestSetupDetail(
+                Symbol(t.label), t.kind === :testsetup_module ? :module : :snippet,
+                range, code_range))
+        end
+    end
+
+    testerrors = RawTestErrorDetail[
+        RawTestErrorDetail(e.name, e.message, incl(maps[e.id][1]))
+        for e in recs.testerrors if haskey(maps, e.id)]
+
+    return _assemble_test_details(rt, uri, text, testitems, testsetups, testerrors)
 end
 
 Salsa.@derived function derived_all_testitems(rt)
