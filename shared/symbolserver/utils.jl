@@ -432,19 +432,25 @@ extends_methods(f) = false
 extends_methods(f::FunctionStore) = f.name != f.extends
 get_top_module(vr::VarRef) = vr.parent === nothing ? vr.name : get_top_module(vr.parent)
 
-# Sorting is the main performance of calling `names`
+# Sorting is the main cost of calling `names`, so go to Base's unsorted entry point.
+#
+# Do NOT re-declare the `jl_module_names` ccall here. Its C signature is not stable —
+# 1.12 added `usings`, 1.13 added `world` — and calling it with the wrong arity is
+# undefined behaviour that does not error: it reads a garbage `world` off the stack and
+# returns a silently truncated, run-to-run varying name list. That made the crawl miss
+# most of Base and Core on 1.13, which surfaced far downstream as `load_core` failing on
+# a `VarRef` where it expected a `ModuleStore`. `Base.unsorted_names` tracks the
+# signature for us and exists on every version we support.
 @static if VERSION < v"1.12-"
-    _jl_module_names(m, all, imported, _) =
-        ccall(:jl_module_names, Array{Symbol,1}, (Any, Cint, Cint), m, all, imported)
+    _unsorted_names(m, all, imported, _) = Base.unsorted_names(m; all, imported)
 else
-    _jl_module_names(m, all, imported, usings) =
-        ccall(:jl_module_names, Array{Symbol,1}, (Any, Cint, Cint, Cint), m, all, imported, usings)
+    _unsorted_names(m, all, imported, usings) = Base.unsorted_names(m; all, imported, usings)
 end
 
 # bindings are world-age partitioned from 1.12 onwards, so an
 # in-frame call misses bindings committed later in the same frame.
 unsorted_names(m::Module; all::Bool=false, imported::Bool=false, usings=false) =
-    Base.invokelatest(_jl_module_names, m, all, imported, usings)
+    Base.invokelatest(_unsorted_names, m, all, imported, usings)
 
 ## recursive_copy
 #

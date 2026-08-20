@@ -1117,6 +1117,24 @@ end
     @test :nonexported_helper in commit_then_enumerate()
 end
 
+@testitem "SymbolServer: unsorted_names agrees with Base.names" begin
+    using JuliaWorkspaces.SymbolServer: unsorted_names
+
+    # unsorted_names used to re-declare the `jl_module_names` ccall itself. That C
+    # signature is not stable — 1.12 added `usings`, 1.13 added `world` — and calling it
+    # with the wrong arity does not error: it reads a garbage `world` off the stack and
+    # returns a silently truncated, run-to-run varying list. On 1.13 that made the crawl
+    # miss most of Base, which only surfaced much later as `load_core` finding a `VarRef`
+    # where it expected a `ModuleStore`. Compare against Base so a future signature change
+    # fails here instead.
+    for m in (Base, Core)
+        @test sort(unsorted_names(m; all=true)) == sort(names(m; all=true))
+        @test sort(unsorted_names(m)) == sort(names(m))
+    end
+    @test :_apply in unsorted_names(Core; all=true)
+    @test :MainInclude in unsorted_names(Base; all=true)
+end
+
 @testitem "SymbolServer: ModuleStore splits exported vs public names" begin
     using JuliaWorkspaces.SymbolServer: ModuleStore
     # `public` is a 1.11+ keyword; the exported/public split only exists there.
