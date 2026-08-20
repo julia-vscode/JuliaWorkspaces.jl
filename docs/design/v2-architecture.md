@@ -481,11 +481,30 @@ with it.
 
 [`src/v2/lint_lowering_rules.jl`](../../src/v2/lint_lowering_rules.jl).
 
-**The takeover model: no new rule ids.** When the flag is on, this producer takes
-over `LOWERING_TAKEOVER_RULES` — currently `:unused_binding` and
-`:unused_function_argument` — from StaticLint. Same ids, same severities, same
-presets, same `JuliaLint.toml` surface; different engine. Nothing user-visible
-changes shape, which is what makes the experiment switchable.
+**The takeover model.** When the flag is on, this producer takes over
+`LOWERING_TAKEOVER_RULES` from StaticLint — as of the Harvest JuliaLowering
+milestone (2026-08-20), seven rules: `:unused_binding`,
+`:unused_function_argument`, `:unused_type_parameter` (from the
+typevar/static-parameter binding pair), and the LoweringError-routed
+`:duplicate_function_argument` / `:break_continue` / `:global_const_decl`,
+plus the module-tree pair `:module_name` / `:relative_import` (a third,
+skeleton-based producer — `derived_module_tree_lint_findings` — whose findings
+attach to module/import rows, which now carry address maps). Same ids, same
+severities, same presets, same `JuliaLint.toml` surface; different engine.
+
+One rule id is NEW and lives in `LOWERING_OWN_RULES` rather than the takeover
+set (nothing to suppress): **`:lowering_errors`**, the catch-all for every
+shape JuliaLowering rejects that no v1 rule covers. LoweringError messages are
+routed through `LOWERING_MESSAGE_RULE_IDS`, an exact-string table whose
+refresh gate (testitems lowering one snippet per row) makes a vendored-
+JuliaLowering refresh that rewords a message fail loudly. Four false-positive
+guards protect the error surfacing: test-block items (the synthetic `let`
+makes module-level constructs error), items under macrocall arguments (the
+macro may transform them; `V2ItemRow.under_macrocall`), items containing
+stripped macrocalls (detected via the expansion-sites query), and files with
+syntax errors (recovered trees; `syntax_errors` already reports the problem).
+An erroring item has empty bindings, so the unused rules are vacuous there —
+the surfaced error replaces them.
 
 `derived_lowering_lint_active(rt, uri)` is the gate both producers consult, and
 its evaluation order matters: with the flag off, the only Salsa dependency
@@ -543,7 +562,7 @@ This is the honest answer to "how far off is the switchover".
 | Environment / SymbolServer seam | nothing external resolves; no missing-reference or call-arity checks |
 | A visibility layer (v1's `layer_visibility.jl`) | no cross-module name resolution |
 | Feature layers | hover, completions, references, signatures, symbols, navigation, actions, formatting are **all** v1-only |
-| Rule coverage | two rules, versus StaticLint's full set |
+| Rule coverage | eight rules taken over + `lowering_errors`, versus StaticLint's full set; the env-dependent half (`missing_reference`, `incorrect_call_args`, …) needs the seam — see [`v2-portability-survey.md`](v2-portability-survey.md) |
 
 v2 today is a complete *spine* — identity, skeleton, module structure, per-item
 binding semantics — carrying a deliberately small payload. The layers it is
