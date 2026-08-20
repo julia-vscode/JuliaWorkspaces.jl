@@ -38,9 +38,28 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
         return StaticLint.collect_hints(x, get_env(jw), res.workspace_packages, meta_dict, missingrefs)
     end
 
+    # Never let the workspace fall through to its default store, which is the scratch space
+    # inside the user's depot: in dynamic mode the store's parent also carries
+    # `standalone-projects`, which the dynamic feature mkpaths, instantiates into and
+    # `rm(...; recursive=true)`s. One directory for the whole module rather than one per call,
+    # so repeated `parse_and_pass`es share a warm store.
+    const _STORE_PATH = Ref{Union{Nothing,String}}(nothing)
+    const _STORE_LOCK = ReentrantLock()
+
+    function shared_store_path()
+        lock(_STORE_LOCK) do
+            cached = _STORE_PATH[]
+            cached === nothing || return cached
+
+            path = mktempdir()
+            _STORE_PATH[] = path
+            return path
+        end
+    end
+
     function parse_and_pass(s; dynamic::DynamicMode=DynamicOff)
         our_uri = TEST_URI
-        jw = JuliaWorkspaces.JuliaWorkspace(;dynamic=dynamic)
+        jw = JuliaWorkspaces.JuliaWorkspace(;dynamic=dynamic, store_path=shared_store_path())
         add_file!(jw, TextFile(our_uri, SourceText(s, "julia")))
 
         if dynamic==DynamicIndexingOnly
