@@ -87,7 +87,8 @@ end
     # For the routed ids, flag-off (StaticLint) and flag-on (v2) must agree
     # per file over this repo's corpus. Divergences are a ratchet: an entry
     # needs a reason, and a healed entry must be removed.
-    const ROUTED_IDS = (:duplicate_function_argument, :break_continue, :global_const_decl)
+    const ROUTED_IDS = (:duplicate_function_argument, :break_continue, :global_const_decl,
+                        :unused_type_parameter, :module_name, :relative_import)
     const EXPECTED_DIVERGENT_FILES = Set{String}()
 
     root = pkgdir(JuliaWorkspaces)
@@ -127,4 +128,67 @@ end
         join(("$k: off=$(divergent[k][1]) on=$(divergent[k][2])" for k in unexpected), "\n  "))
     @test isempty(unexpected)
     @test issubset(EXPECTED_DIVERGENT_FILES, keys(divergent))
+end
+
+@testitem "module-tree rules: module_name and relative_import" setup=[LoweringRouteWS] begin
+    # A nested module named like its parent.
+    jw, uri = lr_workspace("module A\nmodule A\nend\nend\n")
+    diags = [d for d in JuliaWorkspaces.get_diagnostic(jw, uri) if d.code === :module_name]
+    @test length(diags) == 1
+    @test diags[1].message == "Module name matches that of its parent."
+    src = "module A\nmodule A\nend\nend\n"
+    @test src[first(diags[1].range):last(diags[1].range)-1] == "A"
+
+    # Distinct names: silent.
+    jw, uri = lr_workspace("module A\nmodule B\nend\nend\n")
+    @test !any(d -> d[1] === :module_name, lr_codes(jw, uri))
+
+    # Too many leading dots at the top level of a single-file workspace.
+    jw, uri = lr_workspace("using ..Foo\n")
+    diags = [d for d in JuliaWorkspaces.get_diagnostic(jw, uri) if d.code === :relative_import]
+    @test length(diags) == 1
+    @test diags[1].message == "Relative import has more leading dots than available module nesting."
+
+    # Enough nesting: silent. (`using ..Foo` inside `module A module B` pops
+    # one level, which exists.)
+    jw, uri = lr_workspace("module A\nmodule B\nusing ..Foo\nend\nend\n")
+    @test !any(d -> d[1] === :relative_import, lr_codes(jw, uri))
+
+    # One dot anchors at the current module and never over-pops.
+    jw, uri = lr_workspace("using .Foo\n")
+    @test !any(d -> d[1] === :relative_import, lr_codes(jw, uri))
+
+    # Flag off: nothing.
+    jw, uri = lr_workspace("module A\nmodule A\nend\nend\nusing ..Foo\n"; flag=false)
+    @test !any(d -> d[1] in (:module_name, :relative_import), lr_codes(jw, uri))
+
+    # Config off: silenced individually.
+    jw = JuliaWorkspace()
+    uri = URI("file:///pr/src/a.jl")
+    add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
+        SourceText("[rules]\nmodule_name = \"off\"\n", "toml")))
+    add_file!(jw, TextFile(uri, SourceText("module A\nmodule A\nend\nend\n", "julia")))
+    JW.set_lowering_lint!(jw, true)
+    @test !any(d -> d.code === :module_name, JuliaWorkspaces.get_diagnostic(jw, uri))
+end
+
+@testitem "module-tree rules: the splice prefix sees cross-file nesting" setup=[LoweringRouteWS] begin
+    # `module A` in a file included from inside `module A` of the root: v1's
+    # same-file check misses this; the v2 splice prefix catches it (documented
+    # superset).
+    jw = JuliaWorkspace()
+    root = URI("file:///pr/src/root.jl")
+    inner = URI("file:///pr/src/inner.jl")
+    add_file!(jw, TextFile(root, SourceText("module A\ninclude(\"inner.jl\")\nend\n", "julia")))
+    add_file!(jw, TextFile(inner, SourceText("module A\nend\n", "julia")))
+    JW.set_lowering_lint!(jw, true)
+    @test any(d -> d.code === :module_name, JuliaWorkspaces.get_diagnostic(jw, inner))
+
+    # And relative imports account for the spliced depth: `using ..X` inside
+    # the included file's top level pops to the root scope, which exists.
+    add_file!(jw, TextFile(URI("file:///pr/src/root2.jl"),
+        SourceText("module B\ninclude(\"inner2.jl\")\nend\n", "julia")))
+    inner2 = URI("file:///pr/src/inner2.jl")
+    add_file!(jw, TextFile(inner2, SourceText("using ..X\n", "julia")))
+    @test !any(d -> d.code === :relative_import, JuliaWorkspaces.get_diagnostic(jw, inner2))
 end

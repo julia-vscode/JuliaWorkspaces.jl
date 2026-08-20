@@ -15,6 +15,8 @@ const LOWERING_TAKEOVER_RULES = Set([
     :unused_binding, :unused_function_argument, :unused_type_parameter,
     # Routed from LoweringError messages (see LOWERING_MESSAGE_RULE_IDS):
     :duplicate_function_argument, :break_continue, :global_const_decl,
+    # Module-tree rules (derived_module_tree_lint_findings):
+    :module_name, :relative_import,
 ])
 
 # Rules this producer OWNS (no StaticLint counterpart, so no suppression):
@@ -180,6 +182,62 @@ Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
     return result
 end
 
+# ── module-tree rules ───────────────────────────────────────────────────────
+#
+# Rules about module STRUCTURE rather than item bodies: they read the skeleton
+# and the module-tree splice prefix, never the lowering. Position-free (item
+# ids + preorder addresses); ranges attach in the emission join below, which is
+# why commit "Store address maps for module and import rows" exists.
+
+"A structural finding attached to a (possibly bodyless) skeleton row."
+const ModuleTreeFinding = @NamedTuple{id::Int64, addr::Int32, rule_id::Symbol, msg::String}
+
+# The module a file's top level splices into, from its first root (the
+# layer_expansion.jl precedent for multi-root files); empty for a plain buffer.
+Salsa.@derived function _derived_v2_splice_prefix(rt, uri)
+    roots = derived_roots_for_uri(rt, uri)
+    isempty(roots) && return String[]
+    path = derived_v2_file_module_path(rt, first(roots), uri)
+    return path === nothing ? String[] : path
+end
+
+"Module EST children are [bare-flag, name, block]: the name is preorder address 3."
+const _V2_MODULE_NAME_ADDR = Int32(3)
+
+Salsa.@derived function derived_module_tree_lint_findings(rt, uri)
+    result = ModuleTreeFinding[]
+    skel = derived_v2_file_skeleton(rt, uri)
+    (isempty(skel.modules) && isempty(skel.imports)) && return result
+    splice = _derived_v2_splice_prefix(rt, uri)
+
+    # `module_name`: a module named like its parent. Mild superset of v1
+    # (`check_modulename` only sees same-file parents; the splice prefix also
+    # catches `module A` in a file included from inside `module A`).
+    for m in skel.modules
+        parent = vcat(splice, m.parent_module)
+        (!isempty(parent) && last(parent) == m.name) || continue
+        push!(result, (id=m.id, addr=_V2_MODULE_NAME_ADDR, rule_id=:module_name,
+            msg="Module name matches that of its parent."))
+    end
+
+    # `relative_import`: more leading dots than available module nesting — the
+    # exact unresolved-by-pops condition `_v2_classify_import` uses. Reported
+    # at the whole statement (v1 points at the offending `.`; range deviation
+    # accepted).
+    for imp in skel.imports
+        ndots = 0
+        while ndots < length(imp.path) && imp.path[ndots + 1] == "."
+            ndots += 1
+        end
+        ndots > 0 || continue
+        ndots - 1 > length(splice) + length(imp.parent_module) || continue
+        push!(result, (id=imp.id, addr=Int32(1), rule_id=:relative_import,
+            msg="Relative import has more leading dots than available module nesting."))
+    end
+
+    return result
+end
+
 """
     derived_semantic_lint_findings(rt, uri) -> Vector{LintFinding}
 
@@ -218,6 +276,15 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
             1 <= f.addr <= length(ranges) || continue
             push!(result, LintFinding(ranges[f.addr], f.rule_id, f.msg, nothing, "JuliaWorkspaces.jl"))
         end
+    end
+
+    # Module-tree findings attach to module/import rows, whose maps commit 1
+    # of this milestone started storing.
+    for f in derived_module_tree_lint_findings(rt, uri)
+        ranges = get(maps, f.id, nothing)
+        ranges === nothing && continue
+        1 <= f.addr <= length(ranges) || continue
+        push!(result, LintFinding(ranges[f.addr], f.rule_id, f.msg, nothing, "JuliaWorkspaces.jl"))
     end
     return result
 end
