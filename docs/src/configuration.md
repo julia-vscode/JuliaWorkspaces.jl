@@ -68,7 +68,9 @@ Config file names are matched **case-insensitively on the basename**, so
 Scope is the one thing that does **not** follow nearest-wins. A file is searched,
 linted or formatted only if **every** config file of that kind above it admits it
 through its [`include`/`exclude`](#file-selection-include-and-exclude) globs,
-each evaluated relative to that config file's own directory.
+each evaluated relative to that config file's own directory. "Above it" stops at
+the root of the tree in question — a workspace folder here — so a config file
+outside that tree has no say.
 
 **A nested config may narrow scope, never widen it.** Given
 
@@ -431,8 +433,11 @@ that subdirectory, and nothing else.
 
 TestItemRunner.jl reads the same file with the same semantics, so
 `@run_package_tests` and the VS Code test explorer agree on which files are
-searched — including when the runner is pointed at a subdirectory, where it
-still honours the config files above it.
+searched. Both root the chain at the tree they are given: config files above a
+workspace folder do not reach the editor, and config files above the path handed
+to the runner do not reach it either. Pointing the runner at a subdirectory
+therefore scopes discovery to that subdirectory, exactly as opening it as a
+workspace folder would.
 
 ## Implementation notes
 
