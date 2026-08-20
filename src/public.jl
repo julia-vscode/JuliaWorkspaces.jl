@@ -122,6 +122,73 @@ function _reconcile!(jw::JuliaWorkspace)
         put!(df.in_channel, ReconcileMsg(required))
     end
 
+    _reconcile_expansions!(jw)
+
+    return
+end
+
+# Batch caps: a whole-workspace cold pass can hold thousands of expansion
+# sites; grouping per (env, ctx) and capping keeps individual requests small
+# enough that a timeout loses little and the child stays responsive.
+const EXPANSION_BATCH_MAX_ENTRIES = 200
+const EXPANSION_BATCH_MAX_BYTES = 256 * 1024
+
+"""
+    _reconcile_expansions!(jw::JuliaWorkspace)
+
+Send expansion batches for every macro-expansion key the workspace needs and
+has not requested yet. Host-side by design: this is where source text is
+reattached (the last-mile read of `derived_v2_file_maps` + file content), so no
+derived value ever depends on positions. Cheap when the flag is off or nothing
+changed (`derived_required_macro_expansions` is memoized).
+"""
+function _reconcile_expansions!(jw::JuliaWorkspace)
+    df = jw.dynamic_feature
+    df === nothing && return
+    df.djp_mode == DynamicPersistent || return
+    input_macro_expansion(jw.runtime) || return
+
+    required = derived_required_macro_expansions(jw.runtime)
+    isempty(required) && return
+
+    # Group new work per (env child, module context).
+    groups = Dict{Tuple{DJPKey,String},@NamedTuple{imports::Vector{String}, entries::Vector{ExpansionEntry}}}()
+    for r in required
+        r.key in df.requested_expansions && continue
+
+        # Reattach the macrocall's source text (volatile, last mile only).
+        maps = derived_v2_file_maps(jw.runtime, r.file)
+        rngs = get(maps, r.item_id, nothing)
+        (rngs === nothing || !(1 <= r.addr <= length(rngs))) && continue
+        tf = derived_text_file_content(jw.runtime, r.file)
+        tf === nothing && continue
+        text = tf.content.content
+        rng = rngs[r.addr]
+        last(rng) - 1 <= ncodeunits(text) || continue
+        macro_text = text[first(rng):prevind(text, last(rng))]
+
+        push!(df.requested_expansions, r.key)
+        g = get!(groups, (r.env_key, r.ctx_id)) do
+            (imports=r.imports, entries=ExpansionEntry[])
+        end
+        push!(g.entries, (key=r.key, text=macro_text))
+    end
+
+    for ((env_key, ctx_id), g) in groups
+        i = 1
+        while i <= length(g.entries)
+            batch = ExpansionEntry[]
+            bytes = 0
+            while i <= length(g.entries) && length(batch) < EXPANSION_BATCH_MAX_ENTRIES &&
+                  bytes < EXPANSION_BATCH_MAX_BYTES
+                push!(batch, g.entries[i])
+                bytes += ncodeunits(g.entries[i].text)
+                i += 1
+            end
+            put!(df.in_channel, ExpansionBatchMsg(env_key, ctx_id, g.imports, batch))
+        end
+    end
+
     return
 end
 
@@ -465,6 +532,22 @@ function set_lowering_lint!(jw::JuliaWorkspace, enabled::Bool)
 
     process_from_dynamic(jw)
     set_input_lowering_lint!(jw.runtime, enabled)
+    _reconcile!(jw)
+end
+
+"""
+    set_macro_expansion!(jw::JuliaWorkspace, enabled::Bool)
+
+Feature flag (experiment): when `true`, opaque macrocalls in v2 lowering are
+expanded out-of-process by the persistent env child and spliced into the
+analysis (see `src/v2/layer_expansion.jl`). Only effective together with
+[`set_lowering_lint!`](@ref) and `DynamicPersistent` mode. Default `false`.
+"""
+function set_macro_expansion!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_macro_expansion!" enabled=enabled
+
+    process_from_dynamic(jw)
+    set_input_macro_expansion!(jw.runtime, enabled)
     _reconcile!(jw)
 end
 

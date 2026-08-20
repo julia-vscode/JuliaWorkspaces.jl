@@ -38,5 +38,7 @@ include("layer_inventory_v2.jl")
 include("layer_module_tree_v2.jl")
 # Layer 3: JuliaLowering binding analysis over per-item body trees.
 include("layer_lowering.jl")
+# Layer 3½: DJP-side macro expansion — sites, context, cache keys, harvest.
+include("layer_expansion.jl")
 # Layer 4: the lint rules that consume it.
 include("lint_lowering_rules.jl")

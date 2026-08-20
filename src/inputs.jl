@@ -87,6 +87,19 @@ Salsa.@declare_input input_resolved_environments(rt)::Dict{ResolveEnvironmentKey
 # proceed best-effort with whatever symbol caches exist.
 Salsa.@declare_input input_failed_dynamic_keys(rt)::Set{DJPKey}
 
+# Feature flag (experiment): when true, opaque macrocalls in v2 lowering are
+# expanded out-of-process by the persistent env child (see v2/layer_expansion.jl).
+# Lazily false, like `input_lowering_lint` — the legacy behavior costs nothing.
+Salsa.@declare_input input_macro_expansion(rt)::Bool function(_ctx)
+    false
+end
+
+# Settled macro expansions, content-keyed. `:ok` entries carry the expansion
+# source text; `:failed` entries are the negative cache (never re-requested).
+# Consumers read per-key through `derived_macro_expansion` so this single
+# collection input still invalidates fine-grained.
+Salsa.@declare_input input_macro_expansions(rt)::Dict{ExpansionKey,ExpansionOutcome}
+
 # The user-facing failure message per failed work item, kept separate from
 # `input_failed_dynamic_keys` so the readiness gates (pure membership tests)
 # are not invalidated by message-only differences. Keys whose work was merely

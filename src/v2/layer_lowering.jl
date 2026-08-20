@@ -216,7 +216,22 @@ end
 # would destroy the `$` interpolation nodes that the quote's own expansion
 # needs, making interpolated variables look unused (e.g. `T` in
 # `macro m(T); quote; @generated f($(esc(T))) = 1; end; end`).
-function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::Int = 0)
+const _EMPTY_EXPANSIONS = Dict{UInt64,BodyTree{V2Kind}}()
+
+# The DJP splice: a macro-generated tree carries no user positions, so every
+# node anchors at address 0 — bindings there are rule-exempt, uses still count
+# as genuine reads (see `_node_addr`).
+function _materialize_addr0(bt::BodyTree{V2Kind})
+    src = LineNumberNode(0, :body)
+    if bt.children === nothing
+        return JS2.SyntaxTree(bt.kind, nothing, bt.val, src, nothing)
+    end
+    kids = JS2.SyntaxTree[_materialize_addr0(c) for c in bt.children]
+    return JS2.SyntaxTree(bt.kind, kids, bt.val, src, nothing)
+end
+
+function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::Int = 0,
+                      expansions::Dict{UInt64,BodyTree{V2Kind}} = _EMPTY_EXPANSIONS)
     myaddr = (addr[] += 1)
     src = LineNumberNode(myaddr, :body)
     # Structurally transparent macros unwrap to the form they wrap. The skipped
@@ -228,14 +243,14 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
             for c in bt.children[1:end-1]
                 addr[] += bt_node_count(c)
             end
-            return _materialize(target, addr, qdepth)
+            return _materialize(target, addr, qdepth, expansions)
         end
         test_block = _test_block_target(bt)
         if test_block !== nothing
             for c in bt.children[1:end-1]
                 addr[] += bt_node_count(c)
             end
-            body = _materialize(test_block, addr, qdepth)
+            body = _materialize(test_block, addr, qdepth, expansions)
             # A test block runs in its own scope, so its assignments are locals,
             # not module globals. `let … end` is the smallest source-level form
             # that says so; the wrapper nodes are synthetic and consume no
@@ -251,7 +266,18 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
                 _collect_macrocall_identifiers!(kids, c, addr)
             end
         end
-        push!(kids, JS2.SyntaxTree(JS2.K"Value", nothing, nothing, src, nothing))
+        # The union guard (design doc: DJP-side macro expansion): when the DJP
+        # delivered an expansion for this macrocall, splice it at address 0 as
+        # the block's value — KEEPING the identifier-read fallback above, so a
+        # macro that drops an argument can never turn "mentioned in the call"
+        # into a false-positive unused binding. Without an expansion, the
+        # `Value(nothing)` placeholder keeps today's shape exactly.
+        expansion = get(expansions, bt.hash, nothing)
+        if expansion === nothing
+            push!(kids, JS2.SyntaxTree(JS2.K"Value", nothing, nothing, src, nothing))
+        else
+            push!(kids, _materialize_addr0(expansion))
+        end
         return JS2.SyntaxTree(JS2.K"block", kids, nothing, src, nothing)
     end
     if bt.children === nothing
@@ -260,7 +286,7 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
         child_depth = _quote_depth(bt.kind, qdepth)
         kids = Vector{JS2.SyntaxTree}()
         for c in bt.children
-            push!(kids, _materialize(c, addr, child_depth))
+            push!(kids, _materialize(c, addr, child_depth, expansions))
         end
         node = JS2.SyntaxTree(bt.kind, kids, bt.val, src, nothing)
 
@@ -305,8 +331,13 @@ end
 
 # ── the frame ───────────────────────────────────────────────────────────────
 
+# Only materialization mints `:body` line numbers, so requiring the file field
+# keeps foreign `LineNumberNode`s (e.g. ones that rode through a spliced macro
+# expansion) from masquerading as preorder addresses. Address 0 is the "no user
+# address" sentinel: bindings there are rule-exempt, uses still count as reads.
 _node_addr(ex)::Int32 = try
-    Int32(JS2.source_location(LineNumberNode, ex).line)
+    lnn = JS2.source_location(LineNumberNode, ex)
+    (lnn.file === :body && lnn.line >= 0) ? Int32(lnn.line) : Int32(0)
 catch
     Int32(0)
 end
@@ -348,10 +379,12 @@ function _collect_uses!(uses::Vector{BindingUse}, ex)
     return nothing
 end
 
-# Pure function of the body value: the H invariant — no position map, no file
-# content, no runtime state escapes into the result (module NAMES only).
-function _lower_item(body::BodyTree{V2Kind})
-    st = _materialize(body, Ref(0))
+# Pure function of the body value plus the (position-free) expansions dict: the
+# H invariant — no position map, no file content, no runtime state escapes into
+# the result (module NAMES only).
+function _lower_item(body::BodyTree{V2Kind},
+                     expansions::Dict{UInt64,BodyTree{V2Kind}} = _EMPTY_EXPANSIONS)
+    st = _materialize(body, Ref(0), 0, expansions)
     findings = LoweringFinding[]
     bindings = LoweredBinding[]
     uses = BindingUse[]
@@ -388,5 +421,8 @@ position-only edits: its only dependency is the position-free body value.
 Salsa.@derived function derived_item_lowering(rt, ref::V2ItemRef)
     body = derived_item_lowering_body(rt, ref)
     body === nothing && return nothing
-    return _lower_item(body)
+    # Position-free by construction: `derived_item_expansions` is keyed on
+    # content hashes only, and returns the empty dict (with zero extra Salsa
+    # edges) unless `input_macro_expansion` is on.
+    return _lower_item(body, derived_item_expansions(rt, ref))
 end

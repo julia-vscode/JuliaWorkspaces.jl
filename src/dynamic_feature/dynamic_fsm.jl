@@ -89,6 +89,9 @@ function dynamic_process_fsm(id::String)
     union!(transitions[DynamicProcessStarting],  Set([DynamicProcessConnected]))
     union!(transitions[DynamicProcessConnected], Set([DynamicProcessIndexing]))
     union!(transitions[DynamicProcessIndexing],  Set([DynamicProcessDone]))
+    # A settled persistent child can serve further requests (macro expansion
+    # batches) — one at a time, back to Done after each.
+    union!(transitions[DynamicProcessDone],      Set([DynamicProcessIndexing]))
 
     return FSM(DynamicProcessCreated, transitions, id)
 end

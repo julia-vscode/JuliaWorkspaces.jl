@@ -493,6 +493,7 @@ struct JuliaWorkspace
         set_input_resolved_environments!(rt, Dict{ResolveEnvironmentKey,URI}())
         set_input_failed_dynamic_keys!(rt, Set{DJPKey}())
         set_input_dynamic_failure_messages!(rt, Dict{DJPKey,String}())
+        set_input_macro_expansions!(rt, Dict{ExpansionKey,ExpansionOutcome}())
 
         new(rt, dynamic_feature)
     end
@@ -644,12 +645,14 @@ function process_from_dynamic(jw::JuliaWorkspace)
     resolved_envs = copy(input_resolved_environments(jw.runtime))
     failed_keys = copy(input_failed_dynamic_keys(jw.runtime))
     failure_messages = copy(input_dynamic_failure_messages(jw.runtime))
+    expansions = copy(input_macro_expansions(jw.runtime))
     envs_dirty = false
     test_envs_dirty = false
     standalone_dirty = false
     resolved_dirty = false
     failed_dirty = false
     messages_dirty = false
+    expansions_dirty = false
     saw_result = false
 
     while isready(df.out_channel)
@@ -733,6 +736,16 @@ function process_from_dynamic(jw::JuliaWorkspace)
             resolved_proj_hash = resolved_proj === nothing ? UInt64(0) : resolved_proj.content_hash
             push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), resolved_proj_hash))
             envs_dirty = true
+
+        elseif msg isa MacroExpansionsResult
+            @debug "Processing macro expansion batch results" n=length(msg.entries)
+            for e in msg.entries
+                # First writer wins: a `:failed` settlement must not clobber an
+                # `:ok` that a racing batch already delivered for the same key.
+                haskey(expansions, e.key) && expansions[e.key].status == :ok && continue
+                expansions[e.key] = (status=e.status, text=e.text)
+                expansions_dirty = true
+            end
         else
             error("Unknown message: $msg")
         end
@@ -744,6 +757,7 @@ function process_from_dynamic(jw::JuliaWorkspace)
     resolved_dirty && set_input_resolved_environments!(jw.runtime, resolved_envs)
     failed_dirty && set_input_failed_dynamic_keys!(jw.runtime, failed_keys)
     messages_dirty && set_input_dynamic_failure_messages!(jw.runtime, failure_messages)
+    expansions_dirty && set_input_macro_expansions!(jw.runtime, expansions)
     saw_result && (df.saw_result[] = true)
 
     return

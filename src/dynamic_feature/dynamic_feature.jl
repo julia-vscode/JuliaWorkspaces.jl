@@ -160,6 +160,46 @@ function resolve_environment(djp::DynamicJuliaProcess, store_path::String, proje
     )
 end
 
+# The wire form of an `ExpansionKey`: opaque to the child, unique within a batch.
+_expansion_key_string(k::ExpansionKey) =
+    string(k.env_hash, base=16) * "-" * string(k.ctx_hash, base=16) * "-" * string(k.mac_hash, base=16)
+
+"""
+    expand_macros(djp, ctx_id, imports, entries, timeout_seconds) -> Vector{ExpansionOutcomeEntry}
+
+Send one expansion batch to the env's persistent child and map the child's
+keyed answers back onto `ExpansionKey`s. Entries the child did not answer
+(malformed reply) settle as `:failed`.
+"""
+function expand_macros(djp::DynamicJuliaProcess, ctx_id::String, imports::Vector{String},
+                       entries::Vector{ExpansionEntry}, timeout_seconds::Int=0)
+    result = _send_djp_request(
+        djp,
+        timeout_seconds,
+        JuliaDynamicAnalysisProtocol.expand_macros_request_type,
+        JuliaDynamicAnalysisProtocol.ExpandMacrosParams(
+            ctx_id,
+            imports,
+            [JuliaDynamicAnalysisProtocol.ExpandMacroEntry(_expansion_key_string(e.key), e.text) for e in entries]
+        )
+    )
+
+    keymap = Dict(_expansion_key_string(e.key) => e.key for e in entries)
+    outcomes = ExpansionOutcomeEntry[]
+    answered = Set{ExpansionKey}()
+    for r in result.entries
+        k = get(keymap, r.key, nothing)
+        k === nothing && continue
+        push!(answered, k)
+        push!(outcomes, (key=k, status=r.status == "ok" ? :ok : :failed,
+                         text=r.status == "ok" ? r.result : ""))
+    end
+    for e in entries
+        e.key in answered || push!(outcomes, (key=e.key, status=:failed, text=""))
+    end
+    return outcomes
+end
+
 # Exception thrown when the child process exits before establishing a connection.
 struct DynamicProcessCrashException <: Exception
     key::DJPKey
@@ -445,6 +485,16 @@ stays pending forever and `is_ready` never becomes true.
 """
 const DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS = 300
 
+"""
+    DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS
+
+How long the persistent env child may take to answer one macro expansion batch.
+Much tighter than the index timeout: the packages are already loaded, so a slow
+answer means a macro is hanging — and the batch failing (child killed, entries
+negative-cached) is the intended containment for that.
+"""
+const DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS = 60
+
 # Identity of one package's symbol cache on disc.
 const PkgCacheKey = @NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}
 
@@ -528,6 +578,16 @@ struct DynamicFeature
     # work item (readiness must not wait on refreshes).
     refresh_queue::Vector{DJPKey}
     refreshing::Set{DJPKey}
+    # ── Macro expansion batches (served by the persistent env child) ──
+    # FIFO of batches per env key, waiting for the child to be settled (Done).
+    # Never counts as a pending work item and never holds a launch slot.
+    expansion_queue::Dict{DJPKey,Vector{ExpansionBatchMsg}}
+    # Env keys with an expansion batch currently in flight (one per child).
+    expansion_inflight::Set{DJPKey}
+    # HOST-owned (unlike everything above, which the reactor task owns): the
+    # expansion keys `_reconcile_expansions!` has already sent, so a key is
+    # requested at most once per session. Only ever touched from the host task.
+    requested_expansions::Set{ExpansionKey}
 
     function DynamicFeature(djp_mode::DynamicMode, store_path::String;
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
@@ -566,6 +626,9 @@ struct DynamicFeature
             launcher,
             Vector{DJPKey}(),
             Set{DJPKey}(),
+            Dict{DJPKey,Vector{ExpansionBatchMsg}}(),
+            Set{DJPKey}(),
+            Set{ExpansionKey}(),
         )
     end
 end
@@ -1512,6 +1575,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         end
         _report_progress(df, _progress_key("refresh", key), "Done", 100)
         _free_slot!(df, key)
+        _drain_expansion_queue!(df, key)
         return false
     end
 
@@ -1553,6 +1617,8 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     # must see this item's own completion, not a stale pre-decrement value.
     _complete_work_item!(df, key)
     _free_slot!(df, key)
+    # The settled persistent child can now serve queued expansion batches.
+    _drain_expansion_queue!(df, key)
     return false
 end
 
@@ -1673,6 +1739,104 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     return false
 end
 
+# ─── Macro expansion batches ────────────────────────────────────────────────
+#
+# Batches ride on the persistent env child (`df.procs[env_key]`) — the process
+# that indexed the environment and therefore already has its packages loaded.
+# They are NOT work items: they never touch `pending_count`, never hold a launch
+# slot, and their failures never charge the env's failure budget or produce user
+# diagnostics. Every entry always settles — `:ok` or `:failed` — into
+# `input_macro_expansions`, whose `:failed` entries double as the negative cache
+# that stops re-requests.
+
+# Emit `:failed` outcomes for `entry_keys`, waking the host drain.
+function _settle_expansions_failed!(df::DynamicFeature, entry_keys::Vector{ExpansionKey})
+    isempty(entry_keys) && return
+    put!(df.out_channel, MacroExpansionsResult(
+        ExpansionOutcomeEntry[(key=k, status=:failed, text="") for k in entry_keys]))
+    isready(df.update_channel) || try put!(df.update_channel, :data_available) catch; end
+    return
+end
+
+# Send the next queued batch for `key` when its child is settled and idle.
+function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
+    key in df.expansion_inflight && return
+    q = get(df.expansion_queue, key, nothing)
+    (q === nothing || isempty(q)) && return
+    djp = get(df.procs, key, nothing)
+    if djp === nothing || state(djp.fsm) == DynamicProcessDead
+        # The child is gone and nothing will bring it back for these batches.
+        for batch in q
+            _settle_expansions_failed!(df, ExpansionKey[e.key for e in batch.entries])
+        end
+        empty!(q)
+        return
+    end
+    state(djp.fsm) == DynamicProcessDone || return   # still indexing/launching; kicked again on Done
+
+    batch = popfirst!(q)
+    push!(df.expansion_inflight, key)
+    transition!(djp.fsm, DynamicProcessIndexing; reason="macro expansion batch")
+    @async try
+        outcomes = expand_macros(djp, batch.ctx_id, batch.imports, batch.entries,
+                                 DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS)
+        put!(df.in_channel, ExpansionBatchDoneMsg(key, outcomes))
+    catch err
+        @info "Macro expansion batch failed" key exception=(err, catch_backtrace())
+        put!(df.in_channel, ExpansionBatchFailedMsg(key, ExpansionKey[e.key for e in batch.entries], err))
+    end
+    return
+end
+
+function handle!(df::DynamicFeature, msg::ExpansionBatchMsg)
+    key = msg.env_key
+
+    # Serviceable only when a persistent child exists or is on its way: under
+    # other modes (or for an env that failed terminally) settle immediately so
+    # nothing ever waits on these keys.
+    child_forthcoming = haskey(df.procs, key) || key in df.inflight ||
+        key in df.launch_queue || key in df.launching
+    if df.djp_mode != DynamicPersistent || key in df.failed_projects || !child_forthcoming
+        _settle_expansions_failed!(df, ExpansionKey[e.key for e in msg.entries])
+        return false
+    end
+
+    push!(get!(Vector{ExpansionBatchMsg}, df.expansion_queue, key), msg)
+    _drain_expansion_queue!(df, key)
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::ExpansionBatchDoneMsg)
+    delete!(df.expansion_inflight, msg.env_key)
+    djp = get(df.procs, msg.env_key, nothing)
+    if djp !== nothing && state(djp.fsm) == DynamicProcessIndexing
+        transition!(djp.fsm, DynamicProcessDone; reason="macro expansion batch done")
+    end
+    put!(df.out_channel, MacroExpansionsResult(msg.results))
+    isready(df.update_channel) || try put!(df.update_channel, :data_available) catch; end
+    _drain_expansion_queue!(df, msg.env_key)
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::ExpansionBatchFailedMsg)
+    key = msg.env_key
+    delete!(df.expansion_inflight, key)
+    @warn "Macro expansion batch for $(_short_path(_key_path(key))) failed: $(_failure_reason(msg.err))"
+
+    # A failed batch (timeout = a hanging macro, or the child died) forfeits the
+    # child: expansion for this env stays unavailable until a re-key respawns
+    # it. Every queued entry settles `:failed` (the negative cache), so the same
+    # macrocalls cannot kill a future child again.
+    djp = get(df.procs, key, nothing)
+    if djp !== nothing
+        try kill(djp) catch; end
+        delete!(df.procs, key)
+    end
+    _settle_expansions_failed!(df, msg.entry_keys)
+    _drain_expansion_queue!(df, key)   # settles the rest of the queue via the dead-child path
+    return false
+end
+
 # ─── Controller messages ────────────────────────────────────────────────────
 
 function handle!(df::DynamicFeature, ::ResetFailuresMsg)
@@ -1776,6 +1940,18 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
     for key in collect(df.inflight)
         key in required && continue
         _complete_work_item!(df, key)
+    end
+
+    # Expansion batches for envs that are no longer required (re-key kills the
+    # old child above): settle their entries so nothing waits on them. The new
+    # key's batches arrive with fresh env_hashes via the harvest.
+    for (key, q) in collect(df.expansion_queue)
+        key in required && continue
+        for batch in q
+            _settle_expansions_failed!(df, ExpansionKey[e.key for e in batch.entries])
+        end
+        delete!(df.expansion_queue, key)
+        delete!(df.expansion_inflight, key)
     end
 
     # ── Spawn work for newly-required keys ─────────────────────────────────

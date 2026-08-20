@@ -102,6 +102,56 @@ struct CreateStandaloneProjectMsg <: DynamicReactorMessage
     key::ScratchProjectKey
 end
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Macro expansion (served by the persistent env child; no key kind of its own)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+"""
+    ExpansionKey
+
+Content address of one macro expansion: the environment (Project/Manifest
+content hash), the module context (hash over the module's canonical import
+statements, plus the macro-definition hashes of any deved packages it can see),
+and the macrocall itself (`BodyTree.hash`). Position edits and unrelated file
+edits change none of the three, so cached expansions survive them.
+"""
+const ExpansionKey = @NamedTuple{env_hash::UInt64, ctx_hash::UInt64, mac_hash::UInt64}
+
+"One macrocall to expand: its content key and its source text."
+const ExpansionEntry = @NamedTuple{key::ExpansionKey, text::String}
+
+"The settled value of one expansion: `:ok` with the expansion text, or `:failed`."
+const ExpansionOutcome = @NamedTuple{status::Symbol, text::String}
+
+"One settled expansion with its key: `:ok` with the expansion text, or `:failed`."
+const ExpansionOutcomeEntry = @NamedTuple{key::ExpansionKey, status::Symbol, text::String}
+
+"""
+Request to expand a batch of macrocalls sharing one environment and one module
+context. `env_key` is the environment's ordinary `DJPKey` — the batch is served
+by that env's persistent child (the one that indexed it), never by a child of
+its own.
+"""
+struct ExpansionBatchMsg <: DynamicReactorMessage
+    env_key::DJPKey
+    ctx_id::String
+    imports::Vector{String}
+    entries::Vector{ExpansionEntry}
+end
+
+"""Posted by the async expansion task once the child answered a batch."""
+struct ExpansionBatchDoneMsg <: DynamicReactorMessage
+    env_key::DJPKey
+    results::Vector{ExpansionOutcomeEntry}
+end
+
+"""Posted by the async expansion task when a batch failed (timeout, child death, JSONRPC error)."""
+struct ExpansionBatchFailedMsg <: DynamicReactorMessage
+    env_key::DJPKey
+    entry_keys::Vector{ExpansionKey}
+    err::Any
+end
+
 """Request an orderly shutdown of the reactor."""
 struct ShutdownMsg <: DynamicReactorMessage end
 
@@ -254,4 +304,12 @@ struct ResolvedEnvironmentReadyResult <: DynamicResultMessage
     env_folder_uri::URI
     project_uri::URI
     content_hash::UInt64
+end
+
+"""
+A batch of macro expansions settled — each entry `:ok` with expansion text or
+`:failed` (negative-cached so the same key is not re-requested).
+"""
+struct MacroExpansionsResult <: DynamicResultMessage
+    entries::Vector{ExpansionOutcomeEntry}
 end
