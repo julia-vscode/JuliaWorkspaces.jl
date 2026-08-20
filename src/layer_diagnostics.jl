@@ -9,10 +9,13 @@ function _is_env_dependent_finding(f::LintFinding)
     return LINT_RULES_BY_ID[f.rule_id].env_dependent
 end
 
+# Sorted: this vector is now a dependency of every file's scope, and
+# `derived_text_files` is a `Set`, so an unsorted result would change on
+# unrelated file adds and defeat Salsa's backdating.
 Salsa.@derived function derived_lintconfig_files(rt)
     files = derived_text_files(rt)
 
-    return [file for file in files if file.scheme=="file" && is_path_lintconfig_file(uri2filepath(file))]
+    return sort!([file for file in files if file.scheme=="file" && is_path_lintconfig_file(uri2filepath(file))], by=string)
 end
 
 
@@ -144,16 +147,20 @@ end
 One `JuliaLint.toml` file, parsed. Kept separate from the per-file
 [`EffectiveLintConfig`](@ref) so that parsing happens once per config file
 rather than once per linted file.
+
+Carries only the keys the *nearest* config decides. The `include`/`exclude`
+globs are deliberately not here: they compose over the whole ancestor chain and
+live in [`derived_lint_path_filter`](@ref), so that editing `[rules]` does not
+invalidate every file's scope, nor an `exclude` edit every file's rules.
 """
 struct ParsedLintConfig
     preset::String
-    filter::PathFilter
     rules::Dict{Symbol,Tuple{Union{Nothing,Symbol},Dict{Symbol,Any}}}
     overrides::Vector{Any}
 end
 
 ParsedLintConfig() = ParsedLintConfig(
-    DEFAULT_LINT_PRESET, PathFilter(),
+    DEFAULT_LINT_PRESET,
     Dict{Symbol,Tuple{Union{Nothing,Symbol},Dict{Symbol,Any}}}(), Any[],
 )
 
@@ -171,18 +178,39 @@ Salsa.@derived function derived_parsed_lint_config(rt, config_uri)
 
     overrides = parse_overrides!(discard, toml_content, (_, _) -> nothing)
 
-    return ParsedLintConfig(String(preset), parse_path_filter!(discard, toml_content), rules, overrides)
+    return ParsedLintConfig(String(preset), rules, overrides)
+end
+
+"""
+    derived_lint_path_filter(rt, config_uri) -> PathFilter
+
+The `include`/`exclude` globs of one `JuliaLint.toml`. Separate from
+[`derived_parsed_lint_config`](@ref) so scope and settings invalidate
+independently.
+"""
+Salsa.@derived function derived_lint_path_filter(rt, config_uri)
+    discard = Diagnostic[]   # diagnostics are reported by derived_lintconfig_diagnostics
+
+    return parse_path_filter!(discard, derived_toml_syntax_tree(rt, config_uri))
 end
 
 Salsa.@derived function derived_effective_lint_config(rt, uri)
     @debug "derived_effective_lint_config" uri=uri
 
-    config_uri = nearest_config(derived_lintconfig_files(rt), uri)
-    config_uri === nothing && return EffectiveLintConfig()
+    # Scope composes over every enclosing `JuliaLint.toml`, so it is resolved
+    # before the nearest-file lookup that decides the preset and rules.
+    config_files = derived_lintconfig_files(rt)
+    selected = uri.scheme == "file" ? scope_selected(
+        ancestor_configs(config_files, uri), uri2filepath(uri),
+        c -> derived_lint_path_filter(rt, c),
+    ) : true
+
+    config_uri = nearest_config(config_files, uri)
+    config_uri === nothing && return EffectiveLintConfig(selected)
 
     parsed = derived_parsed_lint_config(rt, config_uri)
     relpath = config_relative_path(config_dir_of(config_uri), uri2filepath(uri))
-    relpath === nothing && return EffectiveLintConfig()
+    relpath === nothing && return EffectiveLintConfig(selected)
 
     severities = copy(LINT_PRESETS[parsed.preset])
     options = Dict{Symbol,Dict{Symbol,Any}}()
@@ -203,7 +231,7 @@ Salsa.@derived function derived_effective_lint_config(rt, uri)
         apply_rules!(ov_rules)
     end
 
-    return EffectiveLintConfig(severities, options, path_selected(parsed.filter, relpath))
+    return EffectiveLintConfig(severities, options, selected)
 end
 
 # The user-facing messages of every failed dynamic work item whose project
@@ -241,16 +269,25 @@ Salsa.@derived function derived_diagnostics(rt, uri)
 
     results = Diagnostic[]
 
+    # A config file validates itself even when its own globs exclude the
+    # directory it lives in — otherwise a mistake in `exclude` could hide the
+    # very diagnostic that explains it. The exemption covers *self*-exclusion
+    # only: a config inside a subtree an enclosing `JuliaLint.toml` excluded is
+    # part of code the project deliberately set aside (a vendored repository,
+    # typically) and stays silent along with the rest of it.
     is_config_file = uri.scheme == "file" && (
         is_path_lintconfig_file(uri2filepath(uri)) ||
         is_path_formatconfig_file(uri2filepath(uri)) ||
         is_path_testitemsconfig_file(uri2filepath(uri))
     )
 
-    # `include`/`exclude` suppress everything for a file — except a config
-    # file's own validation, so that a config which happens to exclude its own
-    # directory still reports its mistakes.
-    if !lint_config.selected && !is_config_file
+    is_self_validating_config = is_config_file &&
+        scope_selected(
+            strict_ancestor_configs(derived_lintconfig_files(rt), uri), uri2filepath(uri),
+            c -> derived_lint_path_filter(rt, c),
+        )
+
+    if !lint_config.selected && !is_self_validating_config
         return results
     end
 

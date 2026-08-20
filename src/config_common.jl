@@ -3,11 +3,15 @@
 #
 # All three share the same shape:
 #
-#   * the *nearest* config file, walking up from the target file, governs that
-#     file wholesale — keys it does not set fall back to built-in defaults, never
-#     to a value from a config file further up the tree;
-#   * top-level `include`/`exclude` gitignore-style globs select which files the
-#     tool applies to at all;
+#   * *scope* is the intersection over the whole ancestor chain: top-level
+#     `include`/`exclude` gitignore-style globs select which files the tool
+#     applies to at all, and a file is in scope only if *every* enclosing config
+#     file of that kind admits it. A nested config may narrow scope, never widen
+#     it — so a project can seal a subtree (a vendored repository, say) from its
+#     own root config and nothing inside can reclaim it;
+#   * every *other* key comes wholesale from the *nearest* config file — keys it
+#     does not set fall back to built-in defaults, never to a value from a config
+#     file further up the tree;
 #   * repeated `[[override]]` blocks with `paths = [...]` re-scope a subset of
 #     the file's keys, with later blocks winning;
 #   * unknown keys and invalid values are reported as diagnostics on the config
@@ -165,29 +169,89 @@ end
 # ── Config file discovery ───────────────────────────────────────────────────
 
 """
-    nearest_config(config_uris, uri) -> Union{URI,Nothing}
+    ancestor_configs(config_uris, uri) -> Vector{URI}
 
-The config file governing `uri`: the one in the deepest directory that is a
-prefix of `uri`'s directory. Unlike the merging scheme this replaces, only this
-single file applies.
+Every config file of one kind whose directory is a prefix of `uri`'s path,
+outermost first.
+
+Scope is the intersection over this whole chain (see [`scope_selected`](@ref)),
+while every other key comes from the innermost entry alone (see
+[`nearest_config`](@ref)). The result is sorted, so it does not depend on the
+iteration order of `config_uris` — the callers are Salsa queries, and an
+order-dependent result would defeat backdating.
 """
-function nearest_config(config_uris, uri::URI)
-    uri.scheme == "file" || return nothing
+function ancestor_configs(config_uris, uri::URI)
+    uri.scheme == "file" || return URI[]
     target = replace(uri2filepath(uri), '\\' => '/')
 
-    best = nothing
-    best_len = -1
+    res = Tuple{Int,URI}[]
     for config_uri in config_uris
         config_uri.scheme == "file" || continue
-        dir = _normalize_dir(dirname(uri2filepath(config_uri)))
+        dir = config_dir_of(config_uri)
         _path_startswith(target, dir) || continue
-        if length(dir) > best_len
-            best = config_uri
-            best_len = length(dir)
-        end
+        push!(res, (length(dir), config_uri))
     end
+    sort!(res, by = x -> (x[1], string(x[2])))
 
-    return best
+    return URI[x[2] for x in res]
+end
+
+"""
+    strict_ancestor_configs(config_uris, config_uri) -> Vector{URI}
+
+[`ancestor_configs`](@ref) for a config file's own path, minus any config living
+in the same directory as `config_uri` itself. This is the chain that decides
+whether `config_uri` sits inside a subtree an *enclosing* config has excluded,
+without a config file ever excluding itself.
+"""
+function strict_ancestor_configs(config_uris, config_uri::URI)
+    config_uri.scheme == "file" || return URI[]
+    own_dir = config_dir_of(config_uri)
+    return URI[c for c in ancestor_configs(config_uris, config_uri)
+               if length(config_dir_of(c)) < length(own_dir)]
+end
+
+"""
+    nearest_config(config_uris, uri) -> Union{URI,Nothing}
+
+The config file whose non-scope keys govern `uri`: the one in the deepest
+directory that is a prefix of `uri`'s directory. Only this single file applies —
+`preset`, `[rules]`, `style`, `[options]` and `[[override]]` are never merged
+across files.
+
+Scope is the one exception: `include`/`exclude` compose over the whole chain, so
+use [`ancestor_configs`](@ref) with [`scope_selected`](@ref) for that.
+"""
+function nearest_config(config_uris, uri::URI)
+    chain = ancestor_configs(config_uris, uri)
+    return isempty(chain) ? nothing : last(chain)
+end
+
+"""
+    scope_selected(chain, path, filter_for) -> Bool
+
+Whether `path` is in scope, given the [`ancestor_configs`](@ref) `chain` of the
+relevant kind. It is in scope only if *every* config on the chain admits it via
+that config's own `include`/`exclude`, each evaluated relative to that config's
+own directory.
+
+`filter_for(config_uri)` returns the [`PathFilter`](@ref) of one config file.
+Taking it as a callback keeps this function free of Salsa: each caller passes a
+closure over its own per-config query, so the dependency edges land on exactly
+the config files that were consulted.
+
+The consequence is that a nested config file can only ever *narrow* what an
+enclosing one selected. That is deliberate: the alternative lets a config
+dropped into a subdirectory — a vendored repository, most often — overrule the
+enclosing project's decision to leave that subtree alone.
+"""
+function scope_selected(chain, path::AbstractString, filter_for)
+    for config_uri in chain
+        relpath = config_relative_path(config_dir_of(config_uri), path)
+        relpath === nothing && continue   # unreachable: the chain is prefix-matched
+        path_selected(filter_for(config_uri), relpath) || return false
+    end
+    return true
 end
 
 """
@@ -204,12 +268,14 @@ The config file of the same kind that `config_uri` takes over from: the one in
 the nearest strictly-enclosing directory, or `nothing` when `config_uri` is the
 outermost of its kind.
 
-Because the nearest config governs its subtree wholesale, a nested config file
-does not extend the one above it — it replaces it, and the outer file's
-settings stop applying with no other trace. Reporting that is the price of
-choosing this discovery rule over cascading: the alternative is that a config
-dropped into a subdirectory (a vendored repo, a copied example, a half-finished
-subpackage extraction) silently voids the project's own configuration.
+Because the nearest config governs the *non-scope* keys of its subtree
+wholesale, a nested config file does not extend the one above it — it replaces
+it, and the outer file's settings stop applying with no other trace. Reporting
+that is the price of choosing this discovery rule over cascading for settings.
+
+Scope is not affected: `include`/`exclude` compose over the whole chain
+([`scope_selected`](@ref)), so a nested file can only narrow what an enclosing
+one selected, never widen it.
 """
 function shadowed_config(config_uris, config_uri::URI)
     config_uri.scheme == "file" || return nothing
@@ -297,7 +363,8 @@ function shadowing_diagnostic!(res::Vector{Diagnostic}, config_uris, config_uri:
         1:1, :information,
         "This $filename replaces `$outer_path` for everything below this directory, " *
         "rather than adding to it — settings from that file do not apply here. " *
-        "Copy anything you want to keep, or remove this file.",
+        "Its `include`/`exclude` still do: this file can narrow what is covered, " *
+        "but not widen it. Copy anything you want to keep, or remove this file.",
         nothing, Symbol[], "JuliaWorkspaces.jl", :shadowed_config,
     ))
     return res

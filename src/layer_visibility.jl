@@ -1,5 +1,11 @@
 # Layer 3 (env seam) of the inventory architecture: per-module visible
 # names — the names reachable in a module through its classified imports
+#
+# "Module" here includes the `:testitem` nodes a `@testitem`/`@testmodule`/
+# `@testsnippet` body opens (they really are modules at runtime, and a file
+# `include`d in the body is spliced into one). The single difference is that a
+# test-item node records no SELF-binding: its path segment is an opaque tree
+# key, not a name anything can write.
 # (`derived_module_imports`, from layer_module_tree.jl), gated by the
 # workspace's own packages (`derived_workspace_package_roots`) and, for
 # `:external` targets, the SymbolServer-backed environment
@@ -852,8 +858,10 @@ function _visible_names_pass1(rt, root, path::Vector{String}, visited::Set{URI})
     # `origin_module` is the DECLARING module's path (the parent), consistent
     # with every other `:declared` binding, which is exactly why the ledger
     # entry records the denoted module's FULL path separately.
+    # A `:testitem` node is a runtime module but binds no name — its segment is
+    # an opaque tree key, not an identifier — so it gets no self-binding.
     node = module_node(derived_module_tree(rt, root), path)
-    if node !== nothing && !isempty(path)
+    if node !== nothing && !isempty(path) && node.kind !== :testitem
         _record!(result, modtargets, path[end],
             VisibleName(:module, :declared, node.declared_at, path[1:end - 1]),
             ImportTarget(:tree, path))

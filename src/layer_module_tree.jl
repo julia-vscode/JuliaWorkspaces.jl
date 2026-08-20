@@ -69,6 +69,13 @@ end
 A module within the tree (including the synthetic root).
 
 - `path`: absolute module path in this root; `String[]` for the root file's top level
+- `kind`: `:root` for the synthetic root node, `:module` for a `module`/`baremodule`,
+  `:testitem` for a `@testitem`/`@testmodule`/`@testsnippet` body (see
+  `InventoryTestItem`). A `:testitem` node is a real runtime module — an `include`
+  inside splices into it — but is NOT a module in any user-facing sense: it declares
+  nothing in its parent, binds no name of its own, and is excluded from workspace
+  symbols and the workspace-package edge walks. Every consumer that must exclude
+  test items tests this field; never the shape of the path segment.
 - `bare`: whether this is a `baremodule` (false for the synthetic root node)
 - `declared_at`: where this module was declared (`nothing` for the synthetic root node)
 - `files`: files whose top level splices here, in include order
@@ -79,6 +86,7 @@ A module within the tree (including the synthetic root).
 """
 @auto_hash_equals struct ModuleNode
     path::Vector{String}               # absolute path in this root; String[] = the root file's own top level
+    kind::Symbol                       # :root | :module | :testitem
     bare::Bool                         # baremodule (false for the synthetic root node)
     declared_at::Union{Nothing,ItemRef}   # nothing for the synthetic root node
     files::Vector{URI}                 # files whose top level splices here, in include order
@@ -95,7 +103,9 @@ The complete module structure of a root file (with its includes).
 
 - `root`: the root file's URI
 - `modules`: all modules (sorted by path for deterministic equality)
-- `file_modules`: for each file, the absolute module path its top level splices into
+- `file_modules`: for each file, the absolute module path its top level splices into.
+  A helper included from several test items is spliced at several paths; this
+  records the FIRST, which is the context the file itself is analyzed in.
 """
 @auto_hash_equals struct ModuleTree
     root::URI
@@ -172,6 +182,7 @@ const _BINDING_ITEM_KINDS = (
 # (pass 2) to populate `imports` with real `ResolvedImport`s. `imports` is
 # empty until pass 2 runs.
 mutable struct _ModuleNodeBuilder
+    kind::Symbol
     bare::Bool
     declared_at::Union{Nothing,ItemRef}
     files::Vector{URI}
@@ -187,7 +198,7 @@ mutable struct _ModuleNodeBuilder
 end
 
 _ModuleNodeBuilder() = _ModuleNodeBuilder(
-    false, nothing, URI[], Dict{String,ItemRef}(), Dict{String,Symbol}(),
+    :module, false, nothing, URI[], Dict{String,ItemRef}(), Dict{String,Symbol}(),
     String[], String[], Tuple{URI,InventoryImport}[], ResolvedImport[])
 
 _is_datatype_kind(k::Symbol) =
@@ -231,6 +242,13 @@ which includes something deep" resolve exactly like running the code would:
 the deepest, textually-last declaration of a name always wins, and a node's
 `files` list is true depth-first pre-order, not level-order.
 
+A `@testitem`/`@testmodule`/`@testsnippet` body opens a `:testitem` node of its
+own (it is a fresh module at runtime), and includes inside it splice there.
+Because the common idiom is many test items in one file each including the same
+helper, splices into a test-item node are admitted per `(target, path)` rather
+than per target — see the `spliced`/`stack` comments below. `file_modules`
+consequently records the FIRST splice path for a multiply-spliced file.
+
 Also collects `using`/`import` statements verbatim, as `(file, InventoryImport)`
 pairs on the declaring node's `raw_imports`, at their absolute module path —
 this pass never inspects import targets, it only records where each one was
@@ -243,15 +261,44 @@ function _build_tree_structure(rt, root::URI)
 
     # Rule 8: the synthetic root node always exists, even for a root file with
     # no content or no includes.
-    ensure_node!(String[])
+    ensure_node!(String[]).kind = :root
 
     file_modules = Dict{URI,Vector{String}}()
 
     # Rule 1: visited-set guarded exactly like `derived_include_closure` —
-    # first include wins in true source order (see below), later includes of
-    # an already-visited file are skipped, and cycles terminate. Seeded with
-    # `root` up front so a file including itself is also caught.
+    # first include wins in true source order (see below), and later includes
+    # of an already-visited file are skipped. Seeded with `root` up front so a
+    # file including itself is also caught.
     visited = Set{URI}([root])
+
+    # Rule 1, test-item exception. A `@testitem` body is a separate runtime
+    # module, and the overwhelmingly common idiom is N test items in one file
+    # each doing `include("shared.jl")` — under plain first-include-wins the
+    # helper would splice into the FIRST test item only and every other body
+    # would see nothing. So a splice into (or under) a `:testitem` node is
+    # admitted once per (target, path) instead of once per target.
+    #
+    # Ordinary paths keep exact first-include-wins semantics. A file included
+    # both inside a test item and at an ordinary top level therefore splices in
+    # both places, which is what actually happens at runtime.
+    #
+    # With per-path admission the global visited set can no longer terminate
+    # cycles (a self-include inside a test item generates a fresh, deeper path
+    # every time), so `stack` — the files on the current DFS chain — does it.
+    spliced = Set{Tuple{URI,Vector{String}}}()
+    stack = Set{URI}([root])
+
+    # Whether `p` is a test-item body or nested inside one. Reads the builders
+    # rather than the finished tree (this IS the pass that builds it): the
+    # `:testitem` event carries a lower `order` than anything in its body, so
+    # the node's kind is always set before its includes are reached.
+    function under_testitem(p::Vector{String})
+        for i in 1:length(p)
+            b = get(builders, p[1:i], nothing)
+            b !== nothing && b.kind === :testitem && return true
+        end
+        return false
+    end
 
     # Recursive DFS splice of one file F at absolute path P. Rules 3 & 5
     # write into the very same `declared` dict (a module's own name enters
@@ -262,8 +309,12 @@ function _build_tree_structure(rt, root::URI)
     # `order` and processed in that single pass, `include` events recursing
     # in-place, to reproduce true textual splice order exactly.
     function splice_file!(F::URI, P::Vector{String})
-        # Rule 7.
-        file_modules[F] = P
+        # Rule 7. `get!`, not assignment: a helper included from several test
+        # items is spliced several times, and `file_modules` records ONE path
+        # per file — the first splice's, which is the context the file itself
+        # is analyzed in. Equivalent to the old assignment for every file that
+        # is spliced exactly once.
+        get!(file_modules, F, P)
 
         # The file's own top level splices at P; recording F here handles
         # both the root file (no includer) and included files uniformly —
@@ -292,6 +343,9 @@ function _build_tree_structure(rt, root::URI)
         for inc in inv.includes
             push!(events, (inc.order, :include, inc))
         end
+        for ti in inv.testitems
+            push!(events, (ti.order, :testitem, ti))
+        end
         # Secondary key: for an assignment-wrapped include (`const DATA =
         # include("data.jl")`), the item and the include share the SAME order —
         # both come from the one top-level statement. Real Julia evaluates
@@ -317,6 +371,19 @@ function _build_tree_structure(rt, root::URI)
                 # ...and the module's own name also enters the *parent*
                 # node's `declared`, exactly like a binding item (rule 5).
                 _declare!(ensure_node!(vcat(P, m.parent_module)), m.name, ItemRef(F, m.id), :module)
+            elseif kind === :testitem
+                # A `@testitem`/`@testmodule`/`@testsnippet` body is a fresh
+                # module at runtime, so it opens a node of its own and the
+                # body's items (recorded by the inventory walker with the
+                # extended `parent_module`) splice into it. Deliberately unlike
+                # the `:module` arm: NO `_declare!` into the parent — a test
+                # item binds no name, so nothing can reference it. Creating the
+                # node here rather than letting it materialise from child items
+                # means an EMPTY body is still represented.
+                ti = payload
+                node = ensure_node!(vcat(P, ti.parent_module, [ti.segment]))
+                node.kind = :testitem
+                node.declared_at = ItemRef(F, ti.id)
             elseif kind === :export
                 # Rule 6.
                 e = payload
@@ -340,10 +407,19 @@ function _build_tree_structure(rt, root::URI)
                 # The node at newP must exist regardless of whether this
                 # particular include resolves (other items may share RP).
                 ensure_node!(newP)
-                inc.target in visited && continue
                 derived_has_content(rt, inc.target) || continue
-                push!(visited, inc.target)
+                inc.target in stack && continue     # cycle
+                if under_testitem(newP)
+                    key = (inc.target, newP)
+                    key in spliced && continue
+                    push!(spliced, key)
+                else
+                    inc.target in visited && continue
+                    push!(visited, inc.target)
+                end
+                push!(stack, inc.target)
                 splice_file!(inc.target, newP)
+                delete!(stack, inc.target)
             end
         end
     end
@@ -492,7 +568,7 @@ Salsa.@derived function derived_module_tree(rt, root)
     _classify_imports!(rt, builders)
 
     modules = ModuleNode[
-        ModuleNode(path, b.bare, b.declared_at, b.files, b.declared, b.exports, b.publics, b.imports)
+        ModuleNode(path, b.kind, b.bare, b.declared_at, b.files, b.declared, b.exports, b.publics, b.imports)
         for (path, b) in builders]
     sort!(modules; by=n -> n.path, alg=Base.Sort.MergeSort)
 
@@ -689,6 +765,43 @@ Salsa.@derived function derived_module_is_bare(rt, root, path)
 end
 
 """
+    derived_module_is_testitem(rt, root, path::Vector{String}) -> Bool
+
+Whether `path` names a `@testitem`/`@testmodule`/`@testsnippet` body rather
+than a real module (`ModuleNode.kind === :testitem`). A per-module `Bool`
+projection for the same cutoff reason as [`derived_module_is_bare`](@ref).
+
+Consumers that need "is this path INSIDE a test item" — including any of its
+enclosing prefixes — want [`is_testitem_path`](@ref) instead.
+"""
+Salsa.@derived function derived_module_is_testitem(rt, root, path)
+    @debug "derived_module_is_testitem" root=root path=path
+
+    node = module_node(derived_module_tree(rt, root), path)
+    return node !== nothing && node.kind === :testitem
+end
+
+"""
+    is_testitem_path(rt, root, path::Vector{String}) -> Bool
+
+Whether `path` lies inside a test-item body: itself a `:testitem` node, or
+nested under one (a `module` declared inside a `@testitem` body, say).
+
+The single place anything asks "is this a test item, not a module". Reads the
+per-module `derived_module_is_testitem` selector for each prefix rather than
+inspecting the path segments, so the naming scheme in
+`_mint_testitem_segment!` stays an implementation detail of the inventory
+walker — and so a consumer inside a per-file analysis frame takes only
+`Bool`-valued dependencies.
+"""
+function is_testitem_path(rt, root, path::Vector{String})
+    for i in 1:length(path)
+        derived_module_is_testitem(rt, root, path[1:i]) && return true
+    end
+    return false
+end
+
+"""
     derived_module_declared_at(rt, root, path::Vector{String}) -> Union{Nothing,ItemRef}
 
 The `ItemRef` of the `module` declaration for the module at `path` — a
@@ -783,10 +896,26 @@ end
 # extend) a name — an `:opaque_macrocall` row named `@foo` is a top-level USAGE
 # of the macro, not a method of it. The keep-predicate and payload live in
 # `emit`; shared by the method-item and external-extension projections.
+#
+# The include-admission rule mirrors `_build_tree_structure`'s exactly,
+# test-item exception included: a helper included from N test items must be
+# emitted at all N paths, or the method/arity sets of every test item but the
+# first would be empty. `titems`/`spliced`/`stack` play the same roles as they
+# do there; the defaults make the top-level call sites read unchanged.
 function _walk_spliced_binding_items!(emit, rt, F::URI, P::Vector{String},
                                       name::Union{Nothing,String}, visited::Set{URI};
-                                      kinds=_BINDING_ITEM_KINDS)
+                                      kinds=_BINDING_ITEM_KINDS,
+                                      titems::Set{Vector{String}}=Set{Vector{String}}(),
+                                      spliced::Set{Tuple{URI,Vector{String}}}=Set{Tuple{URI,Vector{String}}}(),
+                                      stack::Set{URI}=Set{URI}([F]))
     inv = derived_file_inventory(rt, F)
+
+    # Register this file's test-item node paths before walking, so the
+    # under-test-item check below sees them regardless of event order.
+    for ti in inv.testitems
+        push!(titems, vcat(P, ti.parent_module, [ti.segment]))
+    end
+    under_testitem(p) = any(i -> p[1:i] in titems, 1:length(p))
 
     events = Tuple{Int,Symbol,Any}[]
     for item in inv.items
@@ -805,10 +934,21 @@ function _walk_spliced_binding_items!(emit, rt, F::URI, P::Vector{String},
         else
             inc = payload
             inc.target === nothing && continue
-            inc.target in visited && continue
             derived_has_content(rt, inc.target) || continue
-            push!(visited, inc.target)
-            _walk_spliced_binding_items!(emit, rt, inc.target, vcat(P, inc.parent_module), name, visited; kinds)
+            inc.target in stack && continue
+            newP = vcat(P, inc.parent_module)
+            if under_testitem(newP)
+                key = (inc.target, newP)
+                key in spliced && continue
+                push!(spliced, key)
+            else
+                inc.target in visited && continue
+                push!(visited, inc.target)
+            end
+            push!(stack, inc.target)
+            _walk_spliced_binding_items!(emit, rt, inc.target, newP, name, visited;
+                                         kinds, titems, spliced, stack)
+            delete!(stack, inc.target)
         end
     end
     return

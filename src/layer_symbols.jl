@@ -295,7 +295,17 @@ function _get_workspace_symbols(runtime, query::String)
         (isempty(inv.items) && isempty(inv.modules)) && continue
         positions = derived_item_positions(runtime, uri)
 
+        # Names declared inside a `@testitem`/`@testmodule`/`@testsnippet` body
+        # are recorded under that body's tree node (so its `include`s resolve),
+        # but they are test-local and were never workspace symbols before —
+        # keep them out. Matched against the file's own recorded segments, not
+        # by the shape of the segment string.
+        ti_segments = Set{String}(ti.segment for ti in inv.testitems)
+        in_testitem(parent_module) =
+            !isempty(ti_segments) && any(seg -> seg in ti_segments, parent_module)
+
         for it in inv.items
+            in_testitem(it.parent_module) && continue
             # `:opaque_macrocall` rows stand in for isolated-scope macrocalls
             # (`@testitem`/`@testset`/…); the old bindingof walk collected no
             # binding for those, so they are not workspace symbols.
@@ -319,6 +329,7 @@ function _get_workspace_symbols(runtime, query::String)
         # Modules live in `inv.modules`, not `inv.items`; the old bindingof walk
         # collected module names as symbols, so include them to preserve that.
         for m in inv.modules
+            in_testitem(m.parent_module) && continue
             _symbol_matches_query(m.name, query) || continue
             entry = get(positions, m.id, nothing)
             entry === nothing && continue

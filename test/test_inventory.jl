@@ -1,6 +1,6 @@
 @testitem "inventory types: structural equality across separately built instances" begin
     using JuliaWorkspaces: FileInventory, InventoryItem, InventoryImport, InventoryExport,
-        InventoryInclude, InventoryModule, InventoryOpaqueMacro, ImportSymbol
+        InventoryInclude, InventoryModule, InventoryOpaqueMacro, InventoryTestItem, ImportSymbol
     using JuliaWorkspaces.URIs2: URI
 
     make() = FileInventory(
@@ -11,6 +11,7 @@
         [InventoryInclude(5, 105, URI("file:///pkg/src/a.jl"), String[])],
         [InventoryModule(6, 106, "M", false, String[])],
         [InventoryOpaqueMacro(7, 107, ["M"])],
+        [InventoryTestItem(8, 108, :testitem, "t", "#testitem#t#1", String[])],
     )
 
     a = make()
@@ -21,8 +22,13 @@
 
     c = FileInventory(
         [InventoryItem(1, 101, "g", String[], :function, "g(x)", String[], String[])],
-        a.imports, a.exports, a.includes, a.modules, a.opaque_macros)
+        a.imports, a.exports, a.includes, a.modules, a.opaque_macros, a.testitems)
     @test !isequal(a, c)
+
+    # The test-item vector participates in the equality contract too.
+    d = FileInventory(a.items, a.imports, a.exports, a.includes, a.modules, a.opaque_macros,
+        [InventoryTestItem(8, 108, :testitem, "other", "#testitem#other#1", String[])])
+    @test !isequal(a, d)
 end
 
 @testitem "inventory walker: visit order, ids, module nesting, doc unwrap, offsets" begin
@@ -46,7 +52,7 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset, _segment
         push!(visited, (order=order, id=id, parent=copy(parent_module), offset=offset,
                         ismod=CSTParser.defines_module(x)))
     end
@@ -100,7 +106,7 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset, _segment
         push!(visited, (order=order, id=id, parent=copy(parent_module), offset=offset))
     end
 
@@ -258,6 +264,170 @@ end
     @test only(filter(e -> e.kind === :public, inv.exports)).names == ["g"]
 
     @test only(inv.includes).target == a_uri
+end
+
+@testitem "inventory: testitem-family bodies get their own node" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    top() = 1
+    @testitem "one" begin
+        include("shared.jl")
+        inside() = 2
+        using Foo
+    end
+    @testmodule Setup begin
+        setupfn() = 3
+    end
+    @testsnippet Snip begin
+        snipfn() = 4
+    end
+    """)
+
+    tis = inv.testitems
+    @test [(t.kind, t.label) for t in tis] ==
+        [(:testitem, "one"), (:testmodule, "Setup"), (:testsnippet, "Snip")]
+    @test all(t -> t.parent_module == String[], tis)
+    @test allunique([t.segment for t in tis])
+
+    seg = tis[1].segment
+    # The body's statements are recorded UNDER the test item, not at file level.
+    @test only(filter(i -> i.name == "inside", inv.items)).parent_module == [seg]
+    @test only(inv.includes).parent_module == [seg]
+    @test only(inv.imports).parent_module == [seg]
+    # ...and the enclosing module is untouched.
+    @test only(filter(i -> i.name == "top", inv.items)).parent_module == String[]
+
+    # The macrocall still produces its `:opaque_macrocall` usage row in the
+    # ENCLOSING module — consumers filter on that and must keep seeing it.
+    opaque = filter(i -> i.kind === :opaque_macrocall, inv.items)
+    @test sort([i.name for i in opaque]) == ["@testitem", "@testmodule", "@testsnippet"]
+    @test all(i -> i.parent_module == String[], opaque)
+end
+
+@testitem "inventory: repeated test-item names get distinct segments" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    @testitem "a" begin
+        f1() = 1
+    end
+    @testitem "a" begin
+        f2() = 2
+    end
+    """)
+    segs = [t.segment for t in inv.testitems]
+    @test length(segs) == 2
+    @test allunique(segs)
+    @test only(filter(i -> i.name == "f1", inv.items)).parent_module == [segs[1]]
+    @test only(filter(i -> i.name == "f2", inv.items)).parent_module == [segs[2]]
+
+    # Identical statements in two bodies must still get distinct ids.
+    @test only(filter(i -> i.name == "f1", inv.items)).id !=
+          only(filter(i -> i.name == "f2", inv.items)).id
+end
+
+@testitem "inventory: an empty test-item body still gets a record" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    @testitem "empty" begin
+    end
+    """)
+    @test length(inv.testitems) == 1
+    @test inv.testitems[1].label == "empty"
+end
+
+@testitem "inventory: @testset/@safetestset stay opaque" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    @testset "s" begin
+        include("shared.jl")
+        inner() = 1
+    end
+    @safetestset "t" begin
+        other() = 2
+    end
+    """)
+    @test isempty(inv.testitems)
+    # No descent: nothing from either body reaches the inventory.
+    @test isempty(filter(i -> i.name in ("inner", "other"), inv.items))
+    @test isempty(inv.includes)
+    @test sort([i.name for i in filter(i -> i.kind === :opaque_macrocall, inv.items)]) ==
+        ["@safetestset", "@testset"]
+end
+
+@testitem "inventory: a nested test item nests its segment" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    @testitem "outer" begin
+        @testitem "inner" begin
+            deep() = 1
+        end
+    end
+    """)
+    outer = only(filter(t -> t.label == "outer", inv.testitems))
+    inner = only(filter(t -> t.label == "inner", inv.testitems))
+    @test outer.parent_module == String[]
+    @test inner.parent_module == [outer.segment]
+    @test only(filter(i -> i.name == "deep", inv.items)).parent_module ==
+        [outer.segment, inner.segment]
+end
+
+@testitem "inventory: test items inside a module nest under it" setup=[InventoryWS] begin
+    inv, _ = inventory_of("""
+    module M
+    @testitem "t" begin
+        f() = 1
+    end
+    end
+    """)
+    ti = only(inv.testitems)
+    @test ti.parent_module == ["M"]
+    @test only(filter(i -> i.name == "f", inv.items)).parent_module == ["M", ti.segment]
+end
+
+@testitem "inventory firewall: test-item segments are position-free" setup=[InventoryWS] begin
+    # The segment scheme must not encode offsets: an edit ABOVE a test item, or
+    # inside one's body, has to leave the inventory `isequal` or every root's
+    # module tree would rebuild on each keystroke.
+    base(prefix, body) = """
+    $prefix
+    @testitem "a" begin
+        f(x) = $body
+    end
+    @testitem "a" begin
+        g(x) = x
+    end
+    """
+
+    inv1, _ = inventory_of(base("# comment", "x + 1"))
+    inv2, _ = inventory_of(base("# a much longer comment\n# and another line", "x * 2"))
+    @test isequal(inv1, inv2)
+    @test hash(inv1) == hash(inv2)
+
+    # Renaming a test item IS an API change.
+    inv3, _ = inventory_of(replace(base("# comment", "x + 1"), "\"a\" begin\n    f" => "\"b\" begin\n    f"))
+    @test !isequal(inv1, inv3)
+end
+
+@testitem "testitem segments: keys match the CST's macrocall nodes" setup=[InventoryWS] begin
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("file:///inv/src/F.jl")
+    _, jw = inventory_of("""
+    @testitem "a" begin
+        f() = 1
+    end
+    @testmodule B begin
+        g() = 2
+    end
+    """; uri)
+    rt = jw.runtime
+
+    segs = JuliaWorkspaces.derived_testitem_segments(rt, uri)
+    inv = JuliaWorkspaces.derived_file_inventory(rt, uri)
+    @test sort(collect(values(segs))) == sort([t.segment for t in inv.testitems])
+
+    # Keyed on the macrocall EXPRs of the very CST the semantic pass traverses.
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(rt, uri)
+    macrocalls = filter(a -> JuliaWorkspaces.CSTParser.ismacrocall(a), cst.args)
+    @test length(macrocalls) == 2
+    for mc in macrocalls
+        @test haskey(segs, UInt64(objectid(mc)))
+    end
 end
 
 @testitem "inventory firewall: body, comment, and docstring edits compare equal" setup=[InventoryWS] begin
@@ -906,7 +1076,7 @@ end
     cst = CSTParser.parse(src, true)
 
     visited = []
-    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset
+    _foreach_toplevel_item(cst) do x, order, id, parent_module, offset, _segment
         push!(visited, (order=order, id=id, head=CSTParser.headof(x), offset=offset))
     end
 
@@ -977,8 +1147,16 @@ end
     @test any(i -> i.kind === :import && i.path == ["SomePkg"], inv.imports)
     # an `include` inside a macro-wrapped `@static if` is a real include event
     @test any(inc -> inc.target == a_uri, inv.includes)
-    # isolating macros (testitem family + testset family) leak nothing
-    @test isempty(filter(i -> i.name in ("leaky1", "leaky2", "leaky3", "leaky4", "leaky5"), inv.items))
+    # The testset family stays fully opaque — nothing from those bodies is
+    # recorded at all.
+    @test isempty(filter(i -> i.name in ("leaky2", "leaky5"), inv.items))
+    # The testitem family IS descended into, but nothing leaks to the enclosing
+    # module: each name is recorded under its own test item's node.
+    segs = Dict(t.label => t.segment for t in inv.testitems)
+    @test byname("leaky1").parent_module == [segs["t"]]
+    @test byname("leaky3").parent_module == [segs["TM"]]
+    @test byname("leaky4").parent_module == [segs["TS"]]
+    @test !any(i -> i.name in ("leaky1", "leaky3", "leaky4") && isempty(i.parent_module), inv.items)
 end
 
 @testitem "inventory parity: typed and parenthesized assignment lhs emit their identifier" setup=[InventoryWS] begin
@@ -1010,12 +1188,17 @@ end
     # StaticLint's `_is_testmodule_macro`/`_is_testsnippet_macro`/
     # `_is_testitem_macro` (macros.jl) all unwrap the qualified `X.@macro`
     # getfield form (mirroring `is_scope_introducing_macrocall`, scope.jl),
-    # so a QUALIFIED form gets the same prebuilt isolating scope a bare one
-    # does — the inventory must stay opaque for all three, identically.
-    names = Set(i.name for i in inv.items)
-    @test !("tm_f" in names)
-    @test !("ts_f" in names)
-    @test !("ti_f" in names)
+    # so a QUALIFIED form gets the same isolating treatment a bare one does:
+    # each body opens its own `:testitem` node, and nothing lands at file level.
+    @test [(t.kind, t.label) for t in inv.testitems] ==
+        [(:testmodule, "TM"), (:testsnippet, "TS"), (:testitem, "t")]
+
+    segs = Dict(t.label => t.segment for t in inv.testitems)
+    byname(n) = only(filter(i -> i.name == n, inv.items))
+    @test byname("tm_f").parent_module == [segs["TM"]]
+    @test byname("ts_f").parent_module == [segs["TS"]]
+    @test byname("ti_f").parent_module == [segs["t"]]
+    @test !any(i -> i.name in ("tm_f", "ts_f", "ti_f") && isempty(i.parent_module), inv.items)
 end
 
 @testitem "macro-declared: name derivation for the modelled macros" begin
