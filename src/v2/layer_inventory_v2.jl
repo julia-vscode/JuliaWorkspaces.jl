@@ -59,6 +59,12 @@ such items are still enumerated, but the lowering layer declines to analyse them
     kind::Symbol
     parent_module::Vector{String}
     interpretable::Bool
+    # True when the item was enumerated from INSIDE a macrocall's arguments
+    # (`@derived function f() … end`, `@kwdef struct …`): the macro may
+    # transform it, so lowering the bare form can raise errors that are false
+    # for the real program. Binding analysis stays best-effort for such items;
+    # lowering-ERROR findings are suppressed.
+    under_macrocall::Bool
 end
 
 "A `module`/`baremodule` declared in this file."
@@ -692,11 +698,14 @@ mutable struct _V2WalkState
     bodies::Dict{Int64,BodyTree{V2Kind}}
     maps::Dict{Int64,Vector{UnitRange{Int}}}
     alloc::_V2ItemIdAllocator
+    # Macrocall-argument nesting depth of the walk position (see
+    # `V2ItemRow.under_macrocall`).
+    in_macro::Int
 end
 _V2WalkState() = _V2WalkState(
     V2FileSkeleton(V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[], V2OpaqueMacro[],
                    V2TestItem[], V2TestError[]),
-    Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator())
+    Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator(), 0)
 
 """
     _v2_walk_file!(state, root)
@@ -764,7 +773,7 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
         return order, id, bt
     end
 
-    push!(skel.items, V2ItemRow(order, id, _v2_id_kind_class(bt), pm, interpretable))
+    push!(skel.items, V2ItemRow(order, id, _v2_id_kind_class(bt), pm, interpretable, state.in_macro > 0))
     state.bodies[id] = bt
     state.maps[id] = ranges
 
@@ -918,15 +927,17 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
         bt = _build_body_tree_v2!(ranges, node)
         order, id = _v2_mint_ids!(state.alloc, _v2_statement_id_key(bt, parent_module))
         push!(state.skeleton.opaque_macros, V2OpaqueMacro(order, id, copy(parent_module)))
-        push!(state.skeleton.items, V2ItemRow(order, id, :opaque_macrocall, copy(parent_module), interpretable))
+        push!(state.skeleton.items, V2ItemRow(order, id, :opaque_macrocall, copy(parent_module), interpretable, state.in_macro > 0))
         state.bodies[id] = bt
         state.maps[id] = ranges
     end
 
     child_interpretable = interpretable && !(name !== nothing && name in DEFINITION_SHAPED_DSL_MACROS)
+    state.in_macro += 1
     for c in cs[min(3, length(cs) + 1):end]
         _v2_walk_one!(state, c, parent_module, child_interpretable)
     end
+    state.in_macro -= 1
     return
 end
 
@@ -1027,6 +1038,22 @@ Salsa.@derived function derived_v2_noninterpretable_ids(rt, uri)
     ids = Set{Int64}()
     for row in derived_v2_file_skeleton(rt, uri).items
         row.interpretable || push!(ids, row.id)
+    end
+    return ids
+end
+
+"""
+    derived_v2_under_macrocall_ids(rt, uri) -> Set{Int64}
+
+Items enumerated from inside a macrocall's arguments (see
+`V2ItemRow.under_macrocall`). Same projection shape as
+`derived_v2_noninterpretable_ids`, for the same reason: a hash lookup that
+backdates on its own.
+"""
+Salsa.@derived function derived_v2_under_macrocall_ids(rt, uri)
+    ids = Set{Int64}()
+    for row in derived_v2_file_skeleton(rt, uri).items
+        row.under_macrocall && push!(ids, row.id)
     end
     return ids
 end

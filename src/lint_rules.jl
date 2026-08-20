@@ -194,6 +194,13 @@ const LINT_RULES = LintRule[
         severity_default = :off, severity_strict = :warning),
 
     # ── Rules backed by analyses other than StaticLint ───────────────────────
+    # Shapes JuliaLowering rejects (v2 lowering producer, behind the lowering
+    # flag): invalid assignment targets, malformed signatures, duplicate struct
+    # fields, … — code that would fail to load. Off outside strict, per the
+    # new-rule convention; messages matching an existing rule id are routed
+    # there instead (see LOWERING_MESSAGE_RULE_IDS).
+    LintRule(id = :lowering_errors, tier = TierSemantic,
+        severity_default = :off, severity_strict = :warning),
     LintRule(id = :syntax_errors, tier = TierSyntax,
         severity_minimal = :error, severity_default = :error, severity_strict = :error),
     LintRule(id = :syntax_warnings, tier = TierSyntax,

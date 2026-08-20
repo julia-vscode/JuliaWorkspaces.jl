@@ -134,6 +134,8 @@ end
         :bare_using => :off,
         :debug_statement => :off,
         :async_task => :off,
+        # Lowering-backed rule (Harvest JuliaLowering); off outside `strict`.
+        :lowering_errors => :off,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 

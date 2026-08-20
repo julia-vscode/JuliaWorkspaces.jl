@@ -13,13 +13,34 @@
 
 const LOWERING_TAKEOVER_RULES = Set([:unused_binding, :unused_function_argument])
 
+# Rules this producer OWNS (no StaticLint counterpart, so no suppression):
+# checks only JuliaLowering computes.
+const LOWERING_OWN_RULES = Set([:lowering_errors])
+
+"""
+    LOWERING_MESSAGE_RULE_IDS
+
+Routes a `LoweringError` message to an existing rule id where one corresponds;
+everything unrouted reports as `:lowering_errors`. Keys are EXACT vendored
+strings — the refresh-gate testitems in test/v2/test_lowering_differential.jl
+lower one snippet per entry and assert the mapped id, so a
+`packages/JuliaLowering` refresh that rewords a message fails loudly instead of
+silently demoting a takeover finding.
+"""
+const LOWERING_MESSAGE_RULE_IDS = Dict{String,Symbol}(
+    # scope_analysis.jl — filled by the takeover-routing commit
+)
+
+_lowering_error_rule_id(msg::AbstractString) = get(LOWERING_MESSAGE_RULE_IDS, msg, :lowering_errors)
+
 # The gate both producers consult. Evaluation order matters: with the flag off
 # the only Salsa dependency is the flag input itself, so config edits do not
 # even re-verify this query.
 Salsa.@derived function derived_lowering_lint_active(rt, uri)
     input_lowering_lint(rt) || return false
     config = derived_effective_lint_config(rt, uri)
-    return any(rule_enabled(config, id) for id in LOWERING_TAKEOVER_RULES)
+    return any(rule_enabled(config, id)
+               for id in Iterators.flatten((LOWERING_TAKEOVER_RULES, LOWERING_OWN_RULES)))
 end
 
 const SemanticFinding = @NamedTuple{addr::Int32, rule_id::Symbol, msg::String}
@@ -35,7 +56,34 @@ errored, or absent — degradation is silence, never noise.
 Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
     result = SemanticFinding[]
     low = derived_item_lowering(rt, ref)
-    (low === nothing || low.status !== :ok) && return result
+    low === nothing && return result
+
+    if low.status !== :ok
+        # Lowering aborted: bindings/uses are empty, so the unused-* loops
+        # below are vacuous — routing the error findings is the only work.
+        #
+        # Test-block items are materialized inside a synthetic `let`
+        # (`_materialize`), which makes module-level constructs — perfectly
+        # legal inside the real `@testitem`/`@testset` macro — raise scope
+        # errors (`struct` in local scope, `const` in local scope, …). Those
+        # are artifacts of the frame, not the user's code: silence, for ALL
+        # error findings of such items.
+        body = derived_item_lowering_body(rt, ref)
+        (body !== nothing && _test_block_target(body) !== nothing) && return result
+        # An item enumerated from inside a macrocall's arguments (`@derived
+        # function …`, `@kwdef struct …`) may be transformed by the macro, so
+        # errors from lowering the bare form are unreliable — silence.
+        ref.id in derived_v2_under_macrocall_ids(rt, ref.file) && return result
+        # Likewise an item CONTAINING opaque macrocalls: materialization
+        # strips them (`function (@main)(args)` loses its name), so structural
+        # errors can be artifacts of the stripping.
+        isempty(derived_v2_item_expansion_sites(rt, ref)) || return result
+        for f in low.findings
+            f.addr == Int32(0) && continue   # no user address to report at
+            push!(result, (addr=f.addr, rule_id=_lowering_error_rule_id(f.msg), msg=f.msg))
+        end
+        return result
+    end
 
     # One source declaration can produce SEVERAL lowered bindings, because
     # desugaring duplicates a pattern into each closure or method it generates.
@@ -105,12 +153,21 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     maps = derived_v2_file_maps(rt, uri)
     isempty(maps) && return result
 
+    # A file with syntax errors lowers RECOVERED trees, so LoweringErrors near
+    # the error region are recovery artifacts — and `syntax_errors` already
+    # reports the real problem. Only the catch-all id is filtered; routed
+    # takeover findings keep flowing (v1 parity: the legacy engine lints broken
+    # files too). File-level and volatile, so it lives in this join, never in
+    # the backdating per-item query.
+    has_syntax_errors = any(d -> d.severity === :error, derived_julia_syntax_diagnostics(rt, uri))
+
     for row in derived_v2_file_skeleton(rt, uri).items
         item_findings = derived_item_semantic_findings(rt, V2ItemRef(uri, row.id))
         isempty(item_findings) && continue
         ranges = get(maps, row.id, nothing)
         ranges === nothing && continue
         for f in item_findings
+            f.rule_id === :lowering_errors && has_syntax_errors && continue
             1 <= f.addr <= length(ranges) || continue
             push!(result, LintFinding(ranges[f.addr], f.rule_id, f.msg, nothing, "JuliaWorkspaces.jl"))
         end

@@ -342,16 +342,27 @@ catch
     Int32(0)
 end
 
-function _error_finding(err)
+# The findings a per-item lowering failure surfaces. JuliaLowering throws
+# ONE diagnostic per item by construction (expand_forms_2 surfaces only
+# `vr.errors[1]`), so the zip below is defensive rather than load-bearing.
+# `internal == true` marks a bug in lowering itself, not the user's code —
+# those degrade to silence, like every other v2 infrastructure failure.
+function _error_findings(err)
     if err isa JL2.LoweringError
-        # Fields: sts (trees the error refers to), msgs, internal.
-        addr = isempty(err.sts) ? Int32(0) : _node_addr(err.sts[1])
-        msg = isempty(err.msgs) ? "lowering error" : string(err.msgs[1])
-        LoweringFinding(addr, msg)
+        err.internal && return LoweringFinding[]
+        isempty(err.msgs) && return LoweringFinding[]
+        return LoweringFinding[
+            LoweringFinding(
+                isempty(err.sts) ? Int32(0) : _node_addr(err.sts[min(i, end)]),
+                string(err.msgs[i]))
+            for i in eachindex(err.msgs)]
     elseif err isa JL2.MacroExpansionError
-        LoweringFinding(_node_addr(err.ex), err.msg)
+        # Unreachable while macrocalls are stripped/spliced before lowering;
+        # kept so a future leak degrades to a routed finding, not silence.
+        return LoweringFinding[LoweringFinding(_node_addr(err.ex), err.msg)]
     else
-        LoweringFinding(Int32(0), first(sprint(showerror, err), 200))
+        # Anything else is a v2 bug, not a user diagnostic.
+        return LoweringFinding[]
     end
 end
 
@@ -407,7 +418,7 @@ function _lower_item(body::BodyTree{V2Kind},
         return ItemLowering(:ok, findings, bindings, uses)
     catch err
         err isa InterruptException && rethrow()
-        return ItemLowering(:error, [_error_finding(err)], LoweredBinding[], BindingUse[])
+        return ItemLowering(:error, _error_findings(err), LoweredBinding[], BindingUse[])
     end
 end
 
