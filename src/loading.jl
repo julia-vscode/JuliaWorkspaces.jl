@@ -3,15 +3,23 @@ function pkg_fileinfo(id::PkgId)
     origin === nothing && return nothing
     cachepath = origin.cachepath
     cachepath === nothing && return nothing
+    return pkg_fileinfo(id, cachepath, nothing)
+end
+
+# `io`, when given, is a handle already open on `cachepath` (see `Revise.hold_cache!`);
+# it is rewound and left open, and reports the file it is attached to rather than
+# whatever now occupies `cachepath`.
+function pkg_fileinfo(id::PkgId, cachepath::AbstractString, io::Union{Nothing,IOStream})
     local checksum
     provides, includes_requires, required_modules = try
         ret = @static if VERSION ≥ v"1.11.0-DEV.683" # https://github.com/JuliaLang/julia/pull/49866
-            io = open(cachepath, "r")
-            checksum = Base.isvalid_cache_header(io)
-            iszero(checksum) && (close(io); return nothing)
+            ownio = io === nothing
+            iou = ownio ? open(cachepath, "r") : (seekstart(io); io)
+            checksum = Base.isvalid_cache_header(iou)
+            iszero(checksum) && (ownio && close(iou); return nothing)
             provides, (_, includes_srcfiles_only, requires), required_modules, _... =
-                Base.parse_cache_header(io, cachepath)
-            close(io)
+                Base.parse_cache_header(iou, cachepath)
+            ownio && close(iou)
             provides, (includes_srcfiles_only, requires), required_modules
         else
             checksum = UInt64(0) # Buildid prior to v"1.12.0-DEV.764", and the `srcfiles_only` API does not take `io`
@@ -31,6 +39,38 @@ function pkg_fileinfo(id::PkgId)
 end
 
 """
+    update_pkgversion!(id::PkgId)
+
+Refresh `Base.pkgorigins[id].version` from the package's `Project.toml`.
+
+Julia caches a package's version in `Base.pkgorigins` at load time, and
+(on Julia 1.12+) `pkgversion` returns that cached value. When developing a
+package and bumping its version, the cached value would otherwise go stale
+(issue #684). Call this after revising a package so `pkgversion` and Pkg's
+version checks stay in sync with the source.
+"""
+function update_pkgversion!(id::PkgId)
+    isdefined(Base, :pkgorigins) || return nothing
+    isdefined(Base, :get_pkgversion_from_path) || return nothing
+    origin = get(Base.pkgorigins, id, nothing)
+    origin === nothing && return nothing
+    hasproperty(origin, :version) || return nothing
+    path = origin.path
+    path === nothing && return nothing
+    # `path` is the package entry file (e.g. `src/Foo.jl`); the version lives in
+    # the `Project.toml` one directory up from `src`. Note: we deliberately avoid
+    # taking `Base.require_lock` here. The load-time lock order is
+    # require_lock → revise_lock (`watch_package` is a `require` callback), and we
+    # hold `revise_lock` at our call sites; acquiring `require_lock` now would
+    # invert that order. A bare field assignment is safe without it.
+    v = Base.get_pkgversion_from_path(joinpath(dirname(path), ".."))
+    # Don't clobber a known version if the project file is momentarily unreadable
+    # (e.g. a path switch in flight) or has no `version` entry.
+    v === nothing || (origin.version = v)
+    return nothing
+end
+
+"""
     parse_pkg_files(id::PkgId)
 
 This function gets called by `watch_package` and runs when a package is first loaded.
@@ -44,23 +84,42 @@ function parse_pkg_files(id::PkgId)
         if cachefile_includes_reqs_buildid !== nothing
             cachefile, includes, reqs, buildid = cachefile_includes_reqs_buildid
             pkgdata.requirements = reqs
+            pkgdata.cachebuildid = buildid
+            if isdefined(Base, :maybe_loaded_precompile) && (mod′ = Base.maybe_loaded_precompile(id, buildid); mod′ isa Module)
+                root = mod′
+            elseif isdefined(Base, :loaded_precompiles) && haskey(Base.loaded_precompiles, id => buildid)
+                root = Base.loaded_precompiles[id => buildid]
+            else
+                root = Base.root_module(id)
+            end
+            # Transforms recorded by `include(mapexpr, ...)` calls while the package
+            # loaded/precompiled (Julia ≥ 1.14), keyed by `(including_module, abspath)`.
+            # `nothing` when there were none or the recording is unavailable.
+            mapexprs = @static isdefined(Base, :include_mapexprs) ? (@invokelatest Base.include_mapexprs(root)) : nothing
+            matched_mapexprs = mapexprs === nothing ? nothing : Set{keytype(mapexprs)}()
             for chi in includes
-                if isdefined(Base, :maybe_loaded_precompile) && (mod′ = Base.maybe_loaded_precompile(id, buildid); mod′ isa Module)
-                    mod = mod′
-                elseif isdefined(Base, :loaded_precompiles) && haskey(Base.loaded_precompiles, id => buildid)
-                    mod = Base.loaded_precompiles[id => buildid]
-                else
-                    mod = Base.root_module(id)
-                end
+                mod = root
                 for mpath in chi.modpath
                     mod = getglobal(mod, Symbol(mpath))::Module
                 end
                 fname = relpath(chi.filename, pkgdata)
+                mapexpr = identity
+                if mapexprs !== nothing
+                    key = (mod, chi.filename)
+                    if haskey(mapexprs, key)
+                        mapexpr = mapexprs[key]::Function
+                        push!(matched_mapexprs, key)
+                    end
+                end
                 # For precompiled packages, we can read the source later (whenever we need it)
                 # from the *.ji cachefile. Keep `chi.filename` itself: that is the exact key
                 # the cache is indexed by, and reconstructing it from `fname` is unreliable
                 # when path forms diverge (e.g. symlinks, see #1033).
-                push!(pkgdata, fname=>FileInfo(mod, cachefile, chi.filename))
+                push!(pkgdata, fname=>FileInfo(mod, cachefile, chi.filename; mapexpr, cachesrcid=cache_src_id(chi)))
+            end
+            if mapexprs !== nothing && length(matched_mapexprs) != length(mapexprs)
+                unmatched = [key for key in keys(mapexprs) if key ∉ matched_mapexprs]
+                @warn "Revise could not associate the following `include(mapexpr, ...)` records of $id with tracked files; their transforms will not be applied on revision" unmatched
             end
             CodeTracking._pkgfiles[id] = pkgdata.info
             return pkgdata
@@ -69,11 +128,26 @@ function parse_pkg_files(id::PkgId)
     # Non-precompiled package(s). Here we rely on the `include` callbacks to have
     # already populated `included_files`; all we have to do is collect the relevant
     # files.
-    # To reduce compiler latency, use runtime dispatch for `queue_includes!`.
-    # `queue_includes!` requires compilation of the whole parsing/expression-splitting infrastructure,
-    # and it's better to wait to compile it until we actually need it.
-    @invokelatest queue_includes!(pkgdata, id)
+    # Pin to Revise's frozen world (issue #552); `frozen`'s runtime dispatch also reduces
+    # compiler latency, since `queue_includes!` pulls in the whole parsing/expression-splitting
+    # infrastructure and it's better to wait to compile it until we actually need it.
+    frozen(queue_includes!, pkgdata, id)
     return pkgdata
+end
+
+# The transform recorded when `fname` was `include(mapexpr, ...)`ed into `mod`
+# (Julia ≥ 1.14, `Base.include_mapexprs`), or `identity` when there was none or no
+# record is available. The record lives in a binding created when the target package
+# loaded — after Revise's frozen world — hence the `@invokelatest`.
+function include_mapexpr_for(mod::Module, fname::AbstractString)
+    @static if isdefined(Base, :include_mapexprs)
+        mod === Base.__toplevel__ && return identity
+        table = @invokelatest Base.include_mapexprs(mod)
+        table === nothing && return identity
+        return get(table, (mod, String(fname)), identity)::Function
+    else
+        return identity
+    end
 end
 
 """
@@ -96,7 +170,7 @@ function modulefiles(mod::Module)
         parentfile = String(first(methods(getfield(mod, :eval))).file)
     end
     id = PkgId(mod)
-    if id.name == "Base" || Symbol(id.name) ∈ stdlib_names
+    if id.name == "Base" || Base.is_stdlib(id)
         parentfile = normpath(Base.find_source_file(parentfile))
         if !startswith(parentfile, juliadir)
             parentfile = replace(parentfile, fallback_juliadir()=>juliadir)

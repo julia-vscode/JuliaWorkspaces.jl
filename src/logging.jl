@@ -1,5 +1,5 @@
 using Base.CoreLogging
-using Base.CoreLogging: Info, Debug
+using Base.CoreLogging: Debug, Info
 
 struct LogRecord
     level
@@ -21,7 +21,7 @@ ReviseLogger(; min_level=Info) = ReviseLogger(LogRecord[], min_level)
 
 CoreLogging.min_enabled_level(logger::ReviseLogger) = logger.min_level
 
-CoreLogging.shouldlog(::ReviseLogger, level, _module, group, id) = _module == Revise
+CoreLogging.shouldlog(::ReviseLogger, _level, _module, _group, _id) = _module == Revise
 
 function CoreLogging.handle_message(logger::ReviseLogger, level, msg, _module,
                                     group, id, file, line; kwargs...)
@@ -41,6 +41,26 @@ function CoreLogging.handle_message(logger::ReviseLogger, level, msg, _module,
 end
 
 CoreLogging.catch_exceptions(::ReviseLogger) = false
+
+# Wrap a logger, dropping the `Base.Docs` "Replacing docs for ..." warnings while
+# forwarding everything else. `revise(mod; force=true)` re-evaluates every
+# docstring in `mod`, and `Base.Docs` warns on each rewrite (issue #975); for a
+# large package this is pages of noise about an entirely expected action.
+struct SuppressReplacingDocsLogger{L<:AbstractLogger} <: AbstractLogger
+    logger::L
+end
+
+CoreLogging.min_enabled_level(l::SuppressReplacingDocsLogger) = CoreLogging.min_enabled_level(l.logger)
+CoreLogging.shouldlog(l::SuppressReplacingDocsLogger, level, _module, group, id) =
+    CoreLogging.shouldlog(l.logger, level, _module, group, id)
+CoreLogging.catch_exceptions(l::SuppressReplacingDocsLogger) = CoreLogging.catch_exceptions(l.logger)
+function CoreLogging.handle_message(l::SuppressReplacingDocsLogger, level, msg, _module,
+                                    group, id, file, line; kwargs...)
+    if _module === Base.Docs && occursin("Replacing docs for", string(msg))
+        return nothing
+    end
+    return CoreLogging.handle_message(l.logger, level, msg, _module, group, id, file, line; kwargs...)
+end
 
 function Base.show(io::IO, l::LogRecord; kwargs...)
     verbose = get(io, :verbose, false)::Bool
