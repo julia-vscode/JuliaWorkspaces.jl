@@ -217,6 +217,12 @@ mutable struct JSONRPCEndpoint{IOIn<:IO,IOOut<:IO,S<:JSON.Serialization,F<:Frami
     write_started_at::Union{Nothing,Float64}
     write_stall_warned::Bool
     write_monitor::Union{Nothing,Timer}
+    # `close` is idempotent, but it cannot decide that from `status`: the read task's
+    # `finally` sets `status_closed` on its own whenever the peer disconnects first.
+    # Guarding on the status made `close` return before it released the write monitor,
+    # the outbound queue and the write task — one leaked uv timer handle and one leaked
+    # task per endpoint whose peer went away first.
+    close_started::Bool
 end
 
 JSONRPCEndpoint(pipe_in, pipe_out, serialization::JSON.Serialization=JSON.StandardSerialization(); framing::FramingMode=ContentLengthFraming()) =
@@ -237,7 +243,8 @@ JSONRPCEndpoint(pipe_in, pipe_out, serialization::JSON.Serialization=JSON.Standa
         framing,
         nothing,
         false,
-        nothing)
+        nothing,
+        false)
 
 write_transport_layer(stream, response, ::ContentLengthFraming) = write_transport_layer(stream, response)
 
@@ -641,14 +648,26 @@ function send_request(x::JSONRPCEndpoint, method::AbstractString, @nospecialize(
         end
     end
 
-    # Build the token used for local waiting: combines endpoint token + optional client token
+    # Build the token used for local waiting: combines endpoint token + optional client token.
+    # Linked by hand for the same reason as in `get_next_message`:
+    # `CancellationTokenSource(client_token, endpoint_token)` discards the registrations it makes
+    # on its parents, and a linked source's parent registrations are only released by closing
+    # them — so `close`-ing the combined source would not help. Without keeping them, every
+    # request carrying a `client_token` left two closures behind on that token and on the
+    # endpoint token for the life of the connection, on lists that
+    # `close(::CancellationTokenRegistration)` walks linearly.
     endpoint_token = CancellationTokens.get_token(x.endpoint_cancellation_source)
-    wait_token = if client_token !== nothing
-        combined_source = CancellationTokens.CancellationTokenSource(client_token, endpoint_token)
-        CancellationTokens.get_token(combined_source)
-    else
-        endpoint_token
+    combined_source = client_token === nothing ? nothing : CancellationTokens.CancellationTokenSource()
+    parent_registrations = CancellationTokens.CancellationTokenRegistration[]
+    if combined_source !== nothing
+        for parent in (client_token, endpoint_token)
+            push!(parent_registrations, CancellationTokens.register(parent) do
+                CancellationTokens.cancel(combined_source)
+            end)
+        end
     end
+
+    wait_token = combined_source === nothing ? endpoint_token : CancellationTokens.get_token(combined_source)
 
     cancelled_by_client = false
     try
@@ -695,6 +714,9 @@ function send_request(x::JSONRPCEndpoint, method::AbstractString, @nospecialize(
         end
         if server_cancel_registration !== nothing
             close(server_cancel_registration)
+        end
+        for reg in parent_registrations
+            close(reg)
         end
     end
 end
@@ -790,7 +812,8 @@ function send_error_response(endpoint, original_request::Request, @nospecialize(
 end
 
 function Base.close(endpoint::JSONRPCEndpoint)
-    endpoint.status == status_closed && return
+    endpoint.close_started && return
+    endpoint.close_started = true
 
     # First, so that a write task wedged against an unresponsive peer — which the `fetch`
     # below then waits on — cannot keep the timer alive after the endpoint is gone.
