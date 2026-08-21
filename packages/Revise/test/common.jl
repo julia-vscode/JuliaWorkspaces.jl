@@ -17,13 +17,21 @@ function newtestdir()
     return testdir
 end
 
-@static if Sys.isapple()
-    const mtimedelay = 3.1  # so the defining files are old enough not to trigger mtime criterion
-elseif Sys.islinux() && isfile("/etc/wsl.conf")   # WSL
-    const mtimedelay = 3.0
-else
-    const mtimedelay = 0.1
-end
+# Spacing between successive writes to a tracked file, so that the watcher sees
+# each edit as distinct. A file named in a filesystem event is settled by a
+# content hash when its ctime is unchanged (see `scan_changed_files`), so this
+# only needs to clear the resolution of `mtime`-based change detection on the
+# polling/non-notifying path, where ext4 timestamps are fine-grained.
+const mtimedelay = 0.1
+
+# The suite assumes a deleted tracked file is processed at the first revise():
+# `yry()` waits on `revision_queue` becoming non-empty, and several testsets
+# assert on captured logs — a deletion deferred by `missing_file_grace` would
+# keep stray entries queued (making the wait vacuous) and emit its warning
+# inside whichever later testset crosses the grace boundary. The deferral
+# itself is exercised by the "Missing-file grace" testset, which sets its own
+# values.
+Revise.missing_file_grace[] = 0.0
 
 # Upper bound on how long `yry()` will wait for the file-watcher task to push
 # the expected change onto `revision_queue`. Only paid by yry() calls that
@@ -42,25 +50,56 @@ else
     end
 end
 
-# Replaces the historical `sleep(mtimedelay); revise(); sleep(mtimedelay)`:
-#   * pre-revise wait is event-driven (wait for the background watcher task to
-#     populate `Revise.revision_queue`), with `event_timeout` as a fall-through
-#     for tests that legitimately produce no revision.
+# Wait for a pending file change to be revised:
+#   * the pre-revise wait is event-driven (block until the background watcher
+#     task populates `Revise.revision_queue`), with `event_timeout` as a
+#     fall-through for tests that legitimately produce no revision.
 #   * a short settling pause lets a *burst* of writes that the watcher delivers
 #     across more than one wakeup land in the queue before we revise.
-#   * the trailing `sleep(mtimedelay)` is retained: it is the ctime-resolution
-#     guard so the *next* test write has a strictly larger ctime than the one
-#     `watch_files_via_dir` just cached. (When the dir watcher learns to use
-#     `watch_folder`, this trailing sleep can be removed.)
-function yry()
-    timedwait(() -> !isempty(Revise.revision_queue), event_timeout; pollint=0.02)
+#   * under `watching_files[]` (per-file and polling watches) a trailing pause
+#     lets the one-shot `watch_file` re-arm before the next test write. That
+#     path re-watches a single file after each revision and, unlike the
+#     buffered per-directory watcher, has neither an event queue nor a content
+#     hash to recover a write that lands while it is between watches.
+#
+# `expect_revision=true` (the default) means a write should already have been
+# queued: hitting `event_timeout` then signals a dropped/late filesystem event,
+# the usual cause of "revision not applied" CI flakes, so we warn. Tests that
+# legitimately expect no revision pass `expect_revision=false` to take the
+# timeout silently.
+function yry(; expect_revision::Bool=true)
+    status = timedwait(() -> !isempty(Revise.revision_queue), event_timeout; pollint=0.02)
+    if expect_revision && status === :timed_out
+        @warn "yry: timed out after $(event_timeout)s waiting for revision_queue; a filesystem event was likely dropped or delayed"
+    end
     sleep(0.02)
     revise()
-    sleep(mtimedelay)
+    # Drain to quiescence. The watcher can deliver a just-written edit's event
+    # *after* this first revise (notably under macOS FSEvents latency): the first
+    # revise then drains some earlier/stale queue entry while the edit we are
+    # waiting for is still in flight, so a single revise would leave it unapplied
+    # until a later `yry`. Keep revising as long as each pass clears something,
+    # absorbing such stragglers within this call. Two stop conditions keep this
+    # bounded: skip entirely once a revision errors (an errored file stays queued
+    # for retry, and re-revising it would re-log and perturb error-reporting
+    # tests), and stop on any pass that makes no progress (a missing file within
+    # `missing_file_grace` is re-queued each pass, so the queue need not empty).
+    if expect_revision
+        for _ in 1:50   # hard cap; the conditions below are the normal exits
+            isempty(Revise.queue_errors) || break
+            timedwait(() -> !isempty(Revise.revision_queue), mtimedelay; pollint=0.02) === :ok || break
+            n = length(Revise.revision_queue)
+            revise()
+            length(Revise.revision_queue) < n || break
+        end
+    end
+    Revise.watching_files[] && sleep(mtimedelay)
 end
-macro yry()
+macro yry(args...)
+    # Forward `@yry(expect_revision=false)` as a keyword argument, not a positional one.
+    kws = [a isa Expr && a.head === :(=) ? Expr(:kw, a.args[1], a.args[2]) : a for a in args]
     esc(quote
-        yry()
+        yry($(kws...))
         @latestworld
     end)
 end
@@ -71,6 +110,20 @@ function collectexprs(rex::Revise.RelocatableExpr)
         push!(items, isa(item, Expr) ? Revise.RelocatableExpr(item) : item)
     end
     items
+end
+
+# Test helpers, *not* Revise functions: each wraps `Revise.parse_and_maybe_eval_source[!]`, asserts
+# the parse succeeded, and returns the resulting `ModuleExprsInfos`. Sharing one terse name keeps the
+# many call sites readable and localizes the `ParseResult` unwrapping to this one spot.
+function parse_source(file::AbstractString, mod::Module; kwargs...)
+    pr = Revise.parse_and_maybe_eval_source(file, mod; kwargs...)
+    pr.success || error("parsing $file produced no usable expressions")
+    return pr.modexinfos
+end
+function parse_source!(mexs::Revise.ModuleExprsInfos, args...; kwargs...)
+    pr = Revise.parse_and_maybe_eval_source!(mexs, args...; kwargs...)
+    pr.success || error("parsing produced no usable expressions")
+    return pr.modexinfos
 end
 
 function get_docstring(obj)

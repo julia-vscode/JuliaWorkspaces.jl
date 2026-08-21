@@ -15,23 +15,24 @@
 #     `loading.jl`), so module-of-evaluation can't identify it. Here we hope
 #     that the top-level filename follows convention and matches the module.
 #
-# We pass `Base.__toplevel__` through to `parse_source` unchanged. `ExprSplitter`
+# We pass `Base.__toplevel__` through to `parse_and_maybe_eval_source` unchanged. `ExprSplitter`
 # has a dedicated `loaded_modules` fallback for that case which resolves
 # `module PkgName ... end` to the real loaded module even when `PkgName` is not
 # a direct dep of the active project. Rewriting to `Main` here would skip that
 # fallback and synthesize an empty `Main.PkgName` stub (#961).
 function queue_includes!(pkgdata::PkgData, id::PkgId)
     modstring = id.name
-    @lock included_files_lock begin
+    @lock revise_lock begin
         delids = Int[]
         for i = 1:length(included_files)
             mod, fname = included_files[i]
             modname = String(Symbol(mod))
             if startswith(modname, modstring) || endswith(fname, modstring*".jl")
-                mod_exs_infos = parse_source(fname, mod)
-                if mod_exs_infos !== nothing
+                mapexpr = include_mapexpr_for(mod, fname)
+                pr = parse_and_maybe_eval_source(fname, mod; mapexpr)
+                if pr.success
                     fname = relpath(fname, pkgdata)
-                    push!(pkgdata, fname=>FileInfo(mod_exs_infos))
+                    push!(pkgdata, fname=>FileInfo(pr.modexinfos; mapexpr))
                 end
                 push!(delids, i)
             end
@@ -52,7 +53,7 @@ function queue_includes(mod::Module)
     if has_writable_paths(pkgdata)
         init_watching(pkgdata)
     end
-    @lock pkgdatas_lock pkgdatas[id] = pkgdata
+    @lock revise_lock pkgdatas[id] = pkgdata
     return pkgdata
 end
 
@@ -62,7 +63,7 @@ end
 function remove_from_included_files(modsym::Symbol)
     i = 1
     modstring = string(modsym)
-    @lock included_files_lock begin
+    @lock revise_lock begin
         while i <= length(included_files)
             mod, fname = included_files[i]
             modname = String(Symbol(mod))
@@ -75,8 +76,9 @@ function remove_from_included_files(modsym::Symbol)
     end
 end
 
-function read_from_cache(pkgdata::PkgData, file::AbstractString)
-    fi = fileinfo(pkgdata, file)
+read_from_cache(pkgdata::PkgData, file::AbstractString) =
+    read_from_cache(pkgdata, file, fileinfo(pkgdata, file))
+function read_from_cache(pkgdata::PkgData, file::AbstractString, fi::FileInfo)
     filep = joinpath(basedir(pkgdata), file)
     if fi.cachefile == basesrccache
         # Get the original path
@@ -89,31 +91,155 @@ function read_from_cache(pkgdata::PkgData, file::AbstractString)
     # up by the filename the cache was indexed with rather than one reconstructed from
     # `basedir` (which can diverge in form, e.g. across symlinks; see #1033).
     lookup = isempty(fi.cachefilename) ? filep : fi.cachefilename
-    Base.read_dependency_src(fi.cachefile, lookup)
+    io = pkgdata.cacheio
+    io === nothing && return Base.read_dependency_src(fi.cachefile, lookup)
+    seekstart(io)
+    iszero(Base.isvalid_cache_header(io)) && throw(ArgumentError("invalid header in cache file $(fi.cachefile)"))
+    return Base.read_dependency_src(io, fi.cachefile, lookup)
+end
+
+# Whether this platform and Julia version support keeping the snapshot alive with an open
+# handle. On Windows a held handle can block the other process from replacing the file, and
+# reading a cache through a handle needs the header API of Julia 1.11+.
+can_hold_cache() = !Sys.iswindows() && VERSION >= v"1.11.0-DEV.683"
+
+"""
+    Revise.hold_cache!(pkgdata)
+
+Keep a handle open on `pkgdata`'s precompile cache file, so that the source snapshot it
+holds stays readable for as long as the session runs.
+
+Julia replaces a cache file by renaming a freshly built one over it. On platforms where
+that leaves existing handles attached to the original file, a handle opened here still
+reads the snapshot this session loaded even after another process rebuilds the cache;
+[`Revise.cache_snapshot_is_valid`](@ref) then finds the cache intact and revision
+proceeds normally. Where a held handle would instead block the other process from
+replacing the file, no handle is taken and the rebuild is handled by detection.
+"""
+function hold_cache!(pkgdata::PkgData)
+    can_hold_cache() || return pkgdata
+    pkgdata.cacheio === nothing || return pkgdata
+    isempty(srcfiles(pkgdata)) && return pkgdata
+    cachefile = fileinfo(pkgdata, 1).cachefile
+    (isempty(cachefile) || cachefile == basesrccache) && return pkgdata
+    pkgdata.cacheio = try
+        open(cachefile, "r")
+    catch
+        nothing
+    end
+    return pkgdata
+end
+
+# Identifies the source text a precompile cache holds for one file, so that a cache
+# rebuilt from unchanged source is recognized as still carrying the same snapshot.
+# Julia 1.11+ records a size and a content hash; 1.10 records only the source file's
+# mtime, so on that version a file merely touched between two builds reads as changed.
+@static if VERSION >= v"1.11.0-DEV.683"    # https://github.com/JuliaLang/julia/pull/49866
+    cache_src_id(inc) = hash(inc.fsize, UInt64(inc.hash))
+else
+    cache_src_id(inc) = hash(inc.mtime)
 end
 
 function maybe_parse_from_cache!(pkgdata::PkgData, file::AbstractString)
     if startswith(file, "REPL[")
         return add_definitions_from_repl(file)
     end
-    fi = fileinfo(pkgdata, file)
+    return maybe_parse_from_cache!(pkgdata, file, fileinfo(pkgdata, file))
+end
+"""
+    Revise.cache_snapshot_is_valid(pkgdata) -> Bool
+
+Whether the precompile cache Revise reads `pkgdata`'s source snapshots from is still the
+one this session loaded. Every precompilation mints a new build id, so a cache whose
+build id has changed, or that has gone missing, was rebuilt or removed by another
+process. A handle held by [`Revise.hold_cache!`](@ref) keeps the original readable, in
+which case the check passes and nothing is lost; otherwise the individual files that
+changed between the two builds lose their baseline (see
+[`Revise.cached_source_is_current`](@ref)).
+"""
+function cache_snapshot_is_valid(pkgdata::PkgData)
+    pkgdata.cachebuildid == 0 && return true   # not loaded from a cache; nothing to compare against
+    cachedata = current_cachedata(pkgdata)
+    cachedata === nothing && return false
+    _, _, _, buildid = cachedata
+    return buildid == pkgdata.cachebuildid
+end
+
+# Header of the cache Revise can still read for this package: through the held handle when
+# there is one, since that reports the file the handle is attached to rather than whatever
+# now occupies the path.
+function current_cachedata(pkgdata::PkgData)
+    io = pkgdata.cacheio
+    io === nothing && return pkg_fileinfo(PkgId(pkgdata))
+    return pkg_fileinfo(PkgId(pkgdata), fileinfo(pkgdata, 1).cachefile, io)
+end
+
+"""
+    Revise.cached_source_is_current(pkgdata, fi) -> Bool
+
+Whether the source snapshot Revise can still read for the file described by `fi` is the
+one this session loaded. A cache rebuilt from unchanged source carries the same snapshot
+and remains a valid baseline; only the files whose content differs between the build this
+session loaded and the build now on disk lose theirs.
+"""
+function cached_source_is_current(pkgdata::PkgData, fi::FileInfo)
+    cache_snapshot_is_valid(pkgdata) && return true
+    fi.cachesrcid === nothing && return false     # nothing recorded to compare against
+    cachedata = current_cachedata(pkgdata)
+    cachedata === nothing && return false
+    _, includes, _, _ = cachedata
+    for inc in includes
+        inc.filename == fi.cachefilename && return cache_src_id(inc) == fi.cachesrcid
+    end
+    return false
+end
+
+# Record the loss and warn once per package, then let the caller report the individual
+# files. A package listed here keeps the prompt yellow for the rest of the session.
+function note_rewritten_cache(id::PkgId)
+    isnew = @lock revise_lock (id ∈ rewritten_caches ? false : (push!(rewritten_caches, id); true))
+    isnew || return nothing
+    @warn """The precompile cache of $(id.name) was rebuilt by another process after this session loaded it, and the source it held for one or more edited files is gone.
+        Revise compares an edit against the source the session loaded, so for those files there is nothing to compare against and no revision is attempted; each one is reported separately.
+        Other files of $(id.name), and every other package, continue to revise normally. Your prompt color will be yellow for the rest of this session; restart Julia to pick up the current state of the affected files."""
+    return nothing
+end
+
+function maybe_parse_from_cache!(pkgdata::PkgData, file::AbstractString, fi::FileInfo)
     if (isempty(fi.mod_exs_infos) && !fi.parsed[]) && (!isempty(fi.cachefile) || !isempty(fi.cacheexprs))
+        if !isempty(fi.cachefile) && !cached_source_is_current(pkgdata, fi)
+            id = PkgId(pkgdata)
+            note_rewritten_cache(id)
+            throw(StaleCacheError(id, joinpath(basedir(pkgdata), file)))
+        end
         # Source was never parsed, get it from the precompile cache
-        src = read_from_cache(pkgdata, file)
+        src = read_from_cache(pkgdata, file, fi)
         filep = joinpath(basedir(pkgdata), file)
         filec = get(cache_file_key, filep, filep)
         topmod = first(keys(fi.mod_exs_infos))
-        ret = parse_source!(fi.mod_exs_infos, src, filec, topmod)
-        if ret === nothing
+        pr = parse_and_maybe_eval_source!(fi.mod_exs_infos, src, filec, topmod; mapexpr=fi.mapexpr)
+        if !pr.success
             @error "failed to parse cache file source text for $file"
         end
-        if ret !== DoNotParse()
+        if !pr.donotparse
             add_modexs!(fi, fi.cacheexprs)
             empty!(fi.cacheexprs)
         end
         fi.parsed[] = true
     end
     return fi
+end
+
+# Reading the cache to look up where something was defined is best-effort: a file whose
+# snapshot is gone has no definitions to report. The loss is raised where it matters,
+# when the file is actually being revised.
+function try_parse_from_cache!(pkgdata::PkgData, file::AbstractString)
+    try
+        return maybe_parse_from_cache!(pkgdata, file)
+    catch err
+        err isa StaleCacheError || rethrow()
+        return nothing
+    end
 end
 
 function add_modexs!(fi::FileInfo, modexs::Vector{Tuple{Module,Expr}})
@@ -136,6 +262,23 @@ function maybe_extract_sigs!(fi::FileInfo)
 end
 maybe_extract_sigs!(pkgdata::PkgData, file::AbstractString) = maybe_extract_sigs!(fileinfo(pkgdata, file))
 
+# Signature extraction lowers and partially evaluates each top-level expression. For
+# macro-generated code this can be fragile to re-lowering: JLLWrappers builds a `let`
+# block that defines and immediately calls gensym'd closures, and re-`:sigs` after the
+# package is already loaded can leave the closure's call method undefined for the freshly
+# minted closure type (issue #706). The package is already loaded and correct, so on
+# failure record the error the same way `revise()` does and keep going, rather than
+# letting it abort the manifest watcher.
+function maybe_extract_sigs_or_queue_error!(pkgdata::PkgData, file::AbstractString, fi::FileInfo)
+    try
+        maybe_extract_sigs!(fi)
+    catch err
+        isa(err, InterruptException) && rethrow(err)
+        @lock revise_lock queue_errors[(pkgdata, file)] = (err, catch_backtrace())
+    end
+    return fi
+end
+
 is_not_populated(fi::FileInfo) =
     (isempty(fi.mod_exs_infos) && !fi.parsed[]) && (!isempty(fi.cachefile) || !isempty(fi.cacheexprs))
 
@@ -148,8 +291,8 @@ function maybe_extract_sigs_for_meths(meths)
             for file in srcfiles(pkgdata)
                 fi = fileinfo(pkgdata, file)
                 if is_not_populated(fi)
-                    fi = maybe_parse_from_cache!(pkgdata, file)
-                    instantiate_sigs!(fi.mod_exs_infos)
+                    fi = try_parse_from_cache!(pkgdata, file)
+                    fi === nothing || instantiate_sigs!(fi.mod_exs_infos)
                 end
             end
         end
@@ -164,36 +307,78 @@ function maybe_extract_sigs_for_types(types)
         for file in srcfiles(pkgdata)
             fi = fileinfo(pkgdata, file)
             if is_not_populated(fi)
-                fi = maybe_parse_from_cache!(pkgdata, file)
-                instantiate_sigs!(fi.mod_exs_infos)
+                fi = try_parse_from_cache!(pkgdata, file)
+                fi === nothing || instantiate_sigs!(fi.mod_exs_infos)
             end
         end
     end
 end
 
 function maybe_add_includes_to_pkgdata!(pkgdata::PkgData, file::AbstractString, includes; eval_now::Bool=false)
-    for (mod, inc) in includes
+    for (mod, mapexpr, inc) in includes
         inc = joinpath(splitdir(file)[1], inc)
         incrp = relpath(inc, pkgdata)
-        hasfile = false
-        for srcfile in srcfiles(pkgdata)
-            if srcfile == incrp
-                hasfile = true
+        hasinclude = false
+        # An entry for the same path and destination module whose `mapexpr` differs:
+        # the `include(mapexpr, ...)` statement was edited (or its closure was
+        # recreated when the including statement was re-evaluated), so that entry
+        # describes a transform that is no longer in the source.
+        stale_idx = 0
+        for (i, srcfile) in enumerate(srcfiles(pkgdata))
+            srcfile == incrp || continue
+            fi = pkgdata.fileinfos[i]
+            if fi.mapexpr === mapexpr
+                hasinclude = true
                 break
+            elseif stale_idx == 0 && first(keys(fi.mod_exs_infos)) === mod
+                stale_idx = i
             end
         end
-        if !hasfile
+        if hasinclude
+            # Already registered, but the watch may have been relinquished while
+            # the file's directory was absent (e.g. a branch switch removed it
+            # past `watch_reappear_grace`); an `include` of the file in revised
+            # code is the signal to resume. Filesystem events were lost while
+            # the watch was down — the stored state (including any deletion of
+            # the file's methods) cannot be trusted — so bring the file current
+            # before re-arming the watch.
+            if !iswatched(pkgdata, incrp)
+                revise_file_now(pkgdata, incrp)
+                init_watching(pkgdata, (incrp,))
+            end
+        elseif stale_idx != 0
+            fi = pkgdata.fileinfos[stale_idx]
+            # The stored expressions must describe what is currently loaded, which was
+            # produced by the *old* transform: reconstruct them from the source snapshot
+            # in the precompile cache before swapping in the new transform. (Parsing
+            # after the swap would apply the new transform to the old source, making the
+            # subsequent diff vacuous and leaving the session stale.)
+            maybe_parse_from_cache!(pkgdata, incrp, fi)
+            pkgdata.fileinfos[stale_idx] = FileInfo(fi.mod_exs_infos, mapexpr, fi.cachefile, fi.cachefilename,
+                                                    fi.cachesrcid, fi.cacheexprs, fi.extracted, fi.parsed)
+            # Re-diff the file under the new transform so the session catches up with
+            # the new effective source.
+            if eval_now
+                revise_file_now(pkgdata, incrp)
+            else
+                @lock revise_lock push!(revision_queue, (pkgdata, incrp))
+            end
+            if !iswatched(pkgdata, incrp)
+                init_watching(pkgdata, (incrp,))
+            end
+        else
             # Add the file to pkgdata
             push!(pkgdata.info.files, incrp)
-            fi = FileInfo(mod)
+            fi = FileInfo(mod; mapexpr)
             push!(pkgdata.fileinfos, fi)
             # Parse the source of the new file
             fullfile = joinpath(basedir(pkgdata), incrp)
             if isfile(fullfile)
-                parse_source!(fi.mod_exs_infos, fullfile, mod)
+                parse_and_maybe_eval_source!(fi.mod_exs_infos, fullfile, mod; mapexpr)
                 if eval_now
-                    # Use runtime dispatch to reduce latency
-                    Base.invokelatest(instantiate_sigs!, fi.mod_exs_infos; mode=:eval)
+                    # Pin to Revise's frozen world (issue #552); `frozen`'s runtime dispatch
+                    # also reduces latency.
+                    frozen(instantiate_sigs!, fi.mod_exs_infos; mode=:eval)
                 end
             end
             # Add to watchlist
@@ -203,8 +388,23 @@ function maybe_add_includes_to_pkgdata!(pkgdata::PkgData, file::AbstractString, 
     end
 end
 
-# Use locking to prevent races between inner and outer @require blocks
-const requires_lock = ReentrantLock()
+# Is `file` (relative to `pkgdata`) registered with a directory watcher? A live
+# watch must be left untouched by re-registration attempts: `init_watching`
+# resets the file's ctime baseline, which is owned by the watcher task.
+function iswatched(pkgdata::PkgData, file::AbstractString)
+    dir, basename = splitdir(String(file)::String)
+    dirfull = joinpath(basedir(pkgdata), dir)
+    return @lock revise_lock begin
+        wl = get(watched_files, dirfull, nothing)
+        wl !== nothing && haskey(wl.trackedfiles, basename)
+    end
+end
+
+# `@require` blocks are tracked under a synthetic filename built by appending this
+# suffix to the real source file (see `add_require`). Such keys have no file on disk,
+# so any path-based operation (reading, watching) must skip them.
+const requires_suffix = "__@require__"
+is_requires_file(file::AbstractString) = endswith(file, requires_suffix)
 
 # This is used by Requires.jl: therefore even if it appears unused by Revise.jl,
 # it cannot be removed as long as we support integration with Requires.jl
@@ -212,14 +412,14 @@ function add_require(sourcefile::String, modcaller::Module, idmod::String, ::Str
     id = PkgId(modcaller)
     # If this fires when the module is first being loaded (because the dependency
     # was already loaded), Revise may not yet have the pkgdata for this package.
-    if !haskey(pkgdatas, id)
+    if !haspkgdata(id)
         watch_package(id)
     end
 
-    @lock requires_lock begin
+    @lock revise_lock begin
         # Get/create the FileInfo specifically for tracking @require blocks
         pkgdata = pkgdatas[id]
-        filekey = relpath(sourcefile, pkgdata) * "__@require__"
+        filekey = relpath(sourcefile, pkgdata) * requires_suffix
         fileidx = fileindex(pkgdata, filekey)
         if fileidx === nothing
             files = srcfiles(pkgdata)
@@ -238,10 +438,10 @@ function add_require(sourcefile::String, modcaller::Module, idmod::String, ::Str
             # signature-extraction code has not yet been compiled (latency reduction)
             includes, complex = deferrable_require(expr)
             if !complex
-                # [(modcaller, inc) for inc in includes] but without precompiling a Generator
-                modincludes = Tuple{Module,String}[]
+                # [(modcaller, identity, inc) for inc in includes] but without precompiling a Generator
+                modincludes = Tuple{Module,Function,String}[]
                 for inc in includes
-                    push!(modincludes, (modcaller, inc))
+                    push!(modincludes, (modcaller, identity, inc))
                 end
                 maybe_add_includes_to_pkgdata!(pkgdata, filekey, modincludes)
                 if isempty(fi.mod_exs_infos)
@@ -253,7 +453,7 @@ function add_require(sourcefile::String, modcaller::Module, idmod::String, ::Str
             end
         end
         if complex
-            Base.invokelatest(eval_require_now, pkgdata, fileidx, filekey, sourcefile, modcaller, expr)
+            frozen(eval_require_now, pkgdata, fileidx, filekey, sourcefile, modcaller, expr)
         end
     end
 end
@@ -310,45 +510,117 @@ function eval_require_now(pkgdata::PkgData, fileidx::Int, filekey::String, sourc
     return ret
 end
 
-function watch_files_via_dir(dirname::AbstractString)
-    try
-        wait_changed(dirname)  # this will block until there is a modification
-    catch e
-        # issue #459
-        (isa(e, InterruptException) && throwto_repl(e)) || throw(e)
+# Block until `dirname` reports filesystem activity. Returns the set of entry
+# names the events identified, or `nothing` when the changed entries are not
+# known (polling mode, a torn-down monitor, or an event that did not name its
+# file) -- a `nothing` return means "anything in the directory may have
+# changed".
+#
+# On notifying filesystems this uses a *persistent, buffered* `FolderMonitor`
+# (`watch_folder`): the OS watch stays registered between calls and queues every
+# event, so a change that lands while we are busy enqueueing a previous one is
+# retained rather than dropped. This is the crucial difference from `watch_file`,
+# which arms a fresh one-shot monitor per call and silently loses anything that
+# occurs in the gap between calls -- a dominant source of missed revisions on
+# macOS FSEvents under load.
+#
+# On polling/non-notifying filesystems we keep the existing directory poll.
+function wait_changed_dir(dirname::AbstractString)
+    if polling_files[] || nonnotifying_path(dirname)
+        wait_changed(dirname)  # unchanged poll behavior
+        return nothing
     end
+    changed = Set{String}()
+    complete = true
+    try
+        name, _ = watch_folder(dirname)              # block for the next buffered event
+        isempty(name) ? (complete = false) : push!(changed, name)
+        while true                                   # drain a burst delivered in one wakeup
+            name, event = watch_folder(dirname, 0)
+            event.timedout && break
+            isempty(name) ? (complete = false) : push!(changed, name)
+        end
+    catch e
+        # EOFError: monitor torn down; let caller re-check state. issue #459: Ctrl-C.
+        e isa EOFError || (isa(e, InterruptException) && throwto_repl(e)) || throw(e)
+        return nothing
+    end
+    return complete ? changed : nothing
+end
+
+# Content hash for disambiguating events whose ctime is unchanged. Reads the
+# file, so call it only on event-named files, not in the per-directory sweep.
+filehash(path::AbstractString) = open(crc32c, path)
+
+# Scan the `tracked` `name=>PkgId` pairs of directory `dirname`, returning those
+# whose files should be queued for revision. `changed` is the set of entry names
+# reported by the filesystem events (`nothing` if unknown).
+#
+# The primary change test compares ctimes, but the kernel stamps inodes with
+# tick-resolution (often ~10ms) timestamps, so a delete-and-recreate that lands
+# within one tick of the recorded ctime is invisible to it (#945). For a file
+# named in an event, an unchanged ctime therefore means either a duplicate
+# notification of a change already queued (a single save delivers several
+# events, possibly across wakeups) or a same-tick rewrite; only content
+# distinguishes the two, so those files are settled by comparing a stored
+# hash. Hashes are recorded when a file is queued — an absent hash reads as
+# changed, keeping the failure mode "spurious no-op revision", never a missed
+# one. The timestamp sweep is unchanged for files the events did not name.
+function scan_changed_files(dirname::AbstractString, wf::WatchList, tracked, changed::Union{Nothing,Set{String}})
     latestfiles = Pair{String,PkgId}[]
-    # Check to see if we're still watching this directory
-    stillwatching = haskey(watched_files, dirname)
-    if stillwatching
-        wf = watched_files[dirname]
-        for (file, id) in wf.trackedfiles
-            fullpath = joinpath(dirname, file)
-            if isdir(fullpath)
-                # Detected a modification in a directory that we're watching in
-                # itself (not as a container for watched files)
-                push!(latestfiles, file=>id)
-                continue
-            elseif !file_exists(fullpath)
-                # File may have been deleted. But check again after a very brief pause.
-                sleep(0.1)
-                if !file_exists(fullpath)
+    for (file, id) in tracked
+        fullpath = joinpath(dirname, file)
+        if isdir(fullpath)
+            # Detected a modification in a directory that we're watching in
+            # itself (not as a container for watched files)
+            push!(latestfiles, file=>id)
+            continue
+        elseif !file_exists(fullpath)
+            # File may have been deleted. But check again after a very brief pause.
+            sleep(0.1)
+            if !file_exists(fullpath)
+                # Queue the disappearance only once (stored ctime 0.0 marks it
+                # as already queued); a sibling-file event must not requeue a
+                # persistently missing file. The stored value reverts to a real
+                # ctime when the file reappears.
+                if (@lock revise_lock get(wf.file_ctimes, file, NaN)) != 0.0
                     push!(latestfiles, file=>id)
-                    wf.file_ctimes[file] = 0.0
-                    continue
+                    @lock revise_lock wf.file_ctimes[file] = 0.0
                 end
+                continue
             end
-            current_ctime = ctime(fullpath)
-            if current_ctime != get(wf.file_ctimes, file, current_ctime - 1)
-                push!(latestfiles, file=>id)
+        end
+        current_ctime = ctime(fullpath)
+        queueit = current_ctime != @lock revise_lock get(wf.file_ctimes, file, current_ctime - 1)
+        if !queueit && changed !== nothing && file in changed
+            h = filehash(fullpath)
+            queueit = h != @lock revise_lock get(wf.file_hashes, file, h + 1)
+        end
+        if queueit
+            push!(latestfiles, file=>id)
+            h = filehash(fullpath)
+            @lock revise_lock begin
                 wf.file_ctimes[file] = current_ctime
+                wf.file_hashes[file] = h
             end
         end
     end
-    return latestfiles, stillwatching
+    return latestfiles
 end
 
-const wplock = ReentrantLock()
+function watch_files_via_dir(dirname::AbstractString)
+    changed = wait_changed_dir(dirname)  # block until the directory changes (buffered on notifying filesystems)
+    # Snapshot the tracked files under the lock. We then do the (potentially
+    # blocking) filesystem checks below without holding it, reacquiring only to
+    # read/update ctimes, so we never hold `revise_lock` across `sleep`.
+    snap = @lock revise_lock begin
+        wf = get(watched_files, dirname, nothing)
+        wf === nothing ? nothing : (wf, collect(wf.trackedfiles))
+    end
+    snap === nothing && return Pair{String,PkgId}[], false
+    wf, tracked = snap
+    return scan_changed_files(dirname, wf, tracked, changed), true
+end
 
 """
     watch_package(id::Base.PkgId)
@@ -361,9 +633,9 @@ function watch_package(id::PkgId)
     # we may have switched environments, so make sure we're watching the right manifest
     active_project_watcher()
 
-    pkgdata = get(pkgdatas, id, nothing)
-    pkgdata !== nothing && return pkgdata
-    @lock wplock begin
+    return @lock revise_lock begin
+        local pkgdata = get(pkgdatas, id, nothing)
+        pkgdata !== nothing && return pkgdata
         modsym = Symbol(id.name)
         if modsym ∈ dont_watch_pkgs
             if id.name ∉ silence_pkgs
@@ -375,10 +647,11 @@ function watch_package(id::PkgId)
         pkgdata = parse_pkg_files(id)
         if has_writable_paths(pkgdata)
             init_watching(pkgdata, srcfiles(pkgdata))
+            hold_cache!(pkgdata)
         end
-        @lock pkgdatas_lock pkgdatas[id] = pkgdata
+        pkgdatas[id] = pkgdata
+        pkgdata
     end
-    return pkgdata
 end
 
 function has_writable_paths(pkgdata::PkgData)
@@ -403,7 +676,7 @@ function has_writable_paths(pkgdata::PkgData)
 end
 
 function watch_includes(mod::Module, fn::AbstractString)
-    @lock included_files_lock push!(included_files, (mod, abspath_no_normalize(fn)))
+    @lock revise_lock push!(included_files, (mod, abspath_no_normalize(fn)))
 end
 
 ## Working with Pkg and code-loading
@@ -461,22 +734,24 @@ function watch_manifest(mfile::String)
                 isfile(mfile) || return nothing
                 pkgdirs = manifest_paths(mfile)
                 pathreplacements = Pair{String,String}[]
-                for (id, pkgdir) in pkgdirs
-                    if haskey(pkgdatas, id)
-                        pkgdata = pkgdatas[id]
-                        if !samefile(pkgdir, basedir(pkgdata))
-                            ## The package directory has changed
-                            @debug "Pkg" _group="pathswitch" oldpath=basedir(pkgdata) newpath=pkgdir
-                            push!(pathreplacements, basedir(pkgdata)=>pkgdir)
-                            switch_basepath(pkgdata, pkgdir)
+                @lock revise_lock begin
+                    for (id, pkgdir) in pkgdirs
+                        if haskey(pkgdatas, id)
+                            pkgdata = pkgdatas[id]
+                            if !samefile(pkgdir, basedir(pkgdata))
+                                ## The package directory has changed
+                                @debug "Pkg" _group="pathswitch" oldpath=basedir(pkgdata) newpath=pkgdir
+                                push!(pathreplacements, basedir(pkgdata)=>pkgdir)
+                                switch_basepath(pkgdata, pkgdir)
+                            end
                         end
                     end
-                end
-                # Update the paths in the watchlist
-                for (oldpath, newpath) in pathreplacements
-                    for (_, pkgdata) in pkgdatas
-                        if samefile(basedir(pkgdata), oldpath)
-                            switch_basepath(pkgdata, newpath)
+                    # Update the paths in the watchlist
+                    for (oldpath, newpath) in pathreplacements
+                        for (_, pkgdata) in pkgdatas
+                            if samefile(basedir(pkgdata), oldpath)
+                                switch_basepath(pkgdata, newpath)
+                            end
                         end
                     end
                 end
@@ -487,30 +762,54 @@ function watch_manifest(mfile::String)
     end
 end
 
+# Return `true` if both paths are files with identical contents.
+function same_contents(file1::AbstractString, file2::AbstractString)
+    (isfile(file1) && isfile(file2)) || return false
+    filesize(file1) == filesize(file2) || return false
+    return read(file1) == read(file2)
+end
+
 function switch_basepath(pkgdata::PkgData, newpath::String)
+    oldpath = basedir(pkgdata)
     # Stop all associated watching tasks
     for dir in unique_dirs(srcfiles(pkgdata))
         @debug "Pkg" _group="unwatch" dir=dir
-        @lock watched_files_lock delete!(watched_files, joinpath(basedir(pkgdata), dir))
+        @lock revise_lock delete!(watched_files, joinpath(oldpath, dir))
         # Note: if the file is revised, the task(s) will run one more time.
         # However, because we've removed the directory from the watch list this will be a no-op,
         # and then the tasks will be dropped.
     end
     # Revise code as needed
-    files = String[]
+    watchfiles = String[]
     mustnotify = false
     for file in srcfiles(pkgdata)
+        # issue #678: `@require` blocks are tracked under a synthetic filename with no
+        # file on disk; reading or watching it as a real path would error.
+        is_requires_file(file) && continue
+        push!(watchfiles, file)
+        # A file that is byte-identical in the new directory defines what the module
+        # already contains, so there is nothing to revise. Skipping it also avoids the
+        # signature extraction below, which re-executes macro expansions that define
+        # types or constants; those error when the definition is already present.
+        same_contents(joinpath(oldpath, file), joinpath(newpath, file)) && continue
         fi = try
             maybe_parse_from_cache!(pkgdata, file)
-        catch
+        catch err
+            if err isa StaleCacheError
+                # No baseline to diff the new location against, and the old source on disk
+                # is not one either. Queue the file so `revise` reports the loss.
+                @lock revise_lock push!(revision_queue, (pkgdata, file))
+                mustnotify = true
+                continue
+            end
             # https://github.com/JuliaLang/julia/issues/42404
             # Get the source-text from the package source instead
             fi = fileinfo(pkgdata, file)
             if isempty(fi.mod_exs_infos) && (!isempty(fi.cachefile) || !isempty(fi.cacheexprs))
-                filep = joinpath(basedir(pkgdata), file)
+                filep = joinpath(oldpath, file)
                 src = read(filep, String)
                 topmod = first(keys(fi.mod_exs_infos))
-                if parse_source!(fi.mod_exs_infos, src, filep, topmod) === nothing
+                if !parse_and_maybe_eval_source!(fi.mod_exs_infos, src, filep, topmod; mapexpr=fi.mapexpr).success
                     @error "failed to parse source text for $filep"
                 end
                 add_modexs!(fi, fi.cacheexprs)
@@ -519,9 +818,8 @@ function switch_basepath(pkgdata::PkgData, newpath::String)
             end
             fi
         end
-        maybe_extract_sigs!(fi)
-        push!(revision_queue, (pkgdata, file))
-        push!(files, file)
+        maybe_extract_sigs_or_queue_error!(pkgdata, file, fi)
+        @lock revise_lock push!(revision_queue, (pkgdata, file))
         mustnotify = true
     end
     mustnotify && notify(revision_event)
@@ -529,17 +827,19 @@ function switch_basepath(pkgdata::PkgData, newpath::String)
     pkgdata.info.basedir = newpath
     # Restart watching, if applicable
     if has_writable_paths(pkgdata)
-        init_watching(pkgdata, files)
+        init_watching(pkgdata, watchfiles)
     end
     return nothing
 end
 
 function active_project_watcher()
     mfile = manifest_file()
-    if !isnothing(mfile) && mfile ∉ watched_manifests
+    isnothing(mfile) && return
+    @lock revise_lock begin
+        mfile ∈ watched_manifests && return
         push!(watched_manifests, mfile)
-        wmthunk = TaskThunk(watch_manifest, (mfile,))
-        schedule(Task(wmthunk))
     end
+    wmthunk = TaskThunk(watch_manifest, (mfile,))
+    schedule(Task(wmthunk))
     return
 end
