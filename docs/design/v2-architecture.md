@@ -670,6 +670,37 @@ today.
   branches over the v2 inventory, module rows (body-block range corrections
   for module headers), and stored bodies (v1's any-file-naming-string-literal
   link semantics preserved).
+- **A2 — doc ranges** (M2): the walker captures each docstring LITERAL's
+  byte range as it unwraps the transparent `@doc` wrapper (`pending_doc` on
+  the walk state, consumed by the first id minted underneath), stored as
+  `V2FileWalk`'s fourth product with its own volatile projection
+  `derived_v2_file_doc_ranges` — the maps firewall verbatim. The docstring
+  TEXT never enters derived state (skeleton/bodies stay `==` across doc
+  edits, contract-pinned); `v2_item_docstring` slices and parses the file at
+  request time, mirroring v1's `item_documentation`. Rejected shapes:
+  storing text (needless churn) and including the wrapper in the body
+  (breaks the position-free hash; widens item ranges).
+- **Document symbols** (M2): candidates from module rows, shape-refined
+  inventory items, struct fields/enum members at their identifier leaves,
+  type params + locals from the per-item lowering, and test-macro title
+  symbols — nested uniformly by range containment (equal ranges are
+  SIBLINGS: shared-id destructures must not swallow each other). Test-macro
+  bodies contribute children as the item's LOCALS (test blocks lower
+  let-wrapped). Declared deltas: flat local nesting, whole-statement
+  value-family ranges, inference-based kinds degrade to Variable.
+- **Same-file global highlights** (M2): a name-keyed second resolver tried
+  after the local one, restricted to the cursor's module; declines on
+  qualified cursors, alias imports, and names the file extends qualified
+  (`Base.hash` methods — target-matched in v1, unjoinable by name).
+- **Selection ranges + block range** (M2): item-view parent chains plus
+  synthetic module/file links (per-offset v1 fallback where v2 has no row);
+  block windows by GAP PARTITION between candidate effective starts
+  (docstring-inclusive via A2, opening delimiter included), one level of
+  module structure, with hard declines whenever the answer would touch a
+  degraded row — `if`-branch and macrocall-argument sub-statements whose
+  enclosing statement has no row of its own. The strict block differential
+  reached exact equality; one declared class records v1 returning nothing
+  inside doc-wrapped module bodies where v2 answers.
 
 Every feature carries a corpus differential in
 [`test/v2/test_features_v2_differential.jl`](../../test/v2/test_features_v2_differential.jl)
