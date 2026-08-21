@@ -146,6 +146,38 @@ function _get_workspace_symbols_v2(runtime, query::String)
     return results
 end
 
+# ── module-at-position ──────────────────────────────────────────────────────
+
+# The v2 arm of `_get_module_at` (layer_navigation.jl). Module rows carry maps
+# whose preorder prefix is fixed — `[module, bare-flag, name, block]` — so
+# `ranges[4]` is the body block. A module contributes its own name only when
+# the offset is STRICTLY inside that body (`start0 < o <= stop0`, mirroring
+# `_get_expr_or_parent`'s convention): a cursor on the `module` keyword, the
+# name, or `end` attributes to the ENCLOSING module, reproducing v1's header
+# corrections in range terms. Innermost (longest-chain) qualifying row wins.
+function _get_module_at_v2(runtime, uri::URI, offset0::Int)
+    root = derived_v2_best_root_for_uri(runtime, uri)
+    root === nothing && return "Main"
+    prefix = derived_v2_file_module_path(runtime, root, uri)
+    prefix === nothing && (prefix = String[])
+    maps = derived_v2_file_maps(runtime, uri)
+    best = String[]
+    for m in derived_v2_file_skeleton(runtime, uri).modules
+        ranges = get(maps, m.id, nothing)
+        (ranges === nothing || length(ranges) < 4) && continue
+        _v2f_contains(ranges[1], offset0) || continue
+        body = ranges[4]
+        # Strict at BOTH edges: the block's mapped range can reach into the
+        # `end` keyword's region, and a cursor there belongs to the enclosing
+        # module (v1's header/end correction).
+        (_v2f_start0(body) < offset0 < _v2f_stop0(body)) || continue
+        chain = vcat(m.parent_module, [m.name])
+        length(chain) > length(best) && (best = chain)
+    end
+    names = vcat(prefix, best)
+    return isempty(names) ? "Main" : join(names, ".")
+end
+
 const _V2_LOCAL_BINDING_KINDS = (:local, :argument, :static_parameter, :typevar)
 
 """

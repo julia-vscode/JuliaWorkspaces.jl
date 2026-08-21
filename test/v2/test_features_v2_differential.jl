@@ -175,3 +175,77 @@ end
     println("workspace symbols differential: on=$(length(s_on)) off=$(length(s_off)) v1_only=$(length(v1_only))")
     @test length(s_on) > 500
 end
+
+@testitem "v2 module-at agrees with v1 across the package corpus" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    root_dir = pkgdir(JuliaWorkspaces)
+
+    function corpus_workspace(flag)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Project.toml")),
+            SourceText(read(joinpath(root_dir, "Project.toml"), String), "toml")))
+        add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Manifest.toml")),
+            SourceText("julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"0\"\n\n[deps]\n", "toml")))
+        uris = JuliaWorkspaces.URIs2.URI[]
+        for (d, _, fs) in walkdir(joinpath(root_dir, "src"))
+            vendored = any(occursin(x, lowercase(d)) for x in ("staticlint", "symbolserver", "packages"))
+            for f in fs
+                endswith(f, ".jl") || continue
+                p = joinpath(d, f)
+                uri = filepath2uri(p)
+                add_file!(jw, TextFile(uri, SourceText(read(p, String), "julia")))
+                vendored || push!(uris, uri)
+            end
+        end
+        flag && JW.set_v2_features!(jw, true)
+        return jw, uris
+    end
+
+    jw_on, uris = corpus_workspace(true)
+    jw_off, _ = corpus_workspace(false)
+
+    problems = String[]
+    samples = Ref(0)
+    saw_mat = Set{Symbol}()
+    for uri in uris
+        maps = JW.derived_v2_file_maps(jw_on.runtime, uri)
+        offsets = Set{Int}()
+        for row in JW.derived_v2_file_skeleton(jw_on.runtime, uri).items
+            length(offsets) >= 25 && break
+            ranges = get(maps, row.id, nothing)
+            (ranges === nothing || isempty(ranges)) && continue
+            o = JW._v2f_start0(ranges[1])
+            push!(offsets, o)
+            o > 0 && push!(offsets, o - 1)
+        end
+        for o in sort!(collect(offsets))
+            samples[] += 1
+            a = JW._get_module_at(jw_on.runtime, uri, o)
+            b = JW._get_module_at(jw_off.runtime, uri, o)
+            a == b && continue
+            # Declared class :file_head_prefix — v1's `_get_expr_or_parent`
+            # walk starts at pos=1, so the first byte or two of a file answers
+            # "Main" even when the file splices into a module; v2 reports the
+            # splice prefix (the correct answer). Tightly keyed.
+            if b == "Main" && o <= 1
+                root = JW.derived_v2_best_root_for_uri(jw_on.runtime, uri)
+                prefix = root === nothing ? nothing :
+                    JW.derived_v2_file_module_path(jw_on.runtime, root, uri)
+                if prefix !== nothing && a == join(prefix, ".")
+                    push!(saw_mat, :file_head_prefix)
+                    continue
+                end
+            end
+            push!(problems, "$(uri)@$(o): on=$(a) off=$(b)")
+        end
+    end
+
+    println("module-at differential: samples=$(samples[]) classes=$(sort!(collect(saw_mat)))")
+    isempty(problems) || println("problems:\n  " * join(first(problems, 30), "\n  "))
+    @test samples[] > 300
+    @test problems == String[]
+end

@@ -230,3 +230,36 @@ end
     jw = ft_workspace(src; flag=false)
     @test any(s -> s.name == "f", JW._get_workspace_symbols(jw.runtime, ""))
 end
+
+# ── module-at-position ──────────────────────────────────────────────────────
+
+@testitem "module-at: header corrections and nesting" setup=[FeatV2WS] begin
+    src = """
+    module Outer
+    f() = 1
+    module Inner
+    g() = 2
+    end
+    end
+    top() = 3
+    """
+    jw = ft_workspace(src)
+    mat(o) = JW._get_module_at(jw.runtime, FT_URI, o)
+
+    # Inside Outer's body, outside Inner.
+    @test mat(off0(src, "f() = 1")) == "Outer"
+    # Inside Inner's body.
+    @test mat(off0(src, "g() = 2")) == "Outer.Inner"
+    # Cursor on the `module` keyword, the name, and `end` all attribute to
+    # the ENCLOSING module.
+    @test mat(off0(src, "module Inner")) == "Outer"
+    @test mat(off0(src, "Inner")) == "Outer"
+    @test mat(off0(src, "end")) == "Outer"        # Inner's `end`
+    # Top level outside every module (v2 has no splice prefix for a
+    # single-file root).
+    @test mat(off0(src, "top()")) == "Main"
+
+    # Flag off still answers (v1 path).
+    jw = ft_workspace(src; flag=false)
+    @test JW._get_module_at(jw.runtime, FT_URI, off0(src, "g() = 2")) == "Outer.Inner"
+end

@@ -170,6 +170,10 @@ Return the fully qualified module name at `offset` (0-based) in `uri`,
 or "Main" if no module scope is found.
 """
 function _get_module_at(runtime, uri::URI, offset::Int)
+    # v2 features (experiment): splice prefix + innermost module whose body
+    # block contains the offset (see `_get_module_at_v2`).
+    input_v2_features(runtime) && return _get_module_at_v2(runtime, uri, offset)
+
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     x, p = _get_expr_or_parent(cst, offset, 1)
 
