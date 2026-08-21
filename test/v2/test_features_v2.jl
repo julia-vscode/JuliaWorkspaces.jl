@@ -326,6 +326,8 @@ project_hash = \"abc\"
 "
     source = """
     module ActV2
+    using Base: string, Meta
+    import Base
     f(x) = x + 1
     function g(unused_arg)
         return 1
@@ -336,6 +338,13 @@ project_hash = \"abc\"
         return isnothing(s)
     end
     check(y) = y == nothing
+    \"\"\"
+        documented(a)
+    \"\"\"
+    documented(a, b) = a + b
+    function undocumented_fn(q)
+        return q
+    end
     end
     """
     uri = URI("file:///actv2/src/ActV2.jl")
@@ -363,7 +372,7 @@ project_hash = \"abc\"
     end
 
     saw_ids = Set{String}()
-    for line in 2:11, col in (1, 5, 10, 14)
+    for line in 2:19, col in (1, 5, 10, 14)
         idx = string_index(source, line, col)
         on = sort([a.id for a in get_code_actions(jw_on, uri, idx, String[])])
         off = sort([a.id for a in get_code_actions(jw_off, uri, idx, String[])])
@@ -376,8 +385,10 @@ project_hash = \"abc\"
             @test [(e.uri, e.edits) for e in e_on] == [(e.uri, e.edits) for e in e_off]
         end
     end
-    # The probe grid actually exercises the structural set.
-    for want in ("ExpandFunction", "RewriteAsRawString")
+    # The probe grid actually exercises the structural set, the docstring
+    # actions, and OrganizeImports.
+    for want in ("ExpandFunction", "RewriteAsRawString", "OrganizeImports",
+                 "AddDocstringTemplate", "UpdateDocstringSignature")
         @test want in saw_ids
     end
     println("actions parity probe covered: ", sort!(collect(saw_ids)))
