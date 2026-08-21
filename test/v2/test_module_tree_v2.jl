@@ -206,3 +206,36 @@ end
     # And the map agrees with v1's, which the tree used to consume.
     @test roots == JW.derived_workspace_package_roots(jw.runtime)
 end
+
+@testitem "v2 module tree: decl events keep order and duplicates across includes" setup=[ModTreeV2WS] begin
+    using JuliaWorkspaces: derived_v2_module_decl_events
+
+    jw = mt_workspace(
+        "Root.jl" => """
+        module M
+        const x = 1
+        include("mid.jl")
+        x = 3
+        struct T end
+        T(v) = new()
+        end
+        """,
+        "mid.jl" => "const x = 2\n")
+    ev = derived_v2_module_decl_events(jw.runtime, MT_ROOT, ["M"])
+    xs = [(n, k) for (n, k, _) in ev if n == "x"]
+    # Splice order: Root's const, then mid.jl's const (spliced at the include
+    # point), then Root's reassignment — duplicates all retained.
+    @test xs == [("x", :const), ("x", :const), ("x", :assignment)]
+    # The method-extension event is recorded even though it never wins.
+    ts = [(n, k) for (n, k, _) in ev if n == "T"]
+    @test ts == [("T", :struct), ("T", :function)]
+    # Refs point at the declaring items in the declaring files.
+    x_refs = [r for (n, _, r) in ev if n == "x"]
+    @test x_refs[2].file != x_refs[1].file
+
+    # The winner maps are unchanged by the stream.
+    @test derived_v2_module_names(jw.runtime, MT_ROOT, ["M"])["T"] === :struct
+
+    # Absent module: empty.
+    @test isempty(derived_v2_module_decl_events(jw.runtime, MT_ROOT, ["NoSuch"]))
+end

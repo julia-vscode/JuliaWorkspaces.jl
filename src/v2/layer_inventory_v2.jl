@@ -65,6 +65,12 @@ such items are still enumerated, but the lowering layer declines to analyse them
     # for the real program. Binding analysis stays best-effort for such items;
     # lowering-ERROR findings are suppressed.
     under_macrocall::Bool
+    # True when the item sits inside an `if`/`elseif`/`else` branch (the walk
+    # is transparent through them, `@static if` included): only ONE branch
+    # runs, so declaration-conflict rules must not pair declarations across —
+    # or with — branches (v1's `in_same_if_branch` exemption, conservatively
+    # widened to "any conditional declaration").
+    conditional::Bool
 end
 
 "A `module`/`baremodule` declared in this file."
@@ -722,11 +728,13 @@ mutable struct _V2WalkState
     # Macrocall-argument nesting depth of the walk position (see
     # `V2ItemRow.under_macrocall`).
     in_macro::Int
+    # `if`-branch nesting depth of the walk position (see `V2ItemRow.conditional`).
+    in_if::Int
 end
 _V2WalkState() = _V2WalkState(
     V2FileSkeleton(V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[], V2OpaqueMacro[],
                    V2TestItem[], V2TestError[]),
-    Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator(), 0)
+    Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator(), 0, 0)
 
 """
     _v2_walk_file!(state, root)
@@ -794,7 +802,8 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
         return order, id, bt
     end
 
-    push!(skel.items, V2ItemRow(order, id, _v2_id_kind_class(bt), pm, interpretable, state.in_macro > 0))
+    push!(skel.items, V2ItemRow(order, id, _v2_id_kind_class(bt), pm, interpretable,
+                                state.in_macro > 0, state.in_if > 0))
     state.bodies[id] = bt
     state.maps[id] = ranges
 
@@ -904,6 +913,7 @@ function _v2_walk_if_chain!(state::_V2WalkState, node, parent_module::Vector{Str
         return _v2_emit_plain!(state, node, parent_module, interpretable)  # ternary
     end
     # cs[1] is the condition; the rest are branch bodies / the elseif tail.
+    state.in_if += 1
     for c in cs[2:end]
         ck = JS2.kind(c)
         if ck == JS2.K"elseif" || ck == JS2.K"if"
@@ -918,6 +928,7 @@ function _v2_walk_if_chain!(state::_V2WalkState, node, parent_module::Vector{Str
             _v2_walk_one!(state, c, parent_module, interpretable)
         end
     end
+    state.in_if -= 1
     return
 end
 
@@ -948,7 +959,8 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
         bt = _build_body_tree_v2!(ranges, node)
         order, id = _v2_mint_ids!(state.alloc, _v2_statement_id_key(bt, parent_module))
         push!(state.skeleton.opaque_macros, V2OpaqueMacro(order, id, copy(parent_module)))
-        push!(state.skeleton.items, V2ItemRow(order, id, :opaque_macrocall, copy(parent_module), interpretable, state.in_macro > 0))
+        push!(state.skeleton.items, V2ItemRow(order, id, :opaque_macrocall, copy(parent_module),
+                                              interpretable, state.in_macro > 0, state.in_if > 0))
         state.bodies[id] = bt
         state.maps[id] = ranges
     end

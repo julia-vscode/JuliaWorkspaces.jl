@@ -549,3 +549,53 @@ end
     rng = maps[imp.id][1]
     @test src[first(rng):last(rng)-1] == "using ..Somewhere"
 end
+
+@testitem "v2 inventory: the conditional flag marks if-branch items" setup=[InvV2WS] begin
+    skel = iv_skel("""
+    top() = 1
+    if Sys.iswindows()
+        cond_a() = 1
+    elseif Sys.isapple()
+        cond_b() = 1
+    else
+        cond_c() = 1
+        if true
+            cond_nested() = 1
+        end
+    end
+    begin
+        flat() = 1
+    end
+    t = true ? 1 : 2
+    """)
+    inv = iv_inv("""
+    top() = 1
+    if Sys.iswindows()
+        cond_a() = 1
+    elseif Sys.isapple()
+        cond_b() = 1
+    else
+        cond_c() = 1
+        if true
+            cond_nested() = 1
+        end
+    end
+    begin
+        flat() = 1
+    end
+    t = true ? 1 : 2
+    """)
+    items = Dict{String,Bool}()
+    for i in inv.items
+        row = only(filter(r -> r.id == i.id, skel.items))
+        items[i.name] = row.conditional
+    end
+    @test items["top"] == false
+    @test items["cond_a"] == true
+    @test items["cond_b"] == true
+    @test items["cond_c"] == true
+    @test items["cond_nested"] == true
+    # Bare begin blocks are unconditional; a ternary item is one plain item.
+    @test items["flat"] == false
+    @test items["t"] == false
+end

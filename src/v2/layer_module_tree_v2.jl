@@ -69,6 +69,12 @@ alongside rather than inside so `declared` stays a plain name→ref map.
     exports::Vector{String}
     publics::Vector{String}
     imports::Vector{V2ResolvedImport}
+    # The RAW ordered declaration stream `(name, kind, ref)` in true textual
+    # splice order, duplicates kept — the winner-only `declared`/
+    # `declared_kinds` maps discard exactly the signal declaration-conflict
+    # rules need (`const x = 1` then `const x = 2` leaves one entry there,
+    # two here).
+    decl_events::Vector{Tuple{String,Symbol,V2ItemRef}}
 end
 
 """
@@ -171,10 +177,11 @@ mutable struct _V2ModuleNodeBuilder
     exports::Vector{String}
     publics::Vector{String}
     raw_imports::Vector{Tuple{URI,V2Import}}
+    decl_events::Vector{Tuple{String,Symbol,V2ItemRef}}
 end
 _V2ModuleNodeBuilder() = _V2ModuleNodeBuilder(
     false, nothing, URI[], Dict{String,V2ItemRef}(), Dict{String,Symbol}(),
-    String[], String[], Tuple{URI,V2Import}[])
+    String[], String[], Tuple{URI,V2Import}[], Tuple{String,Symbol,V2ItemRef}[])
 
 _v2_is_datatype_kind(k::Symbol) =
     k === :struct || k === :mutable_struct || k === :abstract || k === :primitive || k === :enum
@@ -186,6 +193,9 @@ _v2_is_datatype_kind(k::Symbol) =
 # combination keeps last-splice-wins.
 function _v2_declare!(node::_V2ModuleNodeBuilder, name::String, ref::V2ItemRef, kind::Symbol)
     isempty(name) && return
+    # The raw event, recorded BEFORE the method-extension early return: the
+    # events stream keeps every declaration in splice order, winner or not.
+    push!(node.decl_events, (name, kind, ref))
     prev = get(node.declared_kinds, name, nothing)
     if prev !== nothing && _v2_is_datatype_kind(prev) && (kind === :function || kind === :assignment)
         return
@@ -353,7 +363,7 @@ Salsa.@derived function derived_v2_module_tree(rt, root)
         end
         push!(nodes, V2ModuleNode(path, b.bare, b.declared_at, b.files,
                                   b.declared, b.declared_kinds,
-                                  b.exports, b.publics, imports))
+                                  b.exports, b.publics, imports, b.decl_events))
     end
     return V2ModuleTree(root, nodes, file_modules)
 end
@@ -374,6 +384,12 @@ end
 Salsa.@derived function derived_v2_module_is_bare(rt, root, path)
     node = v2_module_node(derived_v2_module_tree(rt, root), path)
     return node === nothing ? false : node.bare
+end
+
+"The raw ordered declaration stream at `path` (see `V2ModuleNode.decl_events`)."
+Salsa.@derived function derived_v2_module_decl_events(rt, root, path)
+    node = v2_module_node(derived_v2_module_tree(rt, root), path)
+    return node === nothing ? Tuple{String,Symbol,V2ItemRef}[] : node.decl_events
 end
 
 "Module-level bindings at `path`: name → the item that declares it."
