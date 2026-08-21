@@ -348,8 +348,19 @@ Salsa.@derived function derived_diagnostics(rt, uri)
 
         # Lowering-backed rules from the v2 framework (experiment, behind
         # `input_lowering_lint`; see v2/lint_lowering_rules.jl). Empty unless
-        # the flag is on and a takeover rule is enabled.
-        foreach(emit_finding!, derived_semantic_lint_findings(rt, uri))
+        # the flag is on and a takeover rule is enabled. Env-dependent rule ids
+        # get the same not-ready suppression the StaticLint loop applies above
+        # — checked lazily so a file with no env-dependent finding never takes
+        # the `derived_file_env_ready` edge through this path.
+        v2_findings = derived_semantic_lint_findings(rt, uri)
+        if !isempty(v2_findings)
+            v2_env_suppress = any(f -> f.rule_id in ENV_DEPENDENT_LINT_RULES, v2_findings) &&
+                !derived_file_env_ready(rt, uri)
+            for f in v2_findings
+                v2_env_suppress && f.rule_id in ENV_DEPENDENT_LINT_RULES && continue
+                emit_finding!(f)
+            end
+        end
 
         # Include-graph diagnostics (DuplicateInclude / IncludeLoop /
         # MissingFile) are a purely structural analysis that does not depend on

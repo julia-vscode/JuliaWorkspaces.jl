@@ -16,7 +16,7 @@ const LOWERING_TAKEOVER_RULES = Set([
     # Re-emitting takeovers: v2 reports these under the same ids and the same
     # (advisory) severities, from a better engine.
     :unused_binding, :unused_function_argument, :unused_type_parameter,
-    :module_name, :relative_import,
+    :module_name, :relative_import, :unresolved_import,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -212,6 +212,91 @@ Salsa.@derived function derived_module_tree_lint_findings(rt, uri)
     return result
 end
 
+# ── unresolved_import ───────────────────────────────────────────────────────
+#
+# The first env-dependent takeover rule: an import whose target cannot be
+# resolved — external with a missing store, or `:unresolved` that the pass-2
+# ledger re-attempt cannot land. Message semantics ported from v1
+# (`mark_unresolved_import_stmt!` + lint_emission.jl): the message names the
+# FIRST unresolved component, distinguishes a declared-but-unindexed
+# dependency from a genuinely unknown one, and states the consequence
+# (wildcard `using` disables missing-reference checks in scope; any other form
+# just goes unchecked). Reported at the whole statement (v1 anchors the range
+# at the failing component; range deviation accepted, as with
+# `relative_import`). Deliberately deferred, documented: colon-list MEMBER
+# misses (needs the implicit-member fallback first, or `import Base: nothing`
+# shapes false-positive) and `:workspace_package` targets whose package root
+# is missing.
+
+# The first unresolved component's name, or `nothing` when the import
+# resolves. Mirrors the visibility layer's own resolution rules exactly —
+# including the pass-2 re-attempt — so this rule can never contradict what
+# visibility actually bound.
+function _v2_unresolved_import_name(rt, root, path::Vector{String}, ri::V2ResolvedImport)
+    t = ri.target
+    if t.sort === :external
+        return derived_v2_external_first_missing_segment(rt, root, t.path)
+    elseif t.sort === :unresolved
+        re = _v2_reattempt_unresolved(rt, root, path, ri, Set{URI}())
+        if re === nothing
+            # Locate the first stuck segment for the message, the same way the
+            # re-attempt walks: anchor, then the deepest tree prefix.
+            split = _v2_unresolved_anchor_and_segs(rt, root, path, t.path)
+            if split === nothing
+                i = findfirst(s -> s != ".", t.path)
+                return i === nothing ? nothing : t.path[i]
+            end
+            anchor, segs = split
+            k = _v2_deepest_tree_prefix(rt, root, anchor, segs)
+            return k >= length(segs) ? last(segs) : segs[k + 1]
+        end
+        re.sort === :external &&
+            return derived_v2_external_first_missing_segment(rt, root, re.path)
+        return nothing
+    end
+    return nothing   # :tree and :workspace_package targets resolve
+end
+
+Salsa.@derived function derived_v2_unresolved_import_findings(rt, uri)
+    result = ModuleTreeFinding[]
+    skel = derived_v2_file_skeleton(rt, uri)
+    isempty(skel.imports) && return result
+    root = derived_v2_best_root_for_uri(rt, uri)
+    root === nothing && return result
+    splice = _derived_v2_splice_prefix(rt, uri)
+    deps = nothing   # project deps demanded only once a finding exists
+
+    for imp in skel.imports
+        # Dots exceeding the nesting are `relative_import`'s finding — v1's
+        # no-double-diagnosis rule (`first_unresolved_import_component` skips
+        # paths already carrying errors).
+        ndots = 0
+        while ndots < length(imp.path) && imp.path[ndots + 1] == "."
+            ndots += 1
+        end
+        ndots > 0 && ndots - 1 > length(splice) + length(imp.parent_module) && continue
+
+        path = vcat(splice, imp.parent_module)
+        ris = derived_v2_module_imports(rt, root, path)
+        idx = findfirst(ri -> ri.from == V2ItemRef(uri, imp.id), ris)
+        idx === nothing && continue
+        ri = ris[idx]
+
+        name = _v2_unresolved_import_name(rt, root, path, ri)
+        name === nothing && continue
+        deps === nothing && (deps = derived_v2_env_project_deps(rt, root))
+        cause = name in deps ?
+            "`$name` is a declared dependency but its symbols could not be indexed." :
+            "Failed to resolve `$name`."
+        consequence = ri.kind === :using && isempty(ri.symbols) ?
+            "Missing-reference checks are disabled in this scope and all nested scopes." :
+            "Anything imported through this statement is assumed to exist and will not be checked."
+        push!(result, (id=imp.id, addr=Int32(1), rule_id=:unresolved_import,
+            msg="$cause $consequence"))
+    end
+    return result
+end
+
 """
     derived_semantic_lint_findings(rt, uri) -> Vector{LintFinding}
 
@@ -252,13 +337,25 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         end
     end
 
-    # Module-tree findings attach to module/import rows, whose maps commit 1
-    # of this milestone started storing.
+    # Module-tree findings attach to module/import rows, whose maps the
+    # Harvest milestone started storing.
     for f in derived_module_tree_lint_findings(rt, uri)
         ranges = get(maps, f.id, nothing)
         ranges === nothing && continue
         1 <= f.addr <= length(ranges) || continue
         push!(result, LintFinding(ranges[f.addr], f.rule_id, f.msg, nothing, "JuliaWorkspaces.jl"))
+    end
+
+    # `unresolved_import` touches the env seam and visibility, so its producer
+    # runs only when the rule is actually on (materialize would filter it
+    # anyway; this skips demanding the machinery at all).
+    if rule_enabled(derived_effective_lint_config(rt, uri), :unresolved_import)
+        for f in derived_v2_unresolved_import_findings(rt, uri)
+            ranges = get(maps, f.id, nothing)
+            ranges === nothing && continue
+            1 <= f.addr <= length(ranges) || continue
+            push!(result, LintFinding(ranges[f.addr], f.rule_id, f.msg, nothing, "JuliaWorkspaces.jl"))
+        end
     end
     return result
 end
