@@ -39,6 +39,9 @@ include("layer_module_tree_v2.jl")
 # Layer 2¼: root discovery — the include graph, roots and the reverse map,
 # built from the same skeleton include rows (no CSTParser/StaticLint route).
 include("layer_includes_v2.jl")
+# Layer 2½: per-module visible names (tree-only; the env arm is the
+# clearly-marked Milestone C seam inside the file).
+include("layer_visibility_v2.jl")
 # Layer 3: JuliaLowering binding analysis over per-item body trees.
 include("layer_lowering.jl")
 # Layer 3½: DJP-side macro expansion — sites, context, cache keys, harvest.

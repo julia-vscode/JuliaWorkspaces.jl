@@ -376,6 +376,12 @@ Salsa.@derived function derived_v2_module_exports(rt, root, path)
     return node === nothing ? String[] : node.exports
 end
 
+"The item declaring the module at `path`, or `nothing` (missing module / the synthetic root)."
+Salsa.@derived function derived_v2_module_declared_at(rt, root, path)
+    node = v2_module_node(derived_v2_module_tree(rt, root), path)
+    return node === nothing ? nothing : node.declared_at
+end
+
 "The resolved `using`/`import` statements of the module at `path`."
 Salsa.@derived function derived_v2_module_imports(rt, root, path)
     node = v2_module_node(derived_v2_module_tree(rt, root), path)
