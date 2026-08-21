@@ -196,3 +196,37 @@ end
     refs = JW._get_references(jw.runtime, FT_URI, off0(src, "z = 1"))
     @test refs isa Vector{JW.ReferenceResult}
 end
+
+# ── workspace symbols ───────────────────────────────────────────────────────
+
+@testitem "workspace symbols: v2 swap" setup=[FeatV2WS] begin
+    src = """
+    module Outer
+    f() = 1
+    struct Thing end
+    macro mymac(x) end
+    @testitem "t" begin
+        hidden_in_test() = 1
+    end
+    end
+    """
+    jw = ft_workspace(src)
+    syms = JW._get_workspace_symbols(jw.runtime, "")
+    names = Set(s.name for s in syms)
+    @test "f" in names
+    @test "Thing" in names
+    @test "Outer" in names
+    # Testitem bodies are opaque in v2: no leakage.
+    @test !("hidden_in_test" in names)
+    # Prefix matching, with the @-stripped variant for macros.
+    @test any(s -> s.name == "@mymac", JW._get_workspace_symbols(jw.runtime, "mymac"))
+    @test any(s -> s.name == "@mymac", JW._get_workspace_symbols(jw.runtime, "@mymac"))
+    @test isempty(JW._get_workspace_symbols(jw.runtime, "zzz_nothing"))
+    # The range slices to the declaration.
+    fsym = only(filter(s -> s.name == "f", syms))
+    @test fsym.start.line == 2
+
+    # Flag off: the v1 path still answers.
+    jw = ft_workspace(src; flag=false)
+    @test any(s -> s.name == "f", JW._get_workspace_symbols(jw.runtime, ""))
+end

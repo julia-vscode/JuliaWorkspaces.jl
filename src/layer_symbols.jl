@@ -279,6 +279,13 @@ end
 Search all files for top-level bindings matching `query`.
 """
 function _get_workspace_symbols(runtime, query::String)
+    # v2 features (experiment): the same enumeration off the v2 inventory and
+    # maps. No testitem filter is needed — v2 keeps test macrocalls opaque, so
+    # testitem-body declarations never become item rows; macro-declared names
+    # have no v2 rows either (v1-only names under the flag, a documented
+    # difference).
+    input_v2_features(runtime) && return _get_workspace_symbols_v2(runtime, query)
+
     results = WorkspaceSymbolResult[]
     files = derived_text_files(runtime)
 

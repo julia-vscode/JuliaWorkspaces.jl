@@ -125,3 +125,53 @@
     @test cursors[] > 300
     @test problems == String[]
 end
+
+@testitem "v2 workspace symbols agree with v1 across the package corpus" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    root_dir = pkgdir(JuliaWorkspaces)
+
+    function corpus_workspace(flag)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Project.toml")),
+            SourceText(read(joinpath(root_dir, "Project.toml"), String), "toml")))
+        add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Manifest.toml")),
+            SourceText("julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"0\"\n\n[deps]\n", "toml")))
+        for (d, _, fs) in walkdir(joinpath(root_dir, "src"))
+            any(occursin(x, lowercase(d)) for x in ("staticlint", "symbolserver", "packages")) && continue
+            for f in fs
+                endswith(f, ".jl") || continue
+                p = joinpath(d, f)
+                add_file!(jw, TextFile(filepath2uri(p), SourceText(read(p, String), "julia")))
+            end
+        end
+        flag && JW.set_v2_features!(jw, true)
+        return jw
+    end
+
+    on = JW._get_workspace_symbols(corpus_workspace(true).runtime, "")
+    off = JW._get_workspace_symbols(corpus_workspace(false).runtime, "")
+    key(s) = (s.name, s.uri)
+    s_on, s_off = Set(key.(on)), Set(key.(off))
+
+    # v2-only names would be phantom symbols: none allowed.
+    v2_only = collect(setdiff(s_on, s_off))
+    isempty(v2_only) || println("v2-only symbols:\n  " * join(first(v2_only, 20), "\n  "))
+    @test isempty(v2_only)
+    # v1-only names must be the macro-declared machinery (generated names like
+    # `set_foo!` for `@declare_input foo(...)`), which v2 deliberately has no
+    # rows for — verified per name against the V1 inventory's own kind, so a
+    # plain source declaration v2 simply missed can never hide here.
+    v1_only = collect(setdiff(s_off, s_on))
+    jw_probe = corpus_workspace(false)
+    for (name, uri) in v1_only
+        inv1 = JW.derived_file_inventory(jw_probe.runtime, uri)
+        kinds = [i.kind for i in inv1.items if i.name == name]
+        @test !isempty(kinds) && all(k -> k === :macro_declared, kinds)
+    end
+    println("workspace symbols differential: on=$(length(s_on)) off=$(length(s_off)) v1_only=$(length(v1_only))")
+    @test length(s_on) > 500
+end

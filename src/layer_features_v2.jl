@@ -103,6 +103,49 @@ function v2_item_row_at(rt, uri::URI, offset0::Int)
     return hits[end]
 end
 
+# ── workspace symbols ───────────────────────────────────────────────────────
+
+# The v2 arm of `_get_workspace_symbols` (layer_symbols.jl): same enumeration,
+# same query/kind rules (`_symbol_matches_query` / `_item_symbol_kind`), off
+# the v2 inventory with ranges from the volatile maps. The parity contract is
+# (name, uri, range); kind is deliberately outside it.
+function _get_workspace_symbols_v2(runtime, query::String)
+    results = WorkspaceSymbolResult[]
+    for uri in derived_text_files(runtime)
+        derived_v2_best_root_for_uri(runtime, uri) === nothing && continue
+        inv = derived_v2_file_inventory(runtime, uri)
+        (isempty(inv.items) && isempty(inv.modules)) && continue
+        maps = derived_v2_file_maps(runtime, uri)
+
+        for it in inv.items
+            it.kind === :opaque_macrocall && continue
+            isempty(it.name) && continue
+            # Qualified method extensions ARE listed under their bare name
+            # (v1 parity: `Base.foo(…) = …` shows as `foo`) — except
+            # operator-spelled ones (`Base.:(==)`), which v1's name extraction
+            # drops; mirror that with an identifier check.
+            (!isempty(it.qualifier) && !Base.isidentifier(it.name)) && continue
+            _symbol_matches_query(it.name, query) || continue
+            ranges = get(maps, it.id, nothing)
+            (ranges === nothing || isempty(ranges)) && continue
+            push!(results, WorkspaceSymbolResult(
+                it.name, _item_symbol_kind(it.kind), uri,
+                _offset_to_position(runtime, uri, _v2f_start0(ranges[1])),
+                _offset_to_position(runtime, uri, _v2f_stop0(ranges[1]))))
+        end
+        for m in inv.modules
+            _symbol_matches_query(m.name, query) || continue
+            ranges = get(maps, m.id, nothing)
+            (ranges === nothing || isempty(ranges)) && continue
+            push!(results, WorkspaceSymbolResult(
+                m.name, 2, uri,   # 2 = Module
+                _offset_to_position(runtime, uri, _v2f_start0(ranges[1])),
+                _offset_to_position(runtime, uri, _v2f_stop0(ranges[1]))))
+        end
+    end
+    return results
+end
+
 const _V2_LOCAL_BINDING_KINDS = (:local, :argument, :static_parameter, :typevar)
 
 """
