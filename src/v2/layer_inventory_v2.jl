@@ -730,11 +730,30 @@ mutable struct _V2WalkState
     in_macro::Int
     # `if`-branch nesting depth of the walk position (see `V2ItemRow.conditional`).
     in_if::Int
+    # A2 (doc-range capture): the byte range of each item's docstring LITERAL,
+    # keyed by walker id. Position-class data, same volatility/firewall class
+    # as `maps` — the docstring TEXT never enters derived state (the skeleton's
+    # "equal regardless of docstrings" contract stays intact; consumers slice
+    # the file at request time).
+    doc_ranges::Dict{Int64,UnitRange{Int}}
+    # Set by the doc-wrapper branch just before delegating to the wrapped
+    # statement; consumed by the FIRST id minted underneath (`_v2_take_doc!`) —
+    # for the pathological `"doc" begin a; b end` only `a` carries the doc.
+    pending_doc::Union{Nothing,UnitRange{Int}}
 end
 _V2WalkState() = _V2WalkState(
     V2FileSkeleton(V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[], V2OpaqueMacro[],
                    V2TestItem[], V2TestError[]),
-    Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator(), 0, 0)
+    Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator(), 0, 0,
+    Dict{Int64,UnitRange{Int}}(), nothing)
+
+function _v2_take_doc!(state::_V2WalkState, id::Int64)
+    if state.pending_doc !== nothing
+        state.doc_ranges[id] = state.pending_doc
+        state.pending_doc = nothing
+    end
+    return nothing
+end
 
 """
     _v2_walk_file!(state, root)
@@ -765,6 +784,7 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
     ranges = UnitRange{Int}[]
     bt = _build_body_tree_v2!(ranges, node)
     order, id = _v2_mint_ids!(state.alloc, _v2_statement_id_key(bt, parent_module))
+    _v2_take_doc!(state, id)
     pm = copy(parent_module)
     k = bt.kind
     skel = state.skeleton
@@ -796,6 +816,9 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
             s !== nothing && push!(names, s)
         end
         push!(skel.exports, V2Export(order, id, k == JS2.K"export" ? :export : :public, names, pm))
+        # Map (not body) stored — the block-range feature needs the statement's
+        # range for cursor windows; same rationale as import rows.
+        state.maps[id] = ranges
         return order, id, bt
     elseif _v2_is_include_call(bt)
         push!(skel.includes, V2Include(order, id, _v2_include_path(bt), pm))
@@ -942,8 +965,13 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
     name = length(cs) >= 1 ? _v2_node_macro_name(cs[1]) : nothing
 
     # A docstring wrapper is transparent: the wrapped item is what gets an id.
+    # The docstring literal's byte range rides along (A2) — consumed by the
+    # first id minted for the wrapped statement.
     if _v2_is_doc_macro(name) && length(cs) == 4
-        return _v2_walk_one!(state, cs[4], parent_module, interpretable)
+        state.pending_doc = _range_v2(cs[3])
+        result = _v2_walk_one!(state, cs[4], parent_module, interpretable)
+        state.pending_doc = nothing   # defensive: nothing emitted underneath
+        return result
     end
 
     # `@enum` and the isolating test macros are single opaque items. The test
@@ -963,6 +991,7 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
         ranges = UnitRange{Int}[]
         bt = _build_body_tree_v2!(ranges, node)
         order, id = _v2_mint_ids!(state.alloc, _v2_statement_id_key(bt, parent_module))
+        _v2_take_doc!(state, id)
         push!(state.skeleton.opaque_macros, V2OpaqueMacro(order, id, copy(parent_module)))
         push!(state.skeleton.items, V2ItemRow(order, id, :opaque_macrocall, copy(parent_module),
                                               interpretable, state.in_macro > 0, state.in_if > 0))
@@ -995,10 +1024,12 @@ struct V2FileWalk
     skeleton::V2FileSkeleton
     bodies::Dict{Int64,BodyTree{V2Kind}}
     maps::Dict{Int64,Vector{UnitRange{Int}}}
+    doc_ranges::Dict{Int64,UnitRange{Int}}
 end
 
 const EMPTY_V2_FILE_WALK = V2FileWalk(
-    EMPTY_V2_SKELETON, Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}())
+    EMPTY_V2_SKELETON, Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(),
+    Dict{Int64,UnitRange{Int}}())
 
 """
     derived_v2_file_walk(rt, uri) -> V2FileWalk
@@ -1033,7 +1064,7 @@ Salsa.@derived function derived_v2_file_walk(rt, uri)
         err isa InterruptException && rethrow()
         return EMPTY_V2_FILE_WALK
     end
-    return V2FileWalk(state.skeleton, state.bodies, state.maps)
+    return V2FileWalk(state.skeleton, state.bodies, state.maps, state.doc_ranges)
 end
 
 """
@@ -1060,6 +1091,17 @@ import-level findings can be emitted at real ranges. VOLATILE by design
 Depending on it from an analysis-layer computation is a bug.
 """
 Salsa.@derived derived_v2_file_maps(rt, uri) = derived_v2_file_walk(rt, uri).maps
+
+"""
+    derived_v2_file_doc_ranges(rt, uri) -> Dict{Int64,UnitRange{Int}}
+
+For each documented item id, the 1-based exclusive-end byte range of its
+docstring LITERAL. The docstring text itself never enters derived state — the
+skeleton/bodies stay `==` across docstring edits — so this is position-class
+data with exactly `derived_v2_file_maps`' contract: VOLATILE, last-mile only.
+Depending on it from an analysis-layer computation is a bug.
+"""
+Salsa.@derived derived_v2_file_doc_ranges(rt, uri) = derived_v2_file_walk(rt, uri).doc_ranges
 
 """
     derived_v2_noninterpretable_ids(rt, uri) -> Set{Int64}

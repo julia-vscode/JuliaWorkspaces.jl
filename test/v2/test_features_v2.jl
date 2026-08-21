@@ -382,3 +382,81 @@ project_hash = \"abc\"
     end
     println("actions parity probe covered: ", sort!(collect(saw_ids)))
 end
+
+# ── docstrings (A2) ─────────────────────────────────────────────────────────
+
+@testitem "A2: doc ranges captured for every documented shape" setup=[FeatV2WS] begin
+    using JuliaWorkspaces: v2_item_docstring, v2_item_doc_range, V2ItemRef
+    src = """
+    \"\"\"
+    documented function
+    \"\"\"
+    f(x) = x
+
+    "short doc" const C = 1
+
+    \"\"\"
+    a struct
+    \"\"\"
+    struct S
+        a::Int
+    end
+
+    "mod doc" module M
+    end
+
+    "enum doc" @enum E ea eb
+
+    "opaque doc" @some_unknown_macro foo
+
+    undocumented() = 1
+    """
+    jw = ft_workspace(src)
+    docs = JW.derived_v2_file_doc_ranges(jw.runtime, FT_URI)
+    inv = JW.derived_v2_file_inventory(jw.runtime, FT_URI)
+    id_of(name) = only(filter(i -> i.name == name, inv.items)).id
+
+    @test v2_item_docstring(jw.runtime, V2ItemRef(FT_URI, id_of("f"))) == "documented function\n"
+    @test v2_item_docstring(jw.runtime, V2ItemRef(FT_URI, id_of("C"))) == "short doc"
+    @test v2_item_docstring(jw.runtime, V2ItemRef(FT_URI, id_of("S"))) == "a struct\n"
+    @test v2_item_docstring(jw.runtime, V2ItemRef(FT_URI, id_of("E"))) == "enum doc"
+    @test v2_item_doc_range(jw.runtime, FT_URI, id_of("undocumented")) === nothing
+
+    # Module rows and opaque macrocalls carry doc ranges too.
+    skel = JW.derived_v2_file_skeleton(jw.runtime, FT_URI)
+    m = only(skel.modules)
+    @test haskey(docs, m.id)
+    om = only(skel.opaque_macros)
+    @test haskey(docs, om.id)
+
+    # The raw range slices to the literal's CONTENT (the EST string node's
+    # range excludes the quotes — which is the useful range for consumers).
+    r = v2_item_doc_range(jw.runtime, FT_URI, id_of("C"))
+    @test src[first(r):last(r)-1] == "short doc"
+end
+
+@testitem "A2: docstring edits backdate skeleton and bodies" setup=[FeatV2WS] begin
+    using JuliaWorkspaces: update_file!
+    src1 = "\"\"\"one\"\"\"\nf(x) = x\n"
+    src2 = "\"\"\"two, longer text\"\"\"\nf(x) = x\n"
+    jw = ft_workspace(src1)
+    skel1 = JW.derived_v2_file_skeleton(jw.runtime, FT_URI)
+    bodies1 = JW.derived_v2_file_bodies(jw.runtime, FT_URI)
+    docs1 = JW.derived_v2_file_doc_ranges(jw.runtime, FT_URI)
+    update_file!(jw, TextFile(FT_URI, SourceText(src2, "julia")))
+    @test JW.derived_v2_file_skeleton(jw.runtime, FT_URI) == skel1
+    @test JW.derived_v2_file_bodies(jw.runtime, FT_URI) == bodies1
+    @test JW.derived_v2_file_doc_ranges(jw.runtime, FT_URI) != docs1
+end
+
+@testitem "A2: export rows now carry maps" setup=[FeatV2WS] begin
+    src = "export foo, bar\npublic baz\nfoo() = 1\n"
+    jw = ft_workspace(src)
+    skel = JW.derived_v2_file_skeleton(jw.runtime, FT_URI)
+    maps = JW.derived_v2_file_maps(jw.runtime, FT_URI)
+    for e in skel.exports
+        @test haskey(maps, e.id)
+        r = maps[e.id][1]
+        @test occursin(e.kind === :export ? "export" : "public", src[first(r):last(r)-1])
+    end
+end

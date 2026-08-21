@@ -103,6 +103,59 @@ function v2_item_row_at(rt, uri::URI, offset0::Int)
     return hits[end]
 end
 
+# ── docstrings (A2) ─────────────────────────────────────────────────────────
+
+"The byte range of `id`'s docstring literal in `uri`, or `nothing`."
+v2_item_doc_range(rt, uri::URI, id::Int64) =
+    get(derived_v2_file_doc_ranges(rt, uri), id, nothing)
+
+"""
+    v2_item_docstring(rt, ref) -> Union{Nothing,String}
+
+The docstring text of one v2 item, recovered at REQUEST time: the walker
+stores only the literal's byte range (`derived_v2_file_doc_ranges`), and this
+helper slices the file and parses the tiny slice for the literal's value —
+the same last-mile contract as v1's `item_documentation` (docs never enter
+derived values, so a docstring edit backdates everything but this). Plain
+function, never derived.
+"""
+function v2_item_docstring(rt, ref::V2ItemRef)
+    r = v2_item_doc_range(rt, ref.file, ref.id)
+    r === nothing && return nothing
+    tf = input_text_file(rt, ref.file)
+    tf === nothing && return nothing
+    text = tf.content.content
+    (1 <= first(r) && last(r) - 1 <= ncodeunits(text)) || return nothing
+    slice = text[first(r):(last(r) - 1)]
+    return try
+        st = JS2.parseall(JS2.SyntaxTree, slice)
+        v = _v2f_string_value(st)
+        v === nothing ? slice : v
+    catch err
+        err isa InterruptException && rethrow()
+        slice
+    end
+end
+
+# The literal string value of a parsed slice: descend through wrapper nodes
+# to the first string-family node and join its literal chunks.
+function _v2f_string_value(st)
+    JS2.is_leaf(st) && return JS2.kind(st) == JS2.K"String" ? string(st.val) : nothing
+    if JS2.kind(st) == JS2.K"string"
+        parts = String[]
+        for c in JS2.children(st)
+            (JS2.is_leaf(c) && JS2.kind(c) == JS2.K"String") || return nothing
+            push!(parts, string(c.val))
+        end
+        return join(parts)
+    end
+    for c in JS2.children(st)
+        v = _v2f_string_value(c)
+        v === nothing || return v
+    end
+    return nothing
+end
+
 # ── workspace symbols ───────────────────────────────────────────────────────
 
 # The v2 arm of `_get_workspace_symbols` (layer_symbols.jl): same enumeration,
