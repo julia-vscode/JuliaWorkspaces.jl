@@ -31,15 +31,16 @@ inputs, share `types.jl`, and share the diagnostics join — but nothing else.
   feature flag, which lazily defaults to `false`. With the flag off, no v2 query
   is ever demanded and diagnostics behave exactly as they do today.
 
-The complete set of touchpoints with the rest of the package — four files, and
-that is the entire coupling surface:
+The complete set of touchpoints with the rest of the package:
 
 | File | Touchpoint |
 | --- | --- |
-| [`src/inputs.jl`](../../src/inputs.jl) | the `input_lowering_lint` feature flag |
+| [`src/inputs.jl`](../../src/inputs.jl) | the `input_lowering_lint` and `input_v2_features` feature flags |
 | [`src/layer_diagnostics.jl`](../../src/layer_diagnostics.jl) | pulls v2 findings in / suppresses StaticLint's for the same rule ids |
-| [`src/public.jl`](../../src/public.jl) | `set_lowering_lint!` |
+| [`src/public.jl`](../../src/public.jl) | `set_lowering_lint!`, `set_v2_features!` |
 | [`src/packagedef.jl`](../../src/packagedef.jl) | the single include |
+| [`src/layer_v2_env_seam.jl`](../../src/layer_v2_env_seam.jl) | the environment edge (plain-data store queries, §7½) |
+| [`src/layer_features_v2.jl`](../../src/layer_features_v2.jl) | v2-backed interactive features (A1 + resolvers; §10½) with flag branches in layer_references/symbols/navigation/misc |
 
 Inside `src/v2/` the load order is the layering
 ([`src/v2/v2.jl`](../../src/v2/v2.jl)):
@@ -630,14 +631,51 @@ This is the honest answer to "how far off is the switchover".
 | Macro expansion (general case shipped M1a: DJP-side, flag-gated; see §8) | without both flags macrocalls stay opaque; use-before-definition rules remain blocked until expansion is on and gated (`derived_file_expansion_ready`, M1c) |
 | Type-level env queries (the seam ships name-level data only, §7½) | no `incorrect_call_args`, `type_piracy`, `kw_default_mismatch`; hover/completions for store content still v1 |
 | The implicit-member fallback + macro-declared names in visibility | colon members a module got from its own implicit `using Base`, and names modelled macros declare, bind `:unknown` (name still binds — no missing-ref FPs, but no hover/goto through them) |
-| Feature layers | hover, completions, references, signatures, symbols, navigation, actions, formatting are **all** v1-only |
+| Feature layers | local references family, workspace symbols, module-at, document links shipped on v2 (§10½, behind `input_v2_features`); hover, completions, signatures, document symbols, most actions still v1-only |
 | Rule coverage | twelve rules taken over + two v2-only rules (`lowering_errors`, `soft_scope_ambiguity`), versus StaticLint's full set; the remaining env-dependent rules need type-level store data — see [`v2-portability-survey.md`](v2-portability-survey.md) |
 
 v2 today is a complete *spine* — identity, skeleton, module structure,
-per-item binding semantics, and a name-level environment edge — carrying a
-payload that now includes the two highest-volume env-dependent rules. What
-remains env-side is the type-level half (method tables, call-arity, store
-docs), plus the whole feature-layer surface.
+per-item binding semantics, and a name-level environment edge — carrying the
+two highest-volume env-dependent rules and the first interactive features.
+What remains env-side is the type-level half (method tables, call-arity,
+store docs), plus the doc/type-hungry feature layers.
+
+---
+
+## 10½. Features on v2 (`src/layer_features_v2.jl`)
+
+The interactive features behind `input_v2_features` (independent of the lint
+flag), composed by one rule: **v2 answers entirely or not at all** — every
+degraded case (opaque/under-macrocall items, expansion sites, failed
+lowering, globals, quoted identifiers) falls through to the untouched v1
+path, so flag-off is byte-identical and a v2 miss can never be worse than
+today.
+
+- **A1**: `V2ItemView` aligns the volatile map's preorder byte ranges with
+  the body's kinds/leaf-values/parents in one walk (defensive node-count
+  check); `v2_item_row_at` / `v2_identifier_addr_at` reproduce `get_expr1`'s
+  cursor contract (both edges inclusive, identifier right-edge tie-break).
+  All PLAIN functions — the volatile-map last-mile discipline
+  (`derived_v2_file_maps` is only ever consumed at request time).
+- **Local references** (`v2_local_occurrences`): the cursor identifier's
+  LOCAL binding group, merged by (name, declaration address) — unifying
+  kwarg-forwarding duplicates, comprehension closures, and the where-param
+  typevar/static_parameter pair — with occurrences filtered to identifier
+  leaves spelling the name (rename can never touch a non-name token). Serves
+  references, rename, prepare-rename, highlights (`:write` = decl site or
+  plain-`=` target), and goto-def (declaration NAME range, a deliberate
+  improvement over v1's whole-expression target). 88% of local cursors on
+  this repo answer from v2.
+- **Workspace symbols / module-at / document links**: whole-function flag
+  branches over the v2 inventory, module rows (body-block range corrections
+  for module headers), and stored bodies (v1's any-file-naming-string-literal
+  link semantics preserved).
+
+Every feature carries a corpus differential in
+[`test/v2/test_features_v2_differential.jl`](../../test/v2/test_features_v2_differential.jl)
+with tightly-keyed ratchet classes; two v1 quirks surfaced and were NOT
+copied (the file-head "Main" answer of module-at; operator-spelled qualified
+extensions dropped from symbols).
 
 ---
 

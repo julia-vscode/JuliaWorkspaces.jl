@@ -105,18 +105,17 @@ StaticLint's `loose_refs`/`Scope` walks are heuristics. Cross-file/module is
 uniformly blocked on a v2 visibility layer ("A3"); Base/stdlib/package content
 on the env seam.
 
-**A1**, the prerequisite for eight of nine layers (~80 LOC): a
-`derived_v2_item_at_offset` / address-at-offset query — the inverse of
-`derived_v2_file_maps`, with the cursor-vs-identifier tie-break v1's
-`get_expr1` implements.
+✅ **A1 shipped** (M1, `src/layer_features_v2.jl`): `V2ItemView` +
+`v2_item_row_at` + `v2_identifier_addr_at` — plain volatile-map consumers
+reproducing `get_expr1`'s identifier right-edge tie-break in range terms.
 
 | layer | portable now | modest additions | blocked on visibility (A3) / env |
 | --- | --- | --- | --- |
-| references (763 LOC) | **local refs/rename/highlights/goto-def (~220 LOC)** — slots into v1's existing `(:local, Binding)` vs `(:tree, ItemRef)` seam | same-file top-level refs | cross-file refs/rename |
-| symbols (347) | **workspace symbols (~70 LOC, near-mechanical)** | document symbols w/ nesting (~200) | — |
-| navigation (205) | **module-at-position (~40 LOC)** | selection ranges, block range (trivia-free range deltas) | — |
-| misc (208) | **document links (~60 LOC)** | inlay parameter hints | inlay type hints (needs types) |
-| actions (881) | **~6 of 13 actions (~250 LOC)** incl. the unused-fixes (v2 already emits the findings) | OrganizeImports, docstring actions (need A2 = docstring capture) | FixMissingRef, ExplicitPackageVarImport |
+| references (763 LOC) | ✅ **local refs/rename/highlights/goto-def** shipped (M1): `v2_local_occurrences` answers entirely-or-not-at-all with generous v1 fallback; 88% of local cursors answer from v2 on the corpus; goto-def targets the declaration NAME (deliberate delta) | same-file top-level refs | cross-file refs/rename |
+| symbols (347) | ✅ **workspace symbols** shipped (M1); v1-only residue = macro-declared names, verified per name | document symbols w/ nesting (~200) | — |
+| navigation (205) | ✅ **module-at-position** shipped (M1); range-based header corrections; fixes v1's file-head "Main" quirk | selection ranges, block range (trivia-free range deltas) | — |
+| misc (208) | ✅ **document links** shipped (M1), parity semantics (any file-naming string literal); docstring contents deliberately unlinked | inlay parameter hints | inlay type hints (needs types) |
+| actions (881) | structural set verified WORKING under both flags (parity-probed; the meta marks their `when`s read survive emission-only suppression) — v2-driven when/handlers for v2-only findings are the follow-up | OrganizeImports, docstring actions (need A2 = docstring capture) | FixMissingRef, ExplicitPackageVarImport |
 | signatures (585) | active-parameter index | same-file help (~300, BodyTree signature renderer); cross-file reachable WITHOUT A3 via a cheap `derived_v2_method_items` | Base/stdlib callees |
 | hover (1083) | local-variable hover | same-file hover (needs A2) | cross-module; Base/store docs (dominates hover value) |
 | completions (1629) | scope-local variables | same-file module names, fields | visible-names/import completions; store completions (dominates volume) |
@@ -166,8 +165,11 @@ testitem suite doubles as a differential harness.
 
 1. ✅ **Harvest JuliaLowering** (this milestone): lowering errors + routed
    takeover ids + `unused_type_parameter` + the module-tree pair.
-2. **v2 features M1**: A1 + local-references family + workspace symbols +
-   module-at-position + document links + structural actions (~640 LOC).
+2. ✅ **v2 features M1** (`src/layer_features_v2.jl`, behind
+   `input_v2_features` / `set_v2_features!` — independent of the lint flag):
+   A1 + local references family + workspace symbols + module-at-position +
+   document links, each with the try-v2-else-v1 composition and a corpus
+   differential; structural actions verified working under both flags.
 3. ✅ **The small rule batch**: `nothing_comparison` + intra-module
    `const_decl` taken over; `soft_scope_ambiguity` shipped as the first
    genuinely new lowering-only rule (see §2).
