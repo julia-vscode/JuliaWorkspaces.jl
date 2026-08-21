@@ -23,7 +23,7 @@
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
     using JuliaWorkspaces.URIs2: filepath2uri
 
-    const RULES = (:missing_reference, :unresolved_import, :nothing_comparison)
+    const RULES = (:missing_reference, :unresolved_import, :nothing_comparison, :const_decl)
 
     root_dir = pkgdir(JuliaWorkspaces)
     jw = JuliaWorkspace()
@@ -54,10 +54,11 @@
     JW.set_lowering_lint!(jw, true)
 
     # The compared key: (rule, referenced name), extracted from the message.
-    # `nothing_comparison` messages carry no name — count-only per file.
+    # `nothing_comparison`/`const_decl` compare count-only per file (the
+    # former's messages carry no name; the latter's v1 messages don't either).
     name_of(rule, msg) = rule === :missing_reference ?
         String(chopprefix(msg, "Missing reference: ")) :
-        rule === :nothing_comparison ? "" :
+        rule in (:nothing_comparison, :const_decl) ? "" :
         (m = match(r"`([^`]+)`", msg); m === nothing ? msg : String(m.captures[1]))
 
     counts(pairs) = begin

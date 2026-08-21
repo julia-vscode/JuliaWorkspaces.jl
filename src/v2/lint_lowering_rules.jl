@@ -17,7 +17,7 @@ const LOWERING_TAKEOVER_RULES = Set([
     # (advisory) severities, from a better engine.
     :unused_binding, :unused_function_argument, :unused_type_parameter,
     :module_name, :relative_import, :unresolved_import, :missing_reference,
-    :nothing_comparison,
+    :nothing_comparison, :const_decl,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -356,6 +356,87 @@ Salsa.@derived function derived_v2_unresolved_import_findings(rt, uri)
     return result
 end
 
+# ── const_decl (intra-module) ───────────────────────────────────────────────
+#
+# Declaration conflicts at module scope, from the module tree's raw ordered
+# decl-event stream — which sees the whole module ACROSS files (v1's check is
+# scope-local, so cross-file redefinitions are new coverage). The LOCAL-scope
+# shapes v1's rule also caught (`const` on a local; `x = 1; x() = 2` inside
+# one function) are LoweringErrors and already surface as
+# `lowering_errors:error` under the flag.
+#
+# Exemptions, all silence-direction: conditional rows (only one `if` branch
+# runs — the `@static if` platform-const idiom; conservative superset of v1's
+# same-branch pairing), under-macrocall and non-interpretable rows, module
+# events (participate as representatives, never flagged), same-item events,
+# and the same-definition-twice exemption via structural body-hash equality.
+
+_v2_const_like(k::Symbol) = _v2_is_datatype_kind(k) || k === :const || k === :enum_member
+
+Salsa.@derived function derived_v2_module_const_decl_findings(rt, root, path)
+    result = @NamedTuple{ref::V2ItemRef, msg::String}[]
+    events = derived_v2_module_decl_events(rt, root, path)
+    isempty(events) && return result
+
+    skels = Dict{URI,Any}()
+    skel_of(uri) = get!(() -> derived_v2_file_skeleton(rt, uri), skels, uri)
+    function usable_item(ref::V2ItemRef)
+        for r in skel_of(ref.file).items
+            r.id == ref.id &&
+                return r.interpretable && !r.under_macrocall && !r.conditional
+        end
+        return false   # not an item row (a module event): representative-only
+    end
+
+    # Running representative per name, mirroring `_v2_declare!` (a datatype
+    # survives a later function/assignment — method extension).
+    rep = Dict{String,Tuple{Symbol,V2ItemRef}}()
+    for (name, kind, ref) in events
+        prev = get(rep, name, nothing)
+        is_item = kind !== :module
+        ok = is_item && usable_item(ref)
+        if prev !== nothing && ok && usable_item(prev[2]) && prev[2] != ref
+            pk = prev[1]
+            same_def = (h1 = derived_v2_item_body_hash(rt, ref);
+                        h2 = derived_v2_item_body_hash(rt, prev[2]);
+                        h1 !== nothing && h1 == h2)
+            if !same_def
+                if _v2_const_like(kind)
+                    push!(result, (ref=ref,
+                        msg="Cannot declare constant `$name`; it already has a value."))
+                elseif (kind === :function || kind === :macro) && pk in (:assignment, :global)
+                    push!(result, (ref=ref,
+                        msg="Cannot define function `$name`; it already has a value."))
+                elseif kind in (:assignment, :global) && _v2_const_like(pk)
+                    push!(result, (ref=ref,
+                        msg="Invalid redefinition of constant `$name`."))
+                end
+            end
+        end
+        # Representative update (method-extension rule as in `_v2_declare!`).
+        if prev === nothing || !(_v2_is_datatype_kind(prev[1]) && kind in (:function, :assignment))
+            rep[name] = (kind, ref)
+        end
+    end
+    return result
+end
+
+Salsa.@derived function derived_v2_const_decl_findings(rt, uri)
+    result = ModuleTreeFinding[]
+    skel = derived_v2_file_skeleton(rt, uri)
+    isempty(skel.items) && return result
+    root = derived_v2_best_root_for_uri(rt, uri)
+    root === nothing && return result
+    splice = _derived_v2_splice_prefix(rt, uri)
+    for path in unique!([vcat(splice, r.parent_module) for r in skel.items])
+        for f in derived_v2_module_const_decl_findings(rt, root, path)
+            f.ref.file == uri || continue
+            push!(result, (id=f.ref.id, addr=Int32(1), rule_id=:const_decl, msg=f.msg))
+        end
+    end
+    return result
+end
+
 # ── missing_reference ───────────────────────────────────────────────────────
 #
 # A post-pass join, no lowering changes: every free identifier in an item
@@ -601,11 +682,20 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         push!(result, LintFinding(ranges[f.addr], f.rule_id, f.msg, nothing, "JuliaWorkspaces.jl"))
     end
 
-    # `unresolved_import` touches the env seam and visibility, so its producer
-    # runs only when the rule is actually on (materialize would filter it
-    # anyway; this skips demanding the machinery at all).
+    # `unresolved_import` touches the env seam and visibility, and `const_decl`
+    # walks whole-module decl streams — each producer runs only when its rule
+    # is actually on (materialize would filter anyway; this skips demanding
+    # the machinery at all).
     if rule_enabled(config, :unresolved_import)
         for f in derived_v2_unresolved_import_findings(rt, uri)
+            ranges = get(maps, f.id, nothing)
+            ranges === nothing && continue
+            1 <= f.addr <= length(ranges) || continue
+            push!(result, LintFinding(ranges[f.addr], f.rule_id, f.msg, nothing, "JuliaWorkspaces.jl"))
+        end
+    end
+    if rule_enabled(config, :const_decl)
+        for f in derived_v2_const_decl_findings(rt, uri)
             ranges = get(maps, f.id, nothing)
             ranges === nothing && continue
             1 <= f.addr <= length(ranges) || continue
