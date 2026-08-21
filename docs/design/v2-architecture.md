@@ -483,28 +483,32 @@ with it.
 
 **The takeover model.** When the flag is on, this producer takes over
 `LOWERING_TAKEOVER_RULES` from StaticLint — as of the Harvest JuliaLowering
-milestone (2026-08-20), seven rules: `:unused_binding`,
-`:unused_function_argument`, `:unused_type_parameter` (from the
-typevar/static-parameter binding pair), and the LoweringError-routed
-`:duplicate_function_argument` / `:break_continue` / `:global_const_decl`,
-plus the module-tree pair `:module_name` / `:relative_import` (a third,
-skeleton-based producer — `derived_module_tree_lint_findings` — whose findings
-attach to module/import rows, which now carry address maps). Same ids, same
-severities, same presets, same `JuliaLint.toml` surface; different engine.
+milestone (2026-08-20), in two distinct modes:
 
-One rule id is NEW and lives in `LOWERING_OWN_RULES` rather than the takeover
-set (nothing to suppress): **`:lowering_errors`**, the catch-all for every
-shape JuliaLowering rejects that no v1 rule covers. LoweringError messages are
-routed through `LOWERING_MESSAGE_RULE_IDS`, an exact-string table whose
-refresh gate (testitems lowering one snippet per row) makes a vendored-
-JuliaLowering refresh that rewords a message fail loudly. Four false-positive
-guards protect the error surfacing: test-block items (the synthetic `let`
-makes module-level constructs error), items under macrocall arguments (the
-macro may transform them; `V2ItemRow.under_macrocall`), items containing
-stripped macrocalls (detected via the expansion-sites query), and files with
-syntax errors (recovered trees; `syntax_errors` already reports the problem).
-An erroring item has empty bindings, so the unused rules are vacuous there —
-the surfaced error replaces them.
+- **Re-emitting takeovers** (same ids, same advisory severities, better
+  engine): `:unused_binding`, `:unused_function_argument`,
+  `:unused_type_parameter` (from the typevar/static-parameter binding pair),
+  and the module-tree pair `:module_name` / `:relative_import` (a third,
+  skeleton-based producer — `derived_module_tree_lint_findings` — whose
+  findings attach to module/import rows, which now carry address maps).
+- **Suppression-only**: `:duplicate_function_argument`, `:break_continue`,
+  `:global_const_decl`. These are v1's *syntactic approximations* of genuine
+  load errors; under the flag they are silenced and the same shapes surface
+  as **`:lowering_errors`** instead — the one NEW rule id, in
+  `LOWERING_OWN_RULES`. Because the lowering IS the ground truth here, that
+  rule ships at `:error` in every preset (`syntax_errors` parity; the
+  messages were verified to be flisp lowering errors on stable Julia too),
+  while the v1 ids keep their `:information` defaults for flag-off users.
+  Consequence, documented: disabling `lowering_errors` under the flag
+  silences this whole error class — the suppressed v1 ids do not come back.
+
+Four false-positive guards protect the error surfacing: test-block items (the
+synthetic `let` makes module-level constructs error), items under macrocall
+arguments (the macro may transform them; `V2ItemRow.under_macrocall`), items
+containing stripped macrocalls (detected via the expansion-sites query), and
+files with syntax errors (recovered trees; `syntax_errors` already reports the
+problem). An erroring item has empty bindings, so the unused rules are vacuous
+there — the surfaced error replaces them.
 
 `derived_lowering_lint_active(rt, uri)` is the gate both producers consult, and
 its evaluation order matters: with the flag off, the only Salsa dependency

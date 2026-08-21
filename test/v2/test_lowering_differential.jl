@@ -20,47 +20,49 @@
     lr_codes(jw, uri) = [(d.code, d.source, d.message) for d in get_diagnostic(jw, uri)]
 end
 
-@testitem "lowering routing: the message table maps to takeover rule ids" setup=[LoweringRouteWS] begin
-    # REFRESH GATE: each case lowers a crafted snippet and asserts the routed
-    # rule id. A packages/JuliaLowering refresh that rewords one of the pinned
-    # messages (see LOWERING_MESSAGE_RULE_IDS) drops the finding into
-    # :lowering_errors and fails here loudly — that is the point.
+@testitem "lowering errors: load-error shapes report at :error under one rule" setup=[LoweringRouteWS] begin
+    # Each case lowers a crafted snippet and must surface as `lowering_errors`
+    # with `:error` severity in the DEFAULT preset (these are shapes Julia will
+    # not load — verified equivalent on stable Julia's flisp lowering).
+    # StaticLint's approximations (`duplicate_function_argument`,
+    # `break_continue`, `global_const_decl`) are suppressed, never re-emitted.
+    # Message text is asserted so a vendored-JuliaLowering rewording surfaces
+    # in review rather than passing silently.
     cases = [
-        ("f(x, x) = x\n",                            :duplicate_function_argument, "function argument name not unique"),
-        ("f((a, b), (a,)) = a\n",                    :duplicate_function_argument, "destructured argument name `a` conflicts with an existing local variable from the same scope"),
-        ("continue\n",                               :break_continue,              "`continue` outside of a `while` or `for` loop"),
-        ("function g()\n    break\nend\n",           :break_continue,              "unlabeled `break` outside of a `while` or `for` loop"),
-        ("function h()\n    const y = 1\nend\n",     :global_const_decl,           "unsupported `const` inside function"),
-        ("const local z = 1\n",                      :global_const_decl,           "unsupported `const local` declaration"),
+        ("f(x, x) = x\n",                            "function argument name not unique"),
+        ("f((a, b), (a,)) = a\n",                    "destructured argument name `a` conflicts with an existing local variable from the same scope"),
+        ("continue\n",                               "`continue` outside of a `while` or `for` loop"),
+        ("function g()\n    break\nend\n",           "unlabeled `break` outside of a `while` or `for` loop"),
+        ("function h()\n    const y = 1\nend\n",     "unsupported `const` inside function"),
+        ("const local z = 1\n",                      "unsupported `const local` declaration"),
     ]
-    for (src, rule, msg) in cases
+    for (src, msg) in cases
         jw, uri = lr_workspace(src)
-        diags = lr_codes(jw, uri)
-        matching = [d for d in diags if d[1] === rule && d[3] == msg]
+        diags = get_diagnostic(jw, uri)
+        matching = [d for d in diags if d.code === :lowering_errors && d.message == msg]
         if length(matching) != 1
-            println("Routing failure for ", repr(src), ": got ", diags)
+            println("Failure for ", repr(src), ": got ", [(d.code, d.message) for d in diags])
         end
         @test length(matching) == 1
-        @test matching[1][2] == "JuliaWorkspaces.jl"
-        # And it must NOT double-report as the catch-all id.
-        @test !any(d -> d[1] === :lowering_errors, diags)
+        @test matching[1].severity === :error
+        @test matching[1].source == "JuliaWorkspaces.jl"
+        # Never re-emitted under the suppressed v1 ids.
+        @test !any(d -> d.code in (:duplicate_function_argument, :break_continue, :global_const_decl), diags)
     end
 end
 
-@testitem "lowering routing: takeover ids honor config and flag" setup=[LoweringRouteWS] begin
-    # The routed rules use the ordinary config surface: turning one off
-    # silences it without touching the others.
+@testitem "lowering errors: one switch governs the class; flag off is legacy" setup=[LoweringRouteWS] begin
+    # Disabling lowering_errors under the flag silences the whole error class
+    # (the suppressed v1 ids do not come back — documented consequence).
     jw = JuliaWorkspace()
     uri = URI("file:///pr/src/a.jl")
     add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
-        SourceText("[rules]\nbreak_continue = \"off\"\n", "toml")))
+        SourceText("[rules]\nlowering_errors = \"off\"\n", "toml")))
     add_file!(jw, TextFile(uri, SourceText("continue\n", "julia")))
     JW.set_lowering_lint!(jw, true)
-    @test !any(d -> d.code === :break_continue, get_diagnostic(jw, uri))
+    @test !any(d -> d.code in (:lowering_errors, :break_continue), get_diagnostic(jw, uri))
 
-    # Flag off: nothing from the lowering producer. (In this synthetic
-    # harness StaticLint does not fire on these shapes either — v2 is a strict
-    # superset here; the corpus differential below covers real-world parity.)
+    # Flag off: nothing from the lowering producer; legacy behavior untouched.
     jw2, uri2 = lr_workspace("continue\n"; flag=false)
     @test !any(d -> d[2] == "JuliaWorkspaces.jl", lr_codes(jw2, uri2))
 end
@@ -84,11 +86,14 @@ end
 end
 
 @testitem "lowering routing: suppression loses nothing over the corpus" setup=[LoweringRouteWS] begin
-    # For the routed ids, flag-off (StaticLint) and flag-on (v2) must agree
-    # per file over this repo's corpus. Divergences are a ratchet: an entry
-    # needs a reason, and a healed entry must be removed.
-    const ROUTED_IDS = (:duplicate_function_argument, :break_continue, :global_const_decl,
-                        :unused_type_parameter, :module_name, :relative_import)
+    # Two per-file comparisons over this repo's corpus, both empty-allowlist
+    # ratchets:
+    #  - the re-emitting takeover ids must AGREE between flag off and on;
+    #  - every flag-off finding with a SUPPRESSED id (v1's load-error
+    #    approximations) must have a flag-on `lowering_errors` finding at the
+    #    same location, so suppression never loses a real problem.
+    const REEMITTING_IDS = (:unused_type_parameter, :module_name, :relative_import)
+    const SUPPRESSED_IDS = (:duplicate_function_argument, :break_continue, :global_const_decl)
     const EXPECTED_DIVERGENT_FILES = Set{String}()
 
     root = pkgdir(JuliaWorkspaces)
@@ -118,9 +123,16 @@ end
             add_file!(jw, TextFile(uri, SourceText(src, "julia")))
             JW.set_input_env_ready!(jw.runtime, true)
             flag && JW.set_lowering_lint!(jw, true)
-            sort([(d.code, first(d.range)) for d in get_diagnostic(jw, uri) if d.code in ROUTED_IDS])
+            diags = get_diagnostic(jw, uri)
+            (reemit = sort([(d.code, first(d.range)) for d in diags if d.code in REEMITTING_IDS]),
+             suppressed = sort([first(d.range) for d in diags if d.code in SUPPRESSED_IDS]),
+             lowering = sort([first(d.range) for d in diags if d.code === :lowering_errors]))
         end
-        per_flag[1] == per_flag[2] || (divergent[rel] = per_flag)
+        off, on = per_flag
+        ok = off.reemit == on.reemit &&
+             isempty(on.suppressed) &&
+             issubset(Set(off.suppressed), Set(on.lowering))
+        ok || (divergent[rel] = per_flag)
     end
 
     unexpected = setdiff(keys(divergent), EXPECTED_DIVERGENT_FILES)

@@ -330,7 +330,7 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | --- | --- | --- |
 | `syntax_errors` | `error` | Julia syntax errors |
 | `syntax_warnings` | `off` | Julia syntax warnings |
-| `lowering_errors` | `off` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — experimental, requires the lowering-lint flag |
+| `lowering_errors` | `error` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — the file will not load. Experimental, requires the lowering-lint flag; when active it supersedes `duplicate_function_argument`/`break_continue`/`global_const_decl` |
 | `testitem_errors` | `error` | Malformed `@testitem` blocks |
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |

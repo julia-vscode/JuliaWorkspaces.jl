@@ -45,10 +45,17 @@ end
     @test any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
 end
 
-@testitem "lowering_errors: off by default, gated by flag, opens the gate alone" setup=[LoweringErrWS] begin
-    # Default preset: the rule ships :off.
+@testitem "lowering_errors: :error by default, gated by flag, opens the gate alone" setup=[LoweringErrWS] begin
+    # Default preset: the rule ships :error in EVERY preset — these are shapes
+    # Julia will not load, the same class as syntax_errors.
     jw, uri = le_workspace("1 = 2\n"; config=nothing)
-    @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+    diags = [d for d in get_diagnostic(jw, uri) if d.code === :lowering_errors]
+    @test length(diags) == 1
+    @test diags[1].severity === :error
+
+    # Minimal preset keeps it too (outright breakage).
+    jw, uri = le_workspace("1 = 2\n"; config="preset = \"minimal\"\n")
+    @test any(d -> d.code === :lowering_errors && d.severity === :error, get_diagnostic(jw, uri))
 
     # Rule on but v2 flag off: nothing.
     jw, uri = le_workspace("1 = 2\n"; flag=false)

@@ -1,10 +1,11 @@
 # Lowering-backed lint rules (experiment, behind `input_lowering_lint`).
 #
-# No new rule ids: when the flag is on, this producer TAKES OVER the rules in
-# `LOWERING_TAKEOVER_RULES` from StaticLint — same ids, severities, presets and
-# JuliaLint.toml surface, different engine (the vendored-JuliaLowering binding
-# analysis in layer_lowering.jl). When the flag is off (the default), nothing
-# below the gate is ever demanded and diagnostics behave exactly as before.
+# When the flag is on, this producer TAKES OVER the rules in
+# `LOWERING_TAKEOVER_RULES` from StaticLint — the advisory-class ones under the
+# same ids/severities, and the load-error-class ones by suppression, superseded
+# by the `:lowering_errors` rule (`LOWERING_OWN_RULES`) at `:error`. When the
+# flag is off (the default), nothing below the gate is ever demanded and
+# diagnostics behave exactly as before.
 #
 # Query shape mirrors the syntax-rule engine: a position-free per-item query
 # that backdates (`derived_item_semantic_findings`), and a volatile per-file
@@ -12,50 +13,23 @@
 # the address→range maps.
 
 const LOWERING_TAKEOVER_RULES = Set([
+    # Re-emitting takeovers: v2 reports these under the same ids and the same
+    # (advisory) severities, from a better engine.
     :unused_binding, :unused_function_argument, :unused_type_parameter,
-    # Routed from LoweringError messages (see LOWERING_MESSAGE_RULE_IDS):
-    :duplicate_function_argument, :break_continue, :global_const_decl,
-    # Module-tree rules (derived_module_tree_lint_findings):
     :module_name, :relative_import,
+    # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
+    # the flag they are silenced and the same shapes surface as
+    # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
+    # v2 findings deserve the error severity while v1's approximations keep
+    # their `:information` defaults for flag-off users). They are NOT
+    # re-emitted under their v1 ids — and consequently, disabling
+    # `lowering_errors` under the flag silences this whole error class.
+    :duplicate_function_argument, :break_continue, :global_const_decl,
 ])
 
 # Rules this producer OWNS (no StaticLint counterpart, so no suppression):
 # checks only JuliaLowering computes.
 const LOWERING_OWN_RULES = Set([:lowering_errors])
-
-"""
-    LOWERING_MESSAGE_RULE_IDS
-
-Routes a `LoweringError` message to an existing rule id where one corresponds;
-everything unrouted reports as `:lowering_errors`. Keys are EXACT vendored
-strings — the refresh-gate testitems in test/v2/test_lowering_differential.jl
-lower one snippet per entry and assert the mapped id, so a
-`packages/JuliaLowering` refresh that rewords a message fails loudly instead of
-silently demoting a takeover finding.
-"""
-const LOWERING_MESSAGE_RULE_IDS = Dict{String,Symbol}(
-    # scope_analysis.jl:144 (`_var_str` variants for other kinds stay unrouted —
-    # v1 has no rule for a duplicate static parameter / typevar)
-    "function argument name not unique"                    => :duplicate_function_argument,
-    # validation.jl:344-348
-    "`continue` outside of a `while` or `for` loop"        => :break_continue,
-    "unlabeled `break` outside of a `while` or `for` loop" => :break_continue,
-    "labeled `break` outside of loop or symbolic block"    => :break_continue,
-    # validation.jl:239/242 + scope_analysis.jl:635/641 + validation.jl:485
-    "unsupported `const` inside function"                  => :global_const_decl,
-    "unsupported `const` declaration on local variable"    => :global_const_decl,
-    "unsupported `const local` declaration"                => :global_const_decl,
-)
-
-function _lowering_error_rule_id(msg::AbstractString)
-    routed = get(LOWERING_MESSAGE_RULE_IDS, msg, nothing)
-    routed === nothing || return routed
-    # A duplicate destructured argument reports a PARAMETERIZED message
-    # ("destructured argument name `a` conflicts with an existing …"), so it
-    # cannot live in the exact-string table; the refresh gate pins the prefix.
-    startswith(msg, "destructured argument name ") && return :duplicate_function_argument
-    return :lowering_errors
-end
 
 # The gate both producers consult. Evaluation order matters: with the flag off
 # the only Salsa dependency is the flag input itself, so config edits do not
@@ -104,7 +78,7 @@ Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
         isempty(derived_v2_item_expansion_sites(rt, ref)) || return result
         for f in low.findings
             f.addr == Int32(0) && continue   # no user address to report at
-            push!(result, (addr=f.addr, rule_id=_lowering_error_rule_id(f.msg), msg=f.msg))
+            push!(result, (addr=f.addr, rule_id=:lowering_errors, msg=f.msg))
         end
         return result
     end

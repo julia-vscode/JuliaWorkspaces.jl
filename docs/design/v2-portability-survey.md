@@ -24,9 +24,9 @@ env/SymbolServer seam · **D** blocked on CFG/flow · **E** no port needed.
 | --- | --- |
 | `unused_binding`, `unused_function_argument` | ✅ ported (pre-milestone). v2 needed none of v1's six false-positive suppressors — real scoping (`is_captured`, per-binding reads) replaces them. |
 | `unused_type_parameter` | ✅ this milestone. A `where` param mints a `:typevar` (signature reads) + `:static_parameter` (body reads) pair at one address; unused ⇔ both unread. Struct/alias params lower as `:local` — not covered, matching v1's where-only semantics. |
-| `duplicate_function_argument` | ✅ this milestone, from `LoweringError` messages ("function argument name not unique" + the parameterized destructured-conflict prefix). |
-| `break_continue` | ✅ this milestone, from the three validation messages. More precise than v1 (labeled break; actual loop scope rather than any enclosing `for`/`while`). |
-| `global_const_decl` | ✅ this milestone, from the three unsupported-`const` messages. (`TypeDeclOnGlobalVariable` is dead on Julia ≥ 1.8.) |
+| `duplicate_function_argument` | ✅ this milestone — superseded: under the flag v1's syntactic check is suppressed and the shapes report as `lowering_errors:error` (the lowering is ground truth; the v1 id keeps `:information` for flag-off users). |
+| `break_continue` | ✅ this milestone — superseded like the above. More precise than v1 (labeled break; actual loop scope rather than any enclosing `for`/`while`). |
+| `global_const_decl` | ✅ this milestone — superseded like the above. (`TypeDeclOnGlobalVariable` is dead on Julia ≥ 1.8.) |
 | `pointless_boolean`, `literal_use`, `NotEqDef` half of `type_piracy`, most of `const_if_condition` | pure shape; portable any time (some arguably belong in the syntax tier). |
 
 ### B — modest additions (~10%)
@@ -70,9 +70,10 @@ TOML/config/environment rules.
   ~131 validation/desugaring/scope checks (invalid assignment targets,
   malformed signatures, duplicate struct fields, `new{...}` arity,
   write-only-underscore reads, bad destructuring, …) — surfaced instead of
-  discarded, with four false-positive guards (test-block let-wrapping,
-  items under macrocall arguments, items containing stripped macrocalls,
-  files with syntax errors).
+  discarded, at `:error` in every preset (these shapes do not load; verified
+  equivalent on stable Julia's flisp lowering), with four false-positive
+  guards (test-block let-wrapping, items under macrocall arguments, items
+  containing stripped macrocalls, files with syntax errors).
 - `is_ambiguous_local`: Julia's soft-scope-ambiguity warning, statically.
   Already projected; per-item lowering rarely sees the conflicting global, so
   a useful rule needs the enclosing module's names injected into the frame.

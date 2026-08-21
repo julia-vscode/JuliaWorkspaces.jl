@@ -196,11 +196,14 @@ const LINT_RULES = LintRule[
     # ── Rules backed by analyses other than StaticLint ───────────────────────
     # Shapes JuliaLowering rejects (v2 lowering producer, behind the lowering
     # flag): invalid assignment targets, malformed signatures, duplicate struct
-    # fields, … — code that would fail to load. Off outside strict, per the
-    # new-rule convention; messages matching an existing rule id are routed
-    # there instead (see LOWERING_MESSAGE_RULE_IDS).
+    # fields, … — code that will NOT load (verified equivalent on stable
+    # Julia's flisp lowering, not just the vendored master copy). Same class of
+    # breakage as `syntax_errors`, so the same treatment: `:error` in every
+    # preset. Under the flag this rule supersedes StaticLint's syntactic
+    # approximations `duplicate_function_argument`/`break_continue`/
+    # `global_const_decl`, which are suppressed rather than re-emitted.
     LintRule(id = :lowering_errors, tier = TierSemantic,
-        severity_default = :off, severity_strict = :warning),
+        severity_minimal = :error, severity_default = :error, severity_strict = :error),
     LintRule(id = :syntax_errors, tier = TierSyntax,
         severity_minimal = :error, severity_default = :error, severity_strict = :error),
     LintRule(id = :syntax_warnings, tier = TierSyntax,

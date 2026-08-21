@@ -30,10 +30,11 @@ Only `src/`, `Project.toml`, `LICENSE*` are required at runtime; the rest of the
    must pass; thunk *execution* is expected to fail on stable Julia — it targets
    master-only Core builtins) and the `lowering layer` testitems in
    `test/v2/test_lowering_layer.jl`.
-4. Run the message-routing refresh gate: the testitems in
-   `test/v2/test_lowering_differential.jl` lower one snippet per entry of
-   `LOWERING_MESSAGE_RULE_IDS` (src/v2/lint_lowering_rules.jl) and assert the
-   routed rule id. A refresh that rewords a pinned LoweringError message fails
-   there — update the table together with the vendor bump, never silently.
+4. Run the lowering-diagnostics gate: the testitems in
+   `test/v2/test_lowering_differential.jl` lower one crafted snippet per
+   error-class shape and assert it still reports as `lowering_errors` with the
+   expected message text, so a refresh that changes what lowering rejects (or
+   rewords a message) is reviewed together with the vendor bump, never
+   silently.
 
 Upstream CI tests nightly only, so a refresh without steps 3–4 is not safe.
