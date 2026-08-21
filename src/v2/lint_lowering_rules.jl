@@ -248,7 +248,17 @@ function _v2_unresolved_import_name(rt, root, path::Vector{String}, ri::V2Resolv
             end
             anchor, segs = split
             k = _v2_deepest_tree_prefix(rt, root, anchor, segs)
-            return k >= length(segs) ? last(segs) : segs[k + 1]
+            k >= length(segs) && return nothing   # the full path IS tree-resolvable
+            cand = segs[k + 1]
+            # v1's resolves-to-a-binding rule: when the stuck segment names a
+            # ledgered EXTERNAL binding (`using AutoHashEquals` in the parent,
+            # `using ..AutoHashEquals` here), the relative statement resolved
+            # lexically — the ORIGIN statement already carries the missing-store
+            # diagnosis, and repeating it at every relative re-import is noise.
+            _, modtargets = _v2_visible_names_pass1(rt, root, vcat(anchor, segs[1:k]), Set{URI}())
+            mt = get(modtargets, cand, nothing)
+            (mt !== nothing && mt.sort === :external) && return nothing
+            return cand
         end
         re.sort === :external &&
             return derived_v2_external_first_missing_segment(rt, root, re.path)
@@ -266,33 +276,39 @@ Salsa.@derived function derived_v2_unresolved_import_findings(rt, uri)
     splice = _derived_v2_splice_prefix(rt, uri)
     deps = nothing   # project deps demanded only once a finding exists
 
-    for imp in skel.imports
-        # Dots exceeding the nesting are `relative_import`'s finding — v1's
-        # no-double-diagnosis rule (`first_unresolved_import_component` skips
-        # paths already carrying errors).
-        ndots = 0
-        while ndots < length(imp.path) && imp.path[ndots + 1] == "."
-            ndots += 1
+    # Iterate the RESOLVED imports of each module this file's statements splice
+    # into, filtered back to this file's rows — a comma-list statement
+    # (`import A, B, C`) is one item id but SEVERAL resolved imports, so a
+    # per-skeleton-row walk would conflate them (each path gets its own
+    # finding, exactly as v1 marks each path expression separately).
+    for path in unique!([vcat(splice, imp.parent_module) for imp in skel.imports])
+        for ri in derived_v2_module_imports(rt, root, path)
+            ri.from.file == uri || continue
+            # Dots exceeding the nesting are `relative_import`'s finding — v1's
+            # no-double-diagnosis rule (`first_unresolved_import_component`
+            # skips paths already carrying errors). `:unresolved` targets keep
+            # the raw written segments, dots included.
+            if ri.target.sort === :unresolved
+                raw = ri.target.path
+                ndots = 0
+                while ndots < length(raw) && raw[ndots + 1] == "."
+                    ndots += 1
+                end
+                ndots > 0 && ndots - 1 > length(path) && continue
+            end
+
+            name = _v2_unresolved_import_name(rt, root, path, ri)
+            name === nothing && continue
+            deps === nothing && (deps = derived_v2_env_project_deps(rt, root))
+            cause = name in deps ?
+                "`$name` is a declared dependency but its symbols could not be indexed." :
+                "Failed to resolve `$name`."
+            consequence = ri.kind === :using && isempty(ri.symbols) ?
+                "Missing-reference checks are disabled in this scope and all nested scopes." :
+                "Anything imported through this statement is assumed to exist and will not be checked."
+            push!(result, (id=ri.from.id, addr=Int32(1), rule_id=:unresolved_import,
+                msg="$cause $consequence"))
         end
-        ndots > 0 && ndots - 1 > length(splice) + length(imp.parent_module) && continue
-
-        path = vcat(splice, imp.parent_module)
-        ris = derived_v2_module_imports(rt, root, path)
-        idx = findfirst(ri -> ri.from == V2ItemRef(uri, imp.id), ris)
-        idx === nothing && continue
-        ri = ris[idx]
-
-        name = _v2_unresolved_import_name(rt, root, path, ri)
-        name === nothing && continue
-        deps === nothing && (deps = derived_v2_env_project_deps(rt, root))
-        cause = name in deps ?
-            "`$name` is a declared dependency but its symbols could not be indexed." :
-            "Failed to resolve `$name`."
-        consequence = ri.kind === :using && isempty(ri.symbols) ?
-            "Missing-reference checks are disabled in this scope and all nested scopes." :
-            "Anything imported through this statement is assumed to exist and will not be checked."
-        push!(result, (id=imp.id, addr=Int32(1), rule_id=:unresolved_import,
-            msg="$cause $consequence"))
     end
     return result
 end

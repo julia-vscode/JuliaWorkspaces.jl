@@ -70,7 +70,9 @@ end
     """)
     @test isempty(ui_diags(jw))
 
-    # The same shape through a MISSING store still fails, at the ledger name.
+    # The same shape through a MISSING store: the ORIGIN statement carries the
+    # diagnosis; the relative re-import resolved to Parent's lexical binding
+    # and stays silent (v1's resolves-to-a-binding rule).
     jw = ui_workspace("""
     module Parent
     using Printf
@@ -79,9 +81,15 @@ end
     end
     end
     """)
+    d = only(ui_diags(jw))
+    @test occursin("`Printf`", d.message)
+
+    # A comma-list statement reports each unresolved path separately.
+    jw = ui_workspace("import NotAPackageA, NotAPackageB\n")
     ds = ui_diags(jw)
-    @test length(ds) == 2   # Parent's `using Printf` and Child's re-attempt
-    @test all(d -> occursin("`Printf`", d.message), ds)
+    @test length(ds) == 2
+    @test any(d -> occursin("`NotAPackageA`", d.message), ds)
+    @test any(d -> occursin("`NotAPackageB`", d.message), ds)
 end
 
 @testitem "v2 unresolved_import: takeover and flag-off" setup=[UnresolvedImpWS] begin
