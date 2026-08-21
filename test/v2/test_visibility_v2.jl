@@ -1,6 +1,9 @@
 # v2 visibility layer (layer_visibility_v2.jl): unit tests, mirroring v1's
-# suite in test/test_module_tree.jl with tree-only external semantics (the
-# Milestone C seam: external targets bind only the module name).
+# suite in test/test_module_tree.jl. External targets resolve through the env
+# seam (src/layer_v2_env_seam.jl). These workspaces have no project, so the
+# env is load_core()'s bake — `Base`/`Core` (and nested submodules) have
+# stores; `Printf`/`Downloads` are genuinely MISSING stores here, which is
+# what makes them the store-missing fixtures below.
 
 @testsnippet VisV2WS begin
     using JuliaWorkspaces
@@ -122,7 +125,7 @@ end
     @test v["Sub"].origin === :import_binding
 end
 
-@testitem "v2 visibility: external targets bind only the module name (tree-only seam)" setup=[VisV2WS] begin
+@testitem "v2 visibility: missing-store externals bind only the module name" setup=[VisV2WS] begin
     jw = vis_workspace("""
     module User
     using Printf
@@ -135,11 +138,34 @@ end
     @test v["Printf"].origin === :using_external
     @test v["Downloads"].kind === :external_symbol
     @test v["Downloads"].origin === :import_binding
-    # No store: exported names are NOT expanded…
+    # No store in this env: exported names are NOT expanded…
     @test !haskey(v, "@printf")
     # …and colon-list members bind lexically as :unknown.
     @test v["@sprintf"].kind === :unknown
     @test v["@sprintf"].origin === :import_binding
+end
+
+@testitem "v2 visibility: store-present externals expand through the env seam" setup=[VisV2WS] begin
+    jw = vis_workspace("""
+    module User
+    using Base.Threads
+    using Base: Filesystem, no_such_name_xyz
+    end
+    """)
+    v = vis(jw, ["User"])
+    # The wildcard expands the store's exports.
+    @test v["@threads"].kind === :external_symbol
+    @test v["@threads"].origin === :using_external
+    @test v["@threads"].origin_module == ["Base", "Threads"]
+    @test v["nthreads"].origin === :using_external
+    # The statement still binds the module name itself.
+    @test v["Threads"].kind === :external_symbol
+    # Colon members resolve against the store's haskey (NOT export-gated:
+    # Filesystem is an unexported submodule).
+    @test v["Filesystem"].kind === :external_symbol
+    @test v["Filesystem"].origin === :import_binding
+    # An absent member still binds lexically, as :unknown.
+    @test v["no_such_name_xyz"].kind === :unknown
 end
 
 @testitem "v2 visibility: workspace package exports come in cross-root" begin
@@ -297,15 +323,30 @@ end
     end
     """)
     # Parent binds `Printf` externally; Child's relative import finds it in
-    # the ledger — but the external extension cannot validate without a store
-    # (the seam; v1 behaves identically when the store is missing), so nothing
-    # binds and the wildcard-unresolved flag covers suppression instead.
+    # the ledger — but the external extension cannot validate against a
+    # MISSING store (v1 behaves identically), so nothing binds and the
+    # wildcard-unresolved flag covers suppression instead.
     imp = only(derived_v2_module_imports(jw.runtime, VIS_ROOT, ["Parent", "Child"]))
     @test imp.target.sort === :unresolved
     vc = vis(jw, ["Parent", "Child"])
     @test !haskey(vc, "Printf")
     @test !haskey(vc, "@printf")
     @test derived_v2_module_unresolved_wildcard_using(jw.runtime, VIS_ROOT, ["Parent", "Child"])
+
+    # The same shape against a PRESENT store: the pass-2 extension validates
+    # through the env seam and the wildcard expands in Child.
+    jws = vis_workspace("""
+    module Parent
+    import Base
+    module Child
+    using ..Base
+    end
+    end
+    """)
+    vcs = vis(jws, ["Parent", "Child"])
+    @test vcs["Base"].kind === :external_symbol
+    @test vcs["println"].origin === :using_external
+    @test !derived_v2_module_unresolved_wildcard_using(jws.runtime, VIS_ROOT, ["Parent", "Child"])
 
     # Single-dot `using .X` failing at depth 0 stays unresolved without
     # recursion.
@@ -325,9 +366,13 @@ end
     jw = vis_workspace("module P\nmodule Q\nend\nusing .Q\nend\n")
     @test !flag(jw, ["P"])
 
-    # External wildcard: always unresolved this milestone (seam).
+    # External wildcard with a MISSING store: unresolved.
     jw = vis_workspace("module P\nusing Printf\nend\n")
     @test flag(jw, ["P"])
+
+    # External wildcard with a PRESENT store: resolved through the env seam.
+    jw = vis_workspace("module P\nusing Base.Threads\nend\n")
+    @test !flag(jw, ["P"])
 
     # Colon form never flags.
     jw = vis_workspace("module P\nusing Printf: @sprintf\nend\n")

@@ -6,12 +6,12 @@
 #       nodes; v2 deliberately has none.
 #   :macro_declared — v1's macro-declared-names machinery (Salsa.@declare_input
 #       et al.); not ported to v2.
-#   :external_names — v1 resolves external imports against the stdlib-only
-#       env (this harness loads no project), expanding wildcard exports and
-#       resolving colon members; v2 is tree-only this milestone. Tightly
-#       keyed: only names v1 marks `:external_symbol` (or that v2 binds as
-#       `:unknown` where v1 resolved a member) may diverge — and when v2 HAS
-#       the name with the same kind, the faces must be equal.
+#
+# A third class, :external_names, existed while the layer was tree-only
+# (Milestone B). With the env seam restored, external faces converged EXACTLY
+# across this corpus — including v1's implicit-member fallback, which this
+# repo's code never exercises through a colon list — so the class is gone and
+# any external divergence now fails outright.
 
 @testitem "v2 visibility agrees with v1 across the package corpus" begin
     using JuliaWorkspaces
@@ -19,7 +19,7 @@
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
     using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
 
-    const EXPECTED_CLASSES = Set([:testitem_nodes, :macro_declared, :external_names])
+    const EXPECTED_CLASSES = Set([:testitem_nodes, :macro_declared])
 
     root_dir = pkgdir(JuliaWorkspaces)
     jw = JuliaWorkspace()
@@ -78,16 +78,6 @@
                 if face1.kind === :macro_declared
                     face2 === nothing ? push!(saw, :macro_declared) :
                         push!(problems, "$(root) $(path): v2 binds macro-declared `$name` as $(face2)")
-                    continue
-                end
-                if face1.kind === :external_symbol
-                    if face2 === nothing || face2.kind === :unknown
-                        # v1 env-expanded / member-resolved; v2 tree-only.
-                        push!(saw, :external_names)
-                        continue
-                    end
-                    isequal(face1, face2) ||
-                        push!(problems, "$(root) $(path): `$name` v1=$(face1) v2=$(face2)")
                     continue
                 end
                 if face2 === nothing

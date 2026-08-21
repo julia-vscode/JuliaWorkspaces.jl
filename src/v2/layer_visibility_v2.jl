@@ -1,18 +1,19 @@
 # Layer 2½ of the v2 stack: per-module visible names — which names are
 # reachable inside a module, and where each comes from. A port of v1's
-# layer_visibility.jl algorithm onto the v2 module tree, TREE-ONLY:
+# layer_visibility.jl algorithm onto the v2 module tree.
 #
-#   THE MILESTONE C SEAM. This layer has no environment contact. Every
-#   `:external` import target behaves as v1's store-MISSING branch: the
-#   statement binds only the target module's name (`:external_symbol`),
-#   colon-list members bind `:unknown`, ledger extensions through external
-#   targets fail, and an external wildcard `using` always counts as
-#   unresolved. Milestone C restores the store lookups at exactly these
-#   marked places: `_v2_external_bring_ins`, the `:external` arm of
-#   `_v2_member_lookup`, the `:external` arm of `_v2_extend_target`, and the
-#   `:external` rules in `_v2_wildcard_using_unresolved`. (v1's implicit
-#   `using Base`/`Core` member fallback and macro-declared names are also
-#   env-side and absent here.)
+#   THE ENVIRONMENT EDGE. `:external` import targets resolve through the
+#   plain-data queries in src/layer_v2_env_seam.jl (outside src/v2 — see its
+#   header for why) at exactly four places: `_v2_external_bring_ins`, the
+#   `:external` arm of `_v2_member_lookup`, the `:external` arm of
+#   `_v2_extend_target`, and the `:external` rules in
+#   `_v2_wildcard_using_unresolved`. A MISSING store keeps v1's store-missing
+#   behavior at each: bind only the module name, members `:unknown`,
+#   extensions fail, wildcard counts as unresolved. Two deliberate absences
+#   remain vs v1: the implicit `using Base`/`Core` MEMBER fallback inside the
+#   `:tree`/`:workspace_package` member-lookup arms, and macro-declared
+#   names — both answer `:unknown` here, which still BINDS the name, so
+#   consumers that look names up by name (missing_reference) stay safe.
 #
 # Everything that leaves this layer is plain data (names, kinds, `V2ItemRef`s)
 # — the same purity contract the rest of v2 keeps. The invalidation design is
@@ -29,8 +30,9 @@
     V2VisibleName(kind, origin, item, origin_module)
 
 One name visible in a module. `kind` is the declaring item's kind, `:module`,
-`:external_symbol` (bound by an external import; tree-only, so never expanded
-into exports), or `:unknown` (bound lexically but unverifiable). `origin`:
+`:external_symbol` (bound through an external import — the module name, an
+expanded export, or a colon-list member resolved against the store), or
+`:unknown` (bound lexically but unverifiable). `origin`:
 `:declared` | `:using_tree` | `:using_workspace_package` | `:using_external` |
 `:import_binding`. `item` is the declaring `V2ItemRef` when the name traces to
 a tree declaration, else `nothing`. `origin_module` is the declaring module's
@@ -87,19 +89,39 @@ function _v2_bound_module_name(ri::V2ResolvedImport)
     return ri.symbols[hit].alias === nothing ? ri.symbols[hit].name : ri.symbols[hit].alias
 end
 
-# MILESTONE C SEAM: the `:external` bring-in arm. Tree-only = v1's
-# store-MISSING branch verbatim: Julia binds the statement's name lexically
-# whatever the store situation, and the import statement is where any failure
-# is reported once — so the bound name must exist here or every use site would
-# contradict that with a spurious missing-ref. Exported names are unknowable
-# without a store; only the module name binds. The ledger entry keeps the
-# denoted target so member/relative chains through the binding re-attempt (and
-# fail) at their own sites.
-function _v2_external_bring_ins(kind::Symbol, target::V2ImportTarget, alias)::Vector{_V2BringIn}
+# ENV EDGE: the `:external` bring-in arm, resolved through the seam queries.
+# Store MISSING (unindexed dependency or genuinely absent package) keeps v1's
+# behavior: Julia binds the statement's name lexically whatever the store
+# situation, and the import statement is where any failure is reported once —
+# so the bound name must exist here or every use site would contradict that
+# with a spurious missing-ref; exported names are unknowable without the
+# store, so only the module name binds. Store PRESENT: a wildcard `using`
+# additionally brings in each export as `:external_symbol`, with a ledger
+# target when the export is module-valued (or names the module itself). The
+# module-name ledger entry keeps the denoted target either way, so
+# member/relative chains through the binding re-attempt at their own sites.
+function _v2_external_bring_ins(rt, root, kind::Symbol, target::V2ImportTarget, alias)::Vector{_V2BringIn}
+    entries = _V2BringIn[]
+    tp = target.path
     origin = kind === :using ? :using_external : :import_binding
+    exports = derived_v2_external_module_exports(rt, root, tp)
+    if exports !== nothing && kind === :using
+        modnames = derived_v2_external_exported_module_names(rt, root, tp)
+        for name in exports
+            mt = if name == tp[end]
+                target   # a module's own name in its export list denotes the module itself
+            elseif name in modnames
+                V2ImportTarget(:external, vcat(tp, [name]))
+            else
+                nothing
+            end
+            push!(entries, (name, V2VisibleName(:external_symbol, :using_external, nothing, tp), mt))
+        end
+    end
     bound = _v2_bound_module_name(target, alias)
-    bound === nothing && return _V2BringIn[]
-    return _V2BringIn[(bound, V2VisibleName(:external_symbol, origin, nothing, target.path), target)]
+    bound === nothing ||
+        push!(entries, (bound, V2VisibleName(:external_symbol, origin, nothing, tp), target))
+    return entries
 end
 
 # Bring in the names for one fully-resolved (never `:unresolved`) target.
@@ -163,7 +185,7 @@ function _v2_target_bring_ins(rt, root, kind::Symbol, target::V2ImportTarget, al
             push!(entries, (bound, V2VisibleName(:module, origin, derived_v2_module_declared_at(rt, entry, tp), tp), target))
 
     elseif target.sort === :external
-        append!(entries, _v2_external_bring_ins(kind, target, alias))
+        append!(entries, _v2_external_bring_ins(rt, root, kind, target, alias))
     end
     return entries
 end
@@ -198,9 +220,15 @@ function _v2_member_lookup(rt, root, target::V2ImportTarget, member_name::String
         mt = names[member_name] === :module ? V2ImportTarget(:workspace_package, vcat(tp, [member_name])) : nothing
         return (names[member_name], derived_v2_module_declared(rt, entry, tp)[member_name], tp, mt)
     elseif target.sort === :external
-        # MILESTONE C SEAM: no store, so every member is `:unknown` (v1's
-        # store-missing behavior).
-        return (:unknown, nothing, tp, nothing)
+        # ENV EDGE: the member gate is the store's `haskey` (NOT export-gated —
+        # `import Base: Filesystem` works); a missing store keeps `:unknown`.
+        member_name == tp[end] &&
+            derived_v2_external_module_exports(rt, root, tp) !== nothing &&
+            return (:external_symbol, nothing, tp, target)
+        mk = derived_v2_external_module_member_kind(rt, root, tp, member_name)
+        (mk === :missing_store || mk === :absent) && return (:unknown, nothing, tp, nothing)
+        mt = mk === :module ? V2ImportTarget(:external, vcat(tp, [member_name])) : nothing
+        return (:external_symbol, nothing, tp, mt)
     else
         return (:unknown, nothing, tp, nothing)
     end
@@ -280,8 +308,10 @@ end
 function _v2_extend_target(rt, root, base::V2ImportTarget, rest::Vector{String}, visited::Set{URI})
     full = vcat(base.path, rest)
     if base.sort === :external
-        # MILESTONE C SEAM: no store to validate against — the extension fails.
-        return nothing
+        # ENV EDGE: the extension validates iff the full path resolves as
+        # nested module stores; a missing store fails as before.
+        return derived_v2_external_module_exports(rt, root, full) === nothing ?
+            nothing : V2ImportTarget(:external, full)
     elseif base.sort === :workspace_package
         roots = derived_v2_workspace_package_roots(rt)
         haskey(roots, full[1]) || return nothing
@@ -547,14 +577,16 @@ Salsa.@derived function derived_v2_visible_item(rt, root, path, name)
     return vn === nothing ? nothing : vn.item
 end
 
-# MILESTONE C SEAM in every `:external` rule below.
+# ENV EDGE in the `:external` rules: an external wildcard resolves iff its
+# store exists (mirrors v1's `_wildcard_using_unresolved` — presence only, not
+# export-emptiness; an indexed-but-exportless store resolves there too, and
+# matching v1 exactly is what the corpus differential holds us to).
 function _v2_wildcard_using_unresolved(rt, root, path::Vector{String}, ri::V2ResolvedImport)
     t = ri.target
     if t.sort === :tree
         return false
     elseif t.sort === :external
-        # Tree-only: no store, so an external wildcard may bring in ANY name.
-        return true
+        return derived_v2_external_module_exports(rt, root, t.path) === nothing
     elseif t.sort === :workspace_package
         # v1's deliberate conservatism: the package's source-analyzed export
         # view is incomplete under computed includes and macro re-exports.
@@ -562,7 +594,8 @@ function _v2_wildcard_using_unresolved(rt, root, path::Vector{String}, ri::V2Res
     else # :unresolved
         re = _v2_reattempt_unresolved(rt, root, path, ri, Set{URI}())
         re === nothing && return true
-        re.sort === :external && return true
+        re.sort === :external &&
+            return derived_v2_external_module_exports(rt, root, re.path) === nothing
         re.sort === :workspace_package && return true
         return false
     end
