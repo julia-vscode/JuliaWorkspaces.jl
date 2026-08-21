@@ -449,7 +449,9 @@ end
                  # collide with them.
                  "derived_roots", "derived_includes", "derived_file_include_data",
                  "derived_all_julia_files", "derived_reverse_include_map",
-                 "derived_best_root_for_uri"]
+                 "derived_best_root_for_uri",
+                 # v2 owns its copy of the package-name → entry-file map.
+                 "derived_workspace_package_roots"]
 
     # Prose may still discuss the v1 pipeline — the whole point of several
     # comments here is to say what v2 replaced. Only executable code counts, so

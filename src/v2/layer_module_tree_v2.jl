@@ -98,6 +98,40 @@ const _V2_BINDING_ITEM_KINDS = (
     :const, :global, :assignment, :enum, :enum_member,
 )
 
+# ── workspace package roots ─────────────────────────────────────────────────
+
+"""
+    derived_v2_workspace_package_roots(rt) -> Dict{String,URI}
+
+Map each workspace package's name to its entry-file URI (`src/<Name>.jl`),
+for packages whose entry file actually exists. A verbatim semantic copy of
+v1's `derived_workspace_package_roots` — the underlying queries
+(`derived_package_folders`, `derived_package`, `derived_has_file`) are
+engine-neutral project-layer reads (TOML + the file store), so v2 owning its
+copy removes the last v1 edge without new machinery.
+
+Determinism rules compose in this order: folders without a valid entry file
+never claim their name (so they cannot shadow one that does), and among the
+survivors sharing a name the lexicographically smaller URI wins (folders are
+iterated in sorted order, and a name already recorded is left alone).
+"""
+Salsa.@derived function derived_v2_workspace_package_roots(rt)
+    folders = sort(derived_package_folders(rt); by=string)
+
+    result = Dict{String,URI}()
+    for folder in folders
+        package = derived_package(rt, folder)
+        package === nothing && continue
+        haskey(result, package.name) && continue
+
+        entry_uri = filepath2uri(joinpath(uri2filepath(folder), "src", "$(package.name).jl"))
+        if derived_has_file(rt, entry_uri)
+            result[package.name] = entry_uri
+        end
+    end
+    return result
+end
+
 # ── include resolution ──────────────────────────────────────────────────────
 
 """
@@ -294,7 +328,7 @@ Salsa.@derived function derived_v2_module_tree(rt, root)
     @debug "derived_v2_module_tree" root=root
 
     builders, file_modules = _v2_build_tree_structure(rt, root)
-    workspace_roots = derived_workspace_package_roots(rt)
+    workspace_roots = derived_v2_workspace_package_roots(rt)
 
     nodes = V2ModuleNode[]
     for path in sort(collect(keys(builders)))

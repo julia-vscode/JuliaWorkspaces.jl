@@ -643,13 +643,14 @@ dynamic feature (out-of-process indexing, see
 findings through `derived_file_env_ready`; v2 has no edge to it at all, which is
 both why v2 is cheap and why it currently answers so little.
 
-Two v1 edges into v2 existed for a while and one remains. **Root discovery**
+Two v1 edges into v2 existed for a while; both are gone. **Root discovery**
 was borrowed (`derived_roots_for_uri`, which routes through CSTParser's
 include collector) until `layer_includes_v2.jl` gave v2 its own include graph,
-roots, and reverse map built from skeleton `V2Include` rows — the boundary
-guard now forbids the v1 names. **`derived_workspace_package_roots`** (v1's
-package-name → entry-file map, needed by import classification) is still v1's;
-replacing it is part of the visibility-layer milestone.
+roots, and reverse map built from skeleton `V2Include` rows. **The
+package-name → entry-file map** used by import classification is now v2's own
+`derived_v2_workspace_package_roots` (a verbatim semantic copy over the
+engine-neutral project layer). The boundary guard forbids both v1 name
+families.
 
 ---
 

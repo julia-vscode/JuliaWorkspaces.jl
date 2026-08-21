@@ -170,3 +170,39 @@ end
     update_file!(jw, TextFile(MT_ROOT, SourceText("module A\ng(x) = x\nend\n", "julia")))
     @test !isequal(before, mt_tree(jw))
 end
+
+@testitem "v2 workspace package roots: name to entry file, tie-breaks mirror v1" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml(name, uuid) = "name = \"$name\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n"
+
+    jw = JuliaWorkspace()
+    # A and B: valid Project.toml + entry file. C: no entry file.
+    add_file!(jw, TextFile(URI("file:///ws/A/Project.toml"), SourceText(project_toml("A", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/A/src/A.jl"), SourceText("module A\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///ws/B/Project.toml"), SourceText(project_toml("B", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/B/src/B.jl"), SourceText("module B\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///ws/C/Project.toml"), SourceText(project_toml("C", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0003"), "toml")))
+    # Dup1: only the larger-URI folder has an entry file — it wins. Dup2: both
+    # valid — the smaller URI wins.
+    add_file!(jw, TextFile(URI("file:///ws/dup1/a/Project.toml"), SourceText(project_toml("Dup1", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0011"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/dup1/b/Project.toml"), SourceText(project_toml("Dup1", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0012"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/dup1/b/src/Dup1.jl"), SourceText("module Dup1\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///ws/dup2/a/Project.toml"), SourceText(project_toml("Dup2", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0021"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/dup2/a/src/Dup2.jl"), SourceText("module Dup2\nend\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///ws/dup2/b/Project.toml"), SourceText(project_toml("Dup2", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0022"), "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/dup2/b/src/Dup2.jl"), SourceText("module Dup2\nend\n", "julia")))
+
+    roots = JW.derived_v2_workspace_package_roots(jw.runtime)
+    @test roots["A"] == URI("file:///ws/A/src/A.jl")
+    @test roots["B"] == URI("file:///ws/B/src/B.jl")
+    @test !haskey(roots, "C")
+    @test roots["Dup1"] == URI("file:///ws/dup1/b/src/Dup1.jl")
+    @test roots["Dup2"] == URI("file:///ws/dup2/a/src/Dup2.jl")
+
+    # And the map agrees with v1's, which the tree used to consume.
+    @test roots == JW.derived_workspace_package_roots(jw.runtime)
+end
