@@ -176,8 +176,20 @@ _V2ModuleNodeBuilder() = _V2ModuleNodeBuilder(
     false, nothing, URI[], Dict{String,V2ItemRef}(), Dict{String,Symbol}(),
     String[], String[], Tuple{URI,V2Import}[])
 
+_v2_is_datatype_kind(k::Symbol) =
+    k === :struct || k === :mutable_struct || k === :abstract || k === :primitive || k === :enum
+
+# One declared-name write, with v1's method-extension rule: a later same-named
+# `:function` (or function-form `:assignment`) over a DATATYPE binding is a
+# method extension — the datatype stays the declared winner (`struct Thing` +
+# `Thing(m) = …` reports `Thing ↦ :struct` with the struct's ref). Every other
+# combination keeps last-splice-wins.
 function _v2_declare!(node::_V2ModuleNodeBuilder, name::String, ref::V2ItemRef, kind::Symbol)
     isempty(name) && return
+    prev = get(node.declared_kinds, name, nothing)
+    if prev !== nothing && _v2_is_datatype_kind(prev) && (kind === :function || kind === :assignment)
+        return
+    end
     node.declared[name] = ref
     node.declared_kinds[name] = kind
     return
