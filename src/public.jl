@@ -6,6 +6,7 @@ export JuliaWorkspace,
     remove_all_children!,
     set_active_project!,
     set_lowering_lint!,
+    set_v2_features!,
     set_indirect_file_content!,
     clear_indirect_file!,
     get_indirect_files,
@@ -546,6 +547,24 @@ function set_lowering_lint!(jw::JuliaWorkspace, enabled::Bool)
 
     process_from_dynamic(jw)
     set_input_lowering_lint!(jw.runtime, enabled)
+    _reconcile!(jw)
+end
+
+"""
+    set_v2_features!(jw::JuliaWorkspace, enabled::Bool)
+
+Feature flag (experiment): when `true`, the interactive features ported to the
+v2 stack — the local references family (references/rename/highlights/
+goto-definition), workspace symbols, module-at-position, and document links —
+answer from the v2 (JuliaLowering-backed) analysis, falling back to the
+legacy path whenever v2 declines an item. Default `false`: exactly the legacy
+behavior. Independent of [`set_lowering_lint!`](@ref).
+"""
+function set_v2_features!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_v2_features!" enabled=enabled
+
+    process_from_dynamic(jw)
+    set_input_v2_features!(jw.runtime, enabled)
     _reconcile!(jw)
 end
 

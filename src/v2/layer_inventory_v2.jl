@@ -799,6 +799,11 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
         return order, id, bt
     elseif _v2_is_include_call(bt)
         push!(skel.includes, V2Include(order, id, _v2_include_path(bt), pm))
+        # Bodies and maps are stored for include rows too (they carry no item
+        # row, so nothing analysis-side enumerates them): document links walks
+        # them for the path string literal's range.
+        state.bodies[id] = bt
+        state.maps[id] = ranges
         return order, id, bt
     end
 

@@ -56,6 +56,9 @@ include("layer_signatures.jl")
 include("layer_symbols.jl")
 include("layer_navigation.jl")
 include("layer_misc.jl")
+# v2-backed interactive features (behind `input_v2_features`); outside src/v2/
+# because it joins v2 data with feature result structs and v1 fallback paths.
+include("layer_features_v2.jl")
 include("layer_actions.jl")
 include("layer_formatting.jl")
 include("fileio.jl")

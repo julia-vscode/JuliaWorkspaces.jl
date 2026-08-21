@@ -10,6 +10,16 @@ Salsa.@declare_input input_lowering_lint(rt)::Bool function(_ctx)
     false
 end
 
+# Feature flag (experiment): when true, the interactive features ported to the
+# v2 stack (local references family, workspace symbols, module-at-position,
+# document links — see layer_features_v2.jl) answer from v2, falling back to
+# the untouched v1 path whenever v2 declines. Independent of
+# `input_lowering_lint` so lint and features can be rolled out / bisected
+# separately. Same lazy-false pattern as above.
+Salsa.@declare_input input_v2_features(rt)::Bool function(_ctx)
+    false
+end
+
 Salsa.@declare_input input_text_file(rt, uri)::Union{TextFile,Nothing}
 
 Salsa.@declare_input input_active_project(rt)::Union{URI,Nothing}
