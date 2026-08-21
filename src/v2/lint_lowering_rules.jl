@@ -16,7 +16,7 @@ const LOWERING_TAKEOVER_RULES = Set([
     # Re-emitting takeovers: v2 reports these under the same ids and the same
     # (advisory) severities, from a better engine.
     :unused_binding, :unused_function_argument, :unused_type_parameter,
-    :module_name, :relative_import, :unresolved_import,
+    :module_name, :relative_import, :unresolved_import, :missing_reference,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -297,6 +297,190 @@ Salsa.@derived function derived_v2_unresolved_import_findings(rt, uri)
     return result
 end
 
+# ── missing_reference ───────────────────────────────────────────────────────
+#
+# A post-pass join, no lowering changes: every free identifier in an item
+# surfaces as an anchor-module `:global` binding (`"JWLoweringAnchor"`), so a
+# read-never-assigned global whose name neither the module's visible names nor
+# the implicit Base/Core scope answer for is a missing reference — reported at
+# each use site. Lowering already resolved locals/arguments/shadows away, and
+# a qualified `A.b` reads only `A` (member checks are deliberately absent this
+# milestone). Conservative-first: every gate errs toward silence, and the
+# corpus differential's zero-undeclared-v2-only rule is the backstop.
+#
+# Deviations from v1, all in the silent direction: the `scope = "symbols"`
+# option behaves as `"all"` (v2 checks identifiers only — no quoted-getfield
+# marks); the isdefined/VERSION guard gate is ITEM-level where v1's is
+# branch-level (branch intervals are computable position-free the same way as
+# the macrocall intervals below — a noted relaxation); own-root files under a
+# package's test/ folder are suppressed wholesale where v1 suppresses only
+# files actually spliced into a `@testitem` body (v2's walker records no
+# includes inside test items, so those helpers are indistinguishable orphan
+# roots here).
+
+# Preorder-address intervals whose reads are synthetic or unreliable, with
+# `_materialize`'s exact address accounting (transparent unwrap, test-block
+# descent, quote depth): each qdepth-0 OPAQUE MACROCALL (its fabricated
+# argument-identifier reads carry real addresses inside the subtree, and v1
+# likewise never reports macrocall arguments) and each qdepth-0→1 QUOTE (its
+# fabricated reads all anchor at the quote's own address; `$`-interpolated
+# reads inside are conservatively silenced with it). A subtree at address `a`
+# with `n` nodes occupies exactly `[a, a+n-1]`.
+function _v2_missing_ref_intervals!(out::Vector{UnitRange{Int32}}, bt::BodyTree{V2Kind},
+                                    addr::Base.RefValue{Int}, qdepth::Int)
+    myaddr = (addr[] += 1)
+    if qdepth == 0
+        target = _transparent_macro_target(bt)
+        if target !== nothing
+            for c in bt.children[1:end-1]
+                addr[] += bt_node_count(c)
+            end
+            return _v2_missing_ref_intervals!(out, target, addr, qdepth)
+        end
+        test_block = _test_block_target(bt)
+        if test_block !== nothing
+            for c in bt.children[1:end-1]
+                addr[] += bt_node_count(c)
+            end
+            return _v2_missing_ref_intervals!(out, test_block, addr, qdepth)
+        end
+        if _is_opaque_macrocall(bt)
+            push!(out, Int32(myaddr):Int32(myaddr + bt_node_count(bt) - 1))
+            addr[] += bt_node_count(bt) - 1
+            return nothing
+        end
+    end
+    bt.children === nothing && return nothing
+    child_depth = _quote_depth(bt.kind, qdepth)
+    if qdepth == 0 && child_depth > qdepth
+        push!(out, Int32(myaddr):Int32(myaddr + bt_node_count(bt) - 1))
+        addr[] += bt_node_count(bt) - 1
+        return nothing
+    end
+    for c in bt.children
+        _v2_missing_ref_intervals!(out, c, addr, child_depth)
+    end
+    return nothing
+end
+
+# The item-level existence-guard gate: a body that mentions `isdefined`,
+# `@isdefined`, or `VERSION` anywhere is skipped whole (v1 exempts only the
+# guarded branch; whole-item is the conservative superset).
+function _v2_mentions_existence_guard(bt::BodyTree{V2Kind})
+    if bt.children === nothing
+        bt.kind == JS2.K"Identifier" || return false
+        bt.val isa Union{Symbol,AbstractString} || return false
+        s = string(bt.val)
+        return s == "isdefined" || s == "@isdefined" || s == "VERSION"
+    end
+    return any(_v2_mentions_existence_guard, bt.children)
+end
+
+# Whether any file under `folder` has an include the walk cannot resolve —
+# the v2 analog of v1's `derived_folder_has_computed_include`, off skeleton
+# rows.
+Salsa.@derived function _derived_v2_package_has_computed_include(rt, folder)
+    prefix = string(folder)
+    for uri in derived_v2_all_julia_files(rt)
+        startswith(string(uri), prefix) || continue
+        for inc in derived_v2_file_skeleton(rt, uri).includes
+            inc.path === nothing && return true
+            derived_v2_include_target(rt, uri, inc.path) === nothing && return true
+        end
+    end
+    return false
+end
+
+# File-level suppression (v1's fourth + fifth cases): an OWN-ROOT file that is
+# not a recognized entry point is either a standalone script, the target of a
+# computed include (real module context unknown), or — under a package's
+# test/ folder — a helper a `@testitem` includes at runtime (which also runs
+# `using Test` + the package under test, none of it visible here). Bare
+# missing-ref reporting against the bare context is unreliable in all three.
+Salsa.@derived function _derived_v2_missing_ref_file_suppressed(rt, uri)
+    root = derived_v2_best_root_for_uri(rt, uri)
+    root == uri || return false
+    fp = uri2filepath(uri)
+    fp === nothing && return true   # untitled buffers: no root context at all
+    name = lowercase(basename(fp))
+    dir = lowercase(basename(dirname(fp)))
+    (name == "runtests.jl" && dir == "test") && return false
+    (name == "make.jl" && dir == "docs") && return false
+    pkg_folder = derived_package_for_file(rt, uri)
+    if pkg_folder !== nothing
+        pkg = derived_package(rt, pkg_folder)
+        if pkg !== nothing
+            entry = joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl")
+            lowercase(fp) == lowercase(entry) && return false
+        end
+        any(seg -> lowercase(seg) == "test", splitpath(dirname(fp))) && return true
+        _derived_v2_package_has_computed_include(rt, pkg_folder) && return true
+    end
+    return false
+end
+
+"""
+    derived_item_missing_reference_findings(rt, ref) -> Vector{SemanticFinding}
+
+Missing-reference findings for one item. A separate query from
+`derived_item_semantic_findings` on purpose: this one depends on the module's
+visible names and (through them) the environment, so env or sibling-file edits
+re-execute it — while the unused-binding query keeps depending on nothing but
+the item's own lowering.
+"""
+Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemRef)
+    result = SemanticFinding[]
+    low = derived_item_lowering(rt, ref)
+    (low === nothing || low.status !== :ok) && return result
+    ref.id in derived_v2_under_macrocall_ids(rt, ref.file) && return result
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return result
+    _test_block_target(body) !== nothing && return result
+    _v2_mentions_existence_guard(body) && return result
+
+    root = derived_v2_best_root_for_uri(rt, ref.file)
+    root === nothing && return result
+    skel = derived_v2_file_skeleton(rt, ref.file)
+    any(t -> t.id == ref.id, skel.testitems) && return result
+    idx = findfirst(r -> r.id == ref.id, skel.items)
+    idx === nothing && return result
+    path = vcat(_derived_v2_splice_prefix(rt, ref.file), skel.items[idx].parent_module)
+
+    # Module blindness: any way unseen code could define names in this module
+    # silences the whole module (pollution does not cross module boundaries).
+    derived_v2_module_unresolved_wildcard_using(rt, root, path) && return result
+    derived_v2_module_has_computed_include(rt, root, path) && return result
+    derived_v2_module_has_opaque_macrocall(rt, root, path) && return result
+
+    visible = derived_v2_module_visible_names_idfree(rt, root, path)
+    implicit = derived_v2_implicit_scope_names(rt, root, derived_v2_module_is_bare(rt, root, path))
+    intervals = UnitRange{Int32}[]
+    _v2_missing_ref_intervals!(intervals, body, Ref(0), 0)
+
+    for b in low.bindings
+        b.kind === :global || continue
+        b.mod == "JWLoweringAnchor" || continue
+        b.is_read || continue
+        b.is_assigned && continue
+        name = b.name
+        (isempty(name) || startswith(name, "_") || startswith(name, "@")) && continue
+        # `var"weird name"` strings and bare operators are exempt (v1 exempts
+        # `var` shapes; an unexported operator read is overwhelmingly a method
+        # extension target, not a typo).
+        Base.isidentifier(name) || continue
+        haskey(visible, name) && continue
+        insorted(name, implicit) && continue
+        for u in low.uses
+            u.binding == b.id || continue
+            u.addr == Int32(0) && continue
+            any(iv -> u.addr in iv, intervals) && continue
+            push!(result, (addr=u.addr, rule_id=:missing_reference,
+                msg="Missing reference: $name"))
+        end
+    end
+    return result
+end
+
 """
     derived_semantic_lint_findings(rt, uri) -> Vector{LintFinding}
 
@@ -325,8 +509,20 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     # the backdating per-item query.
     has_syntax_errors = any(d -> d.severity === :error, derived_julia_syntax_diagnostics(rt, uri))
 
+    # `missing_reference` is env-and-visibility-heavy, so its per-item query
+    # runs only when the rule is on, its `scope` option isn't `"none"`, and
+    # the file isn't suppressed wholesale (own-root helper/orphan files).
+    config = derived_effective_lint_config(rt, uri)
+    missing_refs_on = missingrefs_from_config(config) !== :none &&
+        !_derived_v2_missing_ref_file_suppressed(rt, uri)
+
     for row in derived_v2_file_skeleton(rt, uri).items
-        item_findings = derived_item_semantic_findings(rt, V2ItemRef(uri, row.id))
+        ref = V2ItemRef(uri, row.id)
+        item_findings = derived_item_semantic_findings(rt, ref)
+        if missing_refs_on
+            mr = derived_item_missing_reference_findings(rt, ref)
+            isempty(mr) || (item_findings = vcat(item_findings, mr))
+        end
         isempty(item_findings) && continue
         ranges = get(maps, row.id, nothing)
         ranges === nothing && continue
@@ -349,7 +545,7 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     # `unresolved_import` touches the env seam and visibility, so its producer
     # runs only when the rule is actually on (materialize would filter it
     # anyway; this skips demanding the machinery at all).
-    if rule_enabled(derived_effective_lint_config(rt, uri), :unresolved_import)
+    if rule_enabled(config, :unresolved_import)
         for f in derived_v2_unresolved_import_findings(rt, uri)
             ranges = get(maps, f.id, nothing)
             ranges === nothing && continue
