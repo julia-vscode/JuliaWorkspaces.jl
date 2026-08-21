@@ -108,6 +108,22 @@ All features sit behind flat `public.jl` functions returning plain structs, so
 a v2 implementation swaps in behind them, flag-gated; every layer's existing
 testitem suite doubles as a differential harness.
 
+## 3½. Environment-seam program status
+
+- ✅ **Milestone A — v2 root discovery** (`src/v2/layer_includes_v2.jl`):
+  include graph, roots, reverse map and best-root from skeleton `V2Include`
+  rows; the `joinpath(@__DIR__, …)` include idiom resolves statically; v2's
+  two root consumers retargeted; the boundary guard now forbids v1's root
+  queries; corpus root-differential green with an empty allowlist.
+- Next: **Milestone B — v2 visibility layer** (tree-only
+  `derived_v2_module_visible_names` + id-free face + per-name selector,
+  workspace-package recursion with cycle guard, unresolved-reattempt ledger,
+  unresolved-wildcard flag, own `derived_v2_workspace_package_roots`), then
+  **Milestone C — the env edge** (external exports hash-keyed plain-data-out,
+  Base/Core implicit names, env readiness) and the first env rules
+  (`missing_reference` as a post-pass join over lowering's anchor-module
+  `:global` bindings, `unresolved_import`).
+
 ## 4. Recommended sequencing (as of this survey)
 
 1. ✅ **Harvest JuliaLowering** (this milestone): lowering errors + routed

@@ -117,9 +117,8 @@ package. The hash additionally folds in the own package's macro-defs hash, so
 deved macro edits re-key (D2b). `nothing` when the file has no module context.
 """
 Salsa.@derived function derived_v2_expansion_context(rt, uri)
-    roots = derived_roots_for_uri(rt, uri)
-    isempty(roots) && return nothing
-    root = first(roots)   # M1: first root only
+    root = derived_v2_best_root_for_uri(rt, uri)   # v2's own root discovery
+    root === nothing && return nothing
     path = derived_v2_file_module_path(rt, root, uri)
     path === nothing && return nothing
 

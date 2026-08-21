@@ -36,6 +36,9 @@ const V2Kind = JS2.Kind
 include("layer_inventory_v2.jl")
 # Layer 2: module structure spliced from skeletons and include edges.
 include("layer_module_tree_v2.jl")
+# Layer 2¼: root discovery — the include graph, roots and the reverse map,
+# built from the same skeleton include rows (no CSTParser/StaticLint route).
+include("layer_includes_v2.jl")
 # Layer 3: JuliaLowering binding analysis over per-item body trees.
 include("layer_lowering.jl")
 # Layer 3½: DJP-side macro expansion — sites, context, cache keys, harvest.

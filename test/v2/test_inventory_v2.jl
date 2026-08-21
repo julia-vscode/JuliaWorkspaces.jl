@@ -268,8 +268,14 @@ end
 end
 
 @testitem "v2 inventory: a computed include has no literal path" setup=[InvV2WS] begin
-    inv = iv_inv("include(joinpath(@__DIR__, \"x.jl\"))\n")
+    # A genuinely computed path — a variable in the mix — stays unresolvable.
+    inv = iv_inv("include(joinpath(dir, \"x.jl\"))\n")
     @test only(inv.includes).path === nothing
+
+    # The `joinpath(@__DIR__, …)` idiom, by contrast, IS statically
+    # resolvable: @__DIR__ is the including file's directory.
+    inv = iv_inv("include(joinpath(@__DIR__, \"sub\", \"x.jl\"))\n")
+    @test only(inv.includes).path == "sub/x.jl"
 end
 
 # ── the firewall ────────────────────────────────────────────────────────────
@@ -436,7 +442,14 @@ end
     dir = joinpath(pkgdir(JuliaWorkspaces), "src", "v2")
     forbidden = ["CSTParser", "StaticLint", "derived_julia_legacy_syntax_tree",
                  "_foreach_toplevel_item", "derived_file_inventory",
-                 "derived_item_positions", "parse_julia_syntax_tree"]
+                 "derived_item_positions", "parse_julia_syntax_tree",
+                 # v1's root discovery routes through CSTParser's include
+                 # collector; v2 has its own (layer_includes_v2.jl). The v2
+                 # names carry the `derived_v2_` prefix, so these tokens do not
+                 # collide with them.
+                 "derived_roots", "derived_includes", "derived_file_include_data",
+                 "derived_all_julia_files", "derived_reverse_include_map",
+                 "derived_best_root_for_uri"]
 
     # Prose may still discuss the v1 pipeline — the whole point of several
     # comments here is to say what v2 replaced. Only executable code counts, so

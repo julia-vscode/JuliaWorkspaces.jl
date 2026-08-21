@@ -130,7 +130,9 @@ end
 end
 
 @testitem "v2 module tree: blindness flags" setup=[ModTreeV2WS] begin
-    jw = mt_workspace("Root.jl" => "include(joinpath(@__DIR__, \"x.jl\"))\n")
+    # A variable in the path keeps it genuinely computed (the resolvable
+    # `joinpath(@__DIR__, …)` idiom no longer counts as computed).
+    jw = mt_workspace("Root.jl" => "include(joinpath(dir, \"x.jl\"))\n")
     @test derived_v2_module_has_computed_include(jw.runtime, MT_ROOT, String[])
 
     jw2 = mt_workspace("Root.jl" => "@some_unknown_macro foo\n")
@@ -147,7 +149,7 @@ end
     jw = mt_workspace("Root.jl" => """
     module A
         @some_unknown_macro foo
-        include(joinpath(@__DIR__, "x.jl"))
+        include(joinpath(dir, "x.jl"))
     end
     """)
     @test derived_v2_module_has_opaque_macrocall(jw.runtime, MT_ROOT, ["A"])

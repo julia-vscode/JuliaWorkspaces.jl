@@ -617,12 +617,33 @@ function _v2_is_include_call(bt::BodyTree)
 end
 
 # The literal path argument of an include call, or `nothing` when computed.
+# One computed idiom IS statically resolvable and common enough to support:
+# `include(joinpath(@__DIR__, "a", "b.jl"))` — `@__DIR__` is the including
+# file's directory, which is exactly what `derived_v2_include_target` resolves
+# relative paths against, so the joined literal tail is equivalent to a plain
+# relative path. (v1's StaticLint collector understands the same shape.)
 function _v2_include_path(bt::BodyTree)
     cs = _v2_children(bt)
     length(cs) >= 2 || return nothing
     arg = cs[end]
-    arg.kind == JS2.K"String" || return nothing
-    return _v2_leaf_string(arg)
+    arg.kind == JS2.K"String" && return _v2_leaf_string(arg)
+    if arg.kind == JS2.K"call"
+        acs = _v2_children(arg)
+        length(acs) >= 3 || return nothing
+        _v2_leaf_string(acs[1]) == "joinpath" || return nothing
+        dir = acs[2]
+        (dir.kind == JS2.K"macrocall" && _v2_macrocall_name(dir) == "@__DIR__") || return nothing
+        parts = String[]
+        for c in acs[3:end]
+            c.kind == JS2.K"String" || return nothing
+            s = _v2_leaf_string(c)
+            s === nothing && return nothing
+            push!(parts, s)
+        end
+        isempty(parts) && return nothing
+        return join(parts, "/")
+    end
+    return nothing
 end
 
 # ── id keys ─────────────────────────────────────────────────────────────────

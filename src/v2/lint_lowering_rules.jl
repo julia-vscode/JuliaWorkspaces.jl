@@ -166,12 +166,12 @@ end
 "A structural finding attached to a (possibly bodyless) skeleton row."
 const ModuleTreeFinding = @NamedTuple{id::Int64, addr::Int32, rule_id::Symbol, msg::String}
 
-# The module a file's top level splices into, from its first root (the
-# layer_expansion.jl precedent for multi-root files); empty for a plain buffer.
+# The module a file's top level splices into, from its best root (v2's own
+# root discovery; prefers non-test roots); empty for a plain buffer.
 Salsa.@derived function _derived_v2_splice_prefix(rt, uri)
-    roots = derived_roots_for_uri(rt, uri)
-    isempty(roots) && return String[]
-    path = derived_v2_file_module_path(rt, first(roots), uri)
+    root = derived_v2_best_root_for_uri(rt, uri)
+    root === nothing && return String[]
+    path = derived_v2_file_module_path(rt, root, uri)
     return path === nothing ? String[] : path
 end
 
