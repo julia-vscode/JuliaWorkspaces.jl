@@ -451,7 +451,12 @@ end
                  "derived_all_julia_files", "derived_reverse_include_map",
                  "derived_best_root_for_uri",
                  # v2 owns its copy of the package-name → entry-file map.
-                 "derived_workspace_package_roots"]
+                 "derived_workspace_package_roots",
+                 # Environment stores are reachable from v2 ONLY through the
+                 # plain-data queries in src/layer_v2_env_seam.jl (outside this
+                 # directory); direct store contact must not creep in.
+                 "derived_environment", "derived_stdlib_only_env",
+                 "SymbolServer", "_resolve_external_module"]
 
     # Prose may still discuss the v1 pipeline — the whole point of several
     # comments here is to say what v2 replaced. Only executable code counts, so
