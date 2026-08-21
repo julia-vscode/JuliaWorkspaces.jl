@@ -156,6 +156,212 @@ function _v2f_string_value(st)
     return nothing
 end
 
+# ── document symbols ────────────────────────────────────────────────────────
+
+"All identifier-leaf addresses in `view` spelling `name`."
+function _v2f_name_leaf_addrs(view::V2ItemView, name::String)
+    return [a for a in eachindex(view.ranges)
+            if _v2f_is_identifier(view, a) && string(view.vals[a]) == name]
+end
+
+# Kind refinement for value-family items: v1 reports String(15)/Number(16)
+# for literal-typed values and Function(12) for function-valued assignments
+# via its type inference; v2 approximates from the RHS shape (declared
+# degradation: inferred cases fall to Variable).
+function _v2f_value_kind(body::Union{Nothing,BodyTree{V2Kind}})
+    body === nothing && return 13
+    inner = body
+    while (inner.kind == JS2.K"const" || inner.kind == JS2.K"global") &&
+          inner.children !== nothing && !isempty(inner.children)
+        inner = inner.children[1]
+    end
+    (inner.kind == JS2.K"=" && inner.children !== nothing && length(inner.children) >= 2) || return 13
+    rhs = inner.children[2]
+    # Identifier leaves carry their NAME as a String val — only literal kinds
+    # count (`plain = nothing` is a Variable, not a String).
+    if rhs.children === nothing
+        rhs.kind == JS2.K"String" && return 15
+        (rhs.kind != JS2.K"Identifier" && rhs.val isa Number) && return 16
+    end
+    rhs.kind == JS2.K"string" && return 15
+    (rhs.kind == JS2.K"->" || rhs.kind == JS2.K"function") && return 12
+    return 13
+end
+
+# The macro name and first literal-string argument of an opaque macrocall
+# body — the `@testset` title recovery (accepts both the begin-block and the
+# for-loop forms; an interpolated title yields its first literal chunk).
+function _v2f_macrocall_title(body::BodyTree{V2Kind})
+    body.children === nothing && return nothing, nothing
+    cs = body.children
+    isempty(cs) && return nothing, nothing
+    nm = cs[1].children === nothing ? cs[1].val : nothing
+    name = nm isa Union{Symbol,AbstractString} ? string(nm) : nothing
+    for c in cs[2:end]
+        if c.children === nothing && c.kind == JS2.K"String" && c.val isa AbstractString
+            return name, string(c.val)
+        elseif c.kind == JS2.K"string" && c.children !== nothing
+            for cc in c.children
+                (cc.children === nothing && cc.val isa AbstractString) &&
+                    return name, string(cc.val)
+            end
+            return name, ""
+        end
+    end
+    return name, nothing
+end
+
+"""
+    _get_document_symbols_v2(runtime, uri) -> Vector{DocumentSymbolResult}
+
+The v2 arm of `_get_document_symbols` (layer_symbols.jl). Full lexical
+fidelity: modules, items (shape-refined kinds), struct fields, type
+parameters and locals (from the per-item lowering), and test-macro title
+symbols — nested uniformly by RANGE CONTAINMENT (sort by start asc / width
+desc, stack sweep), which reproduces v1's lexical nesting for modules,
+`@testset` blocks, fields and locals alike. Declared deltas vs v1: locals
+attach flat to their item (v1 nests arbitrarily deep); value-family ranges
+cover the whole statement (v1 anchors the identifier); inference-based kinds
+degrade to Variable. Test-macro BODIES contribute children through the
+per-item lowering (test blocks materialize let-wrapped, so inner definitions
+are the item's locals — kind 13 rather than v1's def kinds), and
+`@testmodule`/`@testsnippet`/interpolated titles are covered BETTER than v1.
+"""
+function _get_document_symbols_v2(runtime, uri::URI)
+    maps = derived_v2_file_maps(runtime, uri)
+    isempty(maps) && return DocumentSymbolResult[]
+    skel = derived_v2_file_skeleton(runtime, uri)
+    inv = derived_v2_file_inventory(runtime, uri)
+    bodies = derived_v2_file_bodies(runtime, uri)
+
+    cands = @NamedTuple{start0::Int, stop0::Int, name::String, kind::Int}[]
+    add!(r::UnitRange{Int}, name::String, kind::Int) =
+        push!(cands, (start0=_v2f_start0(r), stop0=_v2f_stop0(r), name=name, kind=kind))
+    whole(id) = (rs = get(maps, id, nothing); rs === nothing || isempty(rs) ? nothing : rs[1])
+
+    for m in skel.modules
+        r = whole(m.id)
+        r === nothing || add!(r, m.name, 2)
+    end
+
+    for t in skel.testitems
+        r = whole(t.id)
+        r === nothing && continue
+        mac = t.kind === :testitem ? "@testitem" :
+              t.kind === :testsetup_module ? "@testmodule" : "@testsnippet"
+        add!(r, "$mac \"$(t.label)\"", 3)
+    end
+    seen_member_addrs = Dict{Int64,Set{Int}}()   # per id: leaf addrs already used
+    for it in inv.items
+        if it.kind === :opaque_macrocall
+            # `@testset` is an ISOLATED macro: one opaque item row (it is NOT
+            # in `skeleton.opaque_macros`, and its body is never descended, so
+            # it contributes no children). Its title symbol comes from the
+            # stored body's first string argument.
+            if it.name == "@testset"
+                body = get(bodies, it.id, nothing)
+                if body !== nothing
+                    _, title = _v2f_macrocall_title(body)
+                    r = whole(it.id)
+                    (title !== nothing && r !== nothing) &&
+                        add!(r, "@testset \"$title\"", 3)
+                end
+            end
+            continue
+        end
+        isempty(it.name) && continue
+        (!isempty(it.qualifier) && !Base.isidentifier(it.name)) && continue
+        r = whole(it.id)
+        r === nothing && continue
+        view = nothing
+        used = get!(() -> Set{Int}(), seen_member_addrs, it.id)
+
+        if it.kind === :enum_member
+            # Members anchor at their own identifier leaf inside the shared
+            # `@enum` statement, so containment nests them under the enum.
+            view = v2_item_view(runtime, uri, it.id)
+            view === nothing && continue
+            placed = false
+            for a in _v2f_name_leaf_addrs(view, it.name)
+                a in used && continue
+                push!(used, a)
+                add!(view.ranges[a], it.name, 22)
+                placed = true
+                break
+            end
+            placed || add!(r, it.name, 22)
+            continue
+        end
+
+        kind = it.kind in (:const, :global, :assignment) ?
+            _v2f_value_kind(get(bodies, it.id, nothing)) : _item_symbol_kind(it.kind)
+        add!(r, it.name, kind)
+
+        # Struct fields: kind 8 at each field's identifier leaf.
+        if it.kind in (:struct, :mutable_struct) && !isempty(it.field_names)
+            view = v2_item_view(runtime, uri, it.id)
+            if view !== nothing
+                # The struct's own name leaf must not be claimed as a field.
+                nl = _v2f_name_leaf_addrs(view, it.name)
+                isempty(nl) || push!(used, nl[1])
+                for fname in it.field_names
+                    for a in _v2f_name_leaf_addrs(view, fname)
+                        a in used && continue
+                        push!(used, a)
+                        add!(view.ranges[a], fname, 8)
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    # Type parameters and locals from the lowering, flat per item.
+    for row in skel.items
+        (row.kind === :opaque_macrocall || !row.interpretable || row.under_macrocall) && continue
+        ref = V2ItemRef(uri, row.id)
+        low = derived_item_lowering(runtime, ref)
+        (low === nothing || low.status !== :ok) && continue
+        view = v2_item_view(runtime, uri, row.id)
+        view === nothing && continue
+        emitted = Set{Tuple{String,Int32}}()
+        for b in low.bindings
+            (b.is_internal || b.is_ssa || b.addr == Int32(0)) && continue
+            b.kind in (:local, :argument, :typevar, :static_parameter) || continue
+            isempty(b.name) && continue
+            (b.name, b.addr) in emitted && continue
+            a = Int(b.addr)
+            (1 <= a <= length(view.ranges) && _v2f_is_identifier(view, a) &&
+             string(view.vals[a]) == b.name) || continue
+            push!(emitted, (b.name, b.addr))
+            add!(view.ranges[a], b.name,
+                 b.kind in (:typevar, :static_parameter) ? 26 : 13)
+        end
+    end
+
+    # Nest by range containment: start asc, width desc; stack sweep. EQUAL
+    # ranges are SIBLINGS, never parent/child — shared-id statements (a tuple
+    # destructure mints one candidate per name at the same range) must not
+    # swallow each other.
+    sort!(cands; by=c -> (c.start0, -(c.stop0 - c.start0)))
+    results = DocumentSymbolResult[]
+    stack = Tuple{Int,Int,DocumentSymbolResult}[]   # (start0, stop0, node)
+    for c in cands
+        while !isempty(stack) &&
+              !(stack[end][1] <= c.start0 && c.stop0 <= stack[end][2] &&
+                !(stack[end][1] == c.start0 && stack[end][2] == c.stop0))
+            pop!(stack)
+        end
+        ds = DocumentSymbolResult(c.name, c.kind,
+            _offset_to_position(runtime, uri, c.start0),
+            _offset_to_position(runtime, uri, c.stop0),
+            DocumentSymbolResult[])
+        push!(isempty(stack) ? results : stack[end][3].children, ds)
+        push!(stack, (c.start0, c.stop0, ds))
+    end
+    return results
+end
+
 # ── workspace symbols ───────────────────────────────────────────────────────
 
 # The v2 arm of `_get_workspace_symbols` (layer_symbols.jl): same enumeration,

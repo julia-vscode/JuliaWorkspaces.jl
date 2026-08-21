@@ -460,3 +460,75 @@ end
         @test occursin(e.kind === :export ? "export" : "public", src[first(r):last(r)-1])
     end
 end
+
+# ── document symbols ────────────────────────────────────────────────────────
+
+@testitem "document symbols: v2 outline nesting and kinds" setup=[FeatV2WS] begin
+    src = """
+    module Outer
+    function compute(arg)
+        temp = arg + 1
+        return temp
+    end
+    generic(x::T) where {T} = zero(T)
+    struct Point
+        x::Int
+        y::Int
+    end
+    const GREETING = "hi"
+    const COUNT = 42
+    const handler = () -> 1
+    plain = nothing
+    @testset "grouped" begin
+        inner_helper() = 1
+    end
+    end
+    @testitem "checks" begin
+        invisible() = 1
+    end
+    """
+    jw = ft_workspace(src)
+    syms = JW._get_document_symbols(jw.runtime, FT_URI)
+
+    outer = only(filter(s -> s.name == "Outer", syms))
+    @test outer.kind == 2
+    names(v) = Dict(s.name => s for s in v)
+    kids = names(outer.children)
+
+    @test kids["compute"].kind == 12
+    ckids = names(kids["compute"].children)
+    @test haskey(ckids, "arg") && ckids["arg"].kind == 13
+    @test haskey(ckids, "temp") && ckids["temp"].kind == 13
+
+    gkids = names(kids["generic"].children)
+    @test haskey(gkids, "T") && gkids["T"].kind == 26
+    @test haskey(gkids, "x") && gkids["x"].kind == 13
+
+    @test kids["Point"].kind == 23
+    pkids = names(kids["Point"].children)
+    @test pkids["x"].kind == 8
+    @test pkids["y"].kind == 8
+
+    # Value-family shape kinds.
+    @test kids["GREETING"].kind == 15
+    @test kids["COUNT"].kind == 16
+    @test kids["handler"].kind == 12
+    @test kids["plain"].kind == 13
+
+    # @testset gets a title symbol; its inner definitions surface as LOCALS of
+    # the test-block item (test blocks lower let-wrapped), kind 13.
+    ts = only(filter(s -> startswith(s.name, "@testset"), outer.children))
+    @test ts.name == "@testset \"grouped\""
+    @test ts.kind == 3
+    @test any(c -> c.name == "inner_helper" && c.kind == 13, ts.children)
+
+    # @testitem gets a title symbol; body definitions appear as locals too.
+    ti = only(filter(s -> startswith(s.name, "@testitem"), syms))
+    @test ti.name == "@testitem \"checks\""
+    @test any(c -> c.name == "invisible" && c.kind == 13, ti.children)
+
+    # Flag off: the v1 path still answers with the same top-level names.
+    jw2 = ft_workspace(src; flag=false)
+    v1_syms = JW._get_document_symbols(jw2.runtime, FT_URI)
+    @test any(s -> s.name == "Outer", v1_syms)
+end

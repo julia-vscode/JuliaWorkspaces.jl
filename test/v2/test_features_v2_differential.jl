@@ -300,3 +300,76 @@ end
     @test total_on[] > 20
     @test problems == String[]
 end
+
+@testitem "v2 document symbols agree with v1 across the package corpus" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    root_dir = pkgdir(JuliaWorkspaces)
+
+    function corpus_workspace(flag)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Project.toml")),
+            SourceText(read(joinpath(root_dir, "Project.toml"), String), "toml")))
+        add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Manifest.toml")),
+            SourceText("julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"0\"\n\n[deps]\n", "toml")))
+        uris = JuliaWorkspaces.URIs2.URI[]
+        for (d, _, fs) in walkdir(joinpath(root_dir, "src"))
+            vendored = any(occursin(x, lowercase(d)) for x in ("staticlint", "symbolserver", "packages"))
+            for f in fs
+                endswith(f, ".jl") || continue
+                p = joinpath(d, f)
+                uri = filepath2uri(p)
+                add_file!(jw, TextFile(uri, SourceText(read(p, String), "julia")))
+                vendored || push!(uris, uri)
+            end
+        end
+        flag && JW.set_v2_features!(jw, true)
+        return jw, uris
+    end
+
+    jw_on, uris = corpus_workspace(true)
+    jw_off, _ = corpus_workspace(false)
+
+    # Names of symbols whose ancestors are all containers (Module=2,
+    # Namespace=3, or Enum=10 — v2 nests @enum members under the enum symbol
+    # while v1 lists them flat) — the top-level-scope definition surface.
+    function scope_names!(out, syms)
+        for s in syms
+            push!(out, startswith(s.name, "@") ? s.name[nextind(s.name, 1):end] : s.name)
+            s.kind in (2, 3, 10) && scope_names!(out, s.children)
+        end
+        return out
+    end
+
+    problems = String[]
+    total_on = Ref(0)
+    for uri in uris
+        on = JW._get_document_symbols(jw_on.runtime, uri)
+        off = JW._get_document_symbols(jw_off.runtime, uri)
+        n_on = scope_names!(Set{String}(), on)
+        n_off = scope_names!(Set{String}(), off)
+        total_on[] += length(n_on)
+        for name in setdiff(n_off, n_on)
+            # Every v1-only scope name must be macro-declared machinery or a
+            # name inside a @testitem body (opaque in v2) — verified against
+            # the v1 inventory: any name with a plain-declaration v1 row that
+            # v2 misses is a hard failure.
+            inv1 = JW.derived_file_inventory(jw_off.runtime, uri)
+            rows = [i for i in inv1.items if i.name == name || i.name == "@" * name]
+            plain = [i for i in rows if i.kind !== :macro_declared]
+            ti_segments = Set{String}(ti.segment for ti in inv1.testitems)
+            in_ti(i) = any(seg -> seg in ti_segments, i.parent_module)
+            if !isempty(plain) && !all(in_ti, plain)
+                push!(problems, "$(uri): v1-only scope symbol `$name` with a plain declaration")
+            end
+        end
+    end
+
+    println("document symbols differential: v2 scope symbols=$(total_on[])")
+    isempty(problems) || println("problems:\n  " * join(first(problems, 30), "\n  "))
+    @test total_on[] > 500
+    @test problems == String[]
+end
