@@ -115,14 +115,20 @@ testitem suite doubles as a differential harness.
   rows; the `joinpath(@__DIR__, …)` include idiom resolves statically; v2's
   two root consumers retargeted; the boundary guard now forbids v1's root
   queries; corpus root-differential green with an empty allowlist.
-- Next: **Milestone B — v2 visibility layer** (tree-only
-  `derived_v2_module_visible_names` + id-free face + per-name selector,
-  workspace-package recursion with cycle guard, unresolved-reattempt ledger,
-  unresolved-wildcard flag, own `derived_v2_workspace_package_roots`), then
-  **Milestone C — the env edge** (external exports hash-keyed plain-data-out,
-  Base/Core implicit names, env readiness) and the first env rules
-  (`missing_reference` as a post-pass join over lowering's anchor-module
-  `:global` bindings, `unresolved_import`).
+- ✅ **Milestone B — v2 visibility layer (tree-only)**
+  (`src/v2/layer_visibility_v2.jl`): `derived_v2_module_visible_names` + the
+  id-free face + per-name selector, the two-pass ledger algorithm with
+  workspace-package cross-root recursion (cycle-guarded memoization), the
+  unresolved-wildcard flag, and v2's own `derived_v2_workspace_package_roots`
+  (no v1 query reachable from v2 any more). External targets follow v1's
+  store-missing behavior — the four-place Milestone C seam is marked in the
+  file. Corpus differential green with ratchet classes `:testitem_nodes` /
+  `:macro_declared` / `:external_names`; building it caught and fixed the
+  missing method-extension rule in v2's module-tree declare.
+- Next: **Milestone C — the env edge** (external exports hash-keyed
+  plain-data-out, Base/Core implicit names, env readiness) and the first env
+  rules (`missing_reference` as a post-pass join over lowering's
+  anchor-module `:global` bindings, `unresolved_import`).
 
 ## 4. Recommended sequencing (as of this survey)
 

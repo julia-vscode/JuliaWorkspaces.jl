@@ -372,6 +372,59 @@ must stay silent there.
 
 ---
 
+## 7½. Layer 2½ — visibility (tree-only)
+
+[`src/v2/layer_visibility_v2.jl`](../../src/v2/layer_visibility_v2.jl), plus
+v2's own root discovery in
+[`src/v2/layer_includes_v2.jl`](../../src/v2/layer_includes_v2.jl) and
+`derived_v2_workspace_package_roots` — with these, no v1 query is reachable
+from v2 at all (the boundary guard forbids both former borrow families).
+
+**The query family**, keyed per `(root, module-path)` exactly like v1's:
+`derived_v2_module_visible_names` → `Dict{String,V2VisibleName}` — every name
+reachable in the module, each carrying `kind`, `origin` (`:declared`,
+`:using_tree`, `:using_workspace_package`, `:using_external`,
+`:import_binding`), the declaring `V2ItemRef` when tree-backed, and the
+origin-module path. Two projections carry v1's invalidation design over
+intact: the **id-free face** (`derived_v2_module_visible_names_idfree`, no
+item ids — reordering two same-kind declarations backdates it, so hit-testing
+consumers never re-execute) and the **per-name selector**
+(`derived_v2_visible_item`, confining id-shift re-execution to referenced
+names).
+
+**The algorithm** is v1's two-pass ledger port: pass 1 folds imports in three
+precedence tiers (whole-module `using` bring-ins < import/colon-list bindings
+< own declarations + the module self-binding), recording a module-target
+LEDGER in lockstep; pass 2 re-attempts `:unresolved` imports against that
+ledger — bounded, anchored on pass 1 only, equal-tier first-wins — which is
+what resolves `import ..JSONRPC.JSON` when `JSONRPC` was bound by an
+enclosing module's own import, including extension through chains of
+bindings. Cross-root workspace-package recursion routes through the memoized
+query only when the package's using-subgraph is acyclic (guard order is
+load-bearing: Salsa has no in-progress guard, so memoizing on a cycle would
+re-enter or poison).
+
+> **The Milestone C seam.** This layer has no environment contact. Every
+> `:external` target behaves as v1's store-MISSING branch: the statement binds
+> only the module name (`_v2_external_bring_ins`), colon members bind
+> `:unknown` (the `:external` arm of `_v2_member_lookup`), ledger extensions
+> fail (the `:external` arm of `_v2_extend_target`), and an external wildcard
+> `using` always counts as unresolved
+> (`derived_v2_module_unresolved_wildcard_using`). Milestone C restores the
+> store lookups at exactly those four marked places — plus v1's implicit
+> `using Base`/`Core` member fallback and macro-declared names, which are also
+> env-side and absent here.
+
+The corpus differential
+([`test/v2/test_visibility_v2_differential.jl`](../../test/v2/test_visibility_v2_differential.jl))
+compares id-free faces against v1 per `(root, path)` under three ratchet
+classes (`:testitem_nodes`, `:macro_declared`, `:external_names`); building it
+immediately caught — and fixed — a real module-tree bug (v2's `_v2_declare!`
+lacked the method-extension rule, so a constructor after `struct Thing`
+overwrote the declared kind).
+
+---
+
 ## 8. Layer 3 — lowering
 
 [`src/v2/layer_lowering.jl`](../../src/v2/layer_lowering.jl) and
@@ -564,7 +617,7 @@ This is the honest answer to "how far off is the switchover".
 | --- | --- |
 | Macro expansion (general case shipped M1a: DJP-side, flag-gated; see §8) | without both flags macrocalls stay opaque; use-before-definition rules remain blocked until expansion is on and gated (`derived_file_expansion_ready`, M1c) |
 | Environment / SymbolServer seam | nothing external resolves; no missing-reference or call-arity checks |
-| A visibility layer (v1's `layer_visibility.jl`) | no cross-module name resolution |
+| The env arm of visibility (tree-only visibility shipped, §7½) | external names unresolvable; `missing_reference`-class rules still blocked |
 | Feature layers | hover, completions, references, signatures, symbols, navigation, actions, formatting are **all** v1-only |
 | Rule coverage | eight rules taken over + `lowering_errors`, versus StaticLint's full set; the env-dependent half (`missing_reference`, `incorrect_call_args`, …) needs the seam — see [`v2-portability-survey.md`](v2-portability-survey.md) |
 
