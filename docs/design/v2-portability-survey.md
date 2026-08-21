@@ -35,7 +35,7 @@ env/SymbolServer seam · **D** blocked on CFG/flow · **E** no port needed.
 | rule | what it needs |
 | --- | --- |
 | `module_name`, `relative_import` | ✅ this milestone — v2 module tree + splice prefix only. `module_name` is a mild superset of v1 (catches the cross-file splice-point parent). |
-| `nothing_comparison` | shape after lowering; a shadowing local shows up as a `BindingId` use, so the shape check is self-resolving. |
+| `nothing_comparison` | ✅ taken over — body-shape walk in `derived_item_semantic_findings` (includes macrocall arguments, skips quotes); the shadow guard is self-resolving via lowering (a local named `nothing`/`==`/`!=` silences the item). Zero v2-only on the corpus differential. |
 | `index_from_length` (conservative) | "is `length` shadowed locally / defined in this module" via module-tree names. Loses v1's `isarray` exemption (no types). |
 | `const_decl` (intra-module) | a per-name kind/const table on the module tree; lowering already reports same-scope conflicts within one item. |
 | `incorrect_iter_spec` (literal arm) | shape only. |

@@ -17,6 +17,7 @@ const LOWERING_TAKEOVER_RULES = Set([
     # (advisory) severities, from a better engine.
     :unused_binding, :unused_function_argument, :unused_type_parameter,
     :module_name, :relative_import, :unresolved_import, :missing_reference,
+    :nothing_comparison,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -153,7 +154,49 @@ Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
         push!(result, (addr=addr, rule_id=:unused_type_parameter,
             msg="A DataType parameter has been specified but not used."))
     end
+
+    # `nothing_comparison`: a pure shape check over the position-free body —
+    # `x == nothing` / `x != nothing` in evaluated positions, including inside
+    # macrocall arguments (v1 flags `@test x == nothing`, so this walk does
+    # not skip macrocalls). The shadow guard is self-resolving via lowering:
+    # any LOCAL binding named `nothing`/`==`/`!=` in the item silences it
+    # (v1's ref-resolves-to-Core.nothing check, conservatively).
+    if !any(b -> b.kind in (:local, :argument) && b.name in ("nothing", "==", "!="), low.bindings)
+        body = derived_item_lowering_body(rt, ref)
+        body === nothing || _v2_nothing_comparisons!(result, body, Ref(0), 0)
+    end
     return result
+end
+
+_v2_ident_val(bt::BodyTree{V2Kind}) =
+    bt.children === nothing && bt.kind == JS2.K"Identifier" &&
+    bt.val isa Union{Symbol,AbstractString} ? string(bt.val) : nothing
+
+# Plain preorder walk (addresses align with `derived_v2_file_maps` because
+# `_materialize` consumes addresses even for subtrees it skips): flag
+# `==`/`!=` calls with a bare `nothing` operand, at the OPERATOR's address
+# (v1 sets its error on the operator). Quoted code is data — no findings
+# inside, but `$` restores evaluated depth.
+function _v2_nothing_comparisons!(out::Vector{SemanticFinding}, bt::BodyTree{V2Kind},
+                                  addr::Base.RefValue{Int}, qdepth::Int)
+    myaddr = (addr[] += 1)
+    if qdepth == 0 && bt.kind == JS2.K"call" && bt.children !== nothing && length(bt.children) == 3
+        op = _v2_ident_val(bt.children[1])
+        if op == "==" || op == "!="
+            if _v2_ident_val(bt.children[2]) == "nothing" || _v2_ident_val(bt.children[3]) == "nothing"
+                msg = op == "==" ?
+                    "Compare against `nothing` using `isnothing` or `===`" :
+                    "Compare against `nothing` using `!isnothing` or `!==`"
+                push!(out, (addr=Int32(myaddr + 1), rule_id=:nothing_comparison, msg=msg))
+            end
+        end
+    end
+    bt.children === nothing && return nothing
+    child_depth = _quote_depth(bt.kind, qdepth)
+    for c in bt.children
+        _v2_nothing_comparisons!(out, c, addr, child_depth)
+    end
+    return nothing
 end
 
 # ── module-tree rules ───────────────────────────────────────────────────────

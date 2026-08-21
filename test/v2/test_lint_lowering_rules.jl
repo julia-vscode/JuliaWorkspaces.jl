@@ -300,3 +300,46 @@ end
     jw = ll_workspace("f(x) where T = x\n"; config="[rules]\nunused_type_parameter = \"off\"\n")
     @test isempty(ll_codes(jw, :unused_type_parameter))
 end
+
+@testitem "lowering lint: nothing_comparison takeover" setup=[LoweringLintWS] begin
+    # Both operand orders and both operators, exact v1 messages, range on the
+    # operator.
+    jw = ll_workspace("f(x) = x == nothing\n")
+    d = only(ll_codes(jw, :nothing_comparison))
+    @test d.source == "JuliaWorkspaces.jl"
+    @test d.message == "Compare against `nothing` using `isnothing` or `===`"
+    src = "f(x) = x == nothing\n"
+    @test src[first(d.range):last(d.range)-1] == "=="
+
+    jw = ll_workspace("f(x) = nothing == x\n")
+    @test length(ll_codes(jw, :nothing_comparison)) == 1
+    jw = ll_workspace("f(x) = x != nothing\n")
+    @test only(ll_codes(jw, :nothing_comparison)).message ==
+        "Compare against `nothing` using `!isnothing` or `!==`"
+
+    # Inside a macrocall argument (v1 flags `@test x == nothing`).
+    jw = ll_workspace("check(x) = @assert x == nothing\n")
+    @test length(ll_codes(jw, :nothing_comparison)) == 1
+
+    # Top-level statement item.
+    jw = ll_workspace("x = 1\ny = x == nothing\n")
+    @test length(ll_codes(jw, :nothing_comparison)) == 1
+
+    # Negatives: the recommended forms, quoted code, a shadowing local.
+    jw = ll_workspace("f(x) = x === nothing\ng(x) = isnothing(x)\n")
+    @test isempty(ll_codes(jw, :nothing_comparison))
+    jw = ll_workspace("f(x) = :(x == nothing)\n")
+    @test isempty(ll_codes(jw, :nothing_comparison))
+    jw = ll_workspace("function f(nothing)\n    return 1 == nothing\nend\n")
+    @test isempty(ll_codes(jw, :nothing_comparison))
+
+    # Takeover: no StaticLint duplicate under the flag; flag off is legacy.
+    jw = ll_workspace("f(x) = x == nothing\n")
+    @test all(d -> d.source == "JuliaWorkspaces.jl", ll_codes(jw, :nothing_comparison))
+    jw = ll_workspace("f(x) = x == nothing\n"; flag=false)
+    @test !any(d -> d.source == "JuliaWorkspaces.jl", ll_codes(jw, :nothing_comparison))
+
+    # Config: rule off silences it.
+    jw = ll_workspace("f(x) = x == nothing\n"; config="[rules]\nnothing_comparison = \"off\"\n")
+    @test isempty(ll_codes(jw, :nothing_comparison))
+end
