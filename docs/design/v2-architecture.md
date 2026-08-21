@@ -631,7 +631,7 @@ This is the honest answer to "how far off is the switchover".
 | Type-level env queries (the seam ships name-level data only, §7½) | no `incorrect_call_args`, `type_piracy`, `kw_default_mismatch`; hover/completions for store content still v1 |
 | The implicit-member fallback + macro-declared names in visibility | colon members a module got from its own implicit `using Base`, and names modelled macros declare, bind `:unknown` (name still binds — no missing-ref FPs, but no hover/goto through them) |
 | Feature layers | hover, completions, references, signatures, symbols, navigation, actions, formatting are **all** v1-only |
-| Rule coverage | ten rules taken over + `lowering_errors`, versus StaticLint's full set; `missing_reference`/`unresolved_import` shipped with the env seam — the remaining env-dependent rules need type-level store data — see [`v2-portability-survey.md`](v2-portability-survey.md) |
+| Rule coverage | twelve rules taken over + two v2-only rules (`lowering_errors`, `soft_scope_ambiguity`), versus StaticLint's full set; the remaining env-dependent rules need type-level store data — see [`v2-portability-survey.md`](v2-portability-survey.md) |
 
 v2 today is a complete *spine* — identity, skeleton, module structure,
 per-item binding semantics, and a name-level environment edge — carrying a

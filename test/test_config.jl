@@ -137,6 +137,8 @@ end
         # Lowering-backed rule (Harvest JuliaLowering): shapes Julia will not
         # load — same class and treatment as syntax_errors.
         :lowering_errors => :error,
+        # Small rule batch: Julia's soft-scope ambiguity warning, statically.
+        :soft_scope_ambiguity => :information,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 

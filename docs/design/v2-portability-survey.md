@@ -86,9 +86,15 @@ TOML/config/environment rules.
   equivalent on stable Julia's flisp lowering), with four false-positive
   guards (test-block let-wrapping, items under macrocall arguments, items
   containing stripped macrocalls, files with syntax errors).
-- `is_ambiguous_local`: Julia's soft-scope-ambiguity warning, statically.
-  Already projected; per-item lowering rarely sees the conflicting global, so
-  a useful rule needs the enclosing module's names injected into the frame.
+- ✅ **`soft_scope_ambiguity`** (`is_ambiguous_local`): Julia's soft-scope
+  ambiguity warning, statically. The flag requires the conflicting global to
+  EXIST in the lowered-into module — always false against the empty anchor —
+  so the rule runs a SEPARATE second lowering (`_lower_item_soft_scope`) into
+  an anchor seeded with the module's plain-global names (`:assignment`/
+  `:global` kinds; consts/functions/datatypes never soft-scope-warn), keeping
+  `derived_item_lowering` body-only pure. Candidate-gated to items containing
+  top-level `for`/`while`/`try` (the neutral-scope shapes). Corpus FP-sweep
+  empty. Default `:information`, strict `:warning`.
 - `is_captured`: closure-capture rules.
 
 ## 3. Feature layers, classified
@@ -162,8 +168,9 @@ testitem suite doubles as a differential harness.
    takeover ids + `unused_type_parameter` + the module-tree pair.
 2. **v2 features M1**: A1 + local-references family + workspace symbols +
    module-at-position + document links + structural actions (~640 LOC).
-3. `is_ambiguous_local` (with module-name injection), `nothing_comparison`,
-   intra-module `const_decl`.
+3. ✅ **The small rule batch**: `nothing_comparison` + intra-module
+   `const_decl` taken over; `soft_scope_ambiguity` shipped as the first
+   genuinely new lowering-only rule (see §2).
 4. ✅ **The environment seam** (name level, §3½ Milestones A–C):
    `missing_reference` + `unresolved_import` shipped. The remaining
    env-dependent value — call-arity, type rules, store-backed

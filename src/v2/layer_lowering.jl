@@ -422,6 +422,52 @@ function _lower_item(body::BodyTree{V2Kind},
     end
 end
 
+# The seeded second lowering behind the `soft_scope_ambiguity` rule (see
+# lint_lowering_rules.jl). `is_ambiguous_local` fires only when the assigned
+# name has a VALUE-CARRYING, NON-CONST global in the module the tree is
+# rebased into (`is_defined_and_owned_global` → `Base.binding_kind ==
+# PARTITION_KIND_GLOBAL`) — always false against the empty anchor the shared
+# `_lower_item` uses. This variant seeds a fresh anchor with the enclosing
+# module's plain-global names before lowering, and is a SEPARATE entry point
+# on purpose: folding the seed into `derived_item_lowering` would make every
+# item's lowering module-dependent and break its body-only purity (the H
+# invariant). The world counter is fetched AFTER seeding so the lowering
+# passes see the seeded bindings.
+#
+# Returns the `(addr, name)` pairs of ambiguous locals; any error → empty
+# (degradation is silence, matching every other producer here).
+function _lower_item_soft_scope(body::BodyTree{V2Kind},
+                                expansions::Dict{UInt64,BodyTree{V2Kind}},
+                                global_names::Vector{String})
+    st = _materialize(body, Ref(0), 0, expansions)
+    out = Tuple{Int32,String}[]
+    try
+        anchor = Module(:JWLoweringAnchor)
+        for n in global_names
+            # `global x = nothing` — not `setglobal!`, which cannot CREATE a
+            # binding on Julia ≥1.12 (#56933). The eval'd form declares a
+            # value-carrying, non-const global: exactly PARTITION_KIND_GLOBAL.
+            Core.eval(anchor, Expr(:global, Expr(:(=), Symbol(n), nothing)))
+        end
+        world = Base.get_world_counter()
+        ex0 = JL2.rebase_layers(st, anchor, JL2.JL_NEW_SYNTAX_VERSION)
+        ex1 = JL2.expand_forms_1(ex0, world, true)
+        ctx2, ex2 = JL2.expand_forms_2(ex1, world)
+        ctx3, _ = JL2.resolve_scopes(ctx2, ex2; soft_scope=false)
+        for b in ctx3.bindings.info
+            b.is_ambiguous_local || continue
+            b.is_internal && continue
+            addr = _node_addr(b.node_id)
+            addr == Int32(0) && continue
+            push!(out, (addr, b.name))
+        end
+        return out
+    catch err
+        err isa InterruptException && rethrow()
+        return Tuple{Int32,String}[]
+    end
+end
+
 """
     derived_item_lowering(rt, ref) -> Union{Nothing,ItemLowering}
 

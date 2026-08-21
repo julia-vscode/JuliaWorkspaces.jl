@@ -204,6 +204,12 @@ const LINT_RULES = LintRule[
     # `global_const_decl`, which are suppressed rather than re-emitted.
     LintRule(id = :lowering_errors, tier = TierSemantic,
         severity_minimal = :error, severity_default = :error, severity_strict = :error),
+    # Julia's soft-scope ambiguity warning, statically (v2 lowering producer,
+    # behind the lowering flag — no StaticLint counterpart): an un-annotated
+    # assignment in a top-level for/while/try to a name that is also a plain
+    # module global. Julia itself warns at run time in files; this predicts it.
+    LintRule(id = :soft_scope_ambiguity, tier = TierSemantic,
+        severity_minimal = :off, severity_default = :information, severity_strict = :warning),
     LintRule(id = :syntax_errors, tier = TierSyntax,
         severity_minimal = :error, severity_default = :error, severity_strict = :error),
     LintRule(id = :syntax_warnings, tier = TierSyntax,

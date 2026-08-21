@@ -30,7 +30,7 @@ const LOWERING_TAKEOVER_RULES = Set([
 
 # Rules this producer OWNS (no StaticLint counterpart, so no suppression):
 # checks only JuliaLowering computes.
-const LOWERING_OWN_RULES = Set([:lowering_errors])
+const LOWERING_OWN_RULES = Set([:lowering_errors, :soft_scope_ambiguity])
 
 # The gate both producers consult. Evaluation order matters: with the flag off
 # the only Salsa dependency is the flag input itself, so config edits do not
@@ -437,6 +437,66 @@ Salsa.@derived function derived_v2_const_decl_findings(rt, uri)
     return result
 end
 
+# ── soft_scope_ambiguity ────────────────────────────────────────────────────
+#
+# Julia's soft-scope ambiguity warning, statically: an un-annotated assignment
+# inside a top-level `for`/`while`/`try` to a name that is also a plain
+# module global. In a file Julia warns at run time and makes a NEW LOCAL (the
+# REPL silently assigns the global) — this rule predicts that warning without
+# running anything. The signal is JuliaLowering's own `is_ambiguous_local`,
+# which requires the conflicting global to EXIST in the lowered-into module —
+# so this producer runs `_lower_item_soft_scope`, a separate lowering into an
+# anchor seeded with the module's plain-global names (`:assignment`/`:global`
+# kinds only: consts, functions and datatypes never soft-scope-warn, matching
+# `is_defined_and_owned_global`'s PARTITION_KIND_GLOBAL test). Kept separate
+# so `derived_item_lowering` stays body-only pure.
+
+# The soft (permeable) scope shapes: desugaring mints `neutral_scope` for
+# for/while and try blocks only; function bodies and `let` are hard scope.
+function _v2_has_soft_scope_shape(bt::BodyTree{V2Kind}, qdepth::Int=0)
+    if qdepth == 0 &&
+       (bt.kind == JS2.K"for" || bt.kind == JS2.K"while" || bt.kind == JS2.K"try")
+        return true
+    end
+    bt.children === nothing && return false
+    child_depth = _quote_depth(bt.kind, qdepth)
+    return any(c -> _v2_has_soft_scope_shape(c, child_depth), bt.children)
+end
+
+Salsa.@derived function derived_item_soft_scope_findings(rt, ref::V2ItemRef)
+    result = SemanticFinding[]
+    low = derived_item_lowering(rt, ref)
+    (low === nothing || low.status !== :ok) && return result
+    ref.id in derived_v2_under_macrocall_ids(rt, ref.file) && return result
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return result
+    # Test blocks materialize let-wrapped (hard scope) — the flag cannot fire,
+    # but skipping saves the second lowering.
+    _test_block_target(body) !== nothing && return result
+    _v2_has_soft_scope_shape(body) || return result
+
+    root = derived_v2_best_root_for_uri(rt, ref.file)
+    root === nothing && return result
+    skel = derived_v2_file_skeleton(rt, ref.file)
+    any(t -> t.id == ref.id, skel.testitems) && return result
+    idx = findfirst(r -> r.id == ref.id, skel.items)
+    idx === nothing && return result
+    path = vcat(_derived_v2_splice_prefix(rt, ref.file), skel.items[idx].parent_module)
+
+    seeds = sort!(String[n for (n, k) in derived_v2_module_names(rt, root, path)
+                         if k === :assignment || k === :global])
+    isempty(seeds) && return result
+
+    for (addr, name) in _lower_item_soft_scope(body, derived_item_expansions(rt, ref), seeds)
+        push!(result, (addr=addr, rule_id=:soft_scope_ambiguity,
+            msg="Assignment to `$name` in soft scope is ambiguous because a global " *
+                "variable by the same name exists: `$name` will be treated as a new local. " *
+                "Disambiguate by using `local $name` to suppress this warning or " *
+                "`global $name` to assign to the existing global variable."))
+    end
+    return result
+end
+
 # ── missing_reference ───────────────────────────────────────────────────────
 #
 # A post-pass join, no lowering changes: every free identifier in an item
@@ -655,6 +715,7 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     config = derived_effective_lint_config(rt, uri)
     missing_refs_on = missingrefs_from_config(config) !== :none &&
         !_derived_v2_missing_ref_file_suppressed(rt, uri)
+    soft_scope_on = rule_enabled(config, :soft_scope_ambiguity)
 
     for row in derived_v2_file_skeleton(rt, uri).items
         ref = V2ItemRef(uri, row.id)
@@ -662,6 +723,10 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         if missing_refs_on
             mr = derived_item_missing_reference_findings(rt, ref)
             isempty(mr) || (item_findings = vcat(item_findings, mr))
+        end
+        if soft_scope_on
+            ss = derived_item_soft_scope_findings(rt, ref)
+            isempty(ss) || (item_findings = vcat(item_findings, ss))
         end
         isempty(item_findings) && continue
         ranges = get(maps, row.id, nothing)
