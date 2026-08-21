@@ -9,9 +9,10 @@ v2 capabilities the classes are scored against: per-item lowering through
 `rebase_layers → expand_forms_1 → expand_forms_2 → resolve_scopes` (no
 `binding_analysis`/`closure_conversion`/`linear_ir`, hence **no CFG**); real
 macro expansion via the DJP child (flag-gated) spliced into materialization;
-position-free bindings/uses in source-preorder addresses; the v2 module tree
-(env-free); **no** environment/SymbolServer seam, **no** cross-file visibility
-layer, **no** type information.
+position-free bindings/uses in source-preorder addresses; the v2 module tree;
+since the env-seam program (§3½): own root discovery, a cross-file visibility
+layer, and a NAME-level environment edge — but still **no** type information
+(method tables, store docs).
 
 ## 1. Lint rules (all 35), classified
 
@@ -39,14 +40,25 @@ env/SymbolServer seam · **D** blocked on CFG/flow · **E** no port needed.
 | `const_decl` (intra-module) | a per-name kind/const table on the module tree; lowering already reports same-scope conflicts within one item. |
 | `incorrect_iter_spec` (literal arm) | shape only. |
 
-### C — blocked on the environment/SymbolServer seam (~45–55%, the user-visible majority)
+### C — env-dependent (~45–55%, the user-visible majority)
 
-`missing_reference`, `unresolved_import` (the only two `:warning`-by-default
-StaticLint rules), `incorrect_call_args` (external method table),
-`invalid_type_declaration`, `kw_default_mismatch`, `type_piracy`, the strict
-versions of `incorrect_iter_spec`/`index_from_length`. Unreachable until v2
-gets a visibility layer + env seam; shipping them env-free would be a
-false-positive machine.
+- ✅ **`missing_reference`, `unresolved_import`** (the only two
+  `:warning`-by-default StaticLint rules) — Milestone C, taken over.
+  `missing_reference` is a post-pass join over lowering's anchor-module
+  `:global` read-not-assigned bindings vs (id-free visible names ∪ implicit
+  Base/Core scope), with synthetic reads suppressed by preorder-address
+  interval and gate-heavy conservatism (see the file header of
+  `lint_lowering_rules.jl` for the deviations, all in the silent direction:
+  item-level existence guards, whole-file test-helper suppression,
+  `scope="symbols"` ≡ `"all"`, members unchecked). `unresolved_import` ports
+  v1's message semantics exactly (first unresolved component, declared-dep
+  distinction, wildcard consequence, no-double-diagnosis with
+  `relative_import`, resolves-to-a-binding silence). Corpus differential:
+  zero v2-only findings.
+- Still blocked, now on TYPE-level store data rather than the (shipped)
+  name-level seam: `incorrect_call_args` (external method table),
+  `invalid_type_declaration`, `kw_default_mismatch`, `type_piracy`, the
+  strict versions of `incorrect_iter_spec`/`index_from_length`.
 
 ### D — blocked on CFG: effectively nothing
 
@@ -125,10 +137,24 @@ testitem suite doubles as a differential harness.
   file. Corpus differential green with ratchet classes `:testitem_nodes` /
   `:macro_declared` / `:external_names`; building it caught and fixed the
   missing method-extension rule in v2's module-tree declare.
-- Next: **Milestone C — the env edge** (external exports hash-keyed
-  plain-data-out, Base/Core implicit names, env readiness) and the first env
-  rules (`missing_reference` as a post-pass join over lowering's
-  anchor-module `:global` bindings, `unresolved_import`).
+- ✅ **Milestone C — the env edge + first env rules**
+  (`src/layer_v2_env_seam.jl`, outside src/v2 because the store walk needs
+  guard-forbidden names; stores never escape into derived values): external
+  exports/member-kind/first-missing-segment/implicit-scope/project-deps as
+  plain-data queries; the four visibility seam places restored (the
+  `:external_names` differential ratchet class died — external faces
+  converged exactly); env-ready gating extended to v2 findings in
+  `derived_diagnostics` (it previously covered only the StaticLint loop);
+  `missing_reference` + `unresolved_import` shipped as takeovers (see §1
+  class C). Differentials caught three real bugs along the way: the
+  module-tree method-extension rule, comma-list import row conflation, and
+  the missing resolves-to-a-binding rule. Notable env fact: the baked
+  "stdlib-only" env is `load_core()`'s Core/Base/Main only — no actual
+  stdlibs — so projectless tests use `Base`/`Base.Threads` as store-present
+  fixtures.
+- The environment-seam program is COMPLETE at name level. What remains
+  env-side is type-level store data (method tables, docs, completions
+  content) — a different program.
 
 ## 4. Recommended sequencing (as of this survey)
 
@@ -138,5 +164,7 @@ testitem suite doubles as a differential harness.
    module-at-position + document links + structural actions (~640 LOC).
 3. `is_ambiguous_local` (with module-name injection), `nothing_comparison`,
    intra-module `const_decl`.
-4. **The environment seam** — the remaining ~half of lint value plus full
-   hover/completions. The big one; planned separately.
+4. ✅ **The environment seam** (name level, §3½ Milestones A–C):
+   `missing_reference` + `unresolved_import` shipped. The remaining
+   env-dependent value — call-arity, type rules, store-backed
+   hover/completions — needs TYPE-level store queries; plan separately.

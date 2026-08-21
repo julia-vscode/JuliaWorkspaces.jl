@@ -404,24 +404,36 @@ query only when the package's using-subgraph is acyclic (guard order is
 load-bearing: Salsa has no in-progress guard, so memoizing on a cycle would
 re-enter or poison).
 
-> **The Milestone C seam.** This layer has no environment contact. Every
-> `:external` target behaves as v1's store-MISSING branch: the statement binds
-> only the module name (`_v2_external_bring_ins`), colon members bind
-> `:unknown` (the `:external` arm of `_v2_member_lookup`), ledger extensions
-> fail (the `:external` arm of `_v2_extend_target`), and an external wildcard
-> `using` always counts as unresolved
-> (`derived_v2_module_unresolved_wildcard_using`). Milestone C restores the
-> store lookups at exactly those four marked places — plus v1's implicit
-> `using Base`/`Core` member fallback and macro-declared names, which are also
-> env-side and absent here.
+> **The environment edge (Milestone C, resolved).** `:external` targets
+> resolve through the plain-data queries in
+> [`src/layer_v2_env_seam.jl`](../../src/layer_v2_env_seam.jl) at exactly
+> four places: `_v2_external_bring_ins` (a store-backed wildcard `using`
+> expands the export list, module-valued exports get ledger targets), the
+> `:external` arm of `_v2_member_lookup` (colon members resolve via the
+> store's `haskey` — not export-gated), the `:external` arm of
+> `_v2_extend_target` (extensions validate iff the full path resolves as
+> nested stores), and `_v2_wildcard_using_unresolved` (store presence, both
+> the direct arm and the pass-2 landing). A MISSING store keeps v1's
+> store-missing behavior verbatim at each. The seam file lives OUTSIDE
+> src/v2/ because the store walk needs `StaticLint`/`SymbolServer` names the
+> boundary guard forbids (which now also forbids `derived_environment` /
+> `SymbolServer` themselves, so store contact can never creep in); its
+> contract is that stores never escape into derived values — every query
+> returns plain data, and the store-identity `isequal` on rebuilt envs gives
+> early cutoff. Two deliberate absences remain vs v1: the implicit
+> `using Base`/`Core` MEMBER fallback inside the tree/workspace-package
+> member-lookup arms, and macro-declared names — both bind `:unknown`, which
+> still binds the NAME, so name-keyed consumers (missing_reference) stay
+> safe.
 
 The corpus differential
 ([`test/v2/test_visibility_v2_differential.jl`](../../test/v2/test_visibility_v2_differential.jl))
-compares id-free faces against v1 per `(root, path)` under three ratchet
-classes (`:testitem_nodes`, `:macro_declared`, `:external_names`); building it
-immediately caught — and fixed — a real module-tree bug (v2's `_v2_declare!`
-lacked the method-extension rule, so a constructor after `struct Thing`
-overwrote the declared kind).
+compares id-free faces against v1 per `(root, path)` under two ratchet
+classes (`:testitem_nodes`, `:macro_declared`; a third, `:external_names`,
+died when the env seam landed — external faces converged exactly); building
+it immediately caught — and fixed — a real module-tree bug (v2's
+`_v2_declare!` lacked the method-extension rule, so a constructor after
+`struct Thing` overwrote the declared kind).
 
 ---
 
@@ -616,15 +628,16 @@ This is the honest answer to "how far off is the switchover".
 | Missing | Consequence |
 | --- | --- |
 | Macro expansion (general case shipped M1a: DJP-side, flag-gated; see §8) | without both flags macrocalls stay opaque; use-before-definition rules remain blocked until expansion is on and gated (`derived_file_expansion_ready`, M1c) |
-| Environment / SymbolServer seam | nothing external resolves; no missing-reference or call-arity checks |
-| The env arm of visibility (tree-only visibility shipped, §7½) | external names unresolvable; `missing_reference`-class rules still blocked |
+| Type-level env queries (the seam ships name-level data only, §7½) | no `incorrect_call_args`, `type_piracy`, `kw_default_mismatch`; hover/completions for store content still v1 |
+| The implicit-member fallback + macro-declared names in visibility | colon members a module got from its own implicit `using Base`, and names modelled macros declare, bind `:unknown` (name still binds — no missing-ref FPs, but no hover/goto through them) |
 | Feature layers | hover, completions, references, signatures, symbols, navigation, actions, formatting are **all** v1-only |
-| Rule coverage | eight rules taken over + `lowering_errors`, versus StaticLint's full set; the env-dependent half (`missing_reference`, `incorrect_call_args`, …) needs the seam — see [`v2-portability-survey.md`](v2-portability-survey.md) |
+| Rule coverage | ten rules taken over + `lowering_errors`, versus StaticLint's full set; `missing_reference`/`unresolved_import` shipped with the env seam — the remaining env-dependent rules need type-level store data — see [`v2-portability-survey.md`](v2-portability-survey.md) |
 
-v2 today is a complete *spine* — identity, skeleton, module structure, per-item
-binding semantics — carrying a deliberately small payload. The layers it is
-missing are the ones that touch the environment, and those are the expensive
-ones.
+v2 today is a complete *spine* — identity, skeleton, module structure,
+per-item binding semantics, and a name-level environment edge — carrying a
+payload that now includes the two highest-volume env-dependent rules. What
+remains env-side is the type-level half (method tables, call-arity, store
+docs), plus the whole feature-layer surface.
 
 ---
 
