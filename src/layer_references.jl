@@ -542,6 +542,23 @@ function _get_definitions(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
 
+    # v2 features: a local's definition is its declaration identifier.
+    # Deliberate delta vs v1, which lands on the whole defining expression —
+    # the name range is the better target (named ratchet class in the
+    # differential).
+    if input_v2_features(runtime)
+        v2 = v2_local_occurrences(runtime, uri, offset)
+        if v2 !== nothing
+            for o in v2.occ
+                o.addr in v2.decl_addrs || continue
+                push!(results, DefinitionResult(uri,
+                    _offset_to_position(runtime, uri, _v2f_start0(o.range)),
+                    _offset_to_position(runtime, uri, _v2f_stop0(o.range))))
+            end
+            isempty(results) || return unique!(results)
+        end
+    end
+
     # Per-file analysis meta (the inventory architecture's per-file pass), not
     # the whole-closure static-lint meta: a name declared in a SIBLING file
     # resolves here as a plain-data `TreeRef`, which is reattached to its
@@ -592,6 +609,20 @@ function _get_references(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
 
+    # v2 features (experiment): a LOCAL binding resolves entirely from the v2
+    # lowering; anything v2 declines falls through to the v1 path untouched.
+    if input_v2_features(runtime)
+        v2 = v2_local_occurrences(runtime, uri, offset)
+        if v2 !== nothing
+            for o in v2.occ
+                push!(results, ReferenceResult(uri,
+                    _offset_to_position(runtime, uri, _v2f_start0(o.range)),
+                    _offset_to_position(runtime, uri, _v2f_stop0(o.range))))
+            end
+            return results
+        end
+    end
+
     # Per-file analysis meta (the inventory architecture's per-file pass): a
     # module-level name resolves to its `ItemRef` and its references are
     # aggregated cross-file over the outbound tables (`each_reference`); a
@@ -629,6 +660,22 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
 
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
+
+    # v2 features: locals resolve from the lowering (locals are never
+    # `@`-spelled, so the new name is used bare); v2 declining falls through
+    # to the v1 path, including its macro-declared refusal.
+    if input_v2_features(runtime)
+        v2 = v2_local_occurrences(runtime, uri, offset)
+        if v2 !== nothing
+            bare = startswith(new_name, "@") ? new_name[nextind(new_name, 1):end] : new_name
+            for o in v2.occ
+                push!(results, RenameEdit(uri,
+                    _offset_to_position(runtime, uri, _v2f_start0(o.range)),
+                    _offset_to_position(runtime, uri, _v2f_stop0(o.range)), bare))
+            end
+            return results
+        end
+    end
 
     meta_dict = derived_file_analysis(runtime, root, uri).meta
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
@@ -690,6 +737,15 @@ function _can_rename(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return nothing
 
+    # v2 features: a resolved local is renameable at its own identifier range.
+    if input_v2_features(runtime)
+        v2 = v2_local_occurrences(runtime, uri, offset)
+        if v2 !== nothing
+            return (start=_offset_to_position(runtime, uri, _v2f_start0(v2.cursor_range)),
+                    stop=_offset_to_position(runtime, uri, _v2f_stop0(v2.cursor_range)))
+        end
+    end
+
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     x = get_expr1(cst, offset)
     x isa CSTParser.EXPR || return nothing
@@ -734,6 +790,23 @@ function _get_highlights(runtime, uri::URI, offset::Int)
 
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
+
+    # v2 features: locals highlight from the lowering (all occurrences are in
+    # this file by construction). `write` = declaration site or plain-`=`
+    # assignment target; compound assignments report `:read` (documented
+    # approximation).
+    if input_v2_features(runtime)
+        v2 = v2_local_occurrences(runtime, uri, offset)
+        if v2 !== nothing
+            for o in v2.occ
+                push!(results, HighlightResult(
+                    _offset_to_position(runtime, uri, _v2f_start0(o.range)),
+                    _offset_to_position(runtime, uri, _v2f_stop0(o.range)),
+                    o.write ? :write : :read))
+            end
+            return results
+        end
+    end
 
     meta_dict = derived_file_analysis(runtime, root, uri).meta
     cst = derived_julia_legacy_syntax_tree(runtime, uri)

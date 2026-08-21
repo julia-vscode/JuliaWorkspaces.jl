@@ -103,6 +103,104 @@ function v2_item_row_at(rt, uri::URI, offset0::Int)
     return hits[end]
 end
 
+const _V2_LOCAL_BINDING_KINDS = (:local, :argument, :static_parameter, :typevar)
+
+"""
+    V2LocalOccurrences
+
+The resolved occurrence set of one LOCAL binding group: every identifier
+occurrence (declaration sites and uses) with its byte range and a
+read/write classification, plus the cursor identifier's own range for
+prepare-rename.
+"""
+struct V2LocalOccurrences
+    name::String
+    cursor_range::UnitRange{Int}
+    decl_addrs::Vector{Int32}
+    occ::Vector{@NamedTuple{addr::Int32, range::UnitRange{Int}, write::Bool}}
+end
+
+"""
+    v2_local_occurrences(rt, uri, offset0) -> Union{Nothing,V2LocalOccurrences}
+
+Resolve the identifier under the (0-based) cursor as a LOCAL binding of its
+item via the v2 lowering, or return `nothing` — in which case the caller runs
+the untouched v1 path. `nothing` covers, deliberately: no item / opaque or
+degraded items (under-macrocall, expansion sites, failed lowering) / no
+identifier at the cursor / the name resolving to a global (module-level names
+keep the v1 `:tree` route) / quoted identifiers (their fabricated reads
+anchor at the quote's address, so they never match) / groups with no
+user-visible declaration site.
+
+Lowering desugars one source declaration into several bindings sharing its
+declaration address (kwarg forwarding methods, comprehension closures, the
+`where`-param typevar/static_parameter pair) — the group is merged by
+(name, declaration address), which is what unifies a `where` param's
+signature and body occurrences. Occurrences are filtered to addresses that
+ARE identifier leaves spelling the name, so a rename can never touch a
+non-name token. `write` = a declaration site, or the first child of a `K"="`
+assignment; compound assignment (`+=`) occurrences report `read` — a
+documented approximation.
+"""
+function v2_local_occurrences(rt, uri::URI, offset0::Int)
+    row = v2_item_row_at(rt, uri, offset0)
+    row === nothing && return nothing
+    (row.kind === :opaque_macrocall || !row.interpretable || row.under_macrocall) && return nothing
+    ref = V2ItemRef(uri, row.id)
+    isempty(derived_v2_item_expansion_sites(rt, ref)) || return nothing
+    low = derived_item_lowering(rt, ref)
+    (low === nothing || low.status !== :ok) && return nothing
+    view = v2_item_view(rt, uri, row.id)
+    view === nothing && return nothing
+    addr = v2_identifier_addr_at(view, offset0)
+    addr === nothing && return nothing
+    name = string(view.vals[addr])
+    addr32 = Int32(addr)
+
+    used_here = Set{Int32}(u.binding for u in low.uses if u.addr == addr32)
+    decl_set = Set{Int32}()
+    for b in low.bindings
+        b.name == name || continue
+        b.kind in _V2_LOCAL_BINDING_KINDS || continue
+        (b.is_internal || b.is_ssa) && continue
+        (b.addr == addr32 || b.id in used_here) || continue
+        push!(decl_set, b.addr)
+    end
+    isempty(decl_set) && return nothing
+
+    group_ids = Set{Int32}()
+    decl_addrs = Int32[]
+    for b in low.bindings
+        b.name == name || continue
+        b.kind in _V2_LOCAL_BINDING_KINDS || continue
+        b.is_internal && continue
+        b.addr in decl_set || continue
+        push!(group_ids, b.id)
+        (b.addr != Int32(0) && !(b.addr in decl_addrs)) && push!(decl_addrs, b.addr)
+    end
+    isempty(decl_addrs) && return nothing   # no user-visible declaration site
+
+    occ_addrs = Set{Int32}(decl_addrs)
+    for u in low.uses
+        (u.binding in group_ids && u.addr != Int32(0)) && push!(occ_addrs, u.addr)
+    end
+    n = length(view.ranges)
+    occ = @NamedTuple{addr::Int32, range::UnitRange{Int}, write::Bool}[]
+    for a in sort!(collect(occ_addrs))
+        1 <= a <= n || continue
+        ai = Int(a)
+        _v2f_is_identifier(view, ai) || continue
+        string(view.vals[ai]) == name || continue
+        p = Int(view.parents[ai])
+        write = (a in decl_addrs) ||
+            (p != 0 && view.kinds[p] == JS2.K"=" && ai == p + 1)
+        push!(occ, (addr=a, range=view.ranges[ai], write=write))
+    end
+    isempty(occ) && return nothing
+    sort!(occ; by=o -> first(o.range))
+    return V2LocalOccurrences(name, view.ranges[addr], decl_addrs, occ)
+end
+
 """
     v2_identifier_addr_at(view, offset0) -> Union{Nothing,Int}
 

@@ -104,3 +104,95 @@ end
                         string(view.kinds[a]) == "String", eachindex(view.ranges))
     @test sa !== nothing
 end
+
+# ── local references family ─────────────────────────────────────────────────
+
+@testitem "local refs: plain, reassigned, and argument locals" setup=[FeatV2WS] begin
+    src = "function f(a)\n    x = a + 1\n    x = x + 2\n    return x\nend\n"
+    jw = ft_workspace(src)
+
+    # `x`: two write sites (both assignments) and two reads.
+    refs = JW._get_references(jw.runtime, FT_URI, off0(src, "x ="))
+    @test length(refs) == 4
+    his = JW._get_highlights(jw.runtime, FT_URI, off0(src, "x ="))
+    @test count(h -> h.kind === :write, his) == 2
+    @test count(h -> h.kind === :read, his) == 2
+
+    # `a`: declaration (argument) + one read; goto-def lands on the argument name.
+    refs_a = JW._get_references(jw.runtime, FT_URI, off0(src, "a + 1"))
+    @test length(refs_a) == 2
+    defs_a = JW._get_definitions(jw.runtime, FT_URI, off0(src, "a + 1"))
+    @test length(defs_a) == 1
+    @test defs_a[1].start.line == 1
+
+    # Rename rewrites every occurrence with the bare name.
+    edits = JW._get_rename_edits(jw.runtime, FT_URI, off0(src, "x ="), "y")
+    @test length(edits) == 4
+    @test all(e -> e.new_text == "y", edits)
+    @test JW._can_rename(jw.runtime, FT_URI, off0(src, "x =")) !== nothing
+end
+
+@testitem "local refs: closures, comprehensions, where params, kwargs" setup=[FeatV2WS] begin
+    # A captured local: definition + closure read unify.
+    src = "function f()\n    c = 1\n    g = () -> c + 1\n    return g()\nend\n"
+    jw = ft_workspace(src)
+    @test length(JW._get_references(jw.runtime, FT_URI, off0(src, "c = 1"))) == 2
+
+    # Comprehension variable: filter + body closures merge by decl addr.
+    src = "f(d) = [n + 1 for n in d if n > 0]\n"
+    jw = ft_workspace(src)
+    refs = JW._get_references(jw.runtime, FT_URI, off0(src, "n in d"))
+    @test length(refs) == 3   # decl + body read + filter read
+
+    # `where` param: signature and body occurrences unify via the
+    # typevar/static_parameter pair.
+    src = "f(x::T) where {T} = zero(T)\n"
+    jw = ft_workspace(src)
+    refs = JW._get_references(jw.runtime, FT_URI, off0(src, "T} ="))
+    @test length(refs) == 3   # ::T, {T}, zero(T)
+
+    # A kwarg with a default: the forwarding-method duplicate collapses to
+    # source occurrences only.
+    src = "f(a; b = 2) = a + b\n"
+    jw = ft_workspace(src)
+    refs = JW._get_references(jw.runtime, FT_URI, off0(src, "b = 2"))
+    @test length(refs) == 2
+end
+
+@testitem "local refs: shadowing keeps inner and outer distinct" setup=[FeatV2WS] begin
+    src = "function f(v)\n    x = 1\n    let x = 2\n        v += x\n    end\n    return x\nend\n"
+    jw = ft_workspace(src)
+    outer = JW._get_references(jw.runtime, FT_URI, off0(src, "x = 1"))
+    inner = JW._get_references(jw.runtime, FT_URI, off0(src, "x = 2"))
+    @test length(outer) == 2   # decl + return read
+    @test length(inner) == 2   # let binding + the += read
+    @test isempty(intersect(Set(r.start for r in outer), Set(r.start for r in inner)))
+end
+
+@testitem "local refs: fallbacks decline to v1" setup=[FeatV2WS] begin
+    using JuliaWorkspaces: v2_local_occurrences
+
+    # A quoted identifier: fabricated reads anchor at the quote address, so
+    # the resolver declines.
+    src = "f(x) = :(alpha + 1)\n"
+    jw = ft_workspace(src)
+    @test v2_local_occurrences(jw.runtime, FT_URI, off0(src, "alpha")) === nothing
+
+    # Inside an opaque macrocall's arguments: item has expansion sites.
+    src = "function f(y)\n    @some_dsl y + 1\nend\n"
+    jw = ft_workspace(src)
+    @test v2_local_occurrences(jw.runtime, FT_URI, off0(src, "y + 1")) === nothing
+
+    # A module-level (global) name: declined — the v1 :tree route answers.
+    src = "g() = 1\nf() = g()\n"
+    jw = ft_workspace(src)
+    @test v2_local_occurrences(jw.runtime, FT_URI, off0(src, "g()"; nth=2)) === nothing
+
+    # Flag off: the branch never runs (structural — internal helper still
+    # works, but _get_references must follow the v1 path; smoke-check no
+    # crash and plausible output for a local).
+    src = "function f()\n    z = 1\n    return z\nend\n"
+    jw = ft_workspace(src; flag=false)
+    refs = JW._get_references(jw.runtime, FT_URI, off0(src, "z = 1"))
+    @test refs isa Vector{JW.ReferenceResult}
+end
