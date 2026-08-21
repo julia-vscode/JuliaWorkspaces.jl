@@ -299,3 +299,86 @@ end
               Set(string(l.target_uri) for l in links)
     end
 end
+
+# ── code actions under both flags ───────────────────────────────────────────
+
+@testitem "actions: the structural set still works with both v2 flags on" begin
+    # The finding-driven `when` predicates read StaticLint's meta marks, which
+    # the still-running v1 pass sets even when input_lowering_lint suppresses
+    # the corresponding DIAGNOSTICS at emission — so both flags on must offer
+    # exactly the actions flag-off offers, at every probed cursor. Parity is
+    # the contract; absolute expectations live in test/test_actions.jl.
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
+        set_v2_features!, set_lowering_lint!, get_code_actions, execute_code_action
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = "name = \"ActV2\"
+uuid = \"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee51\"
+version = \"0.1.0\"
+"
+    manifest_toml = "julia_version = \"1.11.0\"
+manifest_format = \"2.0\"
+project_hash = \"abc\"
+
+[deps]
+"
+    source = """
+    module ActV2
+    f(x) = x + 1
+    function g(unused_arg)
+        return 1
+    end
+    function h()
+        dead = 2
+        s = "plain"
+        return isnothing(s)
+    end
+    check(y) = y == nothing
+    end
+    """
+    uri = URI("file:///actv2/src/ActV2.jl")
+    function mk(flags)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///actv2/Project.toml"), SourceText(project_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///actv2/Manifest.toml"), SourceText(manifest_toml, "toml")))
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        if flags
+            set_lowering_lint!(jw, true)
+            set_v2_features!(jw, true)
+        end
+        return jw
+    end
+    jw_on, jw_off = mk(true), mk(false)
+
+    function string_index(src, line, col)
+        lines = split(src, '
+')
+        off = 0
+        for l in 1:(line - 1)
+            off += ncodeunits(lines[l]) + 1
+        end
+        return off + col
+    end
+
+    saw_ids = Set{String}()
+    for line in 2:11, col in (1, 5, 10, 14)
+        idx = string_index(source, line, col)
+        on = sort([a.id for a in get_code_actions(jw_on, uri, idx, String[])])
+        off = sort([a.id for a in get_code_actions(jw_off, uri, idx, String[])])
+        @test on == off
+        union!(saw_ids, on)
+        # Every offered action must EXECUTE identically under the flags.
+        for id in on
+            e_on = execute_code_action(jw_on, id, uri, idx)
+            e_off = execute_code_action(jw_off, id, uri, idx)
+            @test [(e.uri, e.edits) for e in e_on] == [(e.uri, e.edits) for e in e_off]
+        end
+    end
+    # The probe grid actually exercises the structural set.
+    for want in ("ExpandFunction", "RewriteAsRawString")
+        @test want in saw_ids
+    end
+    println("actions parity probe covered: ", sort!(collect(saw_ids)))
+end
