@@ -580,3 +580,98 @@ end
     jw = ft_workspace(src4)
     @test v2_global_occurrences(jw.runtime, FT_URI, off0(src4, "print")) === nothing
 end
+
+# ── selection ranges + block range ──────────────────────────────────────────
+
+@testitem "selection ranges: v2 chains nest strictly outward" setup=[FeatV2WS] begin
+    src = """
+    module M
+    f(x) = x + g(x)
+    end
+    export nothing_here
+    """
+    jw = ft_workspace(src)
+    o = off0(src, "g(x)")
+    res = only(JW._get_selection_ranges(jw.runtime, FT_URI, [o]))
+    @test res !== nothing
+    # Walk outward: each range must contain the previous, ending at the file.
+    outermost, depth = let prev = nothing, n = res, count = 0
+        while n !== nothing
+            if prev !== nothing
+                @test (n.start.line < prev.start.line ||
+                       (n.start.line == prev.start.line && n.start.column <= prev.start.column))
+                @test (prev.stop.line < n.stop.line ||
+                       (prev.stop.line == n.stop.line && prev.stop.column <= n.stop.column))
+            end
+            prev = n
+            n = n.parent
+            count += 1
+        end
+        prev, count
+    end
+    @test depth >= 4   # node .. item .. module body .. module .. file
+    @test outermost.start.line == 1 && outermost.start.column == 1   # outermost = file
+
+    # Cursor on an export statement: per-offset v1 fallback still answers.
+    res2 = only(JW._get_selection_ranges(jw.runtime, FT_URI, [off0(src, "export")]))
+    @test res2 !== nothing
+end
+
+@testitem "block range: windows, docstrings, and module structure" setup=[FeatV2WS] begin
+    src = """
+    first_fn() = 1
+
+    \"\"\"
+    docs
+    \"\"\"
+    documented() = 2
+
+    module M
+    inner_a() = 1
+    module Deep
+    end
+    end
+    last_fn() = 3
+    """
+    jw = ft_workspace(src)
+    br(o) = JW._get_current_block_range(jw.runtime, FT_URI, o)
+
+    # A plain statement: highlight covers the statement, block extends to the
+    # next statement's start.
+    b = br(off0(src, "first_fn"))
+    @test b !== nothing
+    @test b.block_start == b.highlight_start
+    @test b.block_start.line == 1
+
+    # Trailing trivia after a statement belongs to the NEXT block.
+    b = br(off0(src, "first_fn") + ncodeunits("first_fn() = 1") + 1)
+    @test b !== nothing && b.highlight_start.line >= 3
+
+    # A documented item's block INCLUDES the docstring (A2 doc range).
+    b = br(off0(src, "documented()"))
+    @test b.block_start.line == 3
+    @test b.highlight_stop.line >= 6
+
+    # Module keyword and `end`: the whole module.
+    b = br(off0(src, "module M"))
+    @test b.block_start.line == 8
+    @test b.highlight_stop.line >= 12
+    # Inside the body: the inner statement.
+    b = br(off0(src, "inner_a"))
+    @test b.block_start.line == 9
+    @test b.highlight_stop.line == 9
+    # A nested module inside the body is returned whole, no recursion.
+    b = br(off0(src, "module Deep"))
+    @test b.block_start.line == 10
+    @test b.highlight_stop.line >= 11
+
+    # A statement under `@static if`: v2 declines, flag-on equals flag-off.
+    src2 = "@static if true\n    cond_fn() = 1\nend\n"
+    jw_on = ft_workspace(src2)
+    jw_off = ft_workspace(src2; flag=false)
+    o = off0(src2, "cond_fn")
+    @test br === br   # keep bindings distinct below
+    b_on = JW._get_current_block_range(jw_on.runtime, FT_URI, o)
+    b_off = JW._get_current_block_range(jw_off.runtime, FT_URI, o)
+    @test b_on == b_off
+end

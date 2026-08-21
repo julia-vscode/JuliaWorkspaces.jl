@@ -63,6 +63,12 @@ end
 For each offset (0-based) in `offsets`, compute a nested selection range.
 """
 function _get_selection_ranges(runtime, uri::URI, offsets::Vector{Int})
+    # v2 features (experiment): per-offset v2 chains with per-offset v1
+    # fallback (see `_get_selection_ranges_v2`).
+    if input_v2_features(runtime) && derived_v2_best_root_for_uri(runtime, uri) !== nothing
+        return _get_selection_ranges_v2(runtime, uri, offsets)
+    end
+
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     results = Union{Nothing,SelectionRangeResult}[]
     for offset in offsets
@@ -83,6 +89,13 @@ Find the current top-level block at `offset` (0-based) in the file.
 Returns a `BlockRangeResult` or `nothing`.
 """
 function _get_current_block_range(runtime, uri::URI, offset::Int)
+    # v2 features (experiment): gap-partition block windows over v2 rows;
+    # `:v1` declines (degraded rows, no root) run the untouched body below.
+    if input_v2_features(runtime)
+        r = _get_current_block_range_v2(runtime, uri, offset)
+        r === :v1 || return r
+    end
+
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     loc = 0
 

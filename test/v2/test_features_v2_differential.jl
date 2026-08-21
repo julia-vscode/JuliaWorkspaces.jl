@@ -397,3 +397,76 @@ end
     @test total_on[] > 500
     @test problems == String[]
 end
+
+@testitem "v2 block range agrees with v1 across the package corpus" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    root_dir = pkgdir(JuliaWorkspaces)
+
+    function corpus_workspace(flag)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Project.toml")),
+            SourceText(read(joinpath(root_dir, "Project.toml"), String), "toml")))
+        add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Manifest.toml")),
+            SourceText("julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"0\"\n\n[deps]\n", "toml")))
+        uris = JuliaWorkspaces.URIs2.URI[]
+        for (d, _, fs) in walkdir(joinpath(root_dir, "src"))
+            vendored = any(occursin(x, lowercase(d)) for x in ("staticlint", "symbolserver", "packages"))
+            for f in fs
+                endswith(f, ".jl") || continue
+                p = joinpath(d, f)
+                uri = filepath2uri(p)
+                add_file!(jw, TextFile(uri, SourceText(read(p, String), "julia")))
+                vendored || push!(uris, uri)
+            end
+        end
+        flag && JW.set_v2_features!(jw, true)
+        return jw, uris
+    end
+
+    jw_on, uris = corpus_workspace(true)
+    jw_off, _ = corpus_workspace(false)
+
+    flat(b) = b === nothing ? nothing :
+        (b.block_start, b.highlight_start, b.highlight_stop, b.block_stop)
+
+    problems = String[]
+    samples = Ref(0)
+    v2_answers = Ref(0)
+    for uri in uris
+        maps = JW.derived_v2_file_maps(jw_on.runtime, uri)
+        offsets = Set{Int}()
+        for row in JW.derived_v2_file_skeleton(jw_on.runtime, uri).items
+            length(offsets) >= 40 && break
+            ranges = get(maps, row.id, nothing)
+            (ranges === nothing || isempty(ranges)) && continue
+            s = JW._v2f_start0(ranges[1])
+            e = JW._v2f_stop0(ranges[1])
+            push!(offsets, s)
+            push!(offsets, (s + e) ÷ 2)
+            push!(offsets, e + 1)   # gap byte
+        end
+        for o in sort!(collect(offsets))
+            samples[] += 1
+            a = flat(JW._get_current_block_range(jw_on.runtime, uri, o))
+            b = flat(JW._get_current_block_range(jw_off.runtime, uri, o))
+            a == b && continue
+            # Declared class :v2_answers — v1 returns NOTHING (its doc-wrapped
+            # module-body walk gives up) where v2 produces a block; strictly
+            # more useful, counted rather than failed. Everything else fails.
+            if b === nothing && a !== nothing
+                v2_answers[] += 1
+            else
+                push!(problems, "$(uri)@$(o): on=$(a) off=$(b)")
+            end
+        end
+    end
+
+    println("block range differential: samples=$(samples[]) v2_answers_where_v1_nothing=$(v2_answers[])")
+    isempty(problems) || println("problems:\n  " * join(first(problems, 20), "\n  "))
+    @test samples[] > 500
+    @test problems == String[]
+end

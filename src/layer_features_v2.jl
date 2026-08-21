@@ -460,6 +460,239 @@ function _get_document_links_v2(runtime, uri::URI)
     return links
 end
 
+# ── selection ranges + block range ──────────────────────────────────────────
+
+"""
+    v2_node_addr_at(view, offset0) -> Union{Nothing,Int}
+
+The innermost node (any kind, not just identifiers) under the cursor:
+smallest containing range; ties prefer a range ENDING exactly at the offset
+(the `get_expr1` right-edge rule), then the later preorder address.
+"""
+function v2_node_addr_at(view::V2ItemView, offset0::Int)
+    best = nothing
+    bkey = (typemax(Int), true, 0)
+    for a in eachindex(view.ranges)
+        r = view.ranges[a]
+        _v2f_contains(r, offset0) || continue
+        key = (_v2f_stop0(r) - _v2f_start0(r), _v2f_stop0(r) != offset0, -a)
+        if best === nothing || key < bkey
+            best, bkey = a, key
+        end
+    end
+    return best
+end
+
+"""
+    _get_selection_ranges_v2(runtime, uri, offsets) -> Vector{Union{Nothing,SelectionRangeResult}}
+
+The v2 arm of `_get_selection_ranges`: per offset, the innermost node's
+parent chain within its item (consecutive duplicate ranges collapsed), then
+synthetic outer links — enclosing module bodies and whole modules
+(innermost-first, only when strictly widening) and finally the whole file.
+Offsets with no item row (export statements, module headers, trivia) fall
+back to the v1 CST path PER OFFSET. The chain's intermediate levels follow
+the EST shape, not v1's CST shape — a declared, test-unpinned delta.
+"""
+function _get_selection_ranges_v2(runtime, uri::URI, offsets::Vector{Int})
+    results = Union{Nothing,SelectionRangeResult}[]
+    maps = derived_v2_file_maps(runtime, uri)
+    skel = derived_v2_file_skeleton(runtime, uri)
+    tf = input_text_file(runtime, uri)
+    eof0 = tf === nothing ? 0 : ncodeunits(tf.content.content)
+    cst = nothing
+    for offset0 in offsets
+        row = v2_item_row_at(runtime, uri, offset0)
+        view = row === nothing ? nothing : v2_item_view(runtime, uri, row.id)
+        if view === nothing
+            cst === nothing && (cst = derived_julia_legacy_syntax_tree(runtime, uri))
+            x = get_expr1(cst, offset0)
+            push!(results, _get_selection_range_of_expr(x, runtime))
+            continue
+        end
+        pairs = Tuple{Int,Int}[]
+        a = v2_node_addr_at(view, offset0)
+        a === nothing && (a = 1)
+        while a != 0
+            r = view.ranges[a]
+            p = (_v2f_start0(r), _v2f_stop0(r))
+            (isempty(pairs) || pairs[end] != p) && push!(pairs, p)
+            a = Int(view.parents[a])
+        end
+        widen!(p) = (isempty(pairs) ||
+            (p[1] <= pairs[end][1] && pairs[end][2] <= p[2] && p != pairs[end])) && push!(pairs, p)
+        mods = [m for m in skel.modules
+                if (rs = get(maps, m.id, nothing);
+                    rs !== nothing && !isempty(rs) && _v2f_contains(rs[1], offset0))]
+        sort!(mods; by=m -> -length(m.parent_module))
+        for m in mods
+            rs = maps[m.id]
+            length(rs) >= 4 && widen!((_v2f_start0(rs[4]), _v2f_stop0(rs[4])))
+            widen!((_v2f_start0(rs[1]), _v2f_stop0(rs[1])))
+        end
+        widen!((0, eof0))
+        node = nothing
+        for p in Iterators.reverse(pairs)
+            node = SelectionRangeResult(_offset_to_position(runtime, uri, p[1]),
+                                        _offset_to_position(runtime, uri, p[2]), node)
+        end
+        push!(results, node)
+    end
+    return results
+end
+
+# One module level's block candidates: every mapped, NON-degraded row spliced
+# at exactly `pm`, deduped by id (an assignment-wrapped include has two rows
+# sharing an id), with the effective start pulled back over the docstring —
+# including its opening quote delimiter — when one exists (v1's top-level
+# statement IS the doc wrapper, starting at the opening quotes). Degraded rows
+# (inside `if` branches / macrocall arguments) are EXCLUDED wholesale: they
+# are sub-statements of a statement that has no row of its own, and letting
+# them in corrupts the window partition for their neighbors.
+function _v2f_block_candidates(skel, maps, docs, text::String, pm::Vector{String})
+    cands = @NamedTuple{start0::Int, stop0::Int, id::Int64, is_module::Bool}[]
+    seen = Set{Int64}()
+    function add!(id, is_module)
+        id in seen && return
+        rs = get(maps, id, nothing)
+        (rs === nothing || isempty(rs)) && return
+        push!(seen, id)
+        s0 = _v2f_start0(rs[1])
+        dr = get(docs, id, nothing)
+        if dr !== nothing
+            ds0 = _v2f_start0(dr)
+            # The stored doc range covers the CONTENT; the wrapper begins at
+            # the opening delimiter — scan back over the whitespace a
+            # triple-quote opener leaves (`\"\"\"\n`), then the quotes.
+            # Codeunit-wise: byte indexing must not trip on multibyte chars.
+            j = ds0   # 1-based index of the byte just before the content
+            while j >= 1 && codeunit(text, j) in
+                  (UInt8(' '), UInt8('\t'), UInt8('\n'), UInt8('\r'))
+                j -= 1
+            end
+            if j >= 3 && codeunit(text, j) == UInt8('"') &&
+               codeunit(text, j - 1) == UInt8('"') && codeunit(text, j - 2) == UInt8('"')
+                ds0 = j - 3
+            elseif j >= 1 && codeunit(text, j) == UInt8('"')
+                ds0 = j - 1
+            end
+            s0 = min(s0, ds0)
+        end
+        push!(cands, (start0=s0, stop0=_v2f_stop0(rs[1]), id=id, is_module=is_module))
+    end
+    for r in skel.items
+        (r.parent_module == pm && !r.conditional && !r.under_macrocall) && add!(r.id, false)
+    end
+    for m in skel.modules
+        m.parent_module == pm && add!(m.id, true)
+    end
+    for imp in skel.imports
+        imp.parent_module == pm && add!(imp.id, false)
+    end
+    for inc in skel.includes
+        inc.parent_module == pm && add!(inc.id, false)
+    end
+    for e in skel.exports
+        e.parent_module == pm && add!(e.id, false)
+    end
+    sort!(cands; by=c -> c.start0)
+    return cands
+end
+
+# Window selection: candidate i owns [start_i, start_{i+1}-1] (the GAP
+# PARTITION standing in for v1's fullspan windows — CSTParser attaches
+# trailing trivia to the preceding statement up to the next one's start);
+# a cursor past the winning row's own stop bumps to the NEXT statement
+# (v1's trailing-trivia rule). Returns `(cand, block_stop0)` or `nothing`.
+function _v2f_block_pick(cands, offset0::Int, hi0::Int)
+    isempty(cands) && return nothing
+    idx = length(cands)
+    for i in 1:(length(cands) - 1)
+        if offset0 < cands[i + 1].start0
+            idx = i
+            break
+        end
+    end
+    prebump_start0 = cands[idx].start0
+    # Trailing-trivia bump — but the LAST statement keeps owning its trailing
+    # region (v1's bump is guarded on a next statement existing).
+    (offset0 > cands[idx].stop0 && idx < length(cands)) && (idx += 1)
+    block_stop0 = idx < length(cands) ? cands[idx + 1].start0 : hi0
+    return (cands[idx], block_stop0, prebump_start0)
+end
+
+"""
+    _get_current_block_range_v2(runtime, uri, offset0)
+
+The v2 arm of `_get_current_block_range`. Returns `:v1` to run the untouched
+v1 body (no v2 root, empty maps, or a winner inside an `if` branch /
+macrocall arguments — those rows are finer-grained than v1's whole-statement
+answer). One level of module structure, exactly like v1: cursor in a module's
+header or `end` region → the whole module; strictly inside the body → the
+inner statement (an inner module returned whole, no recursion).
+"""
+function _get_current_block_range_v2(runtime, uri::URI, offset0::Int)
+    derived_v2_best_root_for_uri(runtime, uri) === nothing && return :v1
+    maps = derived_v2_file_maps(runtime, uri)
+    isempty(maps) && return :v1
+    skel = derived_v2_file_skeleton(runtime, uri)
+    docs = derived_v2_file_doc_ranges(runtime, uri)
+    tf = input_text_file(runtime, uri)
+    tf === nothing && return :v1
+    text = tf.content.content
+    eof0 = ncodeunits(text)
+    _pos(o) = _offset_to_position(runtime, uri, o)
+    result(s0, h1, bs) = BlockRangeResult(_pos(s0), _pos(s0), _pos(h1), _pos(bs))
+
+    # Degraded rows (inside `if` branches or macrocall arguments — including
+    # `@inline function …`, whose row is under_macrocall) are sub-statements
+    # of statements that have NO row of their own. Whenever the answer's
+    # window would touch such a region, only v1 can produce the
+    # whole-statement block — decline.
+    degraded = Tuple{Int,Int}[]
+    for r in skel.items
+        (r.conditional || r.under_macrocall) || continue
+        rs = get(maps, r.id, nothing)
+        (rs === nothing || isempty(rs)) && continue
+        lo = _v2f_start0(rs[1])
+        # A documented degraded row's statement begins at its docstring.
+        dr = get(docs, r.id, nothing)
+        dr !== nothing && (lo = min(lo, max(_v2f_start0(dr) - 3, 0)))
+        push!(degraded, (lo, _v2f_stop0(rs[1])))
+    end
+    touches_degraded(lo, hi) = any(d -> !(d[2] < lo || d[1] > hi), degraded)
+    # The cursor sitting inside a degraded statement itself (including one
+    # BEFORE the first candidate, where no window covers it) → v1.
+    any(d -> d[1] <= offset0 <= d[2], degraded) && return :v1
+
+    cands = _v2f_block_candidates(skel, maps, docs, text, String[])
+    isempty(cands) && return :v1
+    picked = _v2f_block_pick(cands, offset0, eof0)
+    picked === nothing && return nothing
+    c, block_stop0, prebump0 = picked
+    # The degraded check spans from the PRE-BUMP window start: a cursor in the
+    # trailing trivia of an unrepresented/degraded statement must not be
+    # silently assigned to a neighbor.
+    touches_degraded(min(prebump0, c.start0), block_stop0) && return :v1
+    c.is_module || return result(c.start0, c.stop0, block_stop0)
+
+    # Module: body range is preorder address 4 of the module's map.
+    rs = maps[c.id]
+    length(rs) < 4 && return result(c.start0, c.stop0, block_stop0)
+    body_s0, body_e0 = _v2f_start0(rs[4]), _v2f_stop0(rs[4])
+    (body_s0 < offset0 < body_e0) || return result(c.start0, c.stop0, block_stop0)
+
+    m = only(filter(x -> x.id == c.id, skel.modules))
+    inner_pm = vcat(m.parent_module, [m.name])
+    inner = _v2f_block_candidates(skel, maps, docs, text, inner_pm)
+    isempty(inner) && return :v1
+    ip = _v2f_block_pick(inner, offset0, body_e0)
+    ip === nothing && return nothing
+    ic, iblock_stop0, iprebump0 = ip
+    touches_degraded(min(iprebump0, ic.start0), iblock_stop0) && return :v1
+    return result(ic.start0, ic.stop0, iblock_stop0)
+end
+
 # ── module-at-position ──────────────────────────────────────────────────────
 
 # The v2 arm of `_get_module_at` (layer_navigation.jl). Module rows carry maps
