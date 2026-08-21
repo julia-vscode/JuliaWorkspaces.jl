@@ -263,3 +263,39 @@ end
     jw = ft_workspace(src; flag=false)
     @test JW._get_module_at(jw.runtime, FT_URI, off0(src, "g() = 2")) == "Outer.Inner"
 end
+
+# ── document links ──────────────────────────────────────────────────────────
+
+@testitem "document links: v2 swap" setup=[FeatV2WS] begin
+    mktempdir() do dir
+        # Real files on disk, workspace file located in `dir`.
+        target = joinpath(dir, "linked.jl")
+        write(target, "x = 1\n")
+        uri = JuliaWorkspaces.URIs2.filepath2uri(joinpath(dir, "main.jl"))
+        abs_esc = replace(target, "\\" => "\\\\")
+        src = """
+        include("linked.jl")
+        s = "linked.jl"
+        a = "$abs_esc"
+        missing_file = "no_such_file_xyz.jl"
+        """
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+        set_v2_features!(jw, true)
+
+        links = JW._get_document_links(jw.runtime, uri)
+        # The include path, the bare relative literal, and the absolute
+        # literal each link; the missing file does not.
+        @test length(links) == 3
+        @test all(l -> string(l.target_uri) ==
+            string(JuliaWorkspaces.URIs2.filepath2uri(target)), links)
+        @test length(unique((l.start, l.stop) for l in links)) == 3
+
+        # Flag off: the v1 path answers the same targets.
+        jw2 = JuliaWorkspace()
+        add_file!(jw2, TextFile(uri, SourceText(src, "julia")))
+        links_v1 = JW._get_document_links(jw2.runtime, uri)
+        @test Set(string(l.target_uri) for l in links_v1) ==
+              Set(string(l.target_uri) for l in links)
+    end
+end

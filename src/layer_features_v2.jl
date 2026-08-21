@@ -146,6 +146,61 @@ function _get_workspace_symbols_v2(runtime, query::String)
     return results
 end
 
+# ── document links ──────────────────────────────────────────────────────────
+
+function _v2f_walk_links!(links, bt::BodyTree{V2Kind}, addr::Base.RefValue{Int},
+                          ranges::Vector{UnitRange{Int}}, fpath::String, st)
+    my = (addr[] += 1)
+    if bt.children === nothing
+        if bt.kind == JS2.K"String" && bt.val isa String &&
+           isvalid(bt.val) && sizeof(bt.val) < 256
+            val = bt.val
+            r = ranges[my]
+            try
+                if isabspath(val) && safe_isfile(val)
+                    push!(links, DocumentLinkResult(position_at(st, first(r)),
+                        position_at(st, last(r)), URIs2.filepath2uri(val)))
+                elseif !isempty(fpath) && safe_isfile(joinpath(_dirname(fpath), val))
+                    push!(links, DocumentLinkResult(position_at(st, first(r)),
+                        position_at(st, last(r)),
+                        URIs2.filepath2uri(joinpath(_dirname(fpath), val))))
+                end
+            catch err
+                isa(err, Base.IOError) || isa(err, Base.SystemError) || rethrow()
+            end
+        end
+        return nothing
+    end
+    for c in bt.children
+        _v2f_walk_links!(links, c, addr, ranges, fpath, st)
+    end
+    return nothing
+end
+
+# The v2 arm of `_get_document_links` (layer_misc.jl): v1 parity — ANY string
+# literal naming an existing file (absolute, or relative to the file's dir)
+# becomes a link; not tightened to real includes. Walks every stored body
+# (items AND include rows, the latter stored since this milestone). Known
+# deviation: docstring contents produce no links — the walker's doc-wrapper
+# transparency drops the string part from item bodies.
+function _get_document_links_v2(runtime, uri::URI)
+    links = DocumentLinkResult[]
+    tf = input_text_file(runtime, uri)
+    tf === nothing && return links
+    st = tf.content
+    fpath = something(URIs2.uri2filepath(uri), "")
+    maps = derived_v2_file_maps(runtime, uri)
+    bodies = derived_v2_file_bodies(runtime, uri)
+    for id in sort!(collect(keys(bodies)))
+        body = bodies[id]
+        ranges = get(maps, id, nothing)
+        ranges === nothing && continue
+        bt_node_count(body) == length(ranges) || continue
+        _v2f_walk_links!(links, body, Ref(0), ranges, fpath, st)
+    end
+    return links
+end
+
 # ── module-at-position ──────────────────────────────────────────────────────
 
 # The v2 arm of `_get_module_at` (layer_navigation.jl). Module rows carry maps

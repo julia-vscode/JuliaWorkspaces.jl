@@ -249,3 +249,54 @@ end
     @test samples[] > 300
     @test problems == String[]
 end
+
+@testitem "v2 document links agree with v1 across the package corpus" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    root_dir = pkgdir(JuliaWorkspaces)
+
+    function corpus_workspace(flag)
+        jw = JuliaWorkspace()
+        uris = JuliaWorkspaces.URIs2.URI[]
+        for (d, _, fs) in walkdir(joinpath(root_dir, "src"))
+            any(occursin(x, lowercase(d)) for x in ("staticlint", "symbolserver", "packages")) && continue
+            for f in fs
+                endswith(f, ".jl") || continue
+                p = joinpath(d, f)
+                uri = filepath2uri(p)
+                add_file!(jw, TextFile(uri, SourceText(read(p, String), "julia")))
+                push!(uris, uri)
+            end
+        end
+        flag && JW.set_v2_features!(jw, true)
+        return jw, uris
+    end
+
+    jw_on, uris = corpus_workspace(true)
+    jw_off, _ = corpus_workspace(false)
+
+    problems = String[]
+    total_on = Ref(0)
+    saw_docstring = Ref(0)
+    for uri in uris
+        t_on = Set(string(l.target_uri) for l in JW._get_document_links(jw_on.runtime, uri))
+        t_off = Set(string(l.target_uri) for l in JW._get_document_links(jw_off.runtime, uri))
+        total_on[] += length(t_on)
+        # v2-only targets would be phantom links: none allowed. v1-only
+        # targets must come from docstring contents (the declared class) —
+        # counted, not enumerated per target (string literals inside
+        # docstrings are invisible to v2's walk by design).
+        v2only = setdiff(t_on, t_off)
+        isempty(v2only) ||
+            push!(problems, "$(uri): v2-only link targets $(collect(v2only))")
+        saw_docstring[] += length(setdiff(t_off, t_on))
+    end
+
+    println("document links differential: v2_links=$(total_on[]) v1_only_targets=$(saw_docstring[])")
+    isempty(problems) || println("problems:\n  " * join(first(problems, 20), "\n  "))
+    @test total_on[] > 20
+    @test problems == String[]
+end

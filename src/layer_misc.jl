@@ -91,6 +91,10 @@ function _find_document_links(x::CSTParser.EXPR, fpath::String, offset::Int, lin
 end
 
 function _get_document_links(runtime, uri::URI)
+    # v2 features (experiment): the same string-literal semantics off the v2
+    # bodies and maps (see `_get_document_links_v2`).
+    input_v2_features(runtime) && return _get_document_links_v2(runtime, uri)
+
     links = DocumentLinkResult[]
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     cst === nothing && return links
