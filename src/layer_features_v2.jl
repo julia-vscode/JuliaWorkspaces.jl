@@ -591,6 +591,108 @@ function v2_local_occurrences(rt, uri::URI, offset0::Int)
 end
 
 """
+    v2_global_occurrences(rt, uri, offset0) -> Union{Nothing,V2LocalOccurrences}
+
+The SAME-FILE occurrence set of a module-level (global) name under the
+cursor — the piece `v2_local_occurrences` deliberately declines. Name-keyed
+over every item's lowering in the file, restricted to items spliced into the
+SAME module as the cursor's (name-keying across modules would conflate
+same-named globals). Declines, beyond the local resolver's gates: a cursor on
+the right side of a `K"."` access (qualified members need target matching),
+and any file whose import rows alias the name (`using X: f as g` — v1's
+item-keyed join counts alias uses as references of the source; a name-keyed
+answer would silently miss them). Only DOCUMENT HIGHLIGHT consumes this —
+its v1 answer is file-confined by contract; references/rename are cross-file
+and stay v1 for globals.
+"""
+function v2_global_occurrences(rt, uri::URI, offset0::Int)
+    row = v2_item_row_at(rt, uri, offset0)
+    row === nothing && return nothing
+    (row.kind === :opaque_macrocall || !row.interpretable || row.under_macrocall) && return nothing
+    ref = V2ItemRef(uri, row.id)
+    isempty(derived_v2_item_expansion_sites(rt, ref)) || return nothing
+    low = derived_item_lowering(rt, ref)
+    (low === nothing || low.status !== :ok) && return nothing
+    view = v2_item_view(rt, uri, row.id)
+    view === nothing && return nothing
+    addr = v2_identifier_addr_at(view, offset0)
+    addr === nothing && return nothing
+    name = string(view.vals[addr])
+    addr32 = Int32(addr)
+
+    # Qualified member (`M.|name`): decline.
+    p = Int(view.parents[addr])
+    (p != 0 && view.kinds[p] == JS2.K"." && addr != p + 1) && return nothing
+
+    # The cursor must resolve GLOBAL in its own item.
+    used_here = Set{Int32}(u.binding for u in low.uses if u.addr == addr32)
+    cursor_is_global = any(b -> b.name == name && b.kind === :global &&
+                                (b.addr == addr32 || b.id in used_here), low.bindings)
+    cursor_is_global || return nothing
+
+    # Alias decline: any import row binding `name` through an `as` alias (or
+    # aliasing `name` away) breaks the name-keyed join.
+    skel = derived_v2_file_skeleton(rt, uri)
+    for imp in skel.imports
+        imp.alias == name && return nothing
+        for s in imp.symbols
+            (s.alias == name || (s.alias !== nothing && s.name == name)) && return nothing
+        end
+    end
+    # Qualified-extension decline: `Base.hash(x::T) = …` in this file means
+    # occurrences of `hash` split between the extended function and anything
+    # local — v1 resolves them by TARGET; a name-keyed join cannot.
+    for it in derived_v2_file_inventory(rt, uri).items
+        (it.name == name && !isempty(it.qualifier)) && return nothing
+    end
+
+    occ = @NamedTuple{addr::Int32, range::UnitRange{Int}, write::Bool}[]
+    cursor_range = view.ranges[addr]
+    for r in skel.items
+        r.parent_module == row.parent_module || continue
+        (r.kind === :opaque_macrocall || !r.interpretable || r.under_macrocall) && continue
+        rref = V2ItemRef(uri, r.id)
+        isempty(derived_v2_item_expansion_sites(rt, rref)) || continue
+        rlow = derived_item_lowering(rt, rref)
+        (rlow === nothing || rlow.status !== :ok) && continue
+        rview = r.id == row.id ? view : v2_item_view(rt, uri, r.id)
+        rview === nothing && continue
+        # A per-item :global binding's `addr` is its FIRST occurrence in that
+        # item, not a real declaration site — only ASSIGNED bindings' addrs
+        # count as write sites (`const LIMIT = 10` yes; a read-only use no).
+        gids = Set{Int32}()
+        addrs = Set{Int32}()
+        decl_addrs = Set{Int32}()
+        for b in rlow.bindings
+            (b.name == name && b.kind === :global && !b.is_internal) || continue
+            push!(gids, b.id)
+            if b.addr != Int32(0)
+                push!(addrs, b.addr)
+                b.is_assigned && push!(decl_addrs, b.addr)
+            end
+        end
+        isempty(gids) && continue
+        for u in rlow.uses
+            (u.binding in gids && u.addr != Int32(0)) && push!(addrs, u.addr)
+        end
+        n = length(rview.ranges)
+        for a in sort!(collect(addrs))
+            (1 <= a <= n) || continue
+            ai = Int(a)
+            (_v2f_is_identifier(rview, ai) && string(rview.vals[ai]) == name) || continue
+            pp = Int(rview.parents[ai])
+            write = (a in decl_addrs) ||
+                (pp != 0 && rview.kinds[pp] == JS2.K"=" && ai == pp + 1)
+            push!(occ, (addr=a, range=rview.ranges[ai], write=write))
+        end
+    end
+    isempty(occ) && return nothing
+    sort!(occ; by=o -> first(o.range))
+    unique!(o -> o.range, occ)
+    return V2LocalOccurrences(name, cursor_range, Int32[], occ)
+end
+
+"""
     v2_identifier_addr_at(view, offset0) -> Union{Nothing,Int}
 
 The preorder address of the identifier leaf under the cursor, with v1's

@@ -791,12 +791,14 @@ function _get_highlights(runtime, uri::URI, offset::Int)
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return results
 
-    # v2 features: locals highlight from the lowering (all occurrences are in
-    # this file by construction). `write` = declaration site or plain-`=`
-    # assignment target; compound assignments report `:read` (documented
-    # approximation).
+    # v2 features: locals highlight from the lowering, and — highlights being
+    # file-confined by contract — same-file GLOBALS through the name-keyed
+    # resolver when the local one declines. `write` = declaration site or
+    # plain-`=` assignment target; compound assignments report `:read`
+    # (documented approximation).
     if input_v2_features(runtime)
         v2 = v2_local_occurrences(runtime, uri, offset)
+        v2 === nothing && (v2 = v2_global_occurrences(runtime, uri, offset))
         if v2 !== nothing
             for o in v2.occ
                 push!(results, HighlightResult(

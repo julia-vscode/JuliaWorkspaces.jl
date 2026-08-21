@@ -532,3 +532,51 @@ end
     v1_syms = JW._get_document_symbols(jw2.runtime, FT_URI)
     @test any(s -> s.name == "Outer", v1_syms)
 end
+
+# ── same-file global highlights ─────────────────────────────────────────────
+
+@testitem "global highlights: same-file occurrences" setup=[FeatV2WS] begin
+    using JuliaWorkspaces: v2_global_occurrences
+    src = """
+    const LIMIT = 10
+    check(x) = x < LIMIT
+    clamp2(x) = min(x, LIMIT)
+    helper() = 1
+    run() = helper() + helper()
+    """
+    jw = ft_workspace(src)
+
+    # A const and its two use sites; the declaration is the write.
+    his = JW._get_highlights(jw.runtime, FT_URI, off0(src, "LIMIT"))
+    @test length(his) == 3
+    @test count(h -> h.kind === :write, his) == 1
+
+    # A function name: declaration + call sites.
+    his = JW._get_highlights(jw.runtime, FT_URI, off0(src, "helper()"; nth=2))
+    @test length(his) == 3
+
+    # Module-scoping: same name in two modules stays separate.
+    src2 = """
+    module A
+    shared = 1
+    use_a() = shared
+    end
+    module B
+    shared = 2
+    use_b() = shared
+    end
+    """
+    jw = ft_workspace(src2)
+    his_a = JW._get_highlights(jw.runtime, FT_URI, off0(src2, "shared = 1"))
+    @test length(his_a) == 2
+
+    # Alias imports decline the name-keyed resolver (flag-on == flag-off).
+    src3 = "using Base: sum as total\nf(v) = total(v)\n"
+    jw = ft_workspace(src3)
+    @test v2_global_occurrences(jw.runtime, FT_URI, off0(src3, "total(v)")) === nothing
+
+    # Qualified member cursors decline.
+    src4 = "g() = Base.print\n"
+    jw = ft_workspace(src4)
+    @test v2_global_occurrences(jw.runtime, FT_URI, off0(src4, "print")) === nothing
+end

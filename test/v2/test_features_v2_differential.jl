@@ -116,6 +116,30 @@
                     end
                 end
             end
+            # Second cursor family: GLOBAL declaration sites — document
+            # highlight is the only v2 consumer, compared with the same
+            # equal-or-subset discipline.
+            for b in low.bindings
+                file_cursors[] >= 60 && break
+                b.kind === :global || continue
+                (b.is_internal || b.addr == Int32(0)) && continue
+                a = Int(b.addr)
+                (1 <= a <= length(view.ranges) && JW._v2f_is_identifier(view, a)) || continue
+                offset0 = JW._v2f_start0(view.ranges[a])
+                file_cursors[] += 1
+                cursors[] += 1
+                h_on = rngs(JW._get_highlights(jw_on.runtime, uri, offset0))
+                h_off = rngs(JW._get_highlights(jw_off.runtime, uri, offset0))
+                if h_on != h_off
+                    if issubset(h_off, h_on)
+                        push!(saw, :v2_superset)
+                    elseif issubset(h_on, h_off)
+                        push!(saw, :v1_superset)
+                    else
+                        push!(problems, "$(uri)@$(offset0) `$(b.name)`: crossing global-highlight sets on=$(length(h_on)) off=$(length(h_off))")
+                    end
+                end
+            end
         end
     end
 
