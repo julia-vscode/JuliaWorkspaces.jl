@@ -557,6 +557,22 @@ milestone (2026-08-20), in two distinct modes:
   and the module-tree pair `:module_name` / `:relative_import` (a third,
   skeleton-based producer — `derived_module_tree_lint_findings` — whose
   findings attach to module/import rows, which now carry address maps).
+  Later milestones widened the set: `:nothing_comparison`, `:const_decl`,
+  `:missing_reference`, `:unresolved_import` (Milestone C), and — v2 M3, on
+  the arity edge — `:incorrect_call_args` (arity arm, both codes; see
+  `derived_item_call_args_findings`), `:type_piracy`,
+  `:invalid_type_declaration`, `:kw_default_mismatch`, and
+  `:incorrect_iter_spec` (literal arm). The M3 producers share one design:
+  callee/type-name resolution goes name → visibility face → the workspace
+  arity funnel (`src/v2/layer_arity_v2.jl`) or the seam
+  (`derived_v2_external_method_arities`, the `:datatype` member kind), and
+  every unresolvable, shadowed, aliased, partial-view (store-extending),
+  blind-module, test-block or unmodelled-macro case declines to silence —
+  the zero-v2-only corpus differentials are the backstop. The arity-only
+  scope is a PARITY argument, not an approximation: v1's own per-file
+  `tree_visible` path checks cross-file callees from `MethodArity` plain
+  data with no types, so arity-level checking IS the shipped cross-file
+  semantics; only the positional-type message arm is dropped.
 - **Suppression-only**: `:duplicate_function_argument`, `:break_continue`,
   `:global_const_decl`. These are v1's *syntactic approximations* of genuine
   load errors; under the flag they are silenced and the same shapes surface
@@ -629,10 +645,10 @@ This is the honest answer to "how far off is the switchover".
 | Missing | Consequence |
 | --- | --- |
 | Macro expansion (general case shipped M1a: DJP-side, flag-gated; see §8) | without both flags macrocalls stay opaque; use-before-definition rules remain blocked until expansion is on and gated (`derived_file_expansion_ready`, M1c) |
-| Type-level env queries (the seam ships name-level data only, §7½) | no `incorrect_call_args`, `type_piracy`, `kw_default_mismatch`; hover/completions for store content still v1 |
+| Type-level env queries (the seam ships name+ARITY data, §7½; M3 added `derived_v2_external_method_arities` + the `:datatype` member kind) | the arity-level rules shipped in M3 (`incorrect_call_args`, `type_piracy`, `kw_default_mismatch`, …); the positional-TYPE arms and store-doc hover/completions content still v1 |
 | The implicit-member fallback + macro-declared names in visibility | colon members a module got from its own implicit `using Base`, and names modelled macros declare, bind `:unknown` (name still binds — no missing-ref FPs, but no hover/goto through them) |
-| Feature layers | local references family, workspace symbols, module-at, document links shipped on v2 (§10½, behind `input_v2_enabled`); hover, completions, signatures, document symbols, most actions still v1-only |
-| Rule coverage | twelve rules taken over + two v2-only rules (`lowering_errors`, `soft_scope_ambiguity`), versus StaticLint's full set; the remaining env-dependent rules need type-level store data — see [`v2-portability-survey.md`](v2-portability-survey.md) |
+| Feature layers | references family, workspace/document symbols, module-at, document links, selection/block ranges, cross-file hover, signature help shipped on v2 (§10½, behind `input_v2_enabled`); completions, store-content hover, most actions still v1-only |
+| Rule coverage | seventeen rules taken over + two v2-only rules (`lowering_errors`, `soft_scope_ambiguity`), versus StaticLint's full set; what remains env-dependent needs genuinely type-level store data — see [`v2-portability-survey.md`](v2-portability-survey.md) |
 
 v2 today is a complete *spine* — identity, skeleton, module structure,
 per-item binding semantics, and a name-level environment edge — carrying the
@@ -673,7 +689,10 @@ today.
   link semantics preserved).
 - **A2 — doc ranges** (M2): the walker captures each docstring LITERAL's
   byte range as it unwraps the transparent `@doc` wrapper (`pending_doc` on
-  the walk state, consumed by the first id minted underneath), stored as
+  the walk state, consumed by the first id minted underneath — an opaque
+  macrocall row records it WITHOUT consuming, so a doc-wrapped
+  `Salsa.@derived function …` documents both the row and the wrapped
+  definition, M3), stored as
   `V2FileWalk`'s fourth product with its own volatile projection
   `derived_v2_file_doc_ranges` — the maps firewall verbatim. The docstring
   TEXT never enters derived state (skeleton/bodies stay `==` across doc
@@ -703,8 +722,32 @@ today.
   reached exact equality; one declared class records v1 returning nothing
   inside doc-wrapped module bodies where v2 answers.
 
+- **Signature slicing** (M3): signatures render by SLICING THE SOURCE at map
+  ranges — byte-faithful, no printer to keep in sync. `v2_item_signature_text`
+  gives the as-written (whitespace-normalized) signature; `v2_item_signature_params`
+  assembles labels + UTF-16 parameter ranges through v1's own
+  `_assemble_signature`, so both engines share one label/offset contract
+  (wheres/return types dropped, `@nospecialize` peeled, functor callees
+  re-parenthesized, struct inner constructors or the implicit field
+  constructor).
+- **Hover** (M3, `_get_hover_v2` behind a decline-based branch in
+  `_get_hover_text`): CROSS-FILE workspace function names (per-method
+  docstring + signature-slice blocks, byte-equal to the pinned TreeRef
+  rendering, exported/public footer) and cross-file module names. Locals
+  decline (v1 renders inferred types v2 does not compute), datatypes decline
+  (v1 prints the canonical Expr; a comment-preserving slice cannot match
+  beyond whitespace), and SAME-FILE-declared names + definition sites decline
+  because v1 deliberately renders a different (same-file binding) view there.
+- **Signature help** (M3, `_get_signature_help_v2`): innermost-call cursor
+  targeting on the item view (a call ending exactly at the cursor is behind
+  it), workspace callees only (qualified through the module-target ledger),
+  labels/ranges from the slicing helpers, v1's cursor-independent
+  comma-count active-parameter rule mirrored, arg>0 filtering preserved.
+  Store callees, shadowed names and store-extending names decline.
+
 Every feature carries a corpus differential in
 [`test/v2/test_features_v2_differential.jl`](../../test/v2/test_features_v2_differential.jl)
+(hover and signature help carry theirs in their own test files)
 with tightly-keyed ratchet classes; two v1 quirks surfaced and were NOT
 copied (the file-head "Main" answer of module-at; operator-spelled qualified
 extensions dropped from symbols).

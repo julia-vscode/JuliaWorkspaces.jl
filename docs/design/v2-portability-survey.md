@@ -38,7 +38,7 @@ env/SymbolServer seam · **D** blocked on CFG/flow · **E** no port needed.
 | `nothing_comparison` | ✅ taken over — body-shape walk in `derived_item_semantic_findings` (includes macrocall arguments, skips quotes); the shadow guard is self-resolving via lowering (a local named `nothing`/`==`/`!=` silences the item). Zero v2-only on the corpus differential. |
 | `index_from_length` | ⏸ DEFERRED on measurement (v2 M3): v1 produces exactly ONE finding on this repo's corpus (layer_hover.jl, a `1:length` loop over an unknown-typed container). The port would need a syntactic stand-in for v1's `isarray`-typed exemption (fire/decline by initializer or annotation shape) to avoid v2-only findings on annotated arguments — machinery disproportionate to one corpus hit. Revisit if a registry sweep shows real volume. |
 | `const_decl` (intra-module) | ✅ taken over — the module tree's raw ordered decl-event stream (whole-module, so CROSS-FILE redefinitions are new coverage over v1's scope-local check); conditional/under-macrocall rows and structurally-identical re-definitions exempt; local shapes stay `lowering_errors:error`. Zero v2-only on the corpus differential. |
-| `incorrect_iter_spec` (literal arm) | shape only. |
+| `incorrect_iter_spec` (literal arm) | ✅ taken over (v2 M3) — bare numeric literal / bare Base-resolving `length(...)` iterated values, over for/generator specs (multi-spec block form included) with the standard macro/quote address accounting; a locally-shadowed `length` declines the item. The strict `<:Number`-typed-variable arm stays deferred (type inference). |
 
 ### C — env-dependent (~45–55%, the user-visible majority)
 
@@ -55,10 +55,32 @@ env/SymbolServer seam · **D** blocked on CFG/flow · **E** no port needed.
   distinction, wildcard consequence, no-double-diagnosis with
   `relative_import`, resolves-to-a-binding silence). Corpus differential:
   zero v2-only findings.
-- Still blocked, now on TYPE-level store data rather than the (shipped)
-  name-level seam: `incorrect_call_args` (external method table),
-  `invalid_type_declaration`, `kw_default_mismatch`, `type_piracy`, the
-  strict versions of `incorrect_iter_spec`/`index_from_length`.
+- ✅ **`incorrect_call_args` (arity arm) + `function_has_no_methods`**
+  (v2 M3) — the class-C keystone, resolved at ARITY level: v1's own per-file
+  `tree_visible` path already checks cross-file callees from `MethodArity`
+  plain data with no types, so the arity-only port reproduces the shipped
+  cross-file semantics. Callee → visibility face → workspace arity funnel
+  (`derived_v2_method_arities_index`) or seam arities
+  (`derived_v2_external_method_arities`, the `func_nargs(::MethodStore)`
+  port with permissive extension-package scope); the `compare_f_call` port;
+  arity-sentence messages. Deliberately NOT ported: the positional-TYPE
+  message arm ("At argument i: expected T"). Gate-heavy declines (do-blocks,
+  def sigs, splats, shadowed/aliased/partial-view names, blind modules, test
+  blocks, unmodelled macro arguments); zero v2-only on the differential.
+- ✅ **`type_piracy`** (v2 M3) — NotEqDef as pure shape; the
+  import-then-extend rule by name provenance (workspace-owned or where-bound
+  argument types exempt; unresolvable names decline the definition).
+- ✅ **`invalid_type_declaration`** (v2 M3) — signature `x::T` declarations
+  where `T` is a literal, a workspace function/macro, or an external
+  `:value` member; the seam's `:datatype` member kind (VarRef forwards and
+  constructor-`extends` resolved) is the arbiter. Alias chains decline.
+- ✅ **`kw_default_mismatch`** (v2 M3) — literal keyword defaults vs
+  Core-builtin annotations; the EST's TYPED literal values collapse v1's
+  head/digit-count table into `typeof(value)` checks, width for width.
+- Still type-blocked: the positional-type arm of `incorrect_call_args`, the
+  strict `<:Number` arm of `incorrect_iter_spec`, `index_from_length` (see
+  class B — deferred on measurement), and store-doc-hungry
+  hover/completions content.
 
 ### D — blocked on CFG: effectively nothing
 
@@ -116,8 +138,8 @@ reproducing `get_expr1`'s identifier right-edge tie-break in range terms.
 | navigation (205) | ✅ **module-at-position** (M1); ✅ **selection ranges + block range** (M2) — gap-partition windows, docstring-inclusive blocks via A2, hard declines around degraded rows (strict-equality differential) | — | — |
 | misc (208) | ✅ **document links** shipped (M1), parity semantics (any file-naming string literal); docstring contents deliberately unlinked | — | **inlay parameter hints DESCOPED**: callee resolution is `find_methods` — type-discriminating, store-backed; pinned tests require overload selection by argument type → blocked on type-level env data; a tree-callee hybrid is signature-help-shaped follow-up. Inlay type hints need types |
 | actions (881) | structural set + OrganizeImports + BOTH docstring actions verified WORKING under both flags (all pure CST + parent pointers; meta unused; parity-probed incl. execution equality) — no port needed. v2-driven when/handlers for v2-only findings remain the follow-up | — | FixMissingRef, ExplicitPackageVarImport |
-| signatures (585) | active-parameter index | same-file help (~300, BodyTree signature renderer); cross-file reachable WITHOUT A3 via a cheap `derived_v2_method_items` | Base/stdlib callees |
-| hover (1083) | local-variable hover | same-file hover (needs A2) | cross-module; Base/store docs (dominates hover value) |
+| signatures (585) | ✅ **workspace callees shipped** (M3): labels + UTF-16 parameter ranges from SOURCE SLICES through `_assemble_signature` (one label/offset contract for both engines), inner constructors included; `derived_v2_method_items` supplies the cross-file method set; v1's cursor-independent comma-count active-parameter rule mirrored | — | Base/stdlib callees (store method rendering) |
+| hover (1083) | ✅ **cross-file function + module names shipped** (M3): per-method docstring + signature-slice blocks, byte-equal to the pinned TreeRef rendering, exported/public footer included. DECLINED BY DESIGN: locals (v1 renders inferred types), datatypes (canonical Expr printing vs comment-preserving slices), same-file-declared names and definition sites (v1's same-file binding view differs from its own cross-file rendering), argument positions | — | Base/store docs (dominates hover value) |
 | completions (1629) | scope-local variables | same-file module names, fields | visible-names/import completions; store completions (dominates volume) |
 | formatting (309) | — | — | already stack-independent; nothing to do ever |
 
@@ -157,9 +179,22 @@ testitem suite doubles as a differential harness.
   "stdlib-only" env is `load_core()`'s Core/Base/Main only — no actual
   stdlibs — so projectless tests use `Base`/`Base.Threads` as store-present
   fixtures.
-- The environment-seam program is COMPLETE at name level. What remains
-  env-side is type-level store data (method tables, docs, completions
-  content) — a different program.
+- ✅ **v2 M3 — the ARITY edge**: the seam gained
+  `derived_v2_external_method_arities` (the `func_nargs(::MethodStore)` port
+  over the extended-method union, extension-package scope deliberately
+  permissive — over-accepting arities only removes findings) and the
+  `:datatype` member kind (VarRef forwards resolved; constructor
+  FunctionStores followed through `.extends`, v1's `is_never_datatype` rule
+  — while `:module` determination stays lookup-free for visibility parity).
+  Workspace-side, `src/v2/layer_arity_v2.jl` funnels per-item `MethodArity`
+  (the `func_nargs(::EXPR)`/`struct_nargs` port in BodyTree vocabulary; the
+  walker now snapshots enclosing macrocall NAMES per wrapped item so the
+  signature-preserving-macro rule survives without resolution) into
+  `derived_v2_method_arities_index` — an entry per method-kind declaration,
+  empty-vector = `function f end`.
+- The environment-seam program is COMPLETE at name+arity level. What remains
+  env-side is genuinely TYPE-level store data (per-slot method signatures,
+  docs, completions content) — a different program.
 
 ## 4. Recommended sequencing (as of this survey)
 
@@ -174,6 +209,13 @@ testitem suite doubles as a differential harness.
    `const_decl` taken over; `soft_scope_ambiguity` shipped as the first
    genuinely new lowering-only rule (see §2).
 4. ✅ **The environment seam** (name level, §3½ Milestones A–C):
-   `missing_reference` + `unresolved_import` shipped. The remaining
-   env-dependent value — call-arity, type rules, store-backed
-   hover/completions — needs TYPE-level store queries; plan separately.
+   `missing_reference` + `unresolved_import` shipped.
+5. ✅ **v2 M3** (one flag + the arity edge + same-file hover/signature
+   help): the two v2 flags consolidated into `input_v2_enabled` /
+   `set_v2_enabled!`; the arity edge (§3½) with the
+   `incorrect_call_args`/`function_has_no_methods` takeover and the
+   `type_piracy` / `invalid_type_declaration` / `kw_default_mismatch` /
+   `incorrect_iter_spec`-literal batch; signature slicing + hover +
+   signature help on v2 (§3). `index_from_length` deferred on measurement.
+   What remains env-side — store-doc hover/completions, the positional-type
+   arms — needs genuinely TYPE-level store queries; plan separately.
