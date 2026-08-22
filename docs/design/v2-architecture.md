@@ -27,7 +27,7 @@ inputs, share `types.jl`, and share the diagnostics join — but nothing else.
 - **One include line**: [`src/packagedef.jl:29`](../../src/packagedef.jl) →
   `include("v2/v2.jl")`, sitting after `layer_module_tree.jl` and before
   `layer_visibility.jl`.
-- **Inert by default.** The whole stack hangs off the `input_lowering_lint`
+- **Inert by default.** The whole stack hangs off the `input_v2_enabled`
   feature flag, which lazily defaults to `false`. With the flag off, no v2 query
   is ever demanded and diagnostics behave exactly as they do today.
 
@@ -35,9 +35,9 @@ The complete set of touchpoints with the rest of the package:
 
 | File | Touchpoint |
 | --- | --- |
-| [`src/inputs.jl`](../../src/inputs.jl) | the `input_lowering_lint` and `input_v2_features` feature flags |
+| [`src/inputs.jl`](../../src/inputs.jl) | the `input_v2_enabled` feature flag (plus `input_macro_expansion` for the DJP) |
 | [`src/layer_diagnostics.jl`](../../src/layer_diagnostics.jl) | pulls v2 findings in / suppresses StaticLint's for the same rule ids |
-| [`src/public.jl`](../../src/public.jl) | `set_lowering_lint!`, `set_v2_features!` |
+| [`src/public.jl`](../../src/public.jl) | `set_v2_enabled!` |
 | [`src/packagedef.jl`](../../src/packagedef.jl) | the single include |
 | [`src/layer_v2_env_seam.jl`](../../src/layer_v2_env_seam.jl) | the environment edge (plain-data store queries, §7½) |
 | [`src/layer_features_v2.jl`](../../src/layer_features_v2.jl) | v2-backed interactive features (A1 + resolvers; §10½) with flag branches in layer_references/symbols/navigation/misc |
@@ -79,7 +79,7 @@ split, the separate id space — falls out of that.
 
 | File | What both stacks get from it |
 | --- | --- |
-| [`src/inputs.jl`](../../src/inputs.jl) | `input_files`, `input_text_file`, the readiness collections, `input_lowering_lint` |
+| [`src/inputs.jl`](../../src/inputs.jl) | `input_files`, `input_text_file`, the readiness collections, `input_v2_enabled` |
 | [`src/layer_files.jl`](../../src/layer_files.jl) | which files exist, `derived_has_content`, `derived_text_file_content` |
 | [`src/layer_syntax_trees.jl`](../../src/layer_syntax_trees.jl) | parsing entry points and TOML parsing |
 | [`src/types.jl`](../../src/types.jl) | `SourceText`, `TextFile`, `Diagnostic`, the project/test model |
@@ -631,7 +631,7 @@ This is the honest answer to "how far off is the switchover".
 | Macro expansion (general case shipped M1a: DJP-side, flag-gated; see §8) | without both flags macrocalls stay opaque; use-before-definition rules remain blocked until expansion is on and gated (`derived_file_expansion_ready`, M1c) |
 | Type-level env queries (the seam ships name-level data only, §7½) | no `incorrect_call_args`, `type_piracy`, `kw_default_mismatch`; hover/completions for store content still v1 |
 | The implicit-member fallback + macro-declared names in visibility | colon members a module got from its own implicit `using Base`, and names modelled macros declare, bind `:unknown` (name still binds — no missing-ref FPs, but no hover/goto through them) |
-| Feature layers | local references family, workspace symbols, module-at, document links shipped on v2 (§10½, behind `input_v2_features`); hover, completions, signatures, document symbols, most actions still v1-only |
+| Feature layers | local references family, workspace symbols, module-at, document links shipped on v2 (§10½, behind `input_v2_enabled`); hover, completions, signatures, document symbols, most actions still v1-only |
 | Rule coverage | twelve rules taken over + two v2-only rules (`lowering_errors`, `soft_scope_ambiguity`), versus StaticLint's full set; the remaining env-dependent rules need type-level store data — see [`v2-portability-survey.md`](v2-portability-survey.md) |
 
 v2 today is a complete *spine* — identity, skeleton, module structure,
@@ -644,7 +644,8 @@ store docs), plus the doc/type-hungry feature layers.
 
 ## 10½. Features on v2 (`src/layer_features_v2.jl`)
 
-The interactive features behind `input_v2_features` (independent of the lint
+The interactive features behind `input_v2_enabled` (since M3 the single flag for lint takeovers
+and features alike — no separate lint
 flag), composed by one rule: **v2 answers entirely or not at all** — every
 degraded case (opaque/under-macrocall items, expansion sites, failed
 lowering, globals, quoted identifiers) falls through to the untouched v1
@@ -1156,7 +1157,7 @@ prove the walker sees exactly what the external detector sees.
 >   `nothing` sentinel. `_v2_test_macro_addresses` supplies the preorder
 >   addresses (block, first/last block child, skip value) the join needs.
 > - Step 3 is **flag-gated**, not unconditional: `derived_testitems` reads
->   `derived_v2_testitem_details` only when `input_lowering_lint` is on. With
+>   `derived_v2_testitem_details` only when `input_v2_enabled` is on. With
 >   the flag off the v2 walk is never otherwise demanded, and retaining
 >   `V2FileWalk` bundles (~11.6× source, §4.2) for users who get nothing else
 >   from v2 would be the §4 trade in reverse. Flag-off users already lost the

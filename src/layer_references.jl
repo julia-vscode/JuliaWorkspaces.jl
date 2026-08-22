@@ -546,7 +546,7 @@ function _get_definitions(runtime, uri::URI, offset::Int)
     # Deliberate delta vs v1, which lands on the whole defining expression —
     # the name range is the better target (named ratchet class in the
     # differential).
-    if input_v2_features(runtime)
+    if input_v2_enabled(runtime)
         v2 = v2_local_occurrences(runtime, uri, offset)
         if v2 !== nothing
             for o in v2.occ
@@ -611,7 +611,7 @@ function _get_references(runtime, uri::URI, offset::Int)
 
     # v2 features (experiment): a LOCAL binding resolves entirely from the v2
     # lowering; anything v2 declines falls through to the v1 path untouched.
-    if input_v2_features(runtime)
+    if input_v2_enabled(runtime)
         v2 = v2_local_occurrences(runtime, uri, offset)
         if v2 !== nothing
             for o in v2.occ
@@ -664,7 +664,7 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
     # v2 features: locals resolve from the lowering (locals are never
     # `@`-spelled, so the new name is used bare); v2 declining falls through
     # to the v1 path, including its macro-declared refusal.
-    if input_v2_features(runtime)
+    if input_v2_enabled(runtime)
         v2 = v2_local_occurrences(runtime, uri, offset)
         if v2 !== nothing
             bare = startswith(new_name, "@") ? new_name[nextind(new_name, 1):end] : new_name
@@ -738,7 +738,7 @@ function _can_rename(runtime, uri::URI, offset::Int)
     root === nothing && return nothing
 
     # v2 features: a resolved local is renameable at its own identifier range.
-    if input_v2_features(runtime)
+    if input_v2_enabled(runtime)
         v2 = v2_local_occurrences(runtime, uri, offset)
         if v2 !== nothing
             return (start=_offset_to_position(runtime, uri, _v2f_start0(v2.cursor_range)),
@@ -796,7 +796,7 @@ function _get_highlights(runtime, uri::URI, offset::Int)
     # resolver when the local one declines. `write` = declaration site or
     # plain-`=` assignment target; compound assignments report `:read`
     # (documented approximation).
-    if input_v2_features(runtime)
+    if input_v2_enabled(runtime)
         v2 = v2_local_occurrences(runtime, uri, offset)
         v2 === nothing && (v2 = v2_global_occurrences(runtime, uri, offset))
         if v2 !== nothing

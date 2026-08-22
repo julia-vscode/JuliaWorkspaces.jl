@@ -51,7 +51,7 @@
         end
     end
     @test length(uris) > 50
-    JW.set_lowering_lint!(jw, true)
+    JW.set_v2_enabled!(jw, true)
 
     # The compared key: (rule, referenced name), extracted from the message.
     # `nothing_comparison`/`const_decl` compare count-only per file (the

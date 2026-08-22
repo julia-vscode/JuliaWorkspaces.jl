@@ -123,7 +123,7 @@ end
     for f in [joinpath(fixdir, "src", "MacroFix.jl"), joinpath(fixdir, "src", "use.jl")]
         add_file!(jw, TextFile(filepath2uri(f), SourceText(read(f, String), "julia")))
     end
-    JW.set_lowering_lint!(jw, true)
+    JW.set_v2_enabled!(jw, true)
     JW.set_macro_expansion!(jw, true)
     @test length(JW.derived_required_macro_expansions(jw.runtime)) == 1
 

@@ -146,7 +146,7 @@ Salsa.@derived function derived_testitems(rt, uri)
 
     # Under the v2 flag, detection comes off the v2 skeleton: position-only and
     # body edits backdate at `derived_v2_file_testitems` instead of re-detecting.
-    input_lowering_lint(rt) && return derived_v2_testitem_details(rt, uri)
+    input_v2_enabled(rt) && return derived_v2_testitem_details(rt, uri)
 
     text_file = derived_text_file_content(rt, uri)
 

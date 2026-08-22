@@ -6,7 +6,7 @@
     using JuliaWorkspaces
     const JW = JuliaWorkspaces
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
-        set_lowering_lint!
+        set_v2_enabled!
     using JuliaWorkspaces.URIs2: URI, filepath2uri
 
     cd_uri(name) = filepath2uri(joinpath(Sys.iswindows() ? "C:\\cd\\src" : "/cd/src", name))
@@ -20,7 +20,7 @@
         for (name, src) in files
             add_file!(jw, TextFile(cd_uri(name), SourceText(src, "julia")))
         end
-        flag && set_lowering_lint!(jw, true)
+        flag && set_v2_enabled!(jw, true)
         return jw
     end
 

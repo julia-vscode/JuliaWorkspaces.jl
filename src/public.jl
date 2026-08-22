@@ -5,8 +5,7 @@ export JuliaWorkspace,
     remove_file!,
     remove_all_children!,
     set_active_project!,
-    set_lowering_lint!,
-    set_v2_features!,
+    set_v2_enabled!,
     set_indirect_file_content!,
     clear_indirect_file!,
     get_indirect_files,
@@ -534,37 +533,23 @@ function _set_active_project!(jw::JuliaWorkspace, uri_or_nothing::Union{URI,Noth
 end
 
 """
-    set_lowering_lint!(jw::JuliaWorkspace, enabled::Bool)
+    set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
 
-Feature flag (experiment): when `true`, the lint producer of the v2 static
-analysis framework (`src/v2/`, JuliaLowering-backed) takes over the
-`unused_binding` / `unused_function_argument` rules from StaticLint — same rule
-ids, severities, and config surface, different engine. Default `false`: exactly
-the legacy behavior; the v2 machinery is never demanded.
+THE v2 opt-in (experiment): when `true`, the v2 (JuliaLowering-backed) static
+analysis framework takes over — its lint producer supersedes the takeover
+rules from StaticLint (same rule ids, severities, and config surface,
+different engine), and the interactive features ported to v2 (the references
+family, workspace/document symbols, module-at-position, document links,
+selection/block ranges, hover, signature help) answer from v2, each falling
+back to the legacy path whenever v2 declines. Default `false`: exactly the
+legacy behavior; the v2 machinery is never demanded. The DJP-side macro
+expansion has its own flag, [`set_macro_expansion!`](@ref).
 """
-function set_lowering_lint!(jw::JuliaWorkspace, enabled::Bool)
-    @debug "set_lowering_lint!" enabled=enabled
+function set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_v2_enabled!" enabled=enabled
 
     process_from_dynamic(jw)
-    set_input_lowering_lint!(jw.runtime, enabled)
-    _reconcile!(jw)
-end
-
-"""
-    set_v2_features!(jw::JuliaWorkspace, enabled::Bool)
-
-Feature flag (experiment): when `true`, the interactive features ported to the
-v2 stack — the local references family (references/rename/highlights/
-goto-definition), workspace symbols, module-at-position, and document links —
-answer from the v2 (JuliaLowering-backed) analysis, falling back to the
-legacy path whenever v2 declines an item. Default `false`: exactly the legacy
-behavior. Independent of [`set_lowering_lint!`](@ref).
-"""
-function set_v2_features!(jw::JuliaWorkspace, enabled::Bool)
-    @debug "set_v2_features!" enabled=enabled
-
-    process_from_dynamic(jw)
-    set_input_v2_features!(jw.runtime, enabled)
+    set_input_v2_enabled!(jw.runtime, enabled)
     _reconcile!(jw)
 end
 
@@ -574,7 +559,7 @@ end
 Feature flag (experiment): when `true`, opaque macrocalls in v2 lowering are
 expanded out-of-process by the persistent env child and spliced into the
 analysis (see `src/v2/layer_expansion.jl`). Only effective together with
-[`set_lowering_lint!`](@ref) and `DynamicPersistent` mode. Default `false`.
+[`set_v2_enabled!`](@ref) and `DynamicPersistent` mode. Default `false`.
 """
 function set_macro_expansion!(jw::JuliaWorkspace, enabled::Bool)
     @debug "set_macro_expansion!" enabled=enabled

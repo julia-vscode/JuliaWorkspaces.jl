@@ -1,4 +1,4 @@
-# Lowering-backed lint rules (experiment, behind `input_lowering_lint`).
+# Lowering-backed lint rules (experiment, behind `input_v2_enabled`).
 #
 # When the flag is on, this producer TAKES OVER the rules in
 # `LOWERING_TAKEOVER_RULES` from StaticLint — the advisory-class ones under the
@@ -36,7 +36,7 @@ const LOWERING_OWN_RULES = Set([:lowering_errors, :soft_scope_ambiguity])
 # the only Salsa dependency is the flag input itself, so config edits do not
 # even re-verify this query.
 Salsa.@derived function derived_lowering_lint_active(rt, uri)
-    input_lowering_lint(rt) || return false
+    input_v2_enabled(rt) || return false
     config = derived_effective_lint_config(rt, uri)
     return any(rule_enabled(config, id)
                for id in Iterators.flatten((LOWERING_TAKEOVER_RULES, LOWERING_OWN_RULES)))

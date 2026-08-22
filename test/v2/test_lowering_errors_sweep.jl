@@ -12,7 +12,7 @@
         config === nothing || add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"), SourceText(config, "toml")))
         uri = URI("file:///pr/src/a.jl")
         add_file!(jw, TextFile(uri, SourceText(src, "julia")))
-        flag && JW.set_lowering_lint!(jw, true)
+        flag && JW.set_v2_enabled!(jw, true)
         return jw, uri
     end
 
@@ -136,7 +136,7 @@ end
             SourceText("[rules]\nlowering_errors = \"warning\"\n", "toml")))
         uri = URI("file:///pr/src/a.jl")
         add_file!(jw, TextFile(uri, SourceText(src, "julia")))
-        JW.set_lowering_lint!(jw, true)
+        JW.set_v2_enabled!(jw, true)
         msgs = [d.message for d in get_diagnostic(jw, uri) if d.code === :lowering_errors]
         isempty(msgs) || (offenders[rel] = msgs)
     end

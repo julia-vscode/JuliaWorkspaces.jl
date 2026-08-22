@@ -166,7 +166,7 @@ testitem suite doubles as a differential harness.
 1. ✅ **Harvest JuliaLowering** (this milestone): lowering errors + routed
    takeover ids + `unused_type_parameter` + the module-tree pair.
 2. ✅ **v2 features M1** (`src/layer_features_v2.jl`, behind
-   `input_v2_features` / `set_v2_features!` — independent of the lint flag):
+   `input_v2_enabled` / `set_v2_enabled!`, since M3 the SINGLE v2 flag):
    A1 + local references family + workspace symbols + module-at-position +
    document links, each with the try-v2-else-v1 composition and a corpus
    differential; structural actions verified working under both flags.

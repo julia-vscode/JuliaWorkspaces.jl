@@ -1,4 +1,4 @@
-# v2-backed interactive features (experiment, behind `input_v2_features`):
+# v2-backed interactive features (experiment, behind `input_v2_enabled`):
 # the offset→item/address query family ("A1") and the resolvers built on it.
 # Lives OUTSIDE src/v2/ because feature code joins v2 data with feature result
 # structs and v1 fallback paths (same reasoning as layer_testitems.jl).

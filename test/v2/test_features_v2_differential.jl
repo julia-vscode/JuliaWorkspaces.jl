@@ -43,7 +43,7 @@
                 vendored || push!(uris, uri)
             end
         end
-        flag && JW.set_v2_features!(jw, true)
+        flag && JW.set_v2_enabled!(jw, true)
         return jw, uris
     end
 
@@ -172,7 +172,7 @@ end
                 add_file!(jw, TextFile(filepath2uri(p), SourceText(read(p, String), "julia")))
             end
         end
-        flag && JW.set_v2_features!(jw, true)
+        flag && JW.set_v2_enabled!(jw, true)
         return jw
     end
 
@@ -225,7 +225,7 @@ end
                 vendored || push!(uris, uri)
             end
         end
-        flag && JW.set_v2_features!(jw, true)
+        flag && JW.set_v2_enabled!(jw, true)
         return jw, uris
     end
 
@@ -295,7 +295,7 @@ end
                 push!(uris, uri)
             end
         end
-        flag && JW.set_v2_features!(jw, true)
+        flag && JW.set_v2_enabled!(jw, true)
         return jw, uris
     end
 
@@ -350,7 +350,7 @@ end
                 vendored || push!(uris, uri)
             end
         end
-        flag && JW.set_v2_features!(jw, true)
+        flag && JW.set_v2_enabled!(jw, true)
         return jw, uris
     end
 
@@ -423,7 +423,7 @@ end
                 vendored || push!(uris, uri)
             end
         end
-        flag && JW.set_v2_features!(jw, true)
+        flag && JW.set_v2_enabled!(jw, true)
         return jw, uris
     end
 

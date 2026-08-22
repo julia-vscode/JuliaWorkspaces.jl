@@ -1,22 +1,17 @@
 Salsa.@declare_input input_files(rt)::Set{URI}
 
-# Feature flag (experiment): when true, the v2 static analysis framework's lint
-# producer takes over the rules in `LOWERING_TAKEOVER_RULES` from StaticLint
-# (see v2/lint_lowering_rules.jl). Lazily defaults to false: exactly the legacy
-# behavior, and nothing in the v2 lowering layer is ever demanded. Declared lazy
-# rather than initialized in the `JuliaWorkspace` constructor so that the whole
-# v2 opt-in lives here and `src/types.jl` needs no knowledge of it.
-Salsa.@declare_input input_lowering_lint(rt)::Bool function(_ctx)
-    false
-end
-
-# Feature flag (experiment): when true, the interactive features ported to the
-# v2 stack (local references family, workspace symbols, module-at-position,
-# document links — see layer_features_v2.jl) answer from v2, falling back to
-# the untouched v1 path whenever v2 declines. Independent of
-# `input_lowering_lint` so lint and features can be rolled out / bisected
-# separately. Same lazy-false pattern as above.
-Salsa.@declare_input input_v2_features(rt)::Bool function(_ctx)
+# THE v2 opt-in (experiment): when true, the v2 static analysis framework's
+# lint producer takes over the rules in `LOWERING_TAKEOVER_RULES` from
+# StaticLint (see v2/lint_lowering_rules.jl) AND the interactive features
+# ported to v2 (references family, symbols, module-at, document links,
+# selection/block ranges, hover, signature help — see layer_features_v2.jl)
+# answer from v2, each falling back to the untouched v1 path whenever v2
+# declines. Lazily defaults to false: exactly the legacy behavior, and nothing
+# in the v2 layers is ever demanded. Declared lazy rather than initialized in
+# the `JuliaWorkspace` constructor so the whole v2 opt-in lives here and
+# `src/types.jl` needs no knowledge of it. (The DJP-side macro expansion has
+# its own flag, `input_macro_expansion` — a separate resource commitment.)
+Salsa.@declare_input input_v2_enabled(rt)::Bool function(_ctx)
     false
 end
 
@@ -99,7 +94,7 @@ Salsa.@declare_input input_failed_dynamic_keys(rt)::Set{DJPKey}
 
 # Feature flag (experiment): when true, opaque macrocalls in v2 lowering are
 # expanded out-of-process by the persistent env child (see v2/layer_expansion.jl).
-# Lazily false, like `input_lowering_lint` — the legacy behavior costs nothing.
+# Lazily false, like `input_v2_enabled` — the legacy behavior costs nothing.
 Salsa.@declare_input input_macro_expansion(rt)::Bool function(_ctx)
     false
 end

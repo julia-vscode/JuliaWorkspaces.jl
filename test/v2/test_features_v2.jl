@@ -7,7 +7,7 @@
     using JuliaWorkspaces
     const JW = JuliaWorkspaces
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
-        set_v2_features!, v2_item_view, v2_item_row_at, v2_identifier_addr_at
+        set_v2_enabled!, v2_item_view, v2_item_row_at, v2_identifier_addr_at
     using JuliaWorkspaces.URIs2: URI
 
     const FT_URI = URI("file:///ft/src/F.jl")
@@ -15,7 +15,7 @@
     function ft_workspace(src::String; flag=true)
         jw = JuliaWorkspace()
         add_file!(jw, TextFile(FT_URI, SourceText(src, "julia")))
-        flag && set_v2_features!(jw, true)
+        flag && set_v2_enabled!(jw, true)
         return jw
     end
 
@@ -281,7 +281,7 @@ end
         """
         jw = JuliaWorkspace()
         add_file!(jw, TextFile(uri, SourceText(src, "julia")))
-        set_v2_features!(jw, true)
+        set_v2_enabled!(jw, true)
 
         links = JW._get_document_links(jw.runtime, uri)
         # The include path, the bare relative literal, and the absolute
@@ -304,14 +304,14 @@ end
 
 @testitem "actions: the structural set still works with both v2 flags on" begin
     # The finding-driven `when` predicates read StaticLint's meta marks, which
-    # the still-running v1 pass sets even when input_lowering_lint suppresses
+    # the still-running v1 pass sets even when input_v2_enabled suppresses
     # the corresponding DIAGNOSTICS at emission — so both flags on must offer
     # exactly the actions flag-off offers, at every probed cursor. Parity is
     # the contract; absolute expectations live in test/test_actions.jl.
     using JuliaWorkspaces
     const JW = JuliaWorkspaces
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
-        set_v2_features!, set_lowering_lint!, get_code_actions, execute_code_action
+        set_v2_enabled!, set_v2_enabled!, get_code_actions, execute_code_action
     using JuliaWorkspaces.URIs2: URI
 
     project_toml = "name = \"ActV2\"
@@ -354,8 +354,8 @@ project_hash = \"abc\"
         add_file!(jw, TextFile(URI("file:///actv2/Manifest.toml"), SourceText(manifest_toml, "toml")))
         add_file!(jw, TextFile(uri, SourceText(source, "julia")))
         if flags
-            set_lowering_lint!(jw, true)
-            set_v2_features!(jw, true)
+            set_v2_enabled!(jw, true)
+            set_v2_enabled!(jw, true)
         end
         return jw
     end

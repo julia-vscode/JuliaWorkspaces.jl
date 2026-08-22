@@ -6,7 +6,7 @@
     using JuliaWorkspaces
     const JW = JuliaWorkspaces
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
-        set_lowering_lint!
+        set_v2_enabled!
     using JuliaWorkspaces.URIs2: URI
 
     const MR_URI = URI("file:///mr/src/F.jl")
@@ -16,7 +16,7 @@
         config !== nothing &&
             add_file!(jw, TextFile(URI("file:///mr/JuliaLint.toml"), SourceText(config, "toml")))
         add_file!(jw, TextFile(MR_URI, SourceText(src, "julia")))
-        flag && set_lowering_lint!(jw, true)
+        flag && set_v2_enabled!(jw, true)
         return jw
     end
 
@@ -45,7 +45,7 @@ end
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(MR_URI, SourceText("include(\"other.jl\")\nf() = from_other()\n", "julia")))
     add_file!(jw, TextFile(add, SourceText("from_other() = 1\n", "julia")))
-    set_lowering_lint!(jw, true)
+    set_v2_enabled!(jw, true)
     @test isempty(mr_diags(jw))
     @test isempty(mr_diags(jw; uri=add))
 end
@@ -130,7 +130,7 @@ end
     add_file!(jw, TextFile(URI("file:///mrp/Project.toml"), SourceText(project, "toml")))
     add_file!(jw, TextFile(URI("file:///mrp/src/MrPkg.jl"), SourceText("module MrPkg\nend\n", "julia")))
     add_file!(jw, TextFile(helper, SourceText("helper_f() = undefined_from_helper\n", "julia")))
-    set_lowering_lint!(jw, true)
+    set_v2_enabled!(jw, true)
     JW.set_input_env_ready!(jw.runtime, true)
     @test isempty(mr_diags(jw; uri=helper))
 end

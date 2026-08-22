@@ -13,7 +13,7 @@
             add_file!(jw, TextFile(URI("file:///ll/JuliaLint.toml"), SourceText(config, "toml")))
         end
         add_file!(jw, TextFile(LL_URI, SourceText(src, "julia")))
-        flag && set_lowering_lint!(jw, true)
+        flag && set_v2_enabled!(jw, true)
         return jw
     end
 

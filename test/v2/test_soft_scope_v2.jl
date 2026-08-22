@@ -6,7 +6,7 @@
     using JuliaWorkspaces
     const JW = JuliaWorkspaces
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
-        set_lowering_lint!
+        set_v2_enabled!
     using JuliaWorkspaces.URIs2: URI
 
     const SS_URI = URI("file:///ss/src/F.jl")
@@ -16,7 +16,7 @@
         config !== nothing &&
             add_file!(jw, TextFile(URI("file:///ss/JuliaLint.toml"), SourceText(config, "toml")))
         add_file!(jw, TextFile(SS_URI, SourceText(src, "julia")))
-        flag && set_lowering_lint!(jw, true)
+        flag && set_v2_enabled!(jw, true)
         return jw
     end
 
@@ -96,7 +96,7 @@ end
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(SS_URI, SourceText("include(\"defs.jl\")\nfor i in 1:3\n    s += i\nend\n", "julia")))
     add_file!(jw, TextFile(URI("file:///ss/src/defs.jl"), SourceText("s = 0\n", "julia")))
-    set_lowering_lint!(jw, true)
+    set_v2_enabled!(jw, true)
     @test !isempty(ss_diags(jw))
 end
 
@@ -133,7 +133,7 @@ end
         end
     end
     @test length(uris) > 50
-    JW.set_lowering_lint!(jw, true)
+    JW.set_v2_enabled!(jw, true)
 
     hits = String[]
     for uri in uris

@@ -7,7 +7,7 @@
     using JuliaWorkspaces
     const JW = JuliaWorkspaces
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
-        set_lowering_lint!
+        set_v2_enabled!
     using JuliaWorkspaces.URIs2: URI
 
     const UI_URI = URI("file:///ui/src/F.jl")
@@ -15,7 +15,7 @@
     function ui_workspace(src::String; flag=true)
         jw = JuliaWorkspace()
         add_file!(jw, TextFile(UI_URI, SourceText(src, "julia")))
-        flag && set_lowering_lint!(jw, true)
+        flag && set_v2_enabled!(jw, true)
         return jw
     end
 
@@ -114,7 +114,7 @@ end
         add_file!(jw, TextFile(URI("file:///uip/Project.toml"), SourceText(project, "toml")))
         add_file!(jw, TextFile(URI("file:///uip/Manifest.toml"), SourceText(manifest, "toml")))
         add_file!(jw, TextFile(src_uri, SourceText("module UiPkg\nusing NotAPackage\nend\n", "julia")))
-        set_lowering_lint!(jw, true)
+        set_v2_enabled!(jw, true)
         ready && JW.set_input_env_ready!(jw.runtime, true)
         return jw
     end

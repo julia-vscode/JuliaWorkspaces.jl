@@ -24,7 +24,7 @@
         in_package && add_file!(jw, TextFile(URI("file:///pkg/Project.toml"),
             SourceText(PROJECT_TOML, "toml")))
         add_file!(jw, TextFile(URI("file:///pkg/src/a.jl"), SourceText(src, "julia")))
-        v2 && JW.set_lowering_lint!(jw, true)
+        v2 && JW.set_v2_enabled!(jw, true)
         return jw
     end
 

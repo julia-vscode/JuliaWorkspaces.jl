@@ -347,7 +347,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         foreach(emit_finding!, derived_syntax_lint_findings(rt, uri))
 
         # Lowering-backed rules from the v2 framework (experiment, behind
-        # `input_lowering_lint`; see v2/lint_lowering_rules.jl). Empty unless
+        # `input_v2_enabled`; see v2/lint_lowering_rules.jl). Empty unless
         # the flag is on and a takeover rule is enabled. Env-dependent rule ids
         # get the same not-ready suppression the StaticLint loop applies above
         # — checked lazily so a file with no env-dependent finding never takes

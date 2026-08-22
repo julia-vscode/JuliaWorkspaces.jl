@@ -20,7 +20,7 @@
             "julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n", "toml")))
         uri = URI("file:///pkg/src/a.jl")
         add_file!(jw, TextFile(uri, SourceText(src, "julia")))
-        JW.set_lowering_lint!(jw, true)
+        JW.set_v2_enabled!(jw, true)
         JW.set_macro_expansion!(jw, true)
         return jw, uri
     end

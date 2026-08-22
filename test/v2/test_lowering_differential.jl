@@ -13,7 +13,7 @@
         jw = JuliaWorkspace()
         uri = URI("file:///pr/src/a.jl")
         add_file!(jw, TextFile(uri, SourceText(src, "julia")))
-        flag && JW.set_lowering_lint!(jw, true)
+        flag && JW.set_v2_enabled!(jw, true)
         return jw, uri
     end
 
@@ -59,7 +59,7 @@ end
     add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
         SourceText("[rules]\nlowering_errors = \"off\"\n", "toml")))
     add_file!(jw, TextFile(uri, SourceText("continue\n", "julia")))
-    JW.set_lowering_lint!(jw, true)
+    JW.set_v2_enabled!(jw, true)
     @test !any(d -> d.code in (:lowering_errors, :break_continue), get_diagnostic(jw, uri))
 
     # Flag off: nothing from the lowering producer; legacy behavior untouched.
@@ -122,7 +122,7 @@ end
             uri = URI("file:///pr/src/a.jl")
             add_file!(jw, TextFile(uri, SourceText(src, "julia")))
             JW.set_input_env_ready!(jw.runtime, true)
-            flag && JW.set_lowering_lint!(jw, true)
+            flag && JW.set_v2_enabled!(jw, true)
             diags = get_diagnostic(jw, uri)
             (reemit = sort([(d.code, first(d.range)) for d in diags if d.code in REEMITTING_IDS]),
              suppressed = sort([first(d.range) for d in diags if d.code in SUPPRESSED_IDS]),
@@ -180,7 +180,7 @@ end
     add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
         SourceText("[rules]\nmodule_name = \"off\"\n", "toml")))
     add_file!(jw, TextFile(uri, SourceText("module A\nmodule A\nend\nend\n", "julia")))
-    JW.set_lowering_lint!(jw, true)
+    JW.set_v2_enabled!(jw, true)
     @test !any(d -> d.code === :module_name, JuliaWorkspaces.get_diagnostic(jw, uri))
 end
 
@@ -193,7 +193,7 @@ end
     inner = URI("file:///pr/src/inner.jl")
     add_file!(jw, TextFile(root, SourceText("module A\ninclude(\"inner.jl\")\nend\n", "julia")))
     add_file!(jw, TextFile(inner, SourceText("module A\nend\n", "julia")))
-    JW.set_lowering_lint!(jw, true)
+    JW.set_v2_enabled!(jw, true)
     @test any(d -> d.code === :module_name, JuliaWorkspaces.get_diagnostic(jw, inner))
 
     # And relative imports account for the spliced depth: `using ..X` inside

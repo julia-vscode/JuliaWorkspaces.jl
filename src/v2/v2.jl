@@ -7,11 +7,11 @@
 # enforces that — if you find yourself reaching for `derived_file_inventory` or
 # `CSTParser` from this directory, the layer you need is missing, not optional.
 #
-# Inert unless `input_lowering_lint` is true. The complete set of touchpoints
+# Inert unless `input_v2_enabled` is true. The complete set of touchpoints
 # with the rest of the package:
-#   src/inputs.jl            - the `input_lowering_lint` feature flag
+#   src/inputs.jl            - the `input_v2_enabled` feature flag
 #   src/layer_diagnostics.jl - pulls v2 findings in / suppresses StaticLint's
-#   src/public.jl            - `set_lowering_lint!`
+#   src/public.jl            - `set_v2_enabled!`
 #   src/packagedef.jl        - the single include of this file
 
 # Parser-agnostic foundations, so they come before the vendored parser loads.
