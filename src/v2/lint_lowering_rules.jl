@@ -17,7 +17,7 @@ const LOWERING_TAKEOVER_RULES = Set([
     # (advisory) severities, from a better engine.
     :unused_binding, :unused_function_argument, :unused_type_parameter,
     :module_name, :relative_import, :unresolved_import, :missing_reference,
-    :nothing_comparison, :const_decl,
+    :nothing_comparison, :const_decl, :incorrect_call_args,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -681,6 +681,354 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
     return result
 end
 
+# ── incorrect_call_args / function_has_no_methods ───────────────────────────
+#
+# The arity half of v1's method-call check — deliberately arity-ONLY: v1's own
+# per-file tree path checks cross-file callees from the same `MethodArity`
+# plain data, so this reproduces the shipped cross-file semantics; the
+# positional-TYPE arm is not ported (needs types v2 does not compute). Both
+# codes live under the `:incorrect_call_args` rule id, exactly as v1's
+# `LintRule` groups them.
+#
+# Every gate errs toward silence (the zero-v2-only corpus differential is the
+# backstop): do-blocks, definition signatures, splatted calls, dotted/broadcast
+# callees, locally-shadowed callees (via `BindingUse`), unresolvable callees,
+# aliased imports, names with a partial method view (extended external stores,
+# import-then-extend), blind modules, test blocks, quoted code, and macrocall
+# arguments whose effects the analyzer does not model.
+
+# Names whose full method set this root cannot see: (a) qualified extensions
+# whose qualifier resolves to no tree module (`Base.push!(…)` — the store's
+# view is now partial), and (b) names bound by an import (colon list, or the
+# trailing segment of a whole-path `import A.b`) that are ALSO declared
+# unqualified somewhere in the tree — the import-then-extend idiom, whose
+# methods span the import target and the extending module. A call to such a
+# name is declined everywhere in the root (a superset of v1's per-callee
+# `tree_extended` decline; supersets of declines are the safe direction).
+Salsa.@derived function derived_v2_partial_method_names(rt, root)
+    tree = derived_v2_module_tree(rt, root)
+    modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+    declared_anywhere = Set{String}()
+    for n in tree.modules
+        for (name, _, _) in n.decl_events
+            push!(declared_anywhere, name)
+        end
+    end
+
+    result = Set{String}()
+    _v2_walk_spliced_items!(rt, root, String[], Set{URI}([root])) do _, item, loc
+        isempty(item.qualifier) && return
+        item.kind in _V2_METHOD_ITEM_KINDS || return
+        _v2_resolve_extension_qualifier(modpaths, loc, item.qualifier) === nothing &&
+            push!(result, item.name)
+    end
+    for n in tree.modules
+        for ri in n.imports
+            for s in ri.symbols
+                nm = s.alias === nothing ? s.name : s.alias
+                nm in declared_anywhere && push!(result, nm)
+            end
+            if isempty(ri.symbols) && ri.kind === :import && length(ri.target.path) >= 2
+                nm = ri.alias === nothing ? last(ri.target.path) : ri.alias
+                nm in declared_anywhere && push!(result, nm)
+            end
+        end
+    end
+    return result
+end
+
+"The `call_nargs` port: (minargs, maxargs, kws) of a call site."
+function _v2_call_nargs(call::BodyTree{V2Kind})
+    minargs, maxargs, kws = 0, 0, Symbol[]
+    cs = _v2_children(call)
+    for i in 2:length(cs)
+        c = cs[i]
+        if c.kind == JS2.K"parameters"
+            for p in _v2_children(c)
+                # A kw splat in the parameters is ignored, exactly as v1's
+                # `call_nargs` ignores it — fewer recorded kws only ever makes
+                # the comparison MORE accepting.
+                p.kind == JS2.K"kw" || continue
+                n = _v2_arity_arg_name(p)
+                n !== nothing && push!(kws, Symbol(n))
+            end
+        elseif c.kind == JS2.K"kw"
+            n = _v2_arity_arg_name(c)
+            n !== nothing && push!(kws, Symbol(n))
+        elseif c.kind == JS2.K"..."
+            maxargs = typemax(Int)
+        else
+            minargs += 1
+            maxargs !== typemax(Int) && (maxargs += 1)
+        end
+    end
+    return (minargs, maxargs, kws)
+end
+
+"Positional splat directly in the call (parameters splats don't count — v1 parity)."
+_v2_call_has_splat(call::BodyTree{V2Kind}) =
+    any(c -> c.kind == JS2.K"...", _v2_children(call))
+
+"The `compare_f_call` port, verbatim."
+function _v2_compare_f_call(ref::MethodArity, (act_min, act_max, act_kws))
+    if act_max == typemax(Int)
+        act_min <= act_max < ref.minargs && return false
+    else
+        (ref.minargs <= act_min <= act_max <= ref.maxargs) || return false
+    end
+    ref.kwsplat && return true
+    length(act_kws) > length(ref.kws) && return false
+    all(kw in ref.kws for kw in act_kws) || return false
+    return true
+end
+
+# The `_arity_desc` port: render the arity constraint of a method set.
+function _v2_arity_desc(arities::Vector{MethodArity})
+    mins = sort!(unique(a.minargs for a in arities))
+    if any(a.maxargs == typemax(Int) for a in arities)
+        return string("at least ", minimum(mins))
+    elseif length(mins) == 1 && all(a.maxargs == mins[1] for a in arities)
+        return string(mins[1])
+    else
+        lo = minimum(a.minargs for a in arities)
+        hi = maximum(a.maxargs for a in arities)
+        return lo == hi ? string(lo) : string(lo, " to ", hi)
+    end
+end
+
+# The specific reason sentence for a non-matching call, or `nothing` for the
+# generic wording. Arity-only (no type arm): count mismatch first, then an
+# unsupported keyword against the arity-matching candidates.
+function _v2_call_mismatch_reason(arities::Vector{MethodArity}, (act_min, act_max, act_kws))
+    act_max == typemax(Int) && return nothing
+    nargs = act_min   # no splat ⇒ min == max
+    arity_ok = [a for a in arities if a.minargs <= nargs <= a.maxargs]
+    if isempty(arity_ok)
+        desc = _v2_arity_desc(arities)
+        return string("Expected ", desc, " argument", desc == "1" ? "" : "s",
+                      ", got ", nargs, ".")
+    end
+    for kw in act_kws
+        any(a -> a.kwsplat || kw in a.kws, arity_ok) ||
+            return string("Unsupported keyword `", kw, "`.")
+    end
+    return nothing
+end
+
+# Seam arities are plain named tuples (the seam file cannot name v2 types);
+# lift them into the `MethodArity` vocabulary the comparison uses.
+_v2_lift_store_arities(ext) =
+    MethodArity[MethodArity(a.minargs, a.maxargs, a.kws, a.kwsplat) for a in ext]
+
+# Resolve a callee to its full arity set: `nothing` declines, an empty vector
+# means "workspace-declared with zero methods" (`function f end`). The second
+# return distinguishes the workspace/external provenance — only a workspace
+# empty set may claim FunctionHasNoMethods.
+function _v2_callee_arities(rt, root, path::Vector{String},
+                            qual::Vector{String}, name::String)
+    if isempty(qual)
+        face = get(derived_v2_module_visible_names_idfree(rt, root, path), name, nothing)
+        if face === nothing
+            # An undeclared name is `missing_reference`'s business; an implicit
+            # Base/Core name is checked against the store.
+            bare = derived_v2_module_is_bare(rt, root, path)
+            insorted(name, derived_v2_implicit_scope_names(rt, root, bare)) || return nothing
+            ext = derived_v2_external_method_arities(rt, root, ["Base"], name)
+            ext === nothing && (ext = derived_v2_external_method_arities(rt, root, ["Core"], name))
+            (ext === nothing || isempty(ext)) && return nothing
+            return (_v2_lift_store_arities(ext), false)
+        end
+        if face.origin === :declared || face.origin === :using_tree
+            face.kind in _V2_METHOD_ITEM_KINDS || return nothing
+            ws = derived_v2_method_arities(rt, root, face.origin_module, name)
+            ws === nothing && return nothing
+            return (ws, true)
+        elseif face.origin === :using_external || face.origin === :import_binding
+            face.kind === :external_symbol || return nothing
+            # An `as`-renamed import binds a name the store knows under another
+            # one — resolving the bound name against the store would fetch the
+            # wrong (or no) method set. Decline renamed bindings.
+            for ri in derived_v2_module_imports(rt, root, path)
+                any(s -> s.alias == name && s.name != name, ri.symbols) && return nothing
+                ri.alias == name && return nothing
+            end
+            ext = derived_v2_external_method_arities(rt, root, face.origin_module, name)
+            (ext === nothing || isempty(ext)) && return nothing
+            return (_v2_lift_store_arities(ext), false)
+        end
+        return nothing
+    end
+
+    # Qualified callee `Q.f(…)` / `A.B.f(…)`: the first segment resolves
+    # through the module-target ledger (declared child modules and
+    # module-valued import bindings alike), the rest as nested modules.
+    _, modtargets = _v2_visible_names_pass1(rt, root, path, Set{URI}())
+    mt = get(modtargets, qual[1], nothing)
+    if mt === nothing
+        # `Base.foo(…)`/`Core.foo(…)` without any import: the qualifier is an
+        # implicitly-visible name — resolve the written path against the store.
+        bare = derived_v2_module_is_bare(rt, root, path)
+        insorted(qual[1], derived_v2_implicit_scope_names(rt, root, bare)) || return nothing
+        ext = derived_v2_external_method_arities(rt, root, qual, name)
+        (ext === nothing || isempty(ext)) && return nothing
+        return (_v2_lift_store_arities(ext), false)
+    end
+    if mt.sort === :tree
+        resolved = copy(mt.path)
+        tree = derived_v2_module_tree(rt, root)
+        modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+        for seg in qual[2:end]
+            push!(resolved, seg)
+            resolved in modpaths || return nothing
+        end
+        ws = derived_v2_method_arities(rt, root, resolved, name)
+        ws === nothing && return nothing
+        return (ws, true)
+    elseif mt.sort === :external
+        ext = derived_v2_external_method_arities(rt, root, vcat(mt.path, qual[2:end]), name)
+        (ext === nothing || isempty(ext)) && return nothing
+        return (_v2_lift_store_arities(ext), false)
+    end
+    return nothing
+end
+
+# The body walk: preorder addresses aligned with `derived_v2_file_maps`
+# (`_materialize` consumes addresses even for skipped subtrees). Skips —
+# advancing the counter across the whole subtree — quoted code and macrocall
+# arguments the analyzer does not model (`@test_throws` explicitly: its body
+# is EXPECTED to error). Definition signatures and do-block callees are
+# call-shaped but not calls; they are registered in `skip` at the parent, so
+# nested calls inside them (defaults, arguments) stay checked.
+function _v2_call_sites!(emit, bt::BodyTree{V2Kind}, addr::Base.RefValue{Int},
+                         qdepth::Int, skip::Base.IdSet{BodyTree{V2Kind}})
+    myaddr = (addr[] += 1)
+    k = bt.kind
+    if qdepth == 0 && k == JS2.K"macrocall"
+        nm = _v2_macrocall_name(bt)
+        if nm === nothing || nm == "@test_throws" || !_v2_macro_name_effects_known(nm)
+            addr[] += bt_node_count(bt) - 1
+            return nothing
+        end
+    end
+    child_depth = _quote_depth(k, qdepth)
+    if qdepth == 0 && child_depth > qdepth
+        addr[] += bt_node_count(bt) - 1
+        return nothing
+    end
+    bt.children === nothing && return nothing
+    if k == JS2.K"function" || k == JS2.K"macro" || k == JS2.K"="
+        sig = _v2_func_sig(bt)
+        sig !== nothing && push!(skip, sig)
+    elseif k == JS2.K"do" && !isempty(bt.children)
+        push!(skip, bt.children[1])   # TODO v1 parity: count do-block args
+    end
+    if qdepth == 0 && k == JS2.K"call" && !(bt in skip)
+        emit(bt, myaddr)
+    end
+    for c in bt.children
+        _v2_call_sites!(emit, c, addr, child_depth, skip)
+    end
+    return nothing
+end
+
+"""
+    derived_item_call_args_findings(rt, ref) -> Vector{SemanticFinding}
+
+`incorrect_call_args` (arity arm) and its no-methods sibling for one item.
+Separate from `derived_item_semantic_findings` for the same reason
+`missing_reference` is: it depends on visibility, the arity funnel and
+(through the seam) the environment.
+"""
+Salsa.@derived function derived_item_call_args_findings(rt, ref::V2ItemRef)
+    result = SemanticFinding[]
+    low = derived_item_lowering(rt, ref)
+    (low === nothing || low.status !== :ok) && return result
+    ref.id in derived_v2_under_macrocall_ids(rt, ref.file) && return result
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return result
+    # Test blocks run with `using Test` + the package under test — context the
+    # bare module view cannot reproduce, so callee resolution there is
+    # unreliable in BOTH directions. Declined wholesale (v1 checks them with
+    # its prebuilt test scopes; the lost findings land in the differential's
+    # v1-only ratchet class).
+    _test_block_target(body) !== nothing && return result
+
+    root = derived_v2_best_root_for_uri(rt, ref.file)
+    root === nothing && return result
+    skel = derived_v2_file_skeleton(rt, ref.file)
+    any(t -> t.id == ref.id, skel.testitems) && return result
+    idx = findfirst(r -> r.id == ref.id, skel.items)
+    idx === nothing && return result
+    path = vcat(_derived_v2_splice_prefix(rt, ref.file), skel.items[idx].parent_module)
+
+    # A blind module may gain methods from code the walk cannot see (an opaque
+    # macrocall's expansion, an unresolvable include, an unresolved wildcard),
+    # making every "no matching arity" unreliable.
+    derived_v2_module_unresolved_wildcard_using(rt, root, path) && return result
+    derived_v2_module_has_computed_include(rt, root, path) && return result
+    derived_v2_module_has_opaque_macrocall(rt, root, path) && return result
+
+    binding_of = Dict{Int32,LoweredBinding}(b.id => b for b in low.bindings)
+    uses_at = Dict{Int32,Vector{Int32}}()
+    for u in low.uses
+        push!(get!(() -> Int32[], uses_at, u.addr), u.binding)
+    end
+
+    partial = nothing   # demanded lazily, once a candidate call exists
+    _v2_call_sites!(body, Ref(0), 0, Base.IdSet{BodyTree{V2Kind}}()) do call, call_addr
+        _v2_call_has_splat(call) && return
+        callee = _v2_children(call)[1]
+        qual, name = _v2_qualified_name(callee)
+        (name === nothing || isempty(name) || startswith(name, ".")) && return
+
+        if isempty(qual)
+            # A callee resolved by lowering to a local/argument (a closure, a
+            # parameter) fully shadows any same-named global — its method set
+            # is unknowable here. Only an anchor-module global callee that the
+            # item itself never assigns proceeds to visibility resolution.
+            # Desugaring can pin SEVERAL bindings at the callee's address (a
+            # kwarg call mints internal `func`/`kw_container` locals there), so
+            # the test is over every non-internal binding read at it: at least
+            # one must be the callee's own anchor global, and none may be a
+            # real local/argument.
+            ok = false
+            for uid in get(uses_at, Int32(call_addr + 1), Int32[])
+                b = get(binding_of, uid, nothing)
+                b === nothing && continue
+                b.is_internal && continue
+                if b.kind === :global && b.mod == "JWLoweringAnchor" &&
+                   b.name == name && !b.is_assigned
+                    ok = true
+                elseif b.kind === :local || b.kind === :argument
+                    ok = false
+                    break
+                end
+            end
+            ok || return
+        end
+
+        partial === nothing && (partial = derived_v2_partial_method_names(rt, root))
+        name in partial && return
+
+        resolved = _v2_callee_arities(rt, root, path, qual, name)
+        resolved === nothing && return
+        arities, workspace = resolved
+        if isempty(arities)
+            workspace || return
+            push!(result, (addr=Int32(call_addr), rule_id=:incorrect_call_args,
+                msg="Called function has no methods."))
+            return
+        end
+        cc = _v2_call_nargs(call)
+        any(a -> _v2_compare_f_call(a, cc), arities) && return
+        reason = _v2_call_mismatch_reason(arities, cc)
+        push!(result, (addr=Int32(call_addr), rule_id=:incorrect_call_args,
+            msg=reason === nothing ? "Possible method call error." :
+                "Possible method call error. $reason"))
+    end
+    return result
+end
+
 """
     derived_semantic_lint_findings(rt, uri) -> Vector{LintFinding}
 
@@ -716,6 +1064,7 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     missing_refs_on = missingrefs_from_config(config) !== :none &&
         !_derived_v2_missing_ref_file_suppressed(rt, uri)
     soft_scope_on = rule_enabled(config, :soft_scope_ambiguity)
+    call_args_on = rule_enabled(config, :incorrect_call_args)
 
     for row in derived_v2_file_skeleton(rt, uri).items
         ref = V2ItemRef(uri, row.id)
@@ -727,6 +1076,10 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         if soft_scope_on
             ss = derived_item_soft_scope_findings(rt, ref)
             isempty(ss) || (item_findings = vcat(item_findings, ss))
+        end
+        if call_args_on
+            ca = derived_item_call_args_findings(rt, ref)
+            isempty(ca) || (item_findings = vcat(item_findings, ca))
         end
         isempty(item_findings) && continue
         ranges = get(maps, row.id, nothing)
