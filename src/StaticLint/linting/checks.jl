@@ -1642,6 +1642,19 @@ end
 
 # Now called from add_binding
 # Should return true/false indicating whether the binding should actually be added?
+# Whether `x` (a binding-name identifier) sits inside a WHOLE-MODULE
+# `import`/`using` statement (`import Printf`), as opposed to a symbol import
+# (`import Base: name`, whose arguments are wrapped in a `:` operator call).
+function _is_in_whole_module_import(x::EXPR)
+    imp = x
+    while imp isa EXPR && !(headof(imp) === :import || headof(imp) === :using)
+        imp = parentof(imp)
+    end
+    imp isa EXPR || return false
+    return !(imp.args !== nothing && length(imp.args) > 0 &&
+             isoperator(headof(imp.args[1])) && valof(headof(imp.args[1])) == ":")
+end
+
 function check_const_decl(name::String, b::Binding, scope, meta_dict)
     # assumes `scopehasbinding(scope, name)`
 
@@ -1658,6 +1671,11 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
         # a redefinition. A quote passed directly to `eval` does execute and
         # must retain the warning.
         prev_b.val isa EXPR && _is_in_inert_quote(prev_b.val) && return
+        # `import HDF5; const HDF5 = Base.get_extension(...).HDF5` egal-rebinds
+        # an imported MODULE — legal and idiomatic extension access. Only
+        # whole-module imports are exempt: symbol imports (`import Base: name`)
+        # keep the "already declared as an import" error below.
+        prev_b.name isa EXPR && _is_in_whole_module_import(prev_b.name) && return
     end
 
     b.val isa Binding && return check_const_decl(name, b.val, scope, meta_dict)
@@ -1668,8 +1686,14 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
         # per branch is not a redeclaration — the same exemption the
         # InvalidRedefofConst arm below already applies.
         prev = scope.names[name]
-        if prev isa Binding && prev.val isa EXPR && !in_same_if_branch(b.val, prev.val)
-            return
+        if prev isa Binding
+            # an import binding's `.val` may be a store, not an EXPR (`using
+            # Base: @x` in the other @static branch of a `const var"@x"`
+            # shim) — its `.name` EXPR still locates the branch
+            prev_expr = prev.val isa EXPR ? prev.val : (prev.name isa EXPR ? prev.name : nothing)
+            if prev_expr !== nothing && !in_same_if_branch(b.val, prev_expr)
+                return
+            end
         end
         seterror!(b.name, CannotDeclareConst, meta_dict)
     else
