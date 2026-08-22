@@ -18,6 +18,7 @@ const LOWERING_TAKEOVER_RULES = Set([
     :unused_binding, :unused_function_argument, :unused_type_parameter,
     :module_name, :relative_import, :unresolved_import, :missing_reference,
     :nothing_comparison, :const_decl, :incorrect_call_args,
+    :type_piracy, :invalid_type_declaration,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -1029,6 +1030,262 @@ Salsa.@derived function derived_item_call_args_findings(rt, ref::V2ItemRef)
     return result
 end
 
+# ── type_piracy / invalid_type_declaration ──────────────────────────────────
+#
+# Both rules read a definition's SIGNATURE, so they share one per-item
+# producer over the item's own top-level def (nested closures are not visited
+# — v1 reaches them but their bindings are local there too, so its checks
+# rarely fire; the difference is silence-direction).
+#
+# `NotEqDef` is a pure shape (a def named `!=`). `TypePiracy` is v1's
+# import-then-extend rule: a method added to a name this module imports from
+# an external target, where NO signature argument mentions a workspace-owned
+# type (a `where`-bound typevar counts as owned, exactly as v1's Binding test
+# does); an argument type that resolves nowhere declines the whole definition
+# (v1 counts it as foreign — the silent direction is chosen instead).
+# `InvalidTypeDeclaration` flags `x::T` signature declarations whose `T` is a
+# literal, a workspace function/macro, or an external non-datatype (the
+# seam's `:datatype` member kind is the arbiter); alias chains and everything
+# unresolvable decline.
+
+# The signature of the item's own def with ADDRESSES: `(call, call_addr,
+# where_names)`, or `nothing`. Mirrors `_v2_func_sig`'s unwrap chain, keeping
+# the preorder-address arithmetic (each unwrap step descends to child 1 =
+# +1) and collecting the `where`-clause type parameter names on the way.
+function _v2_sig_with_addr(def::BodyTree{V2Kind}, def_addr::Int)
+    (def.kind == JS2.K"function" || def.kind == JS2.K"macro" || def.kind == JS2.K"=") ||
+        return nothing
+    _v2_nchildren(def) >= 1 || return nothing
+    node = _v2_children(def)[1]
+    a = def_addr + 1
+    wnames = String[]
+    while true
+        if node.kind == JS2.K"where" && _v2_nchildren(node) >= 1
+            cs = _v2_children(node)
+            for c in cs[2:end]
+                n = c
+                while (n.kind == JS2.K"<:" || n.kind == JS2.K">:") && _v2_nchildren(n) >= 1
+                    n = _v2_children(n)[1]
+                end
+                s = _v2_leaf_string(n)
+                s !== nothing && push!(wnames, s)
+            end
+            node = cs[1]
+            a += 1
+        elseif node.kind == JS2.K"::" && _v2_nchildren(node) == 2 &&
+               (_v2_children(node)[1].kind == JS2.K"call" ||
+                _v2_children(node)[1].kind == JS2.K"where")
+            node = _v2_children(node)[1]
+            a += 1
+        else
+            break
+        end
+    end
+    node.kind == JS2.K"call" || return nothing
+    return (node, a, wnames)
+end
+
+# Every name a type expression mentions: identifiers, the tails of qualified
+# names (with their qualifier), and everything inside curly parameters —
+# mirroring `refers_to_nonimported_type`'s recursion. Pushes `(qual, name)`.
+function _v2_type_expr_names!(out::Vector{Tuple{Vector{String},String}}, t::BodyTree{V2Kind})
+    k = t.kind
+    if k == JS2.K"curly" || k == JS2.K"where"
+        for c in _v2_children(t)
+            _v2_type_expr_names!(out, c)
+        end
+    elseif (k == JS2.K"<:" || k == JS2.K">:" || k == JS2.K"::") && _v2_nchildren(t) >= 1
+        _v2_type_expr_names!(out, _v2_children(t)[end])
+    else
+        q, n = _v2_qualified_name(t)
+        n !== nothing && push!(out, (q, n))
+    end
+    return out
+end
+
+# Where a type name comes from: `(:workspace, declared_kind)`,
+# `(:external, store_path)`, or `(:unknown, nothing)`. As-renamed imports and
+# every unhandled shape land in `:unknown` — both consumers treat that as a
+# decline.
+function _v2_type_provenance(rt, root, path::Vector{String},
+                             qual::Vector{String}, name::String)
+    if isempty(qual)
+        face = get(derived_v2_module_visible_names_idfree(rt, root, path), name, nothing)
+        if face === nothing
+            bare = derived_v2_module_is_bare(rt, root, path)
+            insorted(name, derived_v2_implicit_scope_names(rt, root, bare)) ||
+                return (:unknown, nothing)
+            mk = derived_v2_external_module_member_kind(rt, root, ["Base"], name)
+            return mk === :absent ? (:external, ["Core"]) : (:external, ["Base"])
+        end
+        (face.origin === :declared || face.origin === :using_tree) &&
+            return (:workspace, face.kind)
+        if face.kind === :external_symbol
+            for ri in derived_v2_module_imports(rt, root, path)
+                any(s -> s.alias == name && s.name != name, ri.symbols) &&
+                    return (:unknown, nothing)
+                ri.alias == name && return (:unknown, nothing)
+            end
+            return (:external, face.origin_module)
+        end
+        return (:unknown, nothing)
+    end
+    _, modtargets = _v2_visible_names_pass1(rt, root, path, Set{URI}())
+    mt = get(modtargets, qual[1], nothing)
+    if mt === nothing
+        bare = derived_v2_module_is_bare(rt, root, path)
+        insorted(qual[1], derived_v2_implicit_scope_names(rt, root, bare)) ||
+            return (:unknown, nothing)
+        return (:external, qual)
+    end
+    if mt.sort === :tree
+        resolved = copy(mt.path)
+        tree = derived_v2_module_tree(rt, root)
+        modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+        for seg in qual[2:end]
+            push!(resolved, seg)
+            resolved in modpaths || return (:unknown, nothing)
+        end
+        kind = get(derived_v2_module_names(rt, root, resolved), name, nothing)
+        return kind === nothing ? (:unknown, nothing) : (:workspace, kind)
+    elseif mt.sort === :external
+        return (:external, vcat(mt.path, qual[2:end]))
+    end
+    return (:unknown, nothing)
+end
+
+const _V2_DATATYPE_DECL_KINDS = (:struct, :mutable_struct, :abstract, :primitive, :enum)
+
+_v2_is_literal_kind(k) =
+    k == JS2.K"Integer" || k == JS2.K"Float" || k == JS2.K"String" ||
+    k == JS2.K"string" || k == JS2.K"Char" || k == JS2.K"Bool" ||
+    k == JS2.K"cmdstring" || k == JS2.K"CmdString" || k == JS2.K"HexInt" ||
+    k == JS2.K"OctInt" || k == JS2.K"BinInt" || k == JS2.K"Float32"
+
+# Is the item's own definition extending a name this module imports from an
+# EXTERNAL target (`import Base: sin` / `import Base.sin`, alias-bound names
+# included)? The piracy precondition, matching v1's
+# `overwrites_imported_function`.
+function _v2_extends_external_import(rt, root, path::Vector{String}, name::String)
+    for ri in derived_v2_module_imports(rt, root, path)
+        ri.target.sort === :external || continue
+        for s in ri.symbols
+            (s.alias === nothing ? s.name : s.alias) == name && return true
+        end
+        if isempty(ri.symbols) && ri.kind === :import && length(ri.target.path) >= 2
+            (ri.alias === nothing ? last(ri.target.path) : ri.alias) == name && return true
+        end
+    end
+    return false
+end
+
+"""
+    derived_item_sig_rule_findings(rt, ref) -> Vector{SemanticFinding}
+
+`type_piracy` (NotEqDef + the import-then-extend rule) and
+`invalid_type_declaration` for one item's own definition signature.
+"""
+Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
+    result = SemanticFinding[]
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return result
+    ref.id in derived_v2_under_macrocall_ids(rt, ref.file) && return result
+    _test_block_target(body) !== nothing && return result
+
+    sig = _v2_sig_with_addr(body, 1)
+    sig === nothing && return result
+    call, call_addr, wnames = sig
+    cs = _v2_children(call)
+    isempty(cs) && return result
+
+    # NotEqDef: a definition named `!=`, qualified or not — pure shape.
+    _, fname = _v2_qualified_name(_v2_unwrap_to_name(cs[1]))
+    if fname == "!="
+        push!(result, (addr=Int32(1), rule_id=:type_piracy,
+            msg="`!=` is defined as `const != = !(==)` and should not be overloaded. " *
+                "Overload `==` instead."))
+        return result
+    end
+
+    root = derived_v2_best_root_for_uri(rt, ref.file)
+    root === nothing && return result
+    skel = derived_v2_file_skeleton(rt, ref.file)
+    any(t -> t.id == ref.id, skel.testitems) && return result
+    idx = findfirst(r -> r.id == ref.id, skel.items)
+    idx === nothing && return result
+    path = vcat(_derived_v2_splice_prefix(rt, ref.file), skel.items[idx].parent_module)
+    derived_v2_module_has_opaque_macrocall(rt, root, path) && return result
+
+    arg_addrs = _v2_child_addresses(call, call_addr)
+
+    # ── invalid_type_declaration over every binary `::` declaration ─────────
+    function check_decl!(node::BodyTree{V2Kind}, addr::Int)
+        (node.kind == JS2.K"::" && _v2_nchildren(node) == 2) || return
+        t = _v2_children(node)[2]
+        if _v2_is_literal_kind(t.kind)
+            push!(result, (addr=Int32(addr), rule_id=:invalid_type_declaration,
+                msg="A non-DataType has been used in a type declaration statement."))
+            return
+        end
+        q, n = _v2_qualified_name(t)
+        n === nothing && return
+        (isempty(q) && n in wnames) && return
+        prov, info = _v2_type_provenance(rt, root, path, q, n)
+        flag = false
+        if prov === :workspace
+            flag = info === :function || info === :macro
+        elseif prov === :external
+            flag = derived_v2_external_module_member_kind(rt, root, info, n) === :value
+        end
+        flag && push!(result, (addr=Int32(addr), rule_id=:invalid_type_declaration,
+            msg="A non-DataType has been used in a type declaration statement."))
+        return
+    end
+    for (i, arg0) in enumerate(cs)
+        i == 1 && continue
+        arg, aaddr = arg0, arg_addrs[i]
+        if arg.kind == JS2.K"parameters"
+            for (j, p) in enumerate(_v2_children(arg))
+                paddr = _v2_child_addresses(arg, aaddr)[j]
+                if p.kind == JS2.K"kw" && _v2_nchildren(p) >= 1
+                    check_decl!(_v2_children(p)[1], paddr + 1)
+                else
+                    check_decl!(p, paddr)
+                end
+            end
+            continue
+        end
+        if arg.kind == JS2.K"kw" && _v2_nchildren(arg) >= 1
+            arg, aaddr = _v2_children(arg)[1], aaddr + 1
+        end
+        check_decl!(arg, aaddr)
+    end
+
+    # ── type_piracy (import-then-extend) ────────────────────────────────────
+    (fname === nothing || !isempty(_v2_qualified_name(_v2_unwrap_to_name(cs[1]))[1])) &&
+        return result
+    _v2_extends_external_import(rt, root, path, fname) || return result
+    for (i, arg0) in enumerate(cs)
+        i == 1 && continue
+        arg0.kind == JS2.K"parameters" && continue
+        arg = _v2_unwrap_nospecialize(arg0)
+        (arg.kind == JS2.K"kw" && _v2_nchildren(arg) >= 1) && (arg = _v2_children(arg)[1])
+        (arg.kind == JS2.K"..." && _v2_nchildren(arg) >= 1) && (arg = _v2_children(arg)[1])
+        t = _v2_arg_decl_type(arg)
+        t === nothing && continue
+        names = _v2_type_expr_names!(Tuple{Vector{String},String}[], t)
+        for (q, n) in names
+            (isempty(q) && n in wnames) && return result   # typevar-typed: owned
+            prov, _ = _v2_type_provenance(rt, root, path, q, n)
+            prov === :workspace && return result           # owned type: not piracy
+            prov === :unknown && return result             # unresolvable: decline
+        end
+    end
+    push!(result, (addr=Int32(1), rule_id=:type_piracy,
+        msg="An imported function has been extended without using module defined typed arguments."))
+    return result
+end
+
 """
     derived_semantic_lint_findings(rt, uri) -> Vector{LintFinding}
 
@@ -1065,6 +1322,10 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         !_derived_v2_missing_ref_file_suppressed(rt, uri)
     soft_scope_on = rule_enabled(config, :soft_scope_ambiguity)
     call_args_on = rule_enabled(config, :incorrect_call_args)
+    # Materialization filters disabled rules anyway; this gate only avoids
+    # demanding the signature machinery when both are off.
+    sig_rules_on = rule_enabled(config, :type_piracy) ||
+        rule_enabled(config, :invalid_type_declaration)
 
     for row in derived_v2_file_skeleton(rt, uri).items
         ref = V2ItemRef(uri, row.id)
@@ -1080,6 +1341,10 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         if call_args_on
             ca = derived_item_call_args_findings(rt, ref)
             isempty(ca) || (item_findings = vcat(item_findings, ca))
+        end
+        if sig_rules_on
+            sr = derived_item_sig_rule_findings(rt, ref)
+            isempty(sr) || (item_findings = vcat(item_findings, sr))
         end
         isempty(item_findings) && continue
         ranges = get(maps, row.id, nothing)
