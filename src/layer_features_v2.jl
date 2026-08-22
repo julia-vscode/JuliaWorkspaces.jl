@@ -948,3 +948,172 @@ function v2_identifier_addr_at(view::V2ItemView, offset0::Int)
     end
     return best
 end
+
+# ── signature slicing (M3) ──────────────────────────────────────────────────
+#
+# Signatures are rendered by SLICING THE SOURCE at map ranges — byte-faithful
+# to what the user wrote, with no printer to keep in sync — then normalizing
+# whitespace so multi-line signatures read as one line. Plain functions, like
+# everything in this file: the map is the volatile last-mile leaf.
+
+"Slice `uri`'s text at 1-based exclusive-end range `r`, or `nothing`."
+function _v2f_slice(rt, uri::URI, r::UnitRange{Int})
+    tf = input_text_file(rt, uri)
+    tf === nothing && return nothing
+    text = tf.content.content
+    (1 <= first(r) && last(r) - 1 <= ncodeunits(text)) || return nothing
+    return text[first(r):(last(r) - 1)]
+end
+
+_v2f_normalize_ws(s::AbstractString) = String(strip(replace(s, r"\s+" => " ")))
+
+"""
+    v2_item_signature_text(rt, ref) -> Union{Nothing,String}
+
+The item's signature AS WRITTEN, whitespace-normalized: for a method item the
+whole left-hand side (wheres and return type kept), for a struct the whole
+definition expression. `nothing` for items that carry neither.
+"""
+function v2_item_signature_text(rt, ref::V2ItemRef)
+    body = derived_v2_item_body(rt, ref)
+    body === nothing && return nothing
+    ranges = get(derived_v2_file_maps(rt, ref.file), ref.id, nothing)
+    (ranges === nothing || length(ranges) != bt_node_count(body)) && return nothing
+    k = body.kind
+    if k == JS2.K"struct" || k == JS2.K"abstract" || k == JS2.K"primitive"
+        s = _v2f_slice(rt, ref.file, ranges[1])
+        return s === nothing ? nothing : _v2f_normalize_ws(s)
+    end
+    (k == JS2.K"function" || k == JS2.K"macro" || k == JS2.K"=") || return nothing
+    _v2_nchildren(body) >= 1 || return nothing
+    # A short-form item must actually be a method definition — `x = 1` is an
+    # assignment, not a signature. `function f end` (bare identifier child)
+    # stays: its name IS its signature.
+    if k == JS2.K"=" && _v2_func_sig(body) === nothing
+        return nothing
+    end
+    length(ranges) >= 2 || return nothing
+    s = _v2f_slice(rt, ref.file, ranges[2])   # child 1 = preorder address 2
+    return s === nothing ? nothing : _v2f_normalize_ws(s)
+end
+
+# One rendered signature: the assembled label plus the UTF-16 `[start, end)`
+# offset range of each positional parameter within it — `_assemble_signature`'s
+# exact contract, so v2 labels and v1 labels share one shape.
+const V2Signature = @NamedTuple{label::String, param_ranges::Vector{Tuple{Int,Int}}}
+
+# The whitespace-normalized source slice of one signature entry, with the
+# wrappers that say nothing about the call peeled: `@nospecialize(x)` yields
+# `x`'s own slice, a `const` field marker its field's.
+function _v2f_param_slice(rt, uri::URI, ranges, node::BodyTree{V2Kind}, addr::Int)
+    if node.kind == JS2.K"macrocall" && _v2_macrocall_name(node) == "@nospecialize" &&
+       _v2_nchildren(node) >= 3
+        caddrs = _v2_child_addresses(node, addr)
+        return _v2f_param_slice(rt, uri, ranges, _v2_children(node)[3], caddrs[3])
+    end
+    if node.kind == JS2.K"const" && _v2_nchildren(node) >= 1
+        return _v2f_param_slice(rt, uri, ranges, _v2_children(node)[1], addr + 1)
+    end
+    1 <= addr <= length(ranges) || return nothing
+    s = _v2f_slice(rt, uri, ranges[addr])
+    return s === nothing ? nothing : _v2f_normalize_ws(s)
+end
+
+# Assemble one V2Signature from a sig call node at `call_addr`. Positional
+# entries each get a label range; keywords appear after `;` in the label only
+# (they are not selected by index) — both exactly as v1's
+# `_expr_signature!`/`_assemble_signature` pair behaves.
+function _v2f_signature_from_call(rt, uri::URI, ranges, call::BodyTree{V2Kind}, call_addr::Int)
+    cs = _v2_children(call)
+    isempty(cs) && return nothing
+    caddrs = _v2_child_addresses(call, call_addr)
+    callee = _v2f_param_slice(rt, uri, ranges, cs[1], caddrs[1])
+    callee === nothing && return nothing
+    # A functor signature `(io::IO)(x)` needs its parens back to read as a call.
+    cs[1].kind == JS2.K"::" && (callee = string("(", callee, ")"))
+    positional = String[]
+    kwargs = String[]
+    for i in 2:length(cs)
+        if cs[i].kind == JS2.K"parameters"
+            paddrs = _v2_child_addresses(cs[i], caddrs[i])
+            for (j, p) in enumerate(_v2_children(cs[i]))
+                s = _v2f_param_slice(rt, uri, ranges, p, paddrs[j])
+                s === nothing && return nothing
+                push!(kwargs, s)
+            end
+        else
+            s = _v2f_param_slice(rt, uri, ranges, cs[i], caddrs[i])
+            s === nothing && return nothing
+            push!(positional, s)
+        end
+    end
+    label, prange = _assemble_signature(callee, positional; kwargs=kwargs)
+    return (label=label, param_ranges=prange)::V2Signature
+end
+
+"""
+    v2_item_signature_params(rt, ref) -> Vector{V2Signature}
+
+Every callable signature the item offers, from source slices: a method item's
+own signature (wheres and return types dropped — the call site doesn't spell
+them); a struct's inner constructors, or, absent any, its implicit field
+constructor. Empty for non-callables and for `function f end`.
+"""
+function v2_item_signature_params(rt, ref::V2ItemRef)
+    out = V2Signature[]
+    body = derived_v2_item_body(rt, ref)
+    body === nothing && return out
+    ranges = get(derived_v2_file_maps(rt, ref.file), ref.id, nothing)
+    (ranges === nothing || length(ranges) != bt_node_count(body)) && return out
+
+    k = body.kind
+    if k == JS2.K"function" || k == JS2.K"macro" || k == JS2.K"="
+        siginfo = _v2_sig_with_addr(body, 1)
+        siginfo === nothing && return out
+        call, call_addr, _ = siginfo
+        sig = _v2f_signature_from_call(rt, ref.file, ranges, call, call_addr)
+        sig === nothing || push!(out, sig)
+        return out
+    end
+    k == JS2.K"struct" || return out
+    cs = _v2_children(body)
+    length(cs) >= 3 || return out
+    caddrs = _v2_child_addresses(body, 1)
+    block = cs[3]
+    baddrs = _v2_child_addresses(block, caddrs[3])
+
+    # Inner constructors first: with any function definition present (even a
+    # sig-less `function S end`) there is no implicit field constructor to
+    # offer — v1's `any(defines_function, …)` gate.
+    has_ctor = false
+    for (j, f) in enumerate(_v2_children(block))
+        si = _v2_sig_with_addr(f, baddrs[j])
+        if si === nothing
+            (f.kind == JS2.K"function" || f.kind == JS2.K"macro") && (has_ctor = true)
+            continue
+        end
+        has_ctor = true
+        sig = _v2f_signature_from_call(rt, ref.file, ranges, si[1], si[2])
+        sig === nothing || push!(out, sig)
+    end
+    has_ctor && return out
+
+    # The implicit constructor: the struct's name (subtype clause dropped,
+    # curly parameters kept) applied to its fields; docstrings are not fields.
+    namenode, nameaddr = cs[2], caddrs[2]
+    while namenode.kind == JS2.K"<:" && _v2_nchildren(namenode) >= 1
+        namenode, nameaddr = _v2_children(namenode)[1], nameaddr + 1
+    end
+    callee = _v2f_param_slice(rt, ref.file, ranges, namenode, nameaddr)
+    callee === nothing && return out
+    fields = String[]
+    for (j, f) in enumerate(_v2_children(block))
+        (f.kind == JS2.K"String" || f.kind == JS2.K"string") && continue
+        s = _v2f_param_slice(rt, ref.file, ranges, f, baddrs[j])
+        s === nothing && return out
+        push!(fields, s)
+    end
+    label, prange = _assemble_signature(callee, fields)
+    push!(out, (label=label, param_ranges=prange)::V2Signature)
+    return out
+end
