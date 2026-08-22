@@ -87,6 +87,50 @@ end
         :pointless_boolean))
 end
 
+@testitem "shape rules: literal use" setup=[ShapeRulesWS] begin
+    msg = "You really shouldn't be using a literal value here."
+    positives = [
+        "function f()\n    1 = 2\nend\n",              # assignment LHS
+        "f(1 = 2) = 1\n",                              # kwarg LHS
+        "f(x::1) = x\n",                               # declaration RHS
+        "f(a) = a isa 1\n",                            # isa RHS
+        "f(a) = a isa \"s\"\n",
+        "struct \"S\"\nend\n",                         # struct name
+        "abstract type 1 end\n",                       # abstract name
+    ]
+    for src in positives
+        ds = sh_diags(src, :literal_use)
+        @test length(ds) >= 1
+        @test ds[1].message == msg
+    end
+    # The range points at the literal.
+    src = "f(a) = a isa 1\n"
+    d = only(sh_diags(src, :literal_use))
+    @test startswith(src[d.range], "1")
+
+    # Negatives: literals in ordinary positions are fine.
+    @test isempty(sh_diags("""
+    x = 1
+    f(a = 1) = a
+    g(a::Int) = a isa Int
+    struct S
+        a::Int
+    end
+    h() = "string value"
+    """, :literal_use))
+    # `x::1` in a signature fires invalid_type_declaration TOO — v1 parity
+    # (two checks, two findings at two nodes).
+    jw = sh_workspace("f(x::1) = x\n")
+    @test !isempty(filter(d -> d.code === :invalid_type_declaration,
+                          get_diagnostic(jw, SH_URI)))
+    # Quoted code and unknown-macro arguments skip.
+    @test isempty(sh_diags("f() = :(1 = 2)\n", :literal_use))
+    @test isempty(sh_diags("@somedsl 1 = 2\n", :literal_use))
+    # Config off.
+    @test isempty(sh_diags("f(a) = a isa 1\n", :literal_use;
+        config="[rules]\nliteral_use = \"off\"\n"))
+end
+
 @testitem "shape rules: flag and config" setup=[ShapeRulesWS] begin
     src = "f(x) = true || g(x)\nfunction h()\n    if true\n        1\n    end\nend\n"
     jw = sh_workspace(src; flag=false)

@@ -20,6 +20,7 @@ const LOWERING_TAKEOVER_RULES = Set([
     :nothing_comparison, :const_decl, :incorrect_call_args,
     :type_piracy, :invalid_type_declaration, :kw_default_mismatch,
     :incorrect_iter_spec, :pointless_boolean, :const_if_condition,
+    :literal_use,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -1425,9 +1426,45 @@ function _v2_shape_rules!(out::Vector{SemanticFinding}, bt::BodyTree{V2Kind},
     return nothing
 end
 
-# The `check_use_of_literal` arms land in commit 2; the hook exists so the
-# walk shape is final from the start.
-_v2_literal_use!(out, bt, myaddr) = nothing
+# A "bad literal" (v1's `isbadliteral`): a literal string/char/bool/number
+# LEAF. Interpolated strings are compound nodes and don't count, matching
+# v1's `isliteral` gate; cmd strings are excluded in both engines.
+function _v2_bad_literal(bt::BodyTree{V2Kind})
+    bt.children === nothing || return false
+    k = bt.kind
+    (k == JS2.K"String" || k == JS2.K"Char" || k == JS2.K"Bool") && return true
+    return k != JS2.K"Identifier" && bt.val isa Union{Integer,AbstractFloat}
+end
+
+# The `check_use_of_literal` port — a bad literal as: a struct /
+# abstract / primitive NAME, an assignment or kwarg LHS, a declaration RHS
+# (`x::1`), or an `isa` RHS. The finding sits at the literal, as v1 marks it.
+# The module-name arm is NOT ported: v2 module rows carry no body to walk
+# (vanishingly rare — declared v1-only residue).
+function _v2_literal_use!(out::Vector{SemanticFinding}, bt::BodyTree{V2Kind}, myaddr::Int)
+    cs = bt.children
+    cs === nothing && return nothing
+    k = bt.kind
+    target = 0
+    if (k == JS2.K"=" || k == JS2.K"kw") && length(cs) >= 1 && _v2_bad_literal(cs[1])
+        target = 1
+    elseif k == JS2.K"::" && length(cs) == 2 && _v2_bad_literal(cs[2])
+        target = 2
+    elseif k == JS2.K"call" && length(cs) == 3 &&
+           _v2_leaf_string(cs[1]) == "isa" && _v2_bad_literal(cs[3])
+        target = 3
+    elseif k == JS2.K"struct" && length(cs) >= 2 && _v2_bad_literal(cs[2])
+        target = 2
+    elseif (k == JS2.K"abstract" || k == JS2.K"primitive") && length(cs) >= 1 &&
+           _v2_bad_literal(cs[1])
+        target = 1
+    end
+    target == 0 && return nothing
+    push!(out, (addr=Int32(_v2_child_addresses(bt, myaddr)[target]),
+        rule_id=:literal_use,
+        msg="You really shouldn't be using a literal value here."))
+    return nothing
+end
 
 """
     derived_item_shape_findings(rt, ref) -> Vector{SemanticFinding}
