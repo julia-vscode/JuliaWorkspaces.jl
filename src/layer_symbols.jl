@@ -258,6 +258,11 @@ end
 Collect all document symbols for the file identified by `uri`.
 """
 function _get_document_symbols(runtime, uri::URI)
+    # v2 features (experiment): the v2 outline (see `_get_document_symbols_v2`);
+    # files outside any v2 root fall through to the v1 path.
+    if input_v2_enabled(runtime) && derived_v2_best_root_for_uri(runtime, uri) !== nothing
+        return _get_document_symbols_v2(runtime, uri)
+    end
     root = derived_best_root_for_uri(runtime, uri)
     root === nothing && return DocumentSymbolResult[]
 
@@ -279,6 +284,13 @@ end
 Search all files for top-level bindings matching `query`.
 """
 function _get_workspace_symbols(runtime, query::String)
+    # v2 features (experiment): the same enumeration off the v2 inventory and
+    # maps. No testitem filter is needed — v2 keeps test macrocalls opaque, so
+    # testitem-body declarations never become item rows; macro-declared names
+    # have no v2 rows either (v1-only names under the flag, a documented
+    # difference).
+    input_v2_enabled(runtime) && return _get_workspace_symbols_v2(runtime, query)
+
     results = WorkspaceSymbolResult[]
     files = derived_text_files(runtime)
 

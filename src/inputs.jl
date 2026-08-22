@@ -1,5 +1,20 @@
 Salsa.@declare_input input_files(rt)::Set{URI}
 
+# THE v2 opt-in (experiment): when true, the v2 static analysis framework's
+# lint producer takes over the rules in `LOWERING_TAKEOVER_RULES` from
+# StaticLint (see v2/lint_lowering_rules.jl) AND the interactive features
+# ported to v2 (references family, symbols, module-at, document links,
+# selection/block ranges, hover, signature help — see layer_features_v2.jl)
+# answer from v2, each falling back to the untouched v1 path whenever v2
+# declines. Lazily defaults to false: exactly the legacy behavior, and nothing
+# in the v2 layers is ever demanded. Declared lazy rather than initialized in
+# the `JuliaWorkspace` constructor so the whole v2 opt-in lives here and
+# `src/types.jl` needs no knowledge of it. (The DJP-side macro expansion has
+# its own flag, `input_macro_expansion` — a separate resource commitment.)
+Salsa.@declare_input input_v2_enabled(rt)::Bool function(_ctx)
+    false
+end
+
 Salsa.@declare_input input_text_file(rt, uri)::Union{TextFile,Nothing}
 
 Salsa.@declare_input input_active_project(rt)::Union{URI,Nothing}
@@ -76,6 +91,19 @@ Salsa.@declare_input input_resolved_environments(rt)::Dict{ResolveEnvironmentKey
 # URI) will never appear, so readiness gates treat these keys as settled and
 # proceed best-effort with whatever symbol caches exist.
 Salsa.@declare_input input_failed_dynamic_keys(rt)::Set{DJPKey}
+
+# Feature flag (experiment): when true, opaque macrocalls in v2 lowering are
+# expanded out-of-process by the persistent env child (see v2/layer_expansion.jl).
+# Lazily false, like `input_v2_enabled` — the legacy behavior costs nothing.
+Salsa.@declare_input input_macro_expansion(rt)::Bool function(_ctx)
+    false
+end
+
+# Settled macro expansions, content-keyed. `:ok` entries carry the expansion
+# source text; `:failed` entries are the negative cache (never re-requested).
+# Consumers read per-key through `derived_macro_expansion` so this single
+# collection input still invalidates fine-grained.
+Salsa.@declare_input input_macro_expansions(rt)::Dict{ExpansionKey,ExpansionOutcome}
 
 # The user-facing failure message per failed work item, kept separate from
 # `input_failed_dynamic_keys` so the readiness gates (pure membership tests)

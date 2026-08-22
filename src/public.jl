@@ -5,6 +5,7 @@ export JuliaWorkspace,
     remove_file!,
     remove_all_children!,
     set_active_project!,
+    set_v2_enabled!,
     set_indirect_file_content!,
     clear_indirect_file!,
     get_indirect_files,
@@ -119,6 +120,87 @@ function _reconcile!(jw::JuliaWorkspace)
         empty!(df.last_required)
         union!(df.last_required, required)
         put!(df.in_channel, ReconcileMsg(required))
+    end
+
+    _reconcile_expansions!(jw)
+
+    return
+end
+
+# Batch caps: a whole-workspace cold pass can hold thousands of expansion
+# sites; grouping per (env, ctx) and capping keeps individual requests small
+# enough that a timeout loses little and the child stays responsive.
+const EXPANSION_BATCH_MAX_ENTRIES = 200
+const EXPANSION_BATCH_MAX_BYTES = 256 * 1024
+
+"""
+    _reconcile_expansions!(jw::JuliaWorkspace)
+
+Send expansion batches for every macro-expansion key the workspace needs and
+has not requested yet. Host-side by design: this is where source text is
+reattached (the last-mile read of `derived_v2_file_maps` + file content), so no
+derived value ever depends on positions. Cheap when the flag is off or nothing
+changed (`derived_required_macro_expansions` is memoized).
+"""
+function _reconcile_expansions!(jw::JuliaWorkspace)
+    # No dynamic feature at all: nothing to send batches to. Keys stay pending
+    # (the flag together with no dynamic feature is a misconfiguration — and
+    # the process-free test seam).
+    df = jw.dynamic_feature
+    df === nothing && return
+    input_macro_expansion(jw.runtime) || return
+
+    # Prune bookkeeping for envs that left the workspace (env edits re-key
+    # everything under a new env_hash, so stale entries only cost memory).
+    live_env_hashes = Set{UInt64}(k.content_hash for k in derived_required_dynamic_projects(jw.runtime))
+    if any(k -> !(k.env_hash in live_env_hashes), keys(input_macro_expansions(jw.runtime)))
+        set_input_macro_expansions!(jw.runtime,
+            filter(p -> p.first.env_hash in live_env_hashes, input_macro_expansions(jw.runtime)))
+    end
+    filter!(k -> k.env_hash in live_env_hashes, df.requested_expansions)
+
+    # Batches are sent regardless of mode: under a non-persistent mode the
+    # reactor settles every entry `:failed` immediately, which is exactly what
+    # the readiness gate and the negative cache need to stay honest.
+    required = derived_required_macro_expansions(jw.runtime)
+    isempty(required) && return
+
+    # Group new work per (env child, module context).
+    groups = Dict{Tuple{DJPKey,String},@NamedTuple{imports::Vector{String}, entries::Vector{ExpansionEntry}}}()
+    for r in required
+        r.key in df.requested_expansions && continue
+
+        # Reattach the macrocall's source text (volatile, last mile only).
+        maps = derived_v2_file_maps(jw.runtime, r.file)
+        rngs = get(maps, r.item_id, nothing)
+        (rngs === nothing || !(1 <= r.addr <= length(rngs))) && continue
+        tf = derived_text_file_content(jw.runtime, r.file)
+        tf === nothing && continue
+        text = tf.content.content
+        rng = rngs[r.addr]
+        last(rng) - 1 <= ncodeunits(text) || continue
+        macro_text = text[first(rng):prevind(text, last(rng))]
+
+        push!(df.requested_expansions, r.key)
+        g = get!(groups, (r.env_key, r.ctx_id)) do
+            (imports=r.imports, entries=ExpansionEntry[])
+        end
+        push!(g.entries, (key=r.key, text=macro_text))
+    end
+
+    for ((env_key, ctx_id), g) in groups
+        i = 1
+        while i <= length(g.entries)
+            batch = ExpansionEntry[]
+            bytes = 0
+            while i <= length(g.entries) && length(batch) < EXPANSION_BATCH_MAX_ENTRIES &&
+                  bytes < EXPANSION_BATCH_MAX_BYTES
+                push!(batch, g.entries[i])
+                bytes += ncodeunits(g.entries[i].text)
+                i += 1
+            end
+            put!(df.in_channel, ExpansionBatchMsg(env_key, ctx_id, g.imports, batch))
+        end
     end
 
     return
@@ -448,6 +530,43 @@ end
 # Input-only mutation. Does not drain results or reconcile.
 function _set_active_project!(jw::JuliaWorkspace, uri_or_nothing::Union{URI,Nothing})
     set_input_active_project!(jw.runtime, uri_or_nothing)
+end
+
+"""
+    set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
+
+THE v2 opt-in (experiment): when `true`, the v2 (JuliaLowering-backed) static
+analysis framework takes over — its lint producer supersedes the takeover
+rules from StaticLint (same rule ids, severities, and config surface,
+different engine), and the interactive features ported to v2 (the references
+family, workspace/document symbols, module-at-position, document links,
+selection/block ranges, hover, signature help) answer from v2, each falling
+back to the legacy path whenever v2 declines. Default `false`: exactly the
+legacy behavior; the v2 machinery is never demanded. The DJP-side macro
+expansion has its own flag, [`set_macro_expansion!`](@ref).
+"""
+function set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_v2_enabled!" enabled=enabled
+
+    process_from_dynamic(jw)
+    set_input_v2_enabled!(jw.runtime, enabled)
+    _reconcile!(jw)
+end
+
+"""
+    set_macro_expansion!(jw::JuliaWorkspace, enabled::Bool)
+
+Feature flag (experiment): when `true`, opaque macrocalls in v2 lowering are
+expanded out-of-process by the persistent env child and spliced into the
+analysis (see `src/v2/layer_expansion.jl`). Only effective together with
+[`set_v2_enabled!`](@ref) and `DynamicPersistent` mode. Default `false`.
+"""
+function set_macro_expansion!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_macro_expansion!" enabled=enabled
+
+    process_from_dynamic(jw)
+    set_input_macro_expansion!(jw.runtime, enabled)
+    _reconcile!(jw)
 end
 
 # Projects

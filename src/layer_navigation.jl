@@ -63,6 +63,12 @@ end
 For each offset (0-based) in `offsets`, compute a nested selection range.
 """
 function _get_selection_ranges(runtime, uri::URI, offsets::Vector{Int})
+    # v2 features (experiment): per-offset v2 chains with per-offset v1
+    # fallback (see `_get_selection_ranges_v2`).
+    if input_v2_enabled(runtime) && derived_v2_best_root_for_uri(runtime, uri) !== nothing
+        return _get_selection_ranges_v2(runtime, uri, offsets)
+    end
+
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     results = Union{Nothing,SelectionRangeResult}[]
     for offset in offsets
@@ -83,6 +89,13 @@ Find the current top-level block at `offset` (0-based) in the file.
 Returns a `BlockRangeResult` or `nothing`.
 """
 function _get_current_block_range(runtime, uri::URI, offset::Int)
+    # v2 features (experiment): gap-partition block windows over v2 rows;
+    # `:v1` declines (degraded rows, no root) run the untouched body below.
+    if input_v2_enabled(runtime)
+        r = _get_current_block_range_v2(runtime, uri, offset)
+        r === :v1 || return r
+    end
+
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     loc = 0
 
@@ -170,6 +183,10 @@ Return the fully qualified module name at `offset` (0-based) in `uri`,
 or "Main" if no module scope is found.
 """
 function _get_module_at(runtime, uri::URI, offset::Int)
+    # v2 features (experiment): splice prefix + innermost module whose body
+    # block contains the offset (see `_get_module_at_v2`).
+    input_v2_enabled(runtime) && return _get_module_at_v2(runtime, uri, offset)
+
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     x, p = _get_expr_or_parent(cst, offset, 1)
 

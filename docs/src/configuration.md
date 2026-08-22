@@ -330,6 +330,8 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | --- | --- | --- |
 | `syntax_errors` | `error` | Julia syntax errors |
 | `syntax_warnings` | `off` | Julia syntax warnings |
+| `lowering_errors` | `error` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — the file will not load. Experimental, requires the lowering-lint flag; when active it supersedes `duplicate_function_argument`/`break_continue`/`global_const_decl` |
+| `soft_scope_ambiguity` | `information` | Julia's soft-scope ambiguity warning, statically: an un-annotated assignment in a top-level `for`/`while`/`try` to a name that is also a plain module global (Julia warns at run time and treats it as a new local). Experimental, requires the lowering-lint flag |
 | `testitem_errors` | `error` | Malformed `@testitem` blocks |
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |

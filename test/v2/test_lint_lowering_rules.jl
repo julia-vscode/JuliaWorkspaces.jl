@@ -1,0 +1,345 @@
+@testsnippet LoweringLintWS begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces: LOWERING_TAKEOVER_RULES,
+        derived_item_semantic_findings, derived_semantic_lint_findings,
+        derived_v2_file_inventory, V2ItemRef, update_file!
+    using JuliaWorkspaces.URIs2: URI
+
+    const LL_URI = URI("file:///ll/src/F.jl")
+
+    function ll_workspace(src::String; flag=true, config::Union{Nothing,String}=nothing)
+        jw = JuliaWorkspace()
+        if config !== nothing
+            add_file!(jw, TextFile(URI("file:///ll/JuliaLint.toml"), SourceText(config, "toml")))
+        end
+        add_file!(jw, TextFile(LL_URI, SourceText(src, "julia")))
+        flag && set_v2_enabled!(jw, true)
+        return jw
+    end
+
+    ll_codes(jw, code) = filter(d -> d.code === code, get_diagnostic(jw, LL_URI))
+
+    function ll_item_ref(jw, name; uri=LL_URI)
+        inv = derived_v2_file_inventory(jw.runtime, uri)
+        return V2ItemRef(uri, only(filter(i -> i.name == name, inv.items)).id)
+    end
+
+    const UNUSED_SRC = """
+    function f(a, b)
+        c = a + 1
+        d = 2
+        return c
+    end
+    """
+end
+
+@testitem "lowering lint: flag off is exactly legacy behavior" setup=[LoweringLintWS] begin
+    jw = ll_workspace(UNUSED_SRC; flag=false)
+    for code in (:unused_binding, :unused_function_argument)
+        # Whatever StaticLint reports, nothing comes from the lowering producer.
+        @test !any(d -> d.source == "JuliaWorkspaces.jl", ll_codes(jw, code))
+    end
+end
+
+@testitem "lowering lint: unused local and argument flagged, StaticLint suppressed" setup=[LoweringLintWS] begin
+    jw = ll_workspace(UNUSED_SRC)
+
+    db = ll_codes(jw, :unused_binding)
+    @test length(db) == 1
+    @test db[1].source == "JuliaWorkspaces.jl"
+    @test occursin("`d`", db[1].message)
+    @test db[1].severity === :hint
+
+    da = ll_codes(jw, :unused_function_argument)
+    @test length(da) == 1
+    @test da[1].source == "JuliaWorkspaces.jl"
+    @test occursin("`b`", da[1].message)
+
+    # The range points at the declaration site.
+    rng = db[1].range
+    @test occursin("d", UNUSED_SRC[first(rng):last(rng)-1])
+end
+
+@testitem "lowering lint: loop variables count, negatives stay silent" setup=[LoweringLintWS] begin
+    # Unused loop variable is flagged.
+    jw = ll_workspace("function f()\n    s = 0\n    for i in 1:3\n        s += 1\n    end\n    return s\nend\n")
+    @test any(d -> occursin("`i`", d.message), ll_codes(jw, :unused_binding))
+
+    # `_`-prefixed names are the intentional-unused convention.
+    jw = ll_workspace("function f(_unused, x)\n    return x\nend\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # A local used only inside a macrocall is NOT unused (semi-transparency).
+    jw = ll_workspace("function f()\n    x = 1\n    @show x\n    return nothing\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+
+    # A local read by a closure is used.
+    jw = ll_workspace("function f()\n    c = 1\n    g = () -> c + 1\n    return g()\nend\n")
+    @test !any(d -> occursin("`c`", d.message), ll_codes(jw, :unused_binding))
+
+    # Unused top-level globals are out of scope for this rule.
+    jw = ll_workspace("unused_global_thing = 1\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+end
+
+@testitem "lowering lint: config severity and disabling are honored" setup=[LoweringLintWS] begin
+    jw = ll_workspace(UNUSED_SRC;
+        config="[rules]\nunused_binding = \"warning\"\n")
+    db = ll_codes(jw, :unused_binding)
+    @test length(db) == 1
+    @test db[1].severity === :warning
+
+    # The unused rules off: their diagnostics disappear, but the gate stays
+    # open (other lowering-backed rules are still enabled), so raw findings
+    # keep being produced and materialization filters them.
+    jw = ll_workspace(UNUSED_SRC;
+        config="[rules]\nunused_binding = \"off\"\nunused_function_argument = \"off\"\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # EVERY gate rule off => the gate is closed, nothing is produced at all.
+    all_off = join(("$(id) = \"off\"" for id in
+        Iterators.flatten((JuliaWorkspaces.LOWERING_TAKEOVER_RULES, JuliaWorkspaces.LOWERING_OWN_RULES))), "\n")
+    jw = ll_workspace(UNUSED_SRC; config="[rules]\n" * all_off * "\n")
+    @test isempty(derived_semantic_lint_findings(jw.runtime, LL_URI))
+end
+
+@testitem "lowering lint: interpolation inside a quoted macrocall is a read" setup=[LoweringLintWS] begin
+    # A macrocall inside a `quote` is data — never expanded — so it must be
+    # materialized faithfully. Flattening it would destroy the `$` nodes and
+    # make the interpolated variable look unused (both engines' worst FP class
+    # in the 2026-08-11 top-100 sweep).
+    jw = ll_workspace("macro m(T)\n    quote\n        @generated f(\$(esc(T))) = 1\n    end\nend\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # Same shape without the nested macrocall, as a control.
+    jw = ll_workspace("macro m(T)\n    quote\n        f(\$(esc(T))) = 1\n    end\nend\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # A macro argument that really is unused must still be reported.
+    jw = ll_workspace("macro m(x)\n    quote\n        1 + 1\n    end\nend\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 1
+end
+
+@testitem "lowering lint: one finding per source declaration" setup=[LoweringLintWS] begin
+    # Desugaring duplicates a destructuring pattern into the filter closure and
+    # the body closure; each reads only one name, but each read sits at a real
+    # use site, so the variable counts as used.
+    jw = ll_workspace("f(d) = [String(n) for (n, c) in d if c isa Int]\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+
+    # Without the filter, `c` genuinely is unused.
+    jw = ll_workspace("f(d) = [String(n) for (n, c) in d]\n")
+    @test length(ll_codes(jw, :unused_binding)) == 1
+
+    # Genuinely-unused names under a filter are still reported, once each.
+    jw = ll_workspace("f(d) = [1 for (n, c) in d if true]\n")
+    @test length(ll_codes(jw, :unused_binding)) == 2
+end
+
+@testitem "lowering lint: annotation macros are structurally transparent" setup=[LoweringLintWS] begin
+    # `@inline` and friends hand their argument through unchanged, so they are
+    # unwrapped without executing anything. Before this, `@inline f(x, y) = x`
+    # hid the definition entirely and `@nospecialize` in argument position hid
+    # the whole signature — together the largest source of missed bindings in
+    # the top-100 corpus sweep.
+    for src in ("@inline f(x, y) = x\n",
+                "@inline function f(x, y)\n    return x\nend\n",
+                "@noinline function f(x, y)\n    return x\nend\n",
+                "Base.@propagate_inbounds function f(x, y)\n    return x\nend\n")
+        jw = ll_workspace(src)
+        codes = ll_codes(jw, :unused_function_argument)
+        @test length(codes) == 1
+        @test occursin("`y`", codes[1].message)
+    end
+
+    # `@nospecialize` sits in argument position: unwrapping it must leave the
+    # signature intact, so BOTH unused arguments are still seen.
+    jw = ll_workspace("f(@nospecialize(x::Int), y) = 1\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 2
+
+    # A local inside an `@inbounds` block is ordinary code.
+    jw = ll_workspace("function f(x)\n    @inbounds begin\n        z = 1\n    end\n    return x\nend\n")
+    @test length(ll_codes(jw, :unused_binding)) == 1
+
+    # A macro NOT in the table stays opaque, and its identifiers count as reads.
+    jw = ll_workspace("function f()\n    x = 1\n    @show x\n    nothing\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+end
+
+@testitem "lowering lint: test blocks are analysed in their own scope" setup=[LoweringLintWS] begin
+    # A test block is ordinary code, so its bindings are worth checking. The
+    # body must be materialised as a SCOPE though: at module level its
+    # assignments would be globals, which this rule ignores by design.
+    jw = ll_workspace("@testset \"t\" begin\n    q = 1\n    @test true\nend\n")
+    @test length(ll_codes(jw, :unused_binding)) == 1
+
+    jw = ll_workspace("@testitem \"t\" begin\n    f(a, b) = a\n    @test f(1, 2) == 1\nend\n")
+    codes = ll_codes(jw, :unused_function_argument)
+    @test length(codes) == 1
+    @test occursin("`b`", codes[1].message)
+
+    # Used bindings stay quiet.
+    jw = ll_workspace("@testset \"t\" begin\n    q = 1\n    @test q == 1\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+
+    # `@testset for` binds its loop variable in the macro, not the block, so
+    # that shape stays opaque rather than inventing bindings.
+    jw = ll_workspace("@testset \"t\" for i in 1:2\n    @test true\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+end
+
+@testitem "lowering lint: definitions inside unexpandable macros are left alone" setup=[LoweringLintWS] begin
+    # Below a macrocall we cannot expand, the macro decides what its arguments
+    # mean. `@define_diffrule Base.:+(x) = :(1)` looks like a method definition
+    # but `x` is pattern syntax that cannot be removed — analysing it as a
+    # signature produced false positives.
+    jw = ll_workspace("@define_diffrule Base.:+(x) = :(1)\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    jw = ll_workspace("@with_kw struct S\n    a::Int = 1\nend\n")
+    @test isempty(ll_codes(jw, :unused_binding))
+
+    # Macros we DO understand stay analysable.
+    jw = ll_workspace("@inline f(x, y) = x\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 1
+
+    # This must stay a NARROW blocklist. Suppressing every definition under a
+    # macro we cannot expand was measured on the corpus and cost far more than
+    # it saved — a docstring is a `Core.@doc` macrocall, so it blinded the
+    # analysis to every documented definition (~353 false negatives to remove
+    # ~13 false positives).
+    jw = ll_workspace("\"\"\"\ndocs\n\"\"\"\nis_fw(T::Type) = false\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 1
+
+    jw = ll_workspace("@static if true\n    f(x, y) = x\nend\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 1
+end
+
+@testitem "lowering lint: names mentioned inside a quote count as used" setup=[LoweringLintWS] begin
+    # A quote lowers to inert data, so a name mentioned only inside one is not
+    # lexically read — but renaming it changes what the quoted code means, and
+    # for `@generated` bodies it breaks the generated method. Treat mentions
+    # inside a quote as uses, the same way opaque macrocalls are treated.
+    jw = ll_workspace("@generated function f(x, n)\n    return quote\n        x + 1\n    end\nend\n")
+    codes = ll_codes(jw, :unused_function_argument)
+    @test length(codes) == 1              # `n` only
+    @test occursin("`n`", codes[1].message)
+
+    jw = ll_workspace("function f(x)\n    return :(x + 1)\nend\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+
+    # An argument mentioned nowhere — quote or otherwise — is still reported.
+    jw = ll_workspace("@generated function f(x, n)\n    return quote\n        99\n    end\nend\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 2
+end
+
+@testitem "lowering lint: default-valued arguments are still checked" setup=[LoweringLintWS] begin
+    # An argument with a default desugars into a forwarding method that reads
+    # the argument only to pass it on. That synthesized read carries the
+    # declaration's own address, so it must not count as a use — otherwise
+    # every optional positional argument and keyword argument silently stops
+    # being checked.
+    jw = ll_workspace("f(a, b = 2) = 3\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 2
+
+    jw = ll_workspace("f(x; verbose=false, pad=\"\") = x\n")
+    @test length(ll_codes(jw, :unused_function_argument)) == 2
+
+    # ... and a default-valued argument that IS used stays quiet.
+    jw = ll_workspace("f(a, b = 2) = a + b\n")
+    @test isempty(ll_codes(jw, :unused_function_argument))
+end
+
+@testitem "lowering lint: findings backdate across position-only edits" setup=[LoweringLintWS] begin
+    jw = ll_workspace(UNUSED_SRC)
+    ref = ll_item_ref(jw, "f")
+    f1 = derived_item_semantic_findings(jw.runtime, ref)
+    @test !isempty(f1)
+
+    update_file!(jw, TextFile(LL_URI, SourceText("# header\n\n" * UNUSED_SRC, "julia")))
+    f2 = derived_item_semantic_findings(jw.runtime, ref)
+    @test isequal(f1, f2)
+end
+
+@testitem "lowering lint: unused type parameters flagged, used and struct params spared" setup=[LoweringLintWS] begin
+    # Unread `where` parameter: flagged at the parameter, v1 message wording.
+    jw = ll_workspace("f(x) where T = x\n")
+    d = ll_codes(jw, :unused_type_parameter)
+    @test length(d) == 1
+    @test d[1].message == "A DataType parameter has been specified but not used."
+    @test d[1].source == "JuliaWorkspaces.jl"
+
+    # Used in the signature: spared.
+    jw = ll_workspace("f(x::T) where T = x\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+
+    # Used only in the body: spared.
+    jw = ll_workspace("function g(x) where T\n    return x isa T\nend\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+
+    # Multiple parameters: only the unused one is flagged.
+    jw = ll_workspace("function g(x::T) where {T, S}\n    return x\nend\n")
+    d = ll_codes(jw, :unused_type_parameter)
+    @test length(d) == 1
+    src = "function g(x::T) where {T, S}\n    return x\nend\n"
+    @test src[first(d[1].range):last(d[1].range)-1] == "S"
+
+    # Struct and type-alias parameters lower as locals and are not covered,
+    # matching v1's where-clause-only semantics.
+    jw = ll_workspace("struct Foo{T}\n    a::Int\nend\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+    jw = ll_workspace("const V{T} = Vector{T}\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+
+    # `_`-prefixed names are the intentional-unused convention.
+    jw = ll_workspace("f(x) where _T = x\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+
+    # Config: rule off silences it.
+    jw = ll_workspace("f(x) where T = x\n"; config="[rules]\nunused_type_parameter = \"off\"\n")
+    @test isempty(ll_codes(jw, :unused_type_parameter))
+end
+
+@testitem "lowering lint: nothing_comparison takeover" setup=[LoweringLintWS] begin
+    # Both operand orders and both operators, exact v1 messages, range on the
+    # operator.
+    jw = ll_workspace("f(x) = x == nothing\n")
+    d = only(ll_codes(jw, :nothing_comparison))
+    @test d.source == "JuliaWorkspaces.jl"
+    @test d.message == "Compare against `nothing` using `isnothing` or `===`"
+    src = "f(x) = x == nothing\n"
+    @test src[first(d.range):last(d.range)-1] == "=="
+
+    jw = ll_workspace("f(x) = nothing == x\n")
+    @test length(ll_codes(jw, :nothing_comparison)) == 1
+    jw = ll_workspace("f(x) = x != nothing\n")
+    @test only(ll_codes(jw, :nothing_comparison)).message ==
+        "Compare against `nothing` using `!isnothing` or `!==`"
+
+    # Inside a macrocall argument (v1 flags `@test x == nothing`).
+    jw = ll_workspace("check(x) = @assert x == nothing\n")
+    @test length(ll_codes(jw, :nothing_comparison)) == 1
+
+    # Top-level statement item.
+    jw = ll_workspace("x = 1\ny = x == nothing\n")
+    @test length(ll_codes(jw, :nothing_comparison)) == 1
+
+    # Negatives: the recommended forms, quoted code, a shadowing local.
+    jw = ll_workspace("f(x) = x === nothing\ng(x) = isnothing(x)\n")
+    @test isempty(ll_codes(jw, :nothing_comparison))
+    jw = ll_workspace("f(x) = :(x == nothing)\n")
+    @test isempty(ll_codes(jw, :nothing_comparison))
+    jw = ll_workspace("function f(nothing)\n    return 1 == nothing\nend\n")
+    @test isempty(ll_codes(jw, :nothing_comparison))
+
+    # Takeover: no StaticLint duplicate under the flag; flag off is legacy.
+    jw = ll_workspace("f(x) = x == nothing\n")
+    @test all(d -> d.source == "JuliaWorkspaces.jl", ll_codes(jw, :nothing_comparison))
+    jw = ll_workspace("f(x) = x == nothing\n"; flag=false)
+    @test !any(d -> d.source == "JuliaWorkspaces.jl", ll_codes(jw, :nothing_comparison))
+
+    # Config: rule off silences it.
+    jw = ll_workspace("f(x) = x == nothing\n"; config="[rules]\nnothing_comparison = \"off\"\n")
+    @test isempty(ll_codes(jw, :nothing_comparison))
+end

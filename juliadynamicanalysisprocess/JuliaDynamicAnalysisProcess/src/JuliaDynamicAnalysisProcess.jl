@@ -9,7 +9,15 @@ include("scratch_env.jl")
 
 struct JuliaDynamicAnalysisProcessState
     endpoint::JSONRPC.JSONRPCEndpoint
+    # Module-context cache for macro expansion, keyed by the parent's ctxId.
+    # Each module holds the eval'd import statements of one file-module context;
+    # the packages behind them are already loaded in this session (get_store
+    # imported every manifest package), so building one is cheap.
+    ctx_modules::Dict{String,Module}
 end
+
+JuliaDynamicAnalysisProcessState(endpoint::JSONRPC.JSONRPCEndpoint) =
+    JuliaDynamicAnalysisProcessState(endpoint, Dict{String,Module}())
 
 # Progress callback for SymbolServer.get_store that forwards each report to the
 # parent process as an `indexProgress` notification.
@@ -122,10 +130,65 @@ function resolve_environment_request(params::JuliaDynamicAnalysisProtocol.Resolv
     end
 end
 
+# ── Macro expansion ─────────────────────────────────────────────────────────
+
+# Bounds ctx-module memory. Dropping the whole cache on overflow is deliberate:
+# rebuilding a context is cheap (packages stay loaded), and drop-all needs no
+# bookkeeping.
+const MAX_CTX_MODULES = 64
+
+function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id::AbstractString, imports::Vector{String})
+    return get!(state.ctx_modules, ctx_id) do
+        length(state.ctx_modules) >= MAX_CTX_MODULES && empty!(state.ctx_modules)
+        # Default module: Base is in scope, as it is in any user file.
+        m = Module(Symbol(:ExpansionCtx_, ctx_id))
+        for stmt in imports
+            try
+                Core.eval(m, Meta.parse(stmt))
+            catch err
+                err isa InterruptException && rethrow()
+                # A failing import degrades this context: macros from it error
+                # per entry below instead of blocking the whole batch.
+            end
+        end
+        m
+    end
+end
+
+function expand_macros_request(params::JuliaDynamicAnalysisProtocol.ExpandMacrosParams, state::JuliaDynamicAnalysisProcessState, token)
+    # Pick up on-disk edits to tracked (deved) packages, so re-expansions
+    # requested after a macro-definition edit see the new definition.
+    try
+        Revise.revise()
+    catch err
+        err isa InterruptException && rethrow()
+        @warn "Revise failed before macro expansion" exception=(err, catch_backtrace())
+    end
+
+    ctx = _expansion_ctx_module!(state, params.ctxId, params.imports)
+
+    entries = map(params.entries) do e
+        try
+            expr = Meta.parse(e.text)
+            if expr isa Expr && expr.head in (:incomplete, :error)
+                error("macrocall text did not parse")
+            end
+            expanded = macroexpand(ctx, expr; recursive=true)
+            JuliaDynamicAnalysisProtocol.ExpandMacroResultEntry(e.key, "ok", string(expanded))
+        catch err
+            err isa InterruptException && rethrow()
+            JuliaDynamicAnalysisProtocol.ExpandMacroResultEntry(e.key, "error", sprint(showerror, err))
+        end
+    end
+
+    return JuliaDynamicAnalysisProtocol.ExpandMacrosResult(entries, UInt64(Base.get_world_counter()))
+end
+
 JSONRPC.@message_dispatcher dispatch_msg begin
     JuliaDynamicAnalysisProtocol.index_project_request_type => index_project_request
     JuliaDynamicAnalysisProtocol.create_standalone_project_request_type => create_standalone_project_request
     JuliaDynamicAnalysisProtocol.resolve_environment_request_type => resolve_environment_request
+    JuliaDynamicAnalysisProtocol.expand_macros_request_type => expand_macros_request
 end
 
 # Executed precompile workload: every dynamic-analysis child process pays at

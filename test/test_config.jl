@@ -134,6 +134,11 @@ end
         :bare_using => :off,
         :debug_statement => :off,
         :async_task => :off,
+        # Lowering-backed rule (Harvest JuliaLowering): shapes Julia will not
+        # load — same class and treatment as syntax_errors.
+        :lowering_errors => :error,
+        # Small rule batch: Julia's soft-scope ambiguity warning, statically.
+        :soft_scope_ambiguity => :information,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 
@@ -142,6 +147,7 @@ end
         r.id => get(
             Dict{Symbol,Symbol}(
                 :syntax_errors => :error,
+                :lowering_errors => :error,
                 :testitem_errors => :error,
                 :toml_syntax_errors => :error,
                 :config_errors => :error,
