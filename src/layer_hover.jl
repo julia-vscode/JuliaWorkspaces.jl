@@ -978,6 +978,15 @@ end
 # ============================================================================
 
 function _get_hover_text(rt, uri, index)
+    # v2 features (experiment): the v2 arm owns module-level function and
+    # module names (docstring + signature-slice blocks); `nothing` declines
+    # run the untouched v1 body below. The branch sits AFTER the same
+    # 1-based→0-based conversion the v1 path applies.
+    if input_v2_enabled(rt)
+        v2 = _get_hover_v2(rt, uri, index - 1)
+        v2 !== nothing && return isempty(v2) ? nothing : v2
+    end
+
     cst = derived_julia_legacy_syntax_tree(rt, uri)
     cst === nothing && return nothing
 

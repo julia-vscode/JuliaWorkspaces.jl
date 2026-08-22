@@ -122,6 +122,7 @@ function, never derived.
 function v2_item_docstring(rt, ref::V2ItemRef)
     r = v2_item_doc_range(rt, ref.file, ref.id)
     r === nothing && return nothing
+    derived_has_content(rt, ref.file) || return nothing
     tf = input_text_file(rt, ref.file)
     tf === nothing && return nothing
     text = tf.content.content
@@ -138,14 +139,17 @@ function v2_item_docstring(rt, ref::V2ItemRef)
 end
 
 # The literal string value of a parsed slice: descend through wrapper nodes
-# to the first string-family node and join its literal chunks.
+# to the first string-family node and join its literal chunks. Raw parsed
+# trees carry their leaf payload as `.value` (`.val` is the lowered-tree
+# attribute — reading it here threw, and the throw fell back to the raw slice
+# with its quote delimiters, which is how the bug surfaced on CRLF corpora).
 function _v2f_string_value(st)
-    JS2.is_leaf(st) && return JS2.kind(st) == JS2.K"String" ? string(st.val) : nothing
+    JS2.is_leaf(st) && return JS2.kind(st) == JS2.K"String" ? string(st.value) : nothing
     if JS2.kind(st) == JS2.K"string"
         parts = String[]
         for c in JS2.children(st)
             (JS2.is_leaf(c) && JS2.kind(c) == JS2.K"String") || return nothing
-            push!(parts, string(c.val))
+            push!(parts, string(c.value))
         end
         return join(parts)
     end
@@ -958,6 +962,7 @@ end
 
 "Slice `uri`'s text at 1-based exclusive-end range `r`, or `nothing`."
 function _v2f_slice(rt, uri::URI, r::UnitRange{Int})
+    derived_has_content(rt, uri) || return nothing
     tf = input_text_file(rt, uri)
     tf === nothing && return nothing
     text = tf.content.content
@@ -1116,4 +1121,154 @@ function v2_item_signature_params(rt, ref::V2ItemRef)
     label, prange = _assemble_signature(callee, fields)
     push!(out, (label=label, param_ranges=prange)::V2Signature)
     return out
+end
+
+# ── hover (M3) ──────────────────────────────────────────────────────────────
+#
+# The v2 hover arm owns exactly the cases whose v1 answer is type-free and
+# reproducible from slices: a module-level FUNCTION name (docstring + one
+# ```julia block per method, in splice order) and a MODULE name (docstring +
+# the compact block). Everything else — locals (v1 renders inferred types),
+# datatypes (v1 prints the canonical Expr; a comment-preserving slice can't
+# match beyond whitespace), store names, argument positions (the "Argument i
+# of n" prefix), macros, qualified members — DECLINES to the untouched v1
+# path by returning `nothing`.
+
+# Does the identifier at `addr` sit anywhere v1 would render extra context or
+# v2 cannot resolve reliably: an argument slot of a call/do, a macrocall's
+# arguments, or quoted code?
+function _v2f_hover_position_declines(view::V2ItemView, addr::Int)
+    child = addr
+    p = Int(view.parents[addr])
+    while p != 0
+        k = view.kinds[p]
+        if k == JS2.K"call"
+            child == p + 1 || return true      # an argument, not the callee
+        elseif k == JS2.K"do" || k == JS2.K"macrocall" ||
+               k == JS2.K"quote" || k == JS2.K"syntaxquote" || k == JS2.K"inert"
+            return true
+        end
+        child = p
+        p = Int(view.parents[p])
+    end
+    return false
+end
+
+# The raw (as-written, whitespace-preserved) signature slice of a method item,
+# or `nothing` when the item is not signature-shaped.
+function _v2f_raw_sig_slice(rt, ref::V2ItemRef)
+    body = derived_v2_item_body(rt, ref)
+    body === nothing && return nothing
+    k = body.kind
+    (k == JS2.K"function" || k == JS2.K"=") || return nothing
+    (k == JS2.K"=" && _v2_func_sig(body) === nothing) && return nothing
+    _v2_nchildren(body) >= 1 || return nothing
+    ranges = get(derived_v2_file_maps(rt, ref.file), ref.id, nothing)
+    (ranges === nothing || length(ranges) < 2) && return nothing
+    return _v2f_slice(rt, ref.file, ranges[2])
+end
+
+"""
+    _get_hover_v2(rt, uri, offset0) -> Union{Nothing,String}
+
+The v2 hover answer for the identifier at the (0-based) cursor, or `nothing`
+to decline to v1. Rendering matches v1's tree-ref path byte for byte on the
+covered cases: the per-method docstring + ```julia signature blocks (via
+`_ensure_ends_with`, so an undocumented first method opens with a newline
+exactly as v1 does), the compact module block, the exported/public footer,
+and the final `_sanitize_docstring` pass.
+"""
+function _get_hover_v2(rt, uri::URI, offset0::Int)
+    root = derived_v2_best_root_for_uri(rt, uri)
+    root === nothing && return nothing
+    row = v2_item_row_at(rt, uri, offset0)
+    row === nothing && return nothing
+    (row.kind === :opaque_macrocall || row.kind === :macrocall) && return nothing
+    (row.interpretable && !row.under_macrocall) || return nothing
+    ref = V2ItemRef(uri, row.id)
+    isempty(derived_v2_item_expansion_sites(rt, ref)) || return nothing
+    low = derived_item_lowering(rt, ref)
+    (low === nothing || low.status !== :ok) && return nothing
+    view = v2_item_view(rt, uri, row.id)
+    view === nothing && return nothing
+    addr = v2_identifier_addr_at(view, offset0)
+    addr === nothing && return nothing
+    name = string(view.vals[addr])
+
+    # Qualified member (`M.|name`): the member side needs target matching.
+    p = Int(view.parents[addr])
+    (p != 0 && view.kinds[p] == JS2.K"." && addr != p + 1) && return nothing
+    _v2f_hover_position_declines(view, addr) && return nothing
+
+    # The name at its own DEFINITION SITE declines: v1 deliberately renders
+    # the same-file binding view there (same-file methods only, no export
+    # footer) — a different answer than its own cross-file rendering, and one
+    # v2 does not reproduce.
+    body = derived_v2_item_body(rt, ref)
+    if body !== nothing
+        siginfo = _v2_sig_with_addr(body, 1)
+        if siginfo !== nothing
+            call, call_addr, _ = siginfo
+            callee = _v2_children(call)[1]
+            callee_addr = call_addr + 1
+            (callee_addr <= addr < callee_addr + bt_node_count(callee)) && return nothing
+        end
+    end
+
+    # A name that resolves to a local/argument/typevar in this item is v1's
+    # (its hover renders inferred types v2 does not compute).
+    addr32 = Int32(addr)
+    used_here = Set{Int32}(u.binding for u in low.uses if u.addr == addr32)
+    any(b -> b.name == name && b.kind !== :global && !b.is_internal &&
+             (b.addr == addr32 || b.id in used_here), low.bindings) && return nothing
+
+    path = vcat(_derived_v2_splice_prefix(rt, uri), row.parent_module)
+    face = get(derived_v2_module_visible_names_idfree(rt, root, path), name, nothing)
+    face === nothing && return nothing
+    (face.origin === :declared || face.origin === :using_tree) || return nothing
+
+    if face.kind === :module
+        mref = derived_v2_visible_item(rt, root, path, name)
+        # Declared in the CURSOR's file → v1 renders its same-file binding
+        # view (no export footer), a different answer than its cross-file
+        # rendering; only the cross-file case is reproduced.
+        (mref !== nothing && mref.file == uri) && return nothing
+        doc = mref === nothing ? nothing : v2_item_docstring(rt, mref)
+        documentation = _module_ref_hover(doc === nothing ? "" : doc, name)
+        documentation = string(documentation, _v2f_api_footer(rt, root, face.origin_module, name))
+        return _sanitize_docstring(documentation)
+    end
+
+    face.kind === :function || return nothing
+    # A workspace function that also extends an external store function
+    # renders unified with the store in v1 — decline the partial view.
+    name in derived_v2_partial_method_names(rt, root) && return nothing
+
+    items = derived_v2_method_items(rt, root, face.origin_module, name)
+    isempty(items) && return nothing
+    # Any method declared in the CURSOR's file → v1 renders its same-file
+    # binding view (same-file methods only, no export footer); only the
+    # cross-file TreeRef rendering is reproduced.
+    any(mref -> mref.file == uri, items) && return nothing
+    documentation = ""
+    for mref in items
+        slice = _v2f_raw_sig_slice(rt, mref)
+        slice === nothing && return nothing   # a non-function method item: decline whole
+        d = v2_item_docstring(rt, mref)
+        d === nothing || (documentation = string(documentation, d))
+        documentation = string(_ensure_ends_with(documentation), "```julia\n", slice, "\n```\n")
+    end
+    documentation = string(documentation, _v2f_api_footer(rt, root, face.origin_module, name))
+    return _sanitize_docstring(documentation)
+end
+
+# v1's workspace exported/public footer, from the v2 module node: exported →
+# footer, public → footer, internal workspace name → none.
+function _v2f_api_footer(rt, root, origin_module::Vector{String}, name::String)
+    node = v2_module_node(derived_v2_module_tree(rt, root), origin_module)
+    node === nothing && return ""
+    status = name in node.exports ? :exported : name in node.publics ? :public : nothing
+    status === nothing && return ""
+    modname = isempty(origin_module) ? nothing : Symbol(last(origin_module))
+    return _status_footer(status, modname)
 end

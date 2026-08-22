@@ -1004,7 +1004,14 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
         ranges = UnitRange{Int}[]
         bt = _build_body_tree_v2!(ranges, node)
         order, id = _v2_mint_ids!(state.alloc, _v2_statement_id_key(bt, parent_module))
-        _v2_take_doc!(state, id)
+        # A doc wrapper around an unmodelled macrocall (`"doc" Salsa.@derived
+        # function f() … end`) documents the DEFINITION the macro wraps, and
+        # the walker is about to enumerate that definition from the arguments
+        # below. Record the doc range on the opaque row WITHOUT consuming it
+        # (block-range candidates key on this row), so the first inner item
+        # still picks it up — that is what lets hover show the docstring of a
+        # macro-wrapped method.
+        state.pending_doc !== nothing && (state.doc_ranges[id] = state.pending_doc)
         push!(state.skeleton.opaque_macros, V2OpaqueMacro(order, id, copy(parent_module)))
         push!(state.skeleton.items, V2ItemRow(order, id, :opaque_macrocall, copy(parent_module),
                                               interpretable, state.in_macro > 0, state.in_if > 0))
