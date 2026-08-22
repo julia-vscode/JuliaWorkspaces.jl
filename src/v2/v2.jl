@@ -42,6 +42,10 @@ include("layer_includes_v2.jl")
 # Layer 2½: per-module visible names (tree-only; the env arm is the
 # clearly-marked Milestone C seam inside the file).
 include("layer_visibility_v2.jl")
+# Layer 2¾: method arities — per-item argument-count shapes and the per-root
+# (module path, name) → arities funnel, for the call-args lint and signature
+# help.
+include("layer_arity_v2.jl")
 # Layer 3: JuliaLowering binding analysis over per-item body trees.
 include("layer_lowering.jl")
 # Layer 3½: DJP-side macro expansion — sites, context, cache keys, harvest.

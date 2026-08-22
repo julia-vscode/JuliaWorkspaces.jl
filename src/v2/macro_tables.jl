@@ -73,6 +73,20 @@ const V2_HANDLED_MACROS = Set{String}([
 ])
 
 """
+Macros that pass the signature of a wrapped method definition through unchanged,
+so its written arity is the real arity. Any OTHER macro wrapper may rewrite the
+signature (`@kwdef` adds a keyword constructor, DSL macros do anything), which
+makes the wrapped definition's arity permissive-anything — v1's `func_nargs`
+early return, keyed there by resolving the macro to Base and here by name (the
+same weaker-but-necessary choice the tables above make). Seeded from
+StaticLint's `SIGNATURE_PRESERVING_MACROS`, then owned by v2.
+"""
+const V2_SIGNATURE_PRESERVING_MACROS = Set{String}([
+    "@inline", "@noinline", "@propagate_inbounds", "@generated",
+    "@assume_effects", "@constprop", "@pure", "@nospecializeinfer",
+])
+
+"""
     _v2_macro_name_effects_known(name) -> Bool
 
 Whether a macrocall spelled `name` (with its leading `@`) can be assumed not to

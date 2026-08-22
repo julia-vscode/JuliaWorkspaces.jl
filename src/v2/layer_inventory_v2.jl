@@ -728,6 +728,17 @@ mutable struct _V2WalkState
     # Macrocall-argument nesting depth of the walk position (see
     # `V2ItemRow.under_macrocall`).
     in_macro::Int
+    # The names of the macrocalls the walk position is nested under, outermost
+    # first (`"?"` for an unreadable name). Parallel to `in_macro` — kept
+    # separately because the depth is a skeleton fact while the NAMES are only
+    # snapshotted per wrapped item (`macro_wrappers`), for the arity layer's
+    # signature-preserving-macro rule. The doc wrapper never appears here: its
+    # branch is transparent without touching macro state, matching v1's doc
+    # exemption.
+    macro_stack::Vector{String}
+    # Per wrapped item id, the `macro_stack` snapshot at emission. Position-free
+    # plain data (names only); absent ⇔ not under any macrocall.
+    macro_wrappers::Dict{Int64,Vector{String}}
     # `if`-branch nesting depth of the walk position (see `V2ItemRow.conditional`).
     in_if::Int
     # A2 (doc-range capture): the byte range of each item's docstring LITERAL,
@@ -744,7 +755,8 @@ end
 _V2WalkState() = _V2WalkState(
     V2FileSkeleton(V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[], V2OpaqueMacro[],
                    V2TestItem[], V2TestError[]),
-    Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator(), 0, 0,
+    Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(), _V2ItemIdAllocator(), 0,
+    String[], Dict{Int64,Vector{String}}(), 0,
     Dict{Int64,UnitRange{Int}}(), nothing)
 
 function _v2_take_doc!(state::_V2WalkState, id::Int64)
@@ -785,6 +797,7 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
     bt = _build_body_tree_v2!(ranges, node)
     order, id = _v2_mint_ids!(state.alloc, _v2_statement_id_key(bt, parent_module))
     _v2_take_doc!(state, id)
+    isempty(state.macro_stack) || (state.macro_wrappers[id] = copy(state.macro_stack))
     pm = copy(parent_module)
     k = bt.kind
     skel = state.skeleton
@@ -1001,9 +1014,11 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
 
     child_interpretable = interpretable && !(name !== nothing && name in DEFINITION_SHAPED_DSL_MACROS)
     state.in_macro += 1
+    push!(state.macro_stack, something(name, "?"))
     for c in cs[min(3, length(cs) + 1):end]
         _v2_walk_one!(state, c, parent_module, child_interpretable)
     end
+    pop!(state.macro_stack)
     state.in_macro -= 1
     return
 end
@@ -1025,11 +1040,12 @@ struct V2FileWalk
     bodies::Dict{Int64,BodyTree{V2Kind}}
     maps::Dict{Int64,Vector{UnitRange{Int}}}
     doc_ranges::Dict{Int64,UnitRange{Int}}
+    macro_wrappers::Dict{Int64,Vector{String}}
 end
 
 const EMPTY_V2_FILE_WALK = V2FileWalk(
     EMPTY_V2_SKELETON, Dict{Int64,BodyTree{V2Kind}}(), Dict{Int64,Vector{UnitRange{Int}}}(),
-    Dict{Int64,UnitRange{Int}}())
+    Dict{Int64,UnitRange{Int}}(), Dict{Int64,Vector{String}}())
 
 """
     derived_v2_file_walk(rt, uri) -> V2FileWalk
@@ -1064,7 +1080,8 @@ Salsa.@derived function derived_v2_file_walk(rt, uri)
         err isa InterruptException && rethrow()
         return EMPTY_V2_FILE_WALK
     end
-    return V2FileWalk(state.skeleton, state.bodies, state.maps, state.doc_ranges)
+    return V2FileWalk(state.skeleton, state.bodies, state.maps, state.doc_ranges,
+                      state.macro_wrappers)
 end
 
 """
@@ -1102,6 +1119,24 @@ data with exactly `derived_v2_file_maps`' contract: VOLATILE, last-mile only.
 Depending on it from an analysis-layer computation is a bug.
 """
 Salsa.@derived derived_v2_file_doc_ranges(rt, uri) = derived_v2_file_walk(rt, uri).doc_ranges
+
+"""
+    derived_v2_file_macro_wrappers(rt, uri) -> Dict{Int64,Vector{String}}
+
+For each item enumerated from inside a macrocall's arguments, the names of its
+enclosing macrocalls, outermost first (`"?"` for an unreadable name; the doc
+wrapper never appears — its branch is transparent). Names only, so the value is
+position-free and backdates like the skeleton; consumers wanting one item use
+`derived_v2_item_macro_wrappers` for per-item early exit.
+"""
+Salsa.@derived derived_v2_file_macro_wrappers(rt, uri) = derived_v2_file_walk(rt, uri).macro_wrappers
+
+const _V2_NO_WRAPPERS = String[]
+
+"The enclosing macrocall names of one item (see `derived_v2_file_macro_wrappers`); empty when unwrapped."
+Salsa.@derived function derived_v2_item_macro_wrappers(rt, ref::V2ItemRef)
+    return get(derived_v2_file_macro_wrappers(rt, ref.file), ref.id, _V2_NO_WRAPPERS)
+end
 
 """
     derived_v2_noninterpretable_ids(rt, uri) -> Set{Int64}
