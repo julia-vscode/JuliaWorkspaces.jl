@@ -18,7 +18,8 @@ const LOWERING_TAKEOVER_RULES = Set([
     :unused_binding, :unused_function_argument, :unused_type_parameter,
     :module_name, :relative_import, :unresolved_import, :missing_reference,
     :nothing_comparison, :const_decl, :incorrect_call_args,
-    :type_piracy, :invalid_type_declaration,
+    :type_piracy, :invalid_type_declaration, :kw_default_mismatch,
+    :incorrect_iter_spec,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -1156,6 +1157,43 @@ end
 
 const _V2_DATATYPE_DECL_KINDS = (:struct, :mutable_struct, :abstract, :primitive, :enum)
 
+# ── kw_default_mismatch ─────────────────────────────────────────────────────
+#
+# v1 compares a literal keyword default against a `Core.<builtin>` annotation
+# by store identity and CST literal head. The EST carries TYPED literal
+# values (`0x01` parses as a `UInt8`), so every head/digit-count rule
+# collapses into a check on `typeof(default value)` — including v1's
+# unsigned-width digit arithmetic, which is exactly how Julia's own parser
+# picks the literal's width. `nothing` from a checker means "flag".
+const _V2_KW_DEFAULT_CHECKS = Dict{String,Function}(
+    "String" => v -> v isa String,
+    # Any LITERAL default for a `::Symbol` annotation mismatches (`:sym` is a
+    # quote node, not a literal — never checked, exactly as v1's guard).
+    "Symbol" => v -> false,
+    "Int" => v -> v isa Int,
+    "Bool" => v -> v isa Bool,
+    "Char" => v -> v isa Char,
+    "Float64" => v -> v isa Float64,
+    "Float32" => v -> v isa Float32,
+    "UInt8" => v -> v isa UInt8,
+    "UInt16" => v -> v isa UInt16,
+    "UInt32" => v -> v isa UInt32,
+    "UInt64" => v -> v isa UInt64,
+    "UInt128" => v -> v isa UInt128,
+    # Signed literals always parse at the native width (or 64/128 via
+    # suffix-less magnitude), so a non-native signed annotation can never be
+    # satisfied by a plain literal — v1's rule, width for width.
+    "Int8" => v -> false,
+    "Int16" => v -> false,
+    "Int32" => v -> Sys.WORD_SIZE == 32 && v isa Int32,
+    "Int64" => v -> Sys.WORD_SIZE == 64 && v isa Int64,
+    "Int128" => v -> false,
+)
+
+_v2_literal_value(bt::BodyTree{V2Kind}) =
+    bt.children === nothing && bt.val isa Union{Integer,AbstractFloat,String,Char} ?
+    bt.val : nothing
+
 _v2_is_literal_kind(k) =
     k == JS2.K"Integer" || k == JS2.K"Float" || k == JS2.K"String" ||
     k == JS2.K"string" || k == JS2.K"Char" || k == JS2.K"Bool" ||
@@ -1241,6 +1279,30 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
             msg="A non-DataType has been used in a type declaration statement."))
         return
     end
+    # ── kw_default_mismatch over `x::T = literal` entries ───────────────────
+    function check_kw!(kw::BodyTree{V2Kind}, kw_addr::Int)
+        (kw.kind == JS2.K"kw" && _v2_nchildren(kw) == 2) || return
+        decl, dflt = _v2_children(kw)
+        (decl.kind == JS2.K"::" && _v2_nchildren(decl) == 2) || return
+        v = _v2_literal_value(dflt)
+        v === nothing && return
+        t = _v2_children(decl)[2]
+        q, n = _v2_qualified_name(t)
+        n === nothing && return
+        checker = get(_V2_KW_DEFAULT_CHECKS, n, nothing)
+        checker === nothing && return
+        (isempty(q) && n in wnames) && return
+        prov, info = _v2_type_provenance(rt, root, path, q, n)
+        # Only the genuine Core builtin (reached through Base/Core) carries
+        # the rule; a same-named workspace type or alias declines.
+        (prov === :external && !isempty(info) && info[1] in ("Base", "Core")) || return
+        checker(v) && return
+        push!(result, (addr=Int32(kw_addr + 1 + bt_node_count(decl)),
+            rule_id=:kw_default_mismatch,
+            msg="The default value provided does not match the specified argument type."))
+        return
+    end
+
     for (i, arg0) in enumerate(cs)
         i == 1 && continue
         arg, aaddr = arg0, arg_addrs[i]
@@ -1249,6 +1311,7 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
                 paddr = _v2_child_addresses(arg, aaddr)[j]
                 if p.kind == JS2.K"kw" && _v2_nchildren(p) >= 1
                     check_decl!(_v2_children(p)[1], paddr + 1)
+                    check_kw!(p, paddr)
                 else
                     check_decl!(p, paddr)
                 end
@@ -1256,6 +1319,7 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
             continue
         end
         if arg.kind == JS2.K"kw" && _v2_nchildren(arg) >= 1
+            check_kw!(arg, aaddr)
             arg, aaddr = _v2_children(arg)[1], aaddr + 1
         end
         check_decl!(arg, aaddr)
@@ -1283,6 +1347,99 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
     end
     push!(result, (addr=Int32(1), rule_id=:type_piracy,
         msg="An imported function has been extended without using module defined typed arguments."))
+    return result
+end
+
+# ── incorrect_iter_spec (literal arm) ───────────────────────────────────────
+#
+# v1's `check_incorrect_iter_spec` has three arms; only the env-light two are
+# ported — a bare numeric literal as the iterated value (`for i in 5`), and a
+# bare `length(...)` call resolving to Base (`for i in length(v)`). The strict
+# `<:Number`-typed-variable arm needs type inference and is DEFERRED. The
+# `1:length(x)` `index_from_length` shape is commit 7's subject.
+
+# Emit each `for`/`generator` iteration-spec `=` node with its address, under
+# the standard macro/quote address accounting.
+function _v2_iter_specs!(emit, bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::Int)
+    myaddr = (addr[] += 1)
+    k = bt.kind
+    if qdepth == 0 && k == JS2.K"macrocall"
+        nm = _v2_macrocall_name(bt)
+        if nm === nothing || nm == "@test_throws" || !_v2_macro_name_effects_known(nm)
+            addr[] += bt_node_count(bt) - 1
+            return nothing
+        end
+    end
+    child_depth = _quote_depth(k, qdepth)
+    if qdepth == 0 && child_depth > qdepth
+        addr[] += bt_node_count(bt) - 1
+        return nothing
+    end
+    bt.children === nothing && return nothing
+    if qdepth == 0 && (k == JS2.K"for" || k == JS2.K"generator")
+        caddrs = _v2_child_addresses(bt, myaddr)
+        specs = k == JS2.K"for" ? (1:min(1, length(bt.children))) : (2:length(bt.children))
+        for i in specs
+            c = bt.children[i]
+            if c.kind == JS2.K"="
+                emit(c, caddrs[i])
+            elseif c.kind == JS2.K"block"   # `for i = …, j = …`
+                baddrs = _v2_child_addresses(c, caddrs[i])
+                for (j, s) in enumerate(_v2_children(c))
+                    s.kind == JS2.K"=" && emit(s, baddrs[j])
+                end
+            end
+        end
+    end
+    for c in bt.children
+        _v2_iter_specs!(emit, c, addr, child_depth)
+    end
+    return nothing
+end
+
+"""
+    derived_item_iter_spec_findings(rt, ref) -> Vector{SemanticFinding}
+
+`incorrect_iter_spec`, literal arm, for one item.
+"""
+Salsa.@derived function derived_item_iter_spec_findings(rt, ref::V2ItemRef)
+    result = SemanticFinding[]
+    low = derived_item_lowering(rt, ref)
+    (low === nothing || low.status !== :ok) && return result
+    ref.id in derived_v2_under_macrocall_ids(rt, ref.file) && return result
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return result
+    _test_block_target(body) !== nothing && return result
+    # A local named `length` anywhere in the item shadows the Base callee.
+    any(b -> !b.is_internal && b.kind in (:local, :argument) && b.name == "length",
+        low.bindings) && return result
+
+    root = derived_v2_best_root_for_uri(rt, ref.file)
+    root === nothing && return result
+    skel = derived_v2_file_skeleton(rt, ref.file)
+    any(t -> t.id == ref.id, skel.testitems) && return result
+    idx = findfirst(r -> r.id == ref.id, skel.items)
+    idx === nothing && return result
+    path = vcat(_derived_v2_splice_prefix(rt, ref.file), skel.items[idx].parent_module)
+    derived_v2_module_has_opaque_macrocall(rt, root, path) && return result
+
+    _v2_iter_specs!(body, Ref(0), 0) do spec, spec_addr
+        _v2_nchildren(spec) == 2 || return
+        rng = _v2_children(spec)[2]
+        flag = false
+        if rng.children === nothing && rng.val isa Union{Integer,AbstractFloat} &&
+           !(rng.val isa Bool)
+            flag = true
+        elseif rng.kind == JS2.K"call" && _v2_nchildren(rng) >= 1
+            q, n = _v2_qualified_name(_v2_children(rng)[1])
+            if n == "length"
+                prov, info = _v2_type_provenance(rt, root, path, q, n)
+                flag = prov === :external && !isempty(info) && info[1] in ("Base", "Core")
+            end
+        end
+        flag && push!(result, (addr=Int32(spec_addr), rule_id=:incorrect_iter_spec,
+            msg="A loop iterator has been used that will likely error."))
+    end
     return result
 end
 
@@ -1325,7 +1482,9 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     # Materialization filters disabled rules anyway; this gate only avoids
     # demanding the signature machinery when both are off.
     sig_rules_on = rule_enabled(config, :type_piracy) ||
-        rule_enabled(config, :invalid_type_declaration)
+        rule_enabled(config, :invalid_type_declaration) ||
+        rule_enabled(config, :kw_default_mismatch)
+    iter_spec_on = rule_enabled(config, :incorrect_iter_spec)
 
     for row in derived_v2_file_skeleton(rt, uri).items
         ref = V2ItemRef(uri, row.id)
@@ -1345,6 +1504,10 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         if sig_rules_on
             sr = derived_item_sig_rule_findings(rt, ref)
             isempty(sr) || (item_findings = vcat(item_findings, sr))
+        end
+        if iter_spec_on
+            it = derived_item_iter_spec_findings(rt, ref)
+            isempty(it) || (item_findings = vcat(item_findings, it))
         end
         isempty(item_findings) && continue
         ranges = get(maps, row.id, nothing)
