@@ -19,7 +19,7 @@ const LOWERING_TAKEOVER_RULES = Set([
     :module_name, :relative_import, :unresolved_import, :missing_reference,
     :nothing_comparison, :const_decl, :incorrect_call_args,
     :type_piracy, :invalid_type_declaration, :kw_default_mismatch,
-    :incorrect_iter_spec,
+    :incorrect_iter_spec, :pointless_boolean, :const_if_condition,
     # SUPPRESSION-ONLY: v1's syntactic approximations of load errors. Under
     # the flag they are silenced and the same shapes surface as
     # `lowering_errors` at `:error` (the lowering IS the ground truth, so the
@@ -1350,6 +1350,100 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
     return result
 end
 
+# ── the shape rules: pointless_boolean / const_if_condition / literal_use ───
+#
+# Pure syntax shapes — no lowering, no visibility, no env — so their producer
+# depends on nothing but the item's body (and the under-macrocall gate). One
+# preorder walk with the standard address accounting and the standard skips
+# (unknown-effect macrocalls, `@test_throws`, quoted code — v1 lints quotes;
+# skipping them is the same declared narrowing `nothing_comparison` made).
+# Test-block bodies stay COVERED: these rules need no resolution context, so
+# the v1 parity that other producers decline on is free here.
+#
+# Ported deltas, both documented in the survey:
+# - `EqInIfConditional` (`if x = 1`) is NOT ported: that shape is a parse
+#   error in JuliaSyntax v2 (error nodes), so `syntax_errors` already reports
+#   the real problem.
+# - The `@static if` exemption is by NAME (a direct `if` argument of a
+#   macrocall spelled `@static`), where v1 resolves the macro to Base by
+#   identity — the name rule also exempts a user macro shadowing `@static`,
+#   the silence direction.
+# - Top-level `if true … end` chains are invisible here: the walker is
+#   transparent through top-level `if` branches (their statements are
+#   separate conditional items), so only `if`s INSIDE an item body are
+#   checked — v1-only residue in the differential.
+
+_v2_bool_literal(bt::BodyTree{V2Kind}) =
+    bt.children === nothing && bt.kind == JS2.K"Bool"
+
+# `static_arg` marks a node that is a DIRECT argument of an `@static`
+# macrocall — its `if` is a deliberate compile-time toggle, not an accidental
+# constant condition.
+function _v2_shape_rules!(out::Vector{SemanticFinding}, bt::BodyTree{V2Kind},
+                          addr::Base.RefValue{Int}, qdepth::Int, static_arg::Bool)
+    myaddr = (addr[] += 1)
+    k = bt.kind
+    if qdepth == 0 && k == JS2.K"macrocall"
+        nm = _v2_macrocall_name(bt)
+        if nm === nothing || nm == "@test_throws" || !_v2_macro_name_effects_known(nm)
+            addr[] += bt_node_count(bt) - 1
+            return nothing
+        end
+    end
+    child_depth = _quote_depth(k, qdepth)
+    if qdepth == 0 && child_depth > qdepth
+        addr[] += bt_node_count(bt) - 1
+        return nothing
+    end
+    bt.children === nothing && return nothing
+    cs = bt.children
+
+    if qdepth == 0
+        if k == JS2.K"||" && length(cs) >= 1 && _v2_bool_literal(cs[1])
+            push!(out, (addr=Int32(myaddr), rule_id=:pointless_boolean,
+                msg="The first argument of a `||` call is a boolean literal."))
+        elseif k == JS2.K"&&" && length(cs) >= 2 &&
+               (_v2_bool_literal(cs[1]) || _v2_bool_literal(cs[2]))
+            push!(out, (addr=Int32(myaddr), rule_id=:pointless_boolean,
+                msg="An argument of a `&&` call is a boolean literal."))
+        elseif k == JS2.K"if" && !static_arg && !isempty(cs) && _v2_bool_literal(cs[1])
+            # Ternaries parse as K"if" too and are flagged, exactly as v1's
+            # `:if`-headed check does; `elseif` conditions are exempt in both
+            # engines (a distinct kind here, a distinct head there). The
+            # finding sits at the CONDITION node (child 1 = myaddr + 1).
+            push!(out, (addr=Int32(myaddr + 1), rule_id=:const_if_condition,
+                msg="A boolean literal has been used as the conditional of an " *
+                    "if statement - it will either always or never run."))
+        end
+        _v2_literal_use!(out, bt, myaddr)
+    end
+
+    child_static = qdepth == 0 && k == JS2.K"macrocall" && _v2_macrocall_name(bt) == "@static"
+    for c in cs
+        _v2_shape_rules!(out, c, addr, child_depth, child_static)
+    end
+    return nothing
+end
+
+# The `check_use_of_literal` arms land in commit 2; the hook exists so the
+# walk shape is final from the start.
+_v2_literal_use!(out, bt, myaddr) = nothing
+
+"""
+    derived_item_shape_findings(rt, ref) -> Vector{SemanticFinding}
+
+`pointless_boolean` / `const_if_condition` / `literal_use` for one item —
+position-free, body-only (see the section header for the ported deltas).
+"""
+Salsa.@derived function derived_item_shape_findings(rt, ref::V2ItemRef)
+    result = SemanticFinding[]
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return result
+    ref.id in derived_v2_under_macrocall_ids(rt, ref.file) && return result
+    _v2_shape_rules!(result, body, Ref(0), 0, false)
+    return result
+end
+
 # ── incorrect_iter_spec (literal arm) ───────────────────────────────────────
 #
 # v1's `check_incorrect_iter_spec` has three arms; only the env-light two are
@@ -1485,6 +1579,9 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         rule_enabled(config, :invalid_type_declaration) ||
         rule_enabled(config, :kw_default_mismatch)
     iter_spec_on = rule_enabled(config, :incorrect_iter_spec)
+    shape_rules_on = rule_enabled(config, :pointless_boolean) ||
+        rule_enabled(config, :const_if_condition) ||
+        rule_enabled(config, :literal_use)
 
     for row in derived_v2_file_skeleton(rt, uri).items
         ref = V2ItemRef(uri, row.id)
@@ -1508,6 +1605,10 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         if iter_spec_on
             it = derived_item_iter_spec_findings(rt, ref)
             isempty(it) || (item_findings = vcat(item_findings, it))
+        end
+        if shape_rules_on
+            sh = derived_item_shape_findings(rt, ref)
+            isempty(sh) || (item_findings = vcat(item_findings, sh))
         end
         isempty(item_findings) && continue
         ranges = get(maps, row.id, nothing)
