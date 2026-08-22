@@ -87,3 +87,34 @@ end
     @test deps isa Vector{String}
     @test issorted(deps)
 end
+
+@testitem "env seam: external method arities" setup=[EnvSeamWS] begin
+    using JuliaWorkspaces: derived_v2_external_method_arities
+    jw = seam_workspace()
+    ar(path, name) = derived_v2_external_method_arities(jw.runtime, SEAM_ROOT, path, name)
+
+    # A vararg function: some method accepts unbounded args.
+    ps = ar(["Base"], "push!")
+    @test ps !== nothing && !isempty(ps)
+    @test any(a -> a.maxargs == typemax(Int), ps)
+
+    # A kwarg-carrying function.
+    sr = ar(["Base"], "sort")
+    @test sr !== nothing
+    @test any(a -> :rev in a.kws || a.kwsplat, sr)
+
+    # A datatype: constructor methods come back.
+    ds = ar(["Base"], "Dict")
+    @test ds !== nothing && !isempty(ds)
+
+    # Not a function: nothing (caller declines).
+    @test ar(["Base"], "pi") === nothing
+    @test ar(["Base"], "no_such_fn_xyz") === nothing
+    @test ar(["NotAPkg"], "anything") === nothing
+
+    # The widened member kind.
+    mk(name) = JW.derived_v2_external_module_member_kind(jw.runtime, SEAM_ROOT, ["Base"], name)
+    @test mk("Int") === :datatype
+    @test mk("map") === :value
+    @test mk("Filesystem") === :module
+end
