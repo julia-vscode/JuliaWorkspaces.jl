@@ -36,7 +36,7 @@ env/SymbolServer seam · **D** blocked on CFG/flow · **E** no port needed.
 | --- | --- |
 | `module_name`, `relative_import` | ✅ this milestone — v2 module tree + splice prefix only. `module_name` is a mild superset of v1 (catches the cross-file splice-point parent). |
 | `nothing_comparison` | ✅ taken over — body-shape walk in `derived_item_semantic_findings` (includes macrocall arguments, skips quotes); the shadow guard is self-resolving via lowering (a local named `nothing`/`==`/`!=` silences the item). Zero v2-only on the corpus differential. |
-| `index_from_length` (conservative) | "is `length` shadowed locally / defined in this module" via module-tree names. Loses v1's `isarray` exemption (no types). |
+| `index_from_length` | ⏸ DEFERRED on measurement (v2 M3): v1 produces exactly ONE finding on this repo's corpus (layer_hover.jl, a `1:length` loop over an unknown-typed container). The port would need a syntactic stand-in for v1's `isarray`-typed exemption (fire/decline by initializer or annotation shape) to avoid v2-only findings on annotated arguments — machinery disproportionate to one corpus hit. Revisit if a registry sweep shows real volume. |
 | `const_decl` (intra-module) | ✅ taken over — the module tree's raw ordered decl-event stream (whole-module, so CROSS-FILE redefinitions are new coverage over v1's scope-local check); conditional/under-macrocall rows and structurally-identical re-definitions exempt; local shapes stay `lowering_errors:error`. Zero v2-only on the corpus differential. |
 | `incorrect_iter_spec` (literal arm) | shape only. |
 
