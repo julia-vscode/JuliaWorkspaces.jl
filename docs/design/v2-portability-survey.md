@@ -28,7 +28,7 @@ env/SymbolServer seam · **D** blocked on CFG/flow · **E** no port needed.
 | `duplicate_function_argument` | ✅ this milestone — superseded: under the flag v1's syntactic check is suppressed and the shapes report as `lowering_errors:error` (the lowering is ground truth; the v1 id keeps `:information` for flag-off users). |
 | `break_continue` | ✅ this milestone — superseded like the above. More precise than v1 (labeled break; actual loop scope rather than any enclosing `for`/`while`). |
 | `global_const_decl` | ✅ this milestone — superseded like the above. (`TypeDeclOnGlobalVariable` is dead on Julia ≥ 1.8.) |
-| `pointless_boolean`, `literal_use`, `NotEqDef` half of `type_piracy`, most of `const_if_condition` | pure shape; portable any time (some arguably belong in the syntax tier). |
+| `pointless_boolean`, `literal_use`, `const_if_condition` | ✅ taken over (v2 M4) — one body-only shape producer (`derived_item_shape_findings`), no lowering/visibility/env; test-block bodies stay covered (no resolution needed). Ported deltas: `EqInIfConditional` not ported (`if x = 1` is a parse error in JuliaSyntax v2 — `syntax_errors` reports it); the `@static if` exemption is by NAME, not Base-identity; top-level `if` chains are invisible (the walker is transparent through them); `literal_use`'s module-name arm not ported (module rows carry no body); quoted code skipped (v1 lints quotes — the standard v2 narrowing). The `NotEqDef` half of `type_piracy` shipped in M3. **This closes the advisory semantic tier**: every remaining v1-only rule is type-blocked or measurement-parked. |
 
 ### B — modest additions (~10%)
 
@@ -219,3 +219,7 @@ testitem suite doubles as a differential harness.
    signature help on v2 (§3). `index_from_length` deferred on measurement.
    What remains env-side — store-doc hover/completions, the positional-type
    arms — needs genuinely TYPE-level store queries; plan separately.
+6. ✅ **v2 M4** (the final shape-rule batch): `pointless_boolean`,
+   `const_if_condition`, `literal_use` taken over (§1 class A). The advisory
+   semantic tier is CLOSED — the only rules v1 still owns are
+   `index_from_length` (measurement-parked) and the type-blocked arms.

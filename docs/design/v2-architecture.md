@@ -562,7 +562,11 @@ milestone (2026-08-20), in two distinct modes:
   the arity edge — `:incorrect_call_args` (arity arm, both codes; see
   `derived_item_call_args_findings`), `:type_piracy`,
   `:invalid_type_declaration`, `:kw_default_mismatch`, and
-  `:incorrect_iter_spec` (literal arm). The M3 producers share one design:
+  `:incorrect_iter_spec` (literal arm); v2 M4 closed the advisory tier with
+  the pure-shape batch `:pointless_boolean` / `:const_if_condition` /
+  `:literal_use` (one body-only producer, `derived_item_shape_findings` —
+  no lowering, no visibility, no env, test-block bodies covered).
+  The M3 producers share one design:
   callee/type-name resolution goes name → visibility face → the workspace
   arity funnel (`src/v2/layer_arity_v2.jl`) or the seam
   (`derived_v2_external_method_arities`, the `:datatype` member kind), and
@@ -648,7 +652,7 @@ This is the honest answer to "how far off is the switchover".
 | Type-level env queries (the seam ships name+ARITY data, §7½; M3 added `derived_v2_external_method_arities` + the `:datatype` member kind) | the arity-level rules shipped in M3 (`incorrect_call_args`, `type_piracy`, `kw_default_mismatch`, …); the positional-TYPE arms and store-doc hover/completions content still v1 |
 | The implicit-member fallback + macro-declared names in visibility | colon members a module got from its own implicit `using Base`, and names modelled macros declare, bind `:unknown` (name still binds — no missing-ref FPs, but no hover/goto through them) |
 | Feature layers | references family, workspace/document symbols, module-at, document links, selection/block ranges, cross-file hover, signature help shipped on v2 (§10½, behind `input_v2_enabled`); completions, store-content hover, most actions still v1-only |
-| Rule coverage | seventeen rules taken over + two v2-only rules (`lowering_errors`, `soft_scope_ambiguity`), versus StaticLint's full set; what remains env-dependent needs genuinely type-level store data — see [`v2-portability-survey.md`](v2-portability-survey.md) |
+| Rule coverage | twenty rules taken over + two v2-only rules (`lowering_errors`, `soft_scope_ambiguity`) — the advisory semantic tier is CLOSED; the only v1-owned rules left are `index_from_length` (measurement-parked) and the type-blocked arms — see [`v2-portability-survey.md`](v2-portability-survey.md) |
 
 v2 today is a complete *spine* — identity, skeleton, module structure,
 per-item binding semantics, and a name-level environment edge — carrying the
