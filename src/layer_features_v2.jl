@@ -1272,3 +1272,163 @@ function _v2f_api_footer(rt, root, origin_module::Vector{String}, name::String)
     modname = isempty(origin_module) ? nothing : Symbol(last(origin_module))
     return _status_footer(status, modname)
 end
+
+# ── signature help (M3) ─────────────────────────────────────────────────────
+
+"The BodyTree node at preorder address `addr` (root = 1), or `nothing`."
+function _v2f_node_at(bt::BodyTree{V2Kind}, addr::Int)
+    addr == 1 && return bt
+    a = 1
+    node = bt
+    while node.children !== nothing
+        found = false
+        for c in node.children
+            n = bt_node_count(c)
+            if a + 1 <= addr <= a + n
+                a += 1
+                if a == addr
+                    return c
+                end
+                node = c
+                found = true
+                break
+            end
+            a += n
+        end
+        found || return nothing
+    end
+    return nothing
+end
+
+"""
+    _get_signature_help_v2(runtime, uri, offset0) -> Union{Nothing,SignatureResult}
+
+The v2 signature-help answer for the innermost call containing the (0-based)
+cursor, or `nothing` to decline to v1. Owns WORKSPACE callees only (declared
+or tree-imported functions/structs, qualified through the module-target
+ledger): labels and parameter ranges come from `v2_item_signature_params`
+(source slices through `_assemble_signature`, the same label/offset contract
+as v1). Store/external callees, locally-shadowed callees, store-extending
+names, definition signatures, do-blocks and macro/quote contexts decline; a
+cursor on the closing paren declines too (v1 answers empty there).
+
+The active parameter mirrors v1's shipped rule exactly: 0 while the cursor
+sits at/before the opening paren, else the call's total top-level comma count
+(v1 counts the call node's COMMA trivia, cursor-independent).
+"""
+function _get_signature_help_v2(runtime, uri::URI, offset0::Int)
+    root = derived_v2_best_root_for_uri(runtime, uri)
+    root === nothing && return nothing
+    row = v2_item_row_at(runtime, uri, offset0)
+    row === nothing && return nothing
+    (row.kind === :opaque_macrocall || row.kind === :macrocall) && return nothing
+    (row.interpretable && !row.under_macrocall) || return nothing
+    ref = V2ItemRef(uri, row.id)
+    isempty(derived_v2_item_expansion_sites(runtime, ref)) || return nothing
+    low = derived_item_lowering(runtime, ref)
+    (low === nothing || low.status !== :ok) && return nothing
+    view = v2_item_view(runtime, uri, row.id)
+    view === nothing && return nothing
+
+    # Innermost call containing the cursor. A call ENDING exactly at the
+    # cursor is behind it, not around it — the cursor after `g(h(1),` sits in
+    # the outer call, and after the only call's `)` there is no call at all
+    # (v1 answers empty there; the decline reproduces that).
+    call_addr = nothing
+    best = typemax(Int)
+    for a in eachindex(view.ranges)
+        view.kinds[a] == JS2.K"call" || continue
+        r = view.ranges[a]
+        _v2f_contains(r, offset0) || continue
+        _v2f_stop0(r) == offset0 && continue
+        w = _v2f_stop0(r) - _v2f_start0(r)
+        if w < best
+            best = w
+            call_addr = a
+        end
+    end
+    call_addr === nothing && return nothing
+
+    body = derived_v2_item_body(runtime, ref)
+    body === nothing && return nothing
+    siginfo = _v2_sig_with_addr(body, 1)
+    (siginfo !== nothing && siginfo[2] == call_addr) && return nothing
+    p = Int(view.parents[call_addr])
+    (p != 0 && view.kinds[p] == JS2.K"do") && return nothing
+    pp = p
+    while pp != 0
+        k = view.kinds[pp]
+        (k == JS2.K"macrocall" || k == JS2.K"quote" ||
+         k == JS2.K"syntaxquote" || k == JS2.K"inert") && return nothing
+        pp = Int(view.parents[pp])
+    end
+
+    call = _v2f_node_at(body, call_addr)
+    (call === nothing || call.children === nothing || isempty(call.children)) && return nothing
+    callee = call.children[1]
+    qual, name = _v2_qualified_name(callee)
+    (name === nothing || isempty(name) || startswith(name, ".")) && return nothing
+
+    # A callee lowering resolved to a local/argument shadows the global.
+    callee_addr32 = Int32(call_addr + 1)
+    binding_of = Dict{Int32,LoweredBinding}(b.id => b for b in low.bindings)
+    for u in low.uses
+        u.addr == callee_addr32 || continue
+        b = get(binding_of, u.binding, nothing)
+        (b !== nothing && !b.is_internal &&
+         (b.kind === :local || b.kind === :argument)) && return nothing
+    end
+
+    path = vcat(_derived_v2_splice_prefix(runtime, uri), row.parent_module)
+    origin = nothing
+    if isempty(qual)
+        face = get(derived_v2_module_visible_names_idfree(runtime, root, path), name, nothing)
+        face === nothing && return nothing
+        (face.origin === :declared || face.origin === :using_tree) || return nothing
+        face.kind in (:function, :struct, :mutable_struct) || return nothing
+        origin = face.origin_module
+    else
+        _, modtargets = _v2_visible_names_pass1(runtime, root, path, Set{URI}())
+        mt = get(modtargets, qual[1], nothing)
+        (mt === nothing || mt.sort !== :tree) && return nothing
+        origin = copy(mt.path)
+        tree = derived_v2_module_tree(runtime, root)
+        modpaths = Set{Vector{String}}(n.path for n in tree.modules)
+        for seg in qual[2:end]
+            push!(origin, seg)
+            origin in modpaths || return nothing
+        end
+    end
+    name in derived_v2_partial_method_names(runtime, root) && return nothing
+
+    items = derived_v2_method_items(runtime, root, origin, name)
+    isempty(items) && return nothing
+    sigs = SignatureInfo[]
+    for mref in items
+        for s in v2_item_signature_params(runtime, mref)
+            push!(sigs, SignatureInfo(s.label, "",
+                ParameterInfo[ParameterInfo(r, nothing) for r in s.param_ranges]))
+        end
+    end
+    isempty(sigs) && return nothing
+
+    # v1's active-parameter rule: LPAREN → 0, else the call's comma count.
+    tf = input_text_file(runtime, uri)
+    tf === nothing && return nothing
+    text = tf.content.content
+    call_range = view.ranges[call_addr]
+    child_addrs = _v2_child_addresses(call, call_addr)
+    child_ranges = [view.ranges[a] for a in child_addrs if 1 <= a <= length(view.ranges)]
+    commas = 0
+    for i in first(call_range):(last(call_range) - 1)
+        i <= ncodeunits(text) || break
+        codeunit(text, i) == UInt8(',') || continue
+        any(r -> first(r) <= i <= last(r) - 1, child_ranges) && continue
+        commas += 1
+    end
+    lparen_pos0 = _v2f_stop0(view.ranges[call_addr + 1]) + 1
+    arg = offset0 <= lparen_pos0 ? 0 : commas
+
+    filtered = arg == 0 ? sigs : filter(s -> length(s.parameters) > arg, sigs)
+    return SignatureResult(filtered, 0, arg)
+end

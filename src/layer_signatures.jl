@@ -548,6 +548,14 @@ Core signature help logic: find all matching signatures for the function call
 at `offset` (0-based) in the file identified by `uri`.
 """
 function _get_signature_help(runtime, uri::URI, offset::Int)
+    # v2 features (experiment): workspace callees answer from signature
+    # slices; `nothing` declines (store callees, shadowed names, …) run the
+    # untouched v1 body below.
+    if input_v2_enabled(runtime)
+        r = _get_signature_help_v2(runtime, uri, offset)
+        r !== nothing && return r
+    end
+
     empty_result = SignatureResult(SignatureInfo[], 0, 0)
 
     root = derived_best_root_for_uri(runtime, uri)
