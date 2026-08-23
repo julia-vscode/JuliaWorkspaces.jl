@@ -473,6 +473,53 @@ Every value reachable from a config struct has well-defined `==` and `hash`
 Salsa can backdate correctly when a config edit turns out not to change the
 effective result.
 
+### Scope can prune the directory walk
+
+Scope is resolved per file by the queries above, which is what a language server
+needs: it must still see a file no config selected in order to answer
+go-to-definition across it.
+
+A batch tool does not. `juliati` in a repository that keeps a few hundred
+thousand `.jl` files of test data under an excluded directory should never
+`readdir` that directory at all — the ~64 s spent listing such a tree dwarfs the
+~35 ms of listing `src/` and `test/`. So the walk itself can honour one or more
+config kinds:
+
+```julia
+JuliaWorkspaces.workspace_from_folders([path]; scope=:testitems)
+```
+
+`scope` is a `Symbol` or a collection of them, drawn from `:testitems`, `:lint`
+and `:format`; the default `nothing` walks everything, exactly as before.
+[`collect_workspace_paths`](@ref) does the walking and documents the details.
+
+Three properties make this safe:
+
+- **Directory pruning is conservative.** A directory is skipped only when no
+  file below it could be selected — decided by `dir_selected`, which asks
+  whether an `exclude` pattern covers the whole subtree and whether any
+  `include` pattern could still match beneath it. `exclude = ["src/*"]` prunes
+  each directory directly inside `src`, but never `src` itself.
+- **Nested configs still compose.** Because a nested config may only
+  [narrow scope](#scope-every-enclosing-file-must-admit-the-file), a directory
+  ruled out by an ancestor can never be reclaimed below it, so it is safe to
+  stop descending there. Config files themselves are always read from a
+  surviving directory, so they keep reporting their own diagnostics.
+- **Several kinds compose as a union.** A caller building one workspace to serve
+  lint, format and test-item queries alike passes all three kinds, and a file any
+  one of them wants is read. A kind with no config file of its own selects
+  everything, so asking for several kinds prunes only what all of them exclude.
+
+A malformed config file fails open — it prunes nothing, and its `config_errors`
+diagnostic is reported as usual once it is part of the workspace.
+
+The one thing to know before excluding a subtree: **its `Project.toml` and
+`Manifest.toml` are not read either.** A package that is in scope but whose test
+environment reaches into the excluded subtree — through `[sources]`, or a
+relative `dev` path — will have that environment resolved incompletely. Exclude
+directories that hold data, not directories that hold environments an in-scope
+package depends on.
+
 ### Where rules are applied
 
 `StaticLint.LintOptions` — the 14 boolean gate that `check_all` consults — is
