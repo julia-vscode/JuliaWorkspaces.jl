@@ -171,9 +171,77 @@ end
 # --- String helpers ---------------------------------------------------------
 
 function _sanitize_docstring(doc::String)
+    doc = _convert_admonitions(doc)
     doc = replace(doc, "```jldoctest" => "```julia")
     doc = replace(doc, "\n#" => "\n###")
     return doc
+end
+
+const _ADMONITION_HEADER = r"^([ \t]*)!!!\s+(\w+)(?:\s+\"(.*)\")?\s*$"
+
+# One indent level below `indent`, which is where the admonition body sits.
+function _admonition_body_line(l, indent)
+    startswith(l, indent) || return nothing
+    rest = SubString(l, ncodeunits(indent) + 1)
+    return startswith(rest, "    ") ? SubString(rest, 5) :
+        startswith(rest, "\t") ? SubString(rest, 2) : nothing
+end
+
+# Julia's `!!! note`/`!!! warning` admonitions have no equivalent in the
+# markdown clients render, and their four-space indented body would come out as
+# a code block. Render them as blockquotes instead.
+#
+# Scanning lines rather than going through the Markdown stdlib is deliberate:
+# the stores hold docs that `Markdown.plain` already rendered once, and a
+# second parse/write cycle is lossy — `plain` writes a ```math fence back as a
+# `$$` block, and nothing parses `$$`, so the math degrades to `:$`.
+function _convert_admonitions(doc::String)
+    occursin("!!!", doc) || return doc
+    lines = split(doc, '\n')
+    out = String[]
+    in_fence = false
+    i = 1
+    while i <= length(lines)
+        line = lines[i]
+        if startswith(lstrip(line), "```")
+            in_fence = !in_fence
+        end
+        m = in_fence ? nothing : match(_ADMONITION_HEADER, line)
+        if m === nothing
+            push!(out, line)
+            i += 1
+            continue
+        end
+        indent = m[1]
+        kind = uppercasefirst(m[2])
+        header = m[3] === nothing ? kind : string(kind, ": ", m[3])
+        i += 1
+        # The body runs until the first line that is neither blank nor indented.
+        body = SubString{String}[]
+        while i <= length(lines)
+            l = lines[i]
+            if isempty(strip(l))
+                push!(body, SubString(l, 1, 0))
+            else
+                dedented = _admonition_body_line(l, indent)
+                dedented === nothing && break
+                push!(body, dedented)
+            end
+            i += 1
+        end
+        while !isempty(body) && isempty(body[end])
+            pop!(body)
+        end
+        # The quote keeps the header's indent, so a nested admonition stays
+        # inside its list item.
+        push!(out, string(indent, "> **", header, "**"))
+        isempty(body) || push!(out, string(indent, ">"))
+        for b in body
+            push!(out, isempty(b) ? string(indent, ">") : string(indent, "> ", b))
+        end
+        push!(out, "")
+    end
+    return join(out, '\n')
 end
 
 _ensure_ends_with(s, c = "\n") = endswith(s, c) ? s : string(s, c)
@@ -858,10 +926,20 @@ _get_func_hover(x::SymbolServer.SymStore, documentation, expr, env, meta_dict) =
 # Closer hover (what does this `end`/`)`/`]` close?)
 # ============================================================================
 
+# A closing `end` is its parent's trivia; an `end` used as an index (`A[end]`,
+# `A[Int(ceil(end/2))]`) is an argument of whatever expression holds it, and
+# closes nothing.
+function _is_block_closer(x::CSTParser.EXPR)
+    p = CSTParser.parentof(x)
+    p isa CSTParser.EXPR || return false
+    p.trivia === nothing && return false
+    return any(t -> t === x, p.trivia)
+end
+
 _get_closer_hover(x, documentation) = documentation
 function _get_closer_hover(x::CSTParser.EXPR, documentation)
     if CSTParser.parentof(x) isa CSTParser.EXPR
-        if CSTParser.headof(x) === :END
+        if CSTParser.headof(x) === :END && _is_block_closer(x)
             if CSTParser.headof(CSTParser.parentof(x)) === :function
                 documentation = string(documentation, "Closes function definition for `", CSTParser.to_codeobject(CSTParser.get_sig(CSTParser.parentof(x))), "`\n")
             elseif CSTParser.defines_module(CSTParser.parentof(x)) && length(CSTParser.parentof(x).args) > 1
@@ -878,6 +956,60 @@ function _get_closer_hover(x::CSTParser.EXPR, documentation)
         end
     end
     return documentation
+end
+
+# ============================================================================
+# Keyword hover (`if`, `for`, `function`, … documented by Base)
+# ============================================================================
+
+# Base's keyword docs are keyed by source spelling, so the tokens of a two-word
+# keyword (`mutable struct`, `abstract type`, `primitive type`) map to the joint
+# entry — for `STRUCT`/`TYPE` that depends on the parent expression.
+function _keyword_doc_key(x::CSTParser.EXPR)
+    p = CSTParser.parentof(x)
+    h = CSTParser.headof(x)
+    if h === :MUTABLE
+        return Symbol("mutable struct")
+    elseif h === :STRUCT
+        return p isa CSTParser.EXPR && CSTParser.defines_mutable(p) ? Symbol("mutable struct") : :struct
+    elseif h === :ABSTRACT
+        return Symbol("abstract type")
+    elseif h === :PRIMITIVE
+        return Symbol("primitive type")
+    elseif h === :TYPE
+        p isa CSTParser.EXPR || return nothing
+        ph = CSTParser.headof(p)
+        ph === :abstract && return Symbol("abstract type")
+        ph === :primitive && return Symbol("primitive type")
+        return nothing
+    elseif CSTParser.iskeyword(x)
+        return Symbol(lowercase(string(h)))
+    elseif CSTParser.isoperator(x) && CSTParser.str_value(x) == "where"
+        # `where` is documented as a keyword but parses as an operator token.
+        return :where
+    end
+    return nothing
+end
+
+# `parsedoc` memoizes the parsed markdown on the `DocStr` itself.
+function _keyword_doc(key::Symbol)
+    try
+        kws = Base.Docs.keywords
+        haskey(kws, key) || return ""
+        return string(Base.Docs.parsedoc(kws[key]))
+    catch
+        return ""
+    end
+end
+
+_get_keyword_hover(x, documentation) = documentation
+function _get_keyword_hover(x::CSTParser.EXPR, documentation::String)
+    key = _keyword_doc_key(x)
+    key === nothing && return documentation
+    doc = _keyword_doc(key)
+    isempty(doc) && return documentation
+    # Any context line already produced (what an `end` closes) stays on top.
+    return isempty(documentation) ? doc : string(_ensure_ends_with(documentation), "\n", doc)
 end
 
 # ============================================================================
@@ -1004,6 +1136,7 @@ function _get_hover_text(rt, uri, index)
     x isa CSTParser.EXPR && CSTParser.isoperator(x) && _resolve_op_ref(x, env, meta_dict, rt, root, path)
     documentation = _get_hover(x, "", x, env, meta_dict, rt, root)
     documentation = _get_closer_hover(x, documentation)
+    documentation = _get_keyword_hover(x, documentation)
     documentation = _get_fcall_position(x, documentation, env, meta_dict, rt, root)
     documentation = _sanitize_docstring(documentation)
 
@@ -1066,7 +1199,7 @@ function _get_doc_from_word(rt, word::AbstractString)
             _traverse_store!(store) do sym, val
                 score = _doc_search_score(needle, sym)
                 if score < 2
-                    hover_text = _get_hover(val, "", nothing, env, _empty_hover_meta_dict)
+                    hover_text = _sanitize_docstring(_get_hover(val, "", nothing, env, _empty_hover_meta_dict))
                     if !isempty(hover_text)
                         push!(matches, score => hover_text)
                     end
