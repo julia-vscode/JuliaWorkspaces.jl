@@ -58,6 +58,75 @@ end
     @test a != c
 end
 
+@testitem "Glob: covers_subtree reduces a pattern to its directory form" begin
+    cs(p, d) = JuliaWorkspaces.covers_subtree(JuliaWorkspaces.GlobPattern(p), d)
+
+    # `foo/**` covers the whole of `foo`, and stays anchored to the config
+    # directory even though stripping `/**` removes its only separator.
+    @test cs("packages/**", "packages")
+    @test !cs("packages/**", "nested/packages")
+    @test !cs("packages/**", "")
+
+    # A directory suffix and a separator-less pattern both match at any depth.
+    @test cs("gen/", "gen")
+    @test cs("gen/", "a/b/gen")
+    @test cs("node_modules", "a/node_modules")
+
+    # `src/*` covers each directory directly inside `src`, but not `src`
+    # itself — a naive `matches(g, "src/")` test would wrongly claim it does.
+    @test !cs("src/*", "src")
+    @test cs("src/*", "src/a")
+
+    @test cs("**/excluded/**", "excluded")
+    @test cs("**/excluded/**", "a/excluded")
+    @test cs("test/manual/**", "test/manual")
+    @test !cs("test/manual/**", "test")
+
+    @test cs("**", "anything")
+end
+
+@testitem "Glob: may_contain_match admits every possible parent directory" begin
+    pf(p, d) = JuliaWorkspaces.may_contain_match(JuliaWorkspaces.GlobPattern(p), d)
+
+    @test pf("src/**", "")
+    @test pf("src/**", "src")
+    @test pf("src/**", "src/a/b")
+    @test !pf("src/**", "data")
+
+    # A pattern with no separator matches at any depth, so every directory is a
+    # possible parent.
+    @test pf("generated.jl", "a/b/c")
+    @test pf("**/*.jl", "a/b/c")
+
+    @test pf("test/manual", "test")
+    @test !pf("test/manual", "test/other")
+
+    @test pf("/foo.jl", "")
+    @test !pf("/foo.jl", "data")
+end
+
+@testitem "Glob: dir_selected is the directory counterpart of path_selected" begin
+    f(inc, exc) = JuliaWorkspaces.PathFilter(
+        JuliaWorkspaces.GlobPattern[JuliaWorkspaces.GlobPattern(x) for x in inc],
+        JuliaWorkspaces.GlobPattern[JuliaWorkspaces.GlobPattern(x) for x in exc],
+    )
+    ds(filter, d) = JuliaWorkspaces.dir_selected(filter, d)
+
+    only_src_and_test = f(["src/**", "test/**"], String[])
+    @test ds(only_src_and_test, "")
+    @test ds(only_src_and_test, "src")
+    @test ds(only_src_and_test, "test/a")
+    @test !ds(only_src_and_test, "data")
+
+    no_bigdata = f(String[], ["bigdata/**"])
+    @test ds(no_bigdata, "")
+    @test ds(no_bigdata, "src")
+    @test !ds(no_bigdata, "bigdata")
+
+    # An empty filter selects everything.
+    @test ds(JuliaWorkspaces.PathFilter(), "anything/at/all")
+end
+
 @testitem "PathFilter: exclude beats include, empty include means all" begin
     G = JuliaWorkspaces.GlobPattern
     sel = JuliaWorkspaces.path_selected
