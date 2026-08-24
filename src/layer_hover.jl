@@ -171,9 +171,77 @@ end
 # --- String helpers ---------------------------------------------------------
 
 function _sanitize_docstring(doc::String)
+    doc = _convert_admonitions(doc)
     doc = replace(doc, "```jldoctest" => "```julia")
     doc = replace(doc, "\n#" => "\n###")
     return doc
+end
+
+const _ADMONITION_HEADER = r"^([ \t]*)!!!\s+(\w+)(?:\s+\"(.*)\")?\s*$"
+
+# One indent level below `indent`, which is where the admonition body sits.
+function _admonition_body_line(l, indent)
+    startswith(l, indent) || return nothing
+    rest = SubString(l, ncodeunits(indent) + 1)
+    return startswith(rest, "    ") ? SubString(rest, 5) :
+        startswith(rest, "\t") ? SubString(rest, 2) : nothing
+end
+
+# Julia's `!!! note`/`!!! warning` admonitions have no equivalent in the
+# markdown clients render, and their four-space indented body would come out as
+# a code block. Render them as blockquotes instead.
+#
+# Scanning lines rather than going through the Markdown stdlib is deliberate:
+# the stores hold docs that `Markdown.plain` already rendered once, and a
+# second parse/write cycle is lossy — `plain` writes a ```math fence back as a
+# `$$` block, and nothing parses `$$`, so the math degrades to `:$`.
+function _convert_admonitions(doc::String)
+    occursin("!!!", doc) || return doc
+    lines = split(doc, '\n')
+    out = String[]
+    in_fence = false
+    i = 1
+    while i <= length(lines)
+        line = lines[i]
+        if startswith(lstrip(line), "```")
+            in_fence = !in_fence
+        end
+        m = in_fence ? nothing : match(_ADMONITION_HEADER, line)
+        if m === nothing
+            push!(out, line)
+            i += 1
+            continue
+        end
+        indent = m[1]
+        kind = uppercasefirst(m[2])
+        header = m[3] === nothing ? kind : string(kind, ": ", m[3])
+        i += 1
+        # The body runs until the first line that is neither blank nor indented.
+        body = SubString{String}[]
+        while i <= length(lines)
+            l = lines[i]
+            if isempty(strip(l))
+                push!(body, SubString(l, 1, 0))
+            else
+                dedented = _admonition_body_line(l, indent)
+                dedented === nothing && break
+                push!(body, dedented)
+            end
+            i += 1
+        end
+        while !isempty(body) && isempty(body[end])
+            pop!(body)
+        end
+        # The quote keeps the header's indent, so a nested admonition stays
+        # inside its list item.
+        push!(out, string(indent, "> **", header, "**"))
+        isempty(body) || push!(out, string(indent, ">"))
+        for b in body
+            push!(out, isempty(b) ? string(indent, ">") : string(indent, "> ", b))
+        end
+        push!(out, "")
+    end
+    return join(out, '\n')
 end
 
 _ensure_ends_with(s, c = "\n") = endswith(s, c) ? s : string(s, c)
@@ -1131,7 +1199,7 @@ function _get_doc_from_word(rt, word::AbstractString)
             _traverse_store!(store) do sym, val
                 score = _doc_search_score(needle, sym)
                 if score < 2
-                    hover_text = _get_hover(val, "", nothing, env, _empty_hover_meta_dict)
+                    hover_text = _sanitize_docstring(_get_hover(val, "", nothing, env, _empty_hover_meta_dict))
                     if !isempty(hover_text)
                         push!(matches, score => hover_text)
                     end

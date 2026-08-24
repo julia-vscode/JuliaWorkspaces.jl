@@ -1442,7 +1442,7 @@ end
 end
 
 @testitem "Hover: keyword docstrings" begin
-    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, _sanitize_docstring
     using JuliaWorkspaces.URIs2: URI
 
     source = """
@@ -1473,9 +1473,7 @@ end
     hover(marker) = get_hover_text(jw, uri, first(findfirst(marker, source)) + 1)
 
     # The same text the layer renders: Base's keyword docs, sanitized.
-    kwdoc(k) = replace(
-        replace(string(Base.Docs.parsedoc(Base.Docs.keywords[Symbol(k)])), "```jldoctest" => "```julia"),
-        "\n#" => "\n###")
+    kwdoc(k) = _sanitize_docstring(string(Base.Docs.parsedoc(Base.Docs.keywords[Symbol(k)])))
 
     @test occursin(kwdoc("function"), hover("function foo"))
     @test occursin(kwdoc("if"), hover("if x > 0"))
@@ -1500,7 +1498,7 @@ end
 end
 
 @testitem "Hover: an indexing `end` documents the keyword and closes nothing" begin
-    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, _sanitize_docstring
     using JuliaWorkspaces.URIs2: URI
 
     # The index `end` is an ARGUMENT of whatever expression holds it — directly
@@ -1518,9 +1516,7 @@ end
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(uri, SourceText(source, "julia")))
 
-    enddoc = replace(
-        replace(string(Base.Docs.parsedoc(Base.Docs.keywords[:end])), "```jldoctest" => "```julia"),
-        "\n#" => "\n###")
+    enddoc = _sanitize_docstring(string(Base.Docs.parsedoc(Base.Docs.keywords[:end])))
     hover(marker) = get_hover_text(jw, uri, first(findfirst(marker, source)) + 1)
 
     for marker in ("end]", "end - 1", "end)))")
@@ -1537,7 +1533,7 @@ end
 end
 
 @testitem "Hover: `where` documents the keyword only where it is one" begin
-    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, _sanitize_docstring
     using JuliaWorkspaces.URIs2: URI
 
     # `where` is a contextual keyword: as a variable name it is an ordinary
@@ -1551,9 +1547,7 @@ end
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(uri, SourceText(source, "julia")))
 
-    wheredoc = replace(
-        replace(string(Base.Docs.parsedoc(Base.Docs.keywords[:where])), "```jldoctest" => "```julia"),
-        "\n#" => "\n###")
+    wheredoc = _sanitize_docstring(string(Base.Docs.parsedoc(Base.Docs.keywords[:where])))
     hover(marker) = something(get_hover_text(jw, uri, first(findfirst(marker, source)) + 1), "")
 
     @test !occursin(wheredoc, hover("where = 2"))
