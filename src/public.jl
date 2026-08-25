@@ -430,6 +430,11 @@ Set the active project for the workspace. The active project serves as the
 fallback environment for files that are not inside any project folder and also
 as the fallback test project when determining test environments.
 
+As a test project it is subject to the same conditions as any other: it is used
+only if it has a readable manifest, and only if that manifest `dev`s the package
+that owns the file (or it is that package's folder). Setting it is therefore
+frequently a no-op for test items — see [`get_test_env`](@ref).
+
 Pass `nothing` to clear the active project.
 
 When the active project is outside the workspace folders, its Project.toml and
@@ -664,7 +669,22 @@ end
 """
     get_test_env(jw::JuliaWorkspace, uri::URI)
 
-Get the test environment that belongs to the given `uri` of the workspace `jw`.
+Resolve what a test item in `uri` needs in order to run, for the workspace `jw`.
+
+The **package** is the innermost enclosing folder whose `Project.toml` has a
+`name`, a `uuid` and a valid `version`, among the folders discovered under the
+workspace folders plus the active project.
+
+The **project** is the innermost enclosing folder that has both a project file
+and a readable manifest; when there is none, the active project, which likewise
+needs a manifest to qualify. Either way it is kept only if it *is* the package
+folder or if its manifest `dev`s the package — a project that merely contains the
+package on disk, or depends on it as a registered package, is discarded and the
+result carries no project at all.
+
+Note that this returns the *ingredients* of a test environment, not a resolved
+one: the project supplies version pins, while the dependencies come from the
+package's test target when a runner builds the environment.
 
 Returns
 
