@@ -569,7 +569,7 @@ end
 
 # tools to retrieve cache from the cloud
 
-function get_file_from_cloud(manifest, uuid, environment_path, depot_dir, cache_dir="../cache", download_dir="../downloads/", symbolcache_upstream="https://julia-symbolcache.org")
+function get_file_from_cloud(manifest, uuid, environment_path, depot_dir, cache_dir="../cache", download_dir="../downloads/", symbolcache_upstream="https://symbolcache.julialang.net")
     paths = get_cache_path(manifest, uuid)
     name = packagename(manifest, uuid)
     link = string(first(splitext(join([symbolcache_upstream, "store/$(CACHE_STORE_VERSION)/packages", paths...], '/'))), ".tar.gz")
