@@ -1633,3 +1633,41 @@ end
     @test !derived_module_is_bare(rt, root_uri, String[])
     @test !derived_module_is_bare(rt, root_uri, ["Outer", "Nope"])
 end
+
+@testitem "explicitly imported name is not re-declared by bare method extensions" begin
+    using JuliaWorkspaces
+    using JuliaWorkspaces.URIs2: URI
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/P/Project.toml"), SourceText("""
+        name = "P"
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0099"
+        version = "0.1.0"
+        """, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/P/src/P.jl"), SourceText("""
+        module P
+        import Dates: Date
+        include("b.jl")
+        end
+        """, "julia")))
+    # The method extensions live in a SIBLING file of the import: per-file
+    # analysis sees `Date` only through the module tree, which must keep the
+    # import (an external symbol that may denote a type) as the visible winner
+    # instead of declaring a local :function for the bare extensions.
+    add_file!(jw, TextFile(URI("file:///ws/P/src/b.jl"), SourceText("""
+        Date(x::Symbol) = Date(2000)
+        f(d::Date) = d
+        """, "julia")))
+
+    root = URI("file:///ws/P/src/P.jl")
+    visible = JuliaWorkspaces.derived_module_visible_names_idfree(jw.runtime, root, ["P"])
+    vn = get(visible, "Date", nothing)
+    @test vn !== nothing
+    # In this synthetic workspace Dates has no resolvable env, so the kind is
+    # :unknown rather than :external_symbol — the point is that the bare
+    # method extensions must NOT have re-declared it as a local :function.
+    @test vn.kind !== :function
+
+    diags = JuliaWorkspaces.get_diagnostic(jw, URI("file:///ws/P/src/b.jl"))
+    @test !any(d -> d.code === :invalid_type_declaration, diags)
+end
