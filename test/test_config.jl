@@ -163,11 +163,13 @@ end
 
 @testitem "Lint rules: preset severities match the pre-registry values" begin
     # The presets used to be three hand-written dicts; they are now derived from
-    # per-rule severity fields. This pins every value to what the hand-written
-    # dicts contained, so the registry refactor is provably behavior-neutral and
-    # any future change to a preset severity is a conscious test update.
+    # per-rule severity fields. This pins every value, so any change to a preset
+    # severity is a conscious test update rather than a side effect. Values are
+    # the original hand-written ones except for the three rules deliberately
+    # demoted to `:off` in `default` on measured false-positive rates — see the
+    # comment above `LINT_RULES`.
     expected_default = Dict{Symbol,Symbol}(
-        :incorrect_call_args => :information,
+        :incorrect_call_args => :off,   # demoted: 93% sampled FP
         :incorrect_iter_spec => :information,
         :index_from_length => :information,
         :nothing_comparison => :information,
@@ -187,8 +189,8 @@ end
         :const_decl => :information,
         :relative_import => :information,
         :include_errors => :warning,
-        :missing_reference => :warning,
-        :unresolved_import => :warning,
+        :missing_reference => :off,     # demoted: 78% sampled FP
+        :unresolved_import => :off,     # demoted: 77% sampled FP
         :syntax_errors => :error,
         :syntax_warnings => :off,
         :testitem_errors => :error,
@@ -384,6 +386,44 @@ end
     mixed = cfg_for("preset = \"minimal\"\n[rules]\nunused_binding = \"error\"")
     @test JuliaWorkspaces.rule_severity(mixed, :unused_binding) === :error
     @test JuliaWorkspaces.rule_severity(mixed, :type_piracy) === :off
+end
+
+@testitem "Lint config: the resolution-dependent rules are off in `default`" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # These three rules accounted for ~92% of the false positives on the
+    # 2026-08-12 corpus sweep and are deliberately silent out of the box. A
+    # project that wants them asks for them; `strict` still reports all three.
+    demoted = (:incorrect_call_args, :missing_reference, :unresolved_import)
+
+    function cfg_for(content)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///dem/JuliaLint.toml"), SourceText(content, "toml")))
+        add_file!(jw, TextFile(URI("file:///dem/a.jl"), SourceText("x = 1\n", "julia")))
+        return JuliaWorkspaces.derived_effective_lint_config(jw.runtime, URI("file:///dem/a.jl"))
+    end
+
+    default = cfg_for("preset = \"default\"")
+    for id in demoted
+        @test JuliaWorkspaces.rule_severity(default, id) === :off
+        @test !JuliaWorkspaces.rule_enabled(default, id)
+    end
+
+    strict = cfg_for("preset = \"strict\"")
+    for id in demoted
+        @test JuliaWorkspaces.rule_severity(strict, id) === :warning
+    end
+
+    # The demotion must reach the derived gates, not just the severity map:
+    # `incorrect_call_args` is the only rule in the `:call` category, and
+    # `missing_reference` drives the `missingrefs` mode.
+    @test !JuliaWorkspaces.lint_options_from_config(default).call
+    @test JuliaWorkspaces.missingrefs_from_config(default) === :none
+
+    # ...and re-enabling with a `[rules]` delta must turn those gates back on.
+    restored = cfg_for("preset = \"default\"\n[rules]\nincorrect_call_args = \"warning\"\nmissing_reference = \"warning\"")
+    @test JuliaWorkspaces.lint_options_from_config(restored).call
+    @test JuliaWorkspaces.missingrefs_from_config(restored) === :all
 end
 
 @testitem "Lint config: override blocks re-scope rules by path" begin

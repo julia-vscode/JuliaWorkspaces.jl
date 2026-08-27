@@ -75,15 +75,27 @@ Base.@kwdef struct LintRule
     category::Union{Nothing,Symbol} = nothing
 end
 
-# `severity_default` reproduces the severities that were hard-coded before
-# rules became configurable, so an absent config file changes nothing.
-# `severity_strict` follows the convention "everything on, and everything that
-# is merely a hint promoted to a warning"; `severity_minimal` keeps only the
-# checks that catch outright breakage.
+# `severity_default` started out reproducing the severities that were hard-coded
+# before rules became configurable. `severity_strict` follows the convention
+# "everything on, and everything that is merely a hint promoted to a warning";
+# `severity_minimal` keeps only the checks that catch outright breakage.
+#
+# Three rules have since been demoted to `:off` in `default`:
+# `incorrect_call_args`, `missing_reference` and `unresolved_import`. On the
+# 2026-08-12 corpus sweep they accounted for ~92% of all false positives, at
+# sampled FP rates of 93%, 78% and 77% respectively. They share one cause — the
+# analysis cannot see a complete method/symbol set for a callee or import — so
+# they are not independently fixable by rule-local work, and none of them is
+# trustworthy enough to fire on a project that never asked for it. They stay on
+# in `strict`, and a project can restore any of them with a one-line `[rules]`
+# entry. Re-promote only on sweep evidence, and changelog it: a preset floats,
+# so the change reaches every project that names it.
 const LINT_RULES = LintRule[
     # ── StaticLint rules gated by a `LintOptions` field ──────────────────────
+    # Off in `default`: 93% of sampled findings were false positives (2026-08-12
+    # sweep), because the checker's method table is incomplete for most callees.
     LintRule(id = :incorrect_call_args, tier = TierSemantic,
-        severity_default = :information, severity_strict = :warning,
+        severity_default = :off, severity_strict = :warning,
         env_dependent = true,
         codes = [StaticLint.IncorrectCallArgs, StaticLint.FunctionHasNoMethods], category = :call),
     LintRule(id = :incorrect_iter_spec, tier = TierSemantic,
@@ -166,12 +178,16 @@ const LINT_RULES = LintRule[
             StaticLint.FileNotAvailable,
             StaticLint.ComputedInclude,
         ]),
+    # Off in `default`: 78% of sampled findings were false positives, chiefly
+    # names minted by `@eval` loops that no static pass can see.
     LintRule(id = :missing_reference, tier = TierSemantic,
-        severity_default = :warning, severity_strict = :warning,
+        severity_default = :off, severity_strict = :warning,
         env_dependent = true, option_keys = [:scope],
         codes = [StaticLint.MissingRef]),
+    # Off in `default`: 77% of sampled findings were false positives, chiefly
+    # `using X` in `ext/` where X is a `[weakdeps]` trigger.
     LintRule(id = :unresolved_import, tier = TierSemantic,
-        severity_default = :warning, severity_strict = :warning,
+        severity_default = :off, severity_strict = :warning,
         env_dependent = true,
         codes = [StaticLint.UnresolvedImport]),
 
