@@ -24,7 +24,7 @@ end
 function unique_dirs(iter)
     udirs = Set{String}()
     for file in iter
-        dir, basename = splitdir(file)
+        dir, _ = splitdir(file)
         push!(udirs, dir)
     end
     return udirs
@@ -35,7 +35,7 @@ function abspath_no_normalize(a)
         cwd = pwd()
         a_drive, a_nodrive = splitdrive(a)
         if a_drive != "" && lowercase(splitdrive(cwd)[1]) != lowercase(a_drive)
-            cwd = a_drive * path_separator
+            cwd = a_drive * Base.Filesystem.path_separator
             a = joinpath(cwd, a_nodrive)
         else
             a = joinpath(cwd, a)
@@ -131,7 +131,7 @@ Base.push!(wl::WatchList, filenameid::Pair{<:AbstractString,PkgFiles}) =
     push!(wl, filenameid.first=>filenameid.second.id)
 Base.push!(wl::WatchList, filenameid::Pair{<:AbstractString,PkgData}) =
     push!(wl, filenameid.first=>filenameid.second.info)
-WatchList() = WatchList(Dict{String,PkgId}(), Dict{String,Float64}())
+WatchList() = WatchList(Dict{String,PkgId}(), Dict{String,Float64}(), Dict{String,UInt64}())
 Base.in(file, wl::WatchList) = haskey(wl.trackedfiles, file)
 
 """

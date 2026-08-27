@@ -1,12 +1,29 @@
 # Integration tests for scripts/regen_symbolcache.sh and scripts/reconcile_symbolcache.sh.
 #
-# Each @testitem gates on rclone availability.  All scratch dirs live under
-# mktempdir() and are cleaned up automatically.  The local rclone backend
+# Each @testitem gates on rclone and linux.  The scripts assume a GNU userland —
+# `package_symbolcache.sh` calls `nproc`, for one — so they do not run on macOS,
+# and they are bash so they do not run on Windows either.  All scratch dirs live
+# under mktempdir() and are cleaned up automatically.  The local rclone backend
 # (:local:<dir>) is used — no R2 credentials or Docker required.
 #
-# Run selectively:
-#   using TestItemRunner
-#   @run_package_tests filter=ti->occursin("cache-infra", ti.name)
+# CI installs rclone on the linux workers (.github/ci_prep.jl), so these run for
+# real there; elsewhere they skip.
+
+@testsnippet CacheInfraScripts begin
+    # `success` spawns with an empty stdio set, so a failing script's stderr is
+    # discarded and the test reports only `false`. Capture it and report it on
+    # failure — but only on failure, since these scripts are chatty when they work.
+    function run_script(cmd)
+        out, err = IOBuffer(), IOBuffer()
+        p = run(pipeline(ignorestatus(cmd), stdout = out, stderr = err); wait = true)
+        ok = success(p)
+        ok || @error(
+            "cache-infra script failed", cmd, exitcode = p.exitcode,
+            stdout = String(take!(out)), stderr = String(take!(err))
+        )
+        return ok
+    end
+end
 
 @testitem "cache-infra: the shell STORE_VERSION matches CACHE_STORE_VERSION" begin
     using JuliaWorkspaces
@@ -24,10 +41,10 @@ end
 # regen_symbolcache.sh tests
 # ===========================================================================
 
-@testitem "cache-infra regen: full run against empty remote" begin
+@testitem "cache-infra regen: full run against empty remote" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
 
     # ---- helpers (inline so no @testmodule dependency) --------------------
@@ -88,7 +105,7 @@ $json_lines
         script = joinpath(scripts, "regen_symbolcache.sh")
         remote = ":local:" * abspath(bucket)
         cmd = `bash $script --remote $remote --mode full --work $workdir --sweep-cmd $("bash " * stub)`
-        @test success(cmd)
+        @test run_script(cmd)
 
         # 1a. artifact present at expected path
         artifact = joinpath(bucket, "store", V, "packages",
@@ -106,10 +123,10 @@ $json_lines
     end
 end
 
-@testitem "cache-infra regen: incremental run preserves index union" begin
+@testitem "cache-infra regen: incremental run preserves index union" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -159,24 +176,24 @@ $json_lines
             ["E/Example/$uuid_ok/h1"],
             [(uuid=uuid_ok,  treehash="h1", status="ok"),
              (uuid=uuid_bad, treehash="h2", status="unsatisfiable")])
-        @test success(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
 
         @test "$uuid_ok/h1" in read_index_tar(bucket)
 
         # --- Run 2: incremental, stub produces EMPTY store + empty results ---
         workdir2 = joinpath(tmp, "work2"); mkpath(workdir2)
         make_stub_sweep(stub, String[], NamedTuple[])
-        @test success(`bash $regen --remote $remote --mode incremental --work $workdir2 --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $regen --remote $remote --mode incremental --work $workdir2 --sweep-cmd $("bash " * stub)`)
 
         # KEY ASSERTION: original key must still be in the index (union never shrinks)
         @test "$uuid_ok/h1" in read_index_tar(bucket)
     end
 end
 
-@testitem "cache-infra regen: incremental tombstone merge" begin
+@testitem "cache-infra regen: incremental tombstone merge" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -227,7 +244,7 @@ $json_lines
             ["E/Example/$uuid_ok/h1"],
             [(uuid=uuid_ok,   treehash="h1", status="ok"),
              (uuid=uuid_bad1, treehash="h2", status="unsatisfiable")])
-        @test success(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
 
         @test "$uuid_bad1/h2" in read_tombstones_gz(bucket)
 
@@ -235,7 +252,7 @@ $json_lines
         workdir2 = joinpath(tmp, "work2"); mkpath(workdir2)
         make_stub_sweep(stub, String[],
             [(uuid=uuid_bad2, treehash="h3", status="unsatisfiable")])
-        @test success(`bash $regen --remote $remote --mode incremental --work $workdir2 --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $regen --remote $remote --mode incremental --work $workdir2 --sweep-cmd $("bash " * stub)`)
 
         tombs2 = read_tombstones_gz(bucket)
         # Both old and new tombstone keys must be present
@@ -244,10 +261,10 @@ $json_lines
     end
 end
 
-@testitem "cache-infra regen: full-mode shard preserves other shards' tombstones" begin
+@testitem "cache-infra regen: full-mode shard preserves other shards' tombstones" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -299,7 +316,7 @@ $json_lines
         workdir1 = joinpath(tmp, "work1"); mkpath(workdir1)
         make_stub_sweep(stub, String[],
             [(uuid=uuid_bad1, treehash="h2", status="unsatisfiable")])
-        @test success(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
         @test "$uuid_bad1/h2" in read_tombstones_gz(bucket)
 
         # --- Shard B: different partition; never attempts uuid_bad1/h2 ---
@@ -308,7 +325,7 @@ $json_lines
             ["E/Example/$uuid_ok/h1"],
             [(uuid=uuid_ok,   treehash="h1", status="ok"),
              (uuid=uuid_bad2, treehash="h3", status="unsatisfiable")])
-        @test success(`bash $regen --remote $remote --mode full --work $workdir2 --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $regen --remote $remote --mode full --work $workdir2 --sweep-cmd $("bash " * stub)`)
 
         tombs = read_tombstones_gz(bucket)
         # KEY ASSERTION: shard A's tombstone survives shard B's upload
@@ -318,10 +335,10 @@ $json_lines
     end
 end
 
-@testitem "cache-infra regen: full-mode retry graduates a tombstone that now succeeds" begin
+@testitem "cache-infra regen: full-mode retry graduates a tombstone that now succeeds" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -368,7 +385,7 @@ $json_lines
         workdir1 = joinpath(tmp, "work1"); mkpath(workdir1)
         make_stub_sweep(stub, String[],
             [(uuid=uuid_bad, treehash="h2", status="unsatisfiable")])
-        @test success(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $regen --remote $remote --mode full --work $workdir1 --sweep-cmd $("bash " * stub)`)
         @test "$uuid_bad/h2" in read_tombstones_gz(bucket)
 
         # --- Run 2: full retries it and it now succeeds ---
@@ -376,17 +393,17 @@ $json_lines
         make_stub_sweep(stub,
             ["B/Bad/$uuid_bad/h2"],
             [(uuid=uuid_bad, treehash="h2", status="ok")])
-        @test success(`bash $regen --remote $remote --mode full --work $workdir2 --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $regen --remote $remote --mode full --work $workdir2 --sweep-cmd $("bash " * stub)`)
 
         # Graduated: the key moved from tombstones to the index
         @test !("$uuid_bad/h2" in read_tombstones_gz(bucket))
     end
 end
 
-@testitem "cache-infra regen: cancelled status excluded from tombstones" begin
+@testitem "cache-infra regen: cancelled status excluded from tombstones" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -434,7 +451,7 @@ $json_lines
             [(uuid=uuid_cancelled, treehash="hc", status="cancelled"),
              (uuid=uuid_failed,    treehash="hf", status="failed")])
 
-        @test success(`bash $(joinpath(scripts, "regen_symbolcache.sh")) --remote $remote --mode full --work $workdir --sweep-cmd $("bash " * stub)`)
+        @test run_script(`bash $(joinpath(scripts, "regen_symbolcache.sh")) --remote $remote --mode full --work $workdir --sweep-cmd $("bash " * stub)`)
 
         tombs = read_tombstones_gz(bucket)
         # cancelled must NOT appear in tombstones
@@ -448,10 +465,10 @@ end
 # seed_symbolcache.sh tests
 # ===========================================================================
 
-@testitem "cache-infra seed: publishes artifacts + index + tombstones from a store" begin
+@testitem "cache-infra seed: publishes artifacts + index + tombstones from a store" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -494,7 +511,7 @@ end
         write(joinpath(store, "E", "Example", uuid_a, "h1.unavailable"), "failed\n")
 
         cmd = `bash $(joinpath(scripts, "seed_symbolcache.sh")) --remote $remote --store $store --work $workdir`
-        @test success(cmd)
+        @test run_script(cmd)
 
         # Artifacts uploaded at the expected paths
         @test isfile(joinpath(bucket, "store", V, "packages", "E", "Example", uuid_a, "h1.tar.gz"))
@@ -516,10 +533,10 @@ end
 # reconcile_symbolcache.sh tests
 # ===========================================================================
 
-@testitem "cache-infra reconcile: index recovery + stale tombstone drop" begin
+@testitem "cache-infra reconcile: index recovery + stale tombstone drop" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -572,7 +589,7 @@ end
                      joinpath(statedir, "tombstones.txt.gz")))
 
         cmd = `bash $(joinpath(scripts, "reconcile_symbolcache.sh")) --remote $remote --work $workdir`
-        @test success(cmd)
+        @test run_script(cmd)
 
         # 5a. Rebuilt index lists BOTH artifact keys
         index = read_index_tar(bucket)
@@ -588,8 +605,8 @@ end
 
 @testitem "cache-infra reconcile: layer-1 abort on rclone list failure" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -628,8 +645,8 @@ end
 
 @testitem "cache-infra reconcile: layer-2 abort on empty list with existing index" begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -669,10 +686,10 @@ end
     end
 end
 
-@testitem "cache-infra reconcile: genuine-empty first run produces 0-entry index" begin
+@testitem "cache-infra reconcile: genuine-empty first run produces 0-entry index" setup=[CacheInfraScripts] begin
     using JuliaWorkspaces
-    has_rclone = Sys.which("rclone") !== nothing
-    has_rclone || @info "skipping cache-infra integration test: rclone not on PATH"
+    has_rclone = Sys.islinux() && Sys.which("rclone") !== nothing
+    has_rclone || @info "skipping cache-infra integration test: needs rclone on linux"
     V = JuliaWorkspaces.SymbolServer.CACHE_STORE_VERSION
     pkg_root = abspath(joinpath(@__DIR__, ".."))
     scripts  = joinpath(pkg_root, "scripts")
@@ -695,7 +712,7 @@ end
         cmd = `bash $(joinpath(scripts, "reconcile_symbolcache.sh")) --remote $remote --work $workdir`
 
         # Must exit 0
-        @test success(cmd)
+        @test run_script(cmd)
 
         # Produced a 0-entry index
         index = read_index_tar(bucket)

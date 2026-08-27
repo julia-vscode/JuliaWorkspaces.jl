@@ -438,9 +438,9 @@ end
     @test tsd.code_range == (length("@testsnippet Foo begin ") + 1):(40 - 4)
 end
 
-@testitem "@testitem project detection" tags=[:skip] begin
+@testitem "@testitem project detection" begin
     using Pkg
-    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace
+    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace, get_test_env
     using JuliaWorkspaces.URIs2: @uri_str, filepath2uri
 
     old = Base.active_project()
@@ -449,6 +449,9 @@ end
         mktempdir() do root_path
             cp(joinpath(@__DIR__, "..", "testdata", "project_detection"), joinpath(root_path, "project_detection"))
 
+            # Three packages, three ways of belonging to an environment: one
+            # instantiated on its own, one dev'd into the enclosing project, and
+            # one that no environment resolves at all.
             Pkg.activate(joinpath(root_path, "project_detection", "TestPackage2"))
             Pkg.instantiate()
 
@@ -461,6 +464,10 @@ end
             file1_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage2", "src", "TestPackage2.jl"))
             file2_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage3", "src", "TestPackage3.jl"))
             file3_uri = filepath2uri(joinpath(root_path, "project_detection", "TestPackage4", "src", "TestPackage4.jl"))
+
+            @test get_test_env(jw, file1_uri).project_uri == filepath2uri(joinpath(root_path, "project_detection", "TestPackage2"))
+            @test get_test_env(jw, file2_uri).project_uri == filepath2uri(joinpath(root_path, "project_detection"))
+            @test get_test_env(jw, file3_uri).project_uri === nothing
         end
     finally
         Base.set_active_project(old)
@@ -604,6 +611,105 @@ version = "0.1.0"
     end
 end
 
+@testitem "test env content hash covers manifests and test project files" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, update_file!, TextFile, SourceText, get_test_env
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    [deps]
+    Inner = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    """
+
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+
+    [[deps.Inner]]
+    deps = []
+    path = "Inner"
+    uuid = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    version = "2.0.0"
+    """
+
+    inner_project = """
+    name = "Inner"
+    uuid = "6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22"
+    version = "2.0.0"
+    """
+
+    inner_test_project = """
+    [deps]
+    Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+    """
+
+    # Scenario 1: the package is deved into an active project (no manifest of its own)
+    outer_manifest_uri = URI("file:///hashenv/Manifest.toml")
+    inner_test_project_uri = URI("file:///hashenv/Inner/test/Project.toml")
+    inner_src_uri = URI("file:///hashenv/Inner/src/Inner.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///hashenv/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(outer_manifest_uri, SourceText(manifest_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///hashenv/Inner/Project.toml"), SourceText(inner_project, "toml")))
+    add_file!(jw, TextFile(inner_test_project_uri, SourceText(inner_test_project, "toml")))
+    add_file!(jw, TextFile(inner_src_uri, SourceText("module Inner end", "julia")))
+    JuliaWorkspaces.set_input_active_project!(jw.runtime, URI("file:///hashenv"))
+
+    env0 = get_test_env(jw, inner_src_uri)
+    @test env0.package_uri == URI("file:///hashenv/Inner")
+    @test env0.project_uri == URI("file:///hashenv")
+    hash0 = env0.env_content_hash
+    @test hash0 isa String
+    @test startswith(hash0, "x")
+
+    # Stable when nothing relevant changes, and across an unrelated src edit
+    @test get_test_env(jw, inner_src_uri).env_content_hash == hash0
+    update_file!(jw, TextFile(inner_src_uri, SourceText("module Inner
+x = 1
+end", "julia")))
+    @test get_test_env(jw, inner_src_uri).env_content_hash == hash0
+
+    # (a) the active project's Manifest.toml changes
+    update_file!(jw, TextFile(outer_manifest_uri, SourceText(manifest_toml * "
+# edited
+", "toml")))
+    hash1 = get_test_env(jw, inner_src_uri).env_content_hash
+    @test hash1 != hash0
+
+    # (b) test/Project.toml under the package changes
+    update_file!(jw, TextFile(inner_test_project_uri, SourceText(inner_test_project * "
+# edited
+", "toml")))
+    hash2 = get_test_env(jw, inner_src_uri).env_content_hash
+    @test hash2 != hash1
+    @test hash2 != hash0
+
+    # Scenario 2: a standalone package with its own Manifest.toml
+    pkg_manifest = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    """
+    pkg_manifest_uri = URI("file:///hashpkg/Manifest.toml")
+    pkg_src_uri = URI("file:///hashpkg/src/Inner.jl")
+
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(URI("file:///hashpkg/Project.toml"), SourceText(inner_project, "toml")))
+    add_file!(jw2, TextFile(pkg_manifest_uri, SourceText(pkg_manifest, "toml")))
+    add_file!(jw2, TextFile(pkg_src_uri, SourceText("module Inner end", "julia")))
+
+    env3 = get_test_env(jw2, pkg_src_uri)
+    @test env3.package_uri == URI("file:///hashpkg")
+    hash3 = env3.env_content_hash
+    @test get_test_env(jw2, pkg_src_uri).env_content_hash == hash3
+
+    # (c) the package folder's own Manifest.toml changes
+    update_file!(jw2, TextFile(pkg_manifest_uri, SourceText(pkg_manifest * "
+# edited
+", "toml")))
+    hash4 = get_test_env(jw2, pkg_src_uri).env_content_hash
+    @test hash4 != hash3
+end
+
 @testitem "derived_testenv for a file in a deved package of a project" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_env
     using JuliaWorkspaces.URIs2: URI
@@ -658,8 +764,8 @@ end
     @test !isequal(te_a, te_b)
     @test hash(te_a) != hash(te_b)
 
-    ti_a = TestItemDetail(u, "id", "n", "code", 24:23, 24:23, true, Symbol[], Symbol[])
-    ti_b = TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[])
+    ti_a = TestItemDetail(u, "id", "n", "code", 24:23, 24:23, true, Symbol[], Symbol[], false)
+    ti_b = TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[], false)
     @test ti_a != ti_b
     @test !isequal(ti_a, ti_b)
     @test hash(ti_a) != hash(ti_b)
@@ -672,8 +778,97 @@ end
 
     # Identical values still compare equal (backdating must still work).
     @test te_b == TestErrorDetail(u, "id", "n", "msg", 23:22)
-    @test isequal(ti_b, TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[]))
+    @test isequal(ti_b, TestItemDetail(u, "id", "n", "code", 23:22, 23:22, true, Symbol[], Symbol[], false))
     @test hash(ts_b) == hash(TestSetupDetail(u, :n, :k, "code", 23:22, 23:22))
+end
+
+@testsnippet TestItemPackage begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: @uri_str, URI
+
+    # A minimal in-memory package, so that test items in `test/bar.jl` resolve to a
+    # package root and therefore get an id relative to it.
+    function workspace_with(content)
+        jw = JuliaWorkspace()
+
+        add_file!(jw, TextFile(uri"file:///home/foo/Project.toml", SourceText("name = \"Foo\"\nuuid = \"12345678-1234-1234-1234-123456789012\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(uri"file:///home/foo/src/Foo.jl", SourceText("module Foo\nend\n", "julia")))
+        add_file!(jw, TextFile(uri"file:///home/foo/test/bar.jl", SourceText(content, "julia")))
+
+        return jw, uri"file:///home/foo/test/bar.jl"
+    end
+end
+
+@testitem "skip defaults to false" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testitems) == 1
+    @test test_results.testitems[1].option_skip === false
+end
+
+@testitem "skip literal is carried through" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" skip=true begin end\n@testitem "bar" skip=false begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testerrors) == 0
+    @test test_results.testitems[1].option_skip === true
+    @test test_results.testitems[2].option_skip === false
+end
+
+@testitem "skip expression is carried through as source text" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" skip=(VERSION < v"1.11") begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testerrors) == 0
+    # Parentheses are trivia to JuliaSyntax, so only the expression itself is sliced.
+    @test test_results.testitems[1].option_skip == "VERSION < v\"1.11\""
+end
+
+@testitem "test item ids are package qualified, package relative and label based" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" begin end\n@testitem "bar" begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test [ti.id for ti in test_results.testitems] == ["Foo@12345678/test/bar.jl::foo", "Foo@12345678/test/bar.jl::bar"]
+end
+
+@testitem "test item ids are invariant under inserting an item above" setup=[TestItemPackage] begin
+    jw1, uri = workspace_with("""@testitem "foo" begin end""")
+    jw2, _ = workspace_with("""@testitem "inserted" begin end\n@testitem "foo" begin end""")
+
+    id1 = only(get_test_items(jw1, uri).testitems).id
+    id2 = get_test_items(jw2, uri).testitems[2].id
+
+    @test id1 == id2 == "Foo@12345678/test/bar.jl::foo"
+end
+
+@testitem "duplicate test item labels get numbered ids and a definition error" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testitem "foo" begin end\n@testitem "foo" begin end\n@testitem "bar" begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    # Every occurrence is suffixed, not just the second one, so the error state is
+    # visible in the id itself and each item stays individually addressable.
+    @test [ti.id for ti in test_results.testitems] == ["Foo@12345678/test/bar.jl::foo#1", "Foo@12345678/test/bar.jl::foo#2", "Foo@12345678/test/bar.jl::bar"]
+
+    @test length(test_results.testerrors) == 2
+    @test all(te -> te.name == "foo", test_results.testerrors)
+    @test all(te -> occursin("used more than once", te.message), test_results.testerrors)
+    @test allunique(te.id for te in test_results.testerrors)
+end
+
+@testitem "duplicate test setup names produce a definition error" setup=[TestItemPackage] begin
+    jw, uri = workspace_with("""@testmodule Foo begin end\n@testsnippet Foo begin end""")
+
+    test_results = get_test_items(jw, uri)
+
+    @test length(test_results.testsetups) == 2
+    @test length(test_results.testerrors) == 2
+    @test all(te -> te.name == "Foo", test_results.testerrors)
 end
 
 @testitem "get_test_items on untitled (non-file) URI" begin
@@ -699,4 +894,79 @@ end
 
     @test length(test_results.testitems) == 0
     @test length(test_results.testerrors) == 1
+end
+
+@testitem "test items in different packages get different ids" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: URI
+
+    # The bug this format exists to fix. Both packages contain `test/runtests.jl` with a
+    # test item called "shared", so a package-relative id alone made them byte-identical —
+    # and the runner keys work by id, so one of the two silently never ran.
+    jw = JuliaWorkspace()
+    for (folder, name, uuid) in (
+            ("alpha", "Alpha", "aaaaaaaa-1234-1234-1234-123456789012"),
+            ("beta", "Beta", "bbbbbbbb-1234-1234-1234-123456789012"))
+        add_file!(jw, TextFile(URI("file:///home/$folder/Project.toml"),
+            SourceText("name = \"$name\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/src/$name.jl"),
+            SourceText("module $name\nend\n", "julia")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/test/runtests.jl"),
+            SourceText("""@testitem "shared" begin end""", "julia")))
+    end
+
+    id_a = only(get_test_items(jw, URI("file:///home/alpha/test/runtests.jl")).testitems).id
+    id_b = only(get_test_items(jw, URI("file:///home/beta/test/runtests.jl")).testitems).id
+
+    @test id_a == "Alpha@aaaaaaaa/test/runtests.jl::shared"
+    @test id_b == "Beta@bbbbbbbb/test/runtests.jl::shared"
+    @test id_a != id_b
+end
+
+@testitem "same-named packages with different uuids get different ids" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: URI
+
+    # A vendored copy sitting beside a dev checkout: same name, different package. The uuid
+    # fragment is what separates them.
+    jw = JuliaWorkspace()
+    for (folder, uuid) in (("dev", "aaaaaaaa-1234-1234-1234-123456789012"),
+                           ("vendor", "bbbbbbbb-1234-1234-1234-123456789012"))
+        add_file!(jw, TextFile(URI("file:///home/$folder/Project.toml"),
+            SourceText("name = \"Same\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/src/Same.jl"),
+            SourceText("module Same\nend\n", "julia")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/test/runtests.jl"),
+            SourceText("""@testitem "x" begin end""", "julia")))
+    end
+
+    id_dev = only(get_test_items(jw, URI("file:///home/dev/test/runtests.jl")).testitems).id
+    id_vendor = only(get_test_items(jw, URI("file:///home/vendor/test/runtests.jl")).testitems).id
+
+    @test id_dev != id_vendor
+end
+
+@testitem "the same package cloned twice mints the same id, by design" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: URI
+
+    # Two worktrees of one package share a name AND a uuid, so their ids are identical.
+    # That is deliberate and not a bug to "fix" here: the only thing separating two clones
+    # is their location, and location differs between a dev checkout and a CI runner, so an
+    # id cannot be both workspace-unique and portable. This one keeps portability; callers
+    # that need uniqueness key on `(package_uri, id)`.
+    jw = JuliaWorkspace()
+    for folder in ("wt-a", "wt-b")
+        add_file!(jw, TextFile(URI("file:///home/$folder/Project.toml"),
+            SourceText("name = \"Clone\"\nuuid = \"cccccccc-1234-1234-1234-123456789012\"\nversion = \"0.1.0\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/src/Clone.jl"),
+            SourceText("module Clone\nend\n", "julia")))
+        add_file!(jw, TextFile(URI("file:///home/$folder/test/runtests.jl"),
+            SourceText("""@testitem "x" begin end""", "julia")))
+    end
+
+    id_a = only(get_test_items(jw, URI("file:///home/wt-a/test/runtests.jl")).testitems).id
+    id_b = only(get_test_items(jw, URI("file:///home/wt-b/test/runtests.jl")).testitems).id
+
+    @test id_a == id_b == "Clone@cccccccc/test/runtests.jl::x"
 end

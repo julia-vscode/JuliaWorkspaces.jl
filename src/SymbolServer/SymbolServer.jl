@@ -29,32 +29,45 @@ mutable struct SymbolServerInstance
 
     function SymbolServerInstance(depot_path::String="", store_path::Union{String,Nothing}=nothing, julia_exe::Union{NamedTuple{(:path,:version),Tuple{String,VersionNumber}},Nothing}=nothing; symbolcache_upstream = nothing)
         if symbolcache_upstream === nothing
-            symbolcache_upstream = "https://julia-symbolcache.org"
+            symbolcache_upstream = "https://symbolcache.julialang.net"
         end
         return new(nothing, depot_path, julia_exe === nothing ? joinpath(Sys.BINDIR, Base.julia_exename()) : julia_exe.path, julia_exe === nothing ? VERSION : julia_exe.version, Set{Process}(), store_path === nothing ? abspath(joinpath(@__DIR__, "..", "store")) : store_path, symbolcache_upstream)
     end
 end
 
 const GENERAL_REGISTRY_UUID = UUID("23338594-aafe-5451-b93e-139f81909106")
+function _general_pkgs_in_current_depot()
+    @static if VERSION >= v"1.7-"
+        regs = Pkg.Types.Context().registries
+        i = findfirst(r -> r.name == "General" && r.uuid == GENERAL_REGISTRY_UUID, regs)
+        i === nothing && return Dict()
+        return regs[i].pkgs
+    else
+        for r in Pkg.Types.collect_registries()
+            (r.name == "General" && r.uuid == GENERAL_REGISTRY_UUID) || continue
+            reg = Pkg.Types.read_registry(joinpath(r.path, "Registry.toml"))
+            return reg["packages"]
+        end
+        return Dict()
+    end
+end
+
 function get_general_pkgs()
+    # Whatever depot this process is actually configured with comes first, so a run that has
+    # deliberately isolated its depot — a test, a sandbox — stays isolated.
+    pkgs = _general_pkgs_in_current_depot()
+    isempty(pkgs) || return pkgs
+
+    # Only if that turned up no General registry do we fall back to the default user depot:
+    # a host that overrode JULIA_DEPOT_PATH without carrying the registry over would
+    # otherwise send every package to local cache generation.
+    home_depot = joinpath(homedir(), ".julia")
+    home_depot in Base.DEPOT_PATH && return pkgs
+
     dp_before = copy(Base.DEPOT_PATH)
     try
-        # because the env var JULIA_DEPOT_PATH is overritten this is probably the best
-        # guess depot location
-        push!(empty!(Base.DEPOT_PATH), joinpath(homedir(), ".julia"))
-        @static if VERSION >= v"1.7-"
-            regs = Pkg.Types.Context().registries
-            i = findfirst(r -> r.name == "General" && r.uuid == GENERAL_REGISTRY_UUID, regs)
-            i === nothing && return Dict()
-            return regs[i].pkgs
-        else
-            for r in Pkg.Types.collect_registries()
-                (r.name == "General" && r.uuid == GENERAL_REGISTRY_UUID) || continue
-                reg = Pkg.Types.read_registry(joinpath(r.path, "Registry.toml"))
-                return reg["packages"]
-            end
-            return Dict()
-        end
+        push!(empty!(Base.DEPOT_PATH), home_depot)
+        return _general_pkgs_in_current_depot()
     finally
         append!(empty!(Base.DEPOT_PATH), dp_before)
     end

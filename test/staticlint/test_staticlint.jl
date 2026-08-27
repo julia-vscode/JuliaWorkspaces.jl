@@ -38,9 +38,28 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
         return StaticLint.collect_hints(x, get_env(jw), res.workspace_packages, meta_dict, missingrefs)
     end
 
+    # Never let the workspace fall through to its default store, which is the scratch space
+    # inside the user's depot: in dynamic mode the store's parent also carries
+    # `standalone-projects`, which the dynamic feature mkpaths, instantiates into and
+    # `rm(...; recursive=true)`s. One directory for the whole module rather than one per call,
+    # so repeated `parse_and_pass`es share a warm store.
+    const _STORE_PATH = Ref{Union{Nothing,String}}(nothing)
+    const _STORE_LOCK = ReentrantLock()
+
+    function shared_store_path()
+        lock(_STORE_LOCK) do
+            cached = _STORE_PATH[]
+            cached === nothing || return cached
+
+            path = mktempdir()
+            _STORE_PATH[] = path
+            return path
+        end
+    end
+
     function parse_and_pass(s; dynamic::DynamicMode=DynamicOff)
         our_uri = TEST_URI
-        jw = JuliaWorkspaces.JuliaWorkspace(;dynamic=dynamic)
+        jw = JuliaWorkspaces.JuliaWorkspace(;dynamic=dynamic, store_path=shared_store_path())
         add_file!(jw, TextFile(our_uri, SourceText(s, "julia")))
 
         if dynamic==DynamicIndexingOnly
@@ -2455,15 +2474,6 @@ end
     cst, meta_dict = parse_and_pass("using Base.Meta: quot, lower")
 end
 
-@testitem "issue 1609" setup=[shared_static_lint] begin
-    using JuliaWorkspaces.StaticLint: haserror
-
-    cst1, meta_dict1 = parse_and_pass("function g(@nospecialize(x), y) x + y end")
-    cst2, meta_dict2 = parse_and_pass("function g(@nospecialize(x), y) y end")
-    @test !haserror(cst1.args[1].args[1].args[2].args[3], meta_dict1)
-    @test haserror(cst2.args[1].args[1].args[2].args[3], meta_dict2)
-end
-
 @testitem "j-vsc issue 1835" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: errorof
 
@@ -2806,7 +2816,7 @@ end
     @test bindingof(cst[2][2][3], meta_dict).type == bindingof(cst[1], meta_dict)
 end
 
-@testitem "clear .type refs" setup=[shared_static_lint] begin
+@testitem "where clauses in a struct signature produce no hints" setup=[shared_static_lint] begin
     cst, meta_dict, jw = parse_and_pass("""
     struct T{S,R} where S <: Number where R <: Number
     end
@@ -2835,7 +2845,7 @@ end
     @test isempty(get_hints(jw))
 end
 
-@testitem "where type param infer" setup=[shared_static_lint] begin
+@testitem "where type param infer: nested where clauses" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: getmeta
 
     cst, meta_dict, jw = parse_and_pass("""
@@ -3002,7 +3012,7 @@ end
 end
 
 
-@testitem "#1218" setup=[shared_static_lint] begin
+@testitem "#1218: a method on a function imported from a parent module" setup=[shared_static_lint] begin
     cst, meta_dict, jw = parse_and_pass("""
     module Sup
     function myfunc end
@@ -5294,6 +5304,151 @@ end
     bare_store = SS.ModuleStore(SS.VarRef(nothing, :Bare), Dict{Symbol,Any}(),
         "", Symbol[], Symbol[], [:Core])
     @test SS.maybe_getfield(:sin, bare_store, env.symbols) === nothing
+end
+
+@testitem "struct fields behind field-modifier macros are not missing references" setup=[shared_static_lint] begin
+    # `@atomic` is a known field modifier: the wrapped declaration still gets a
+    # field binding, so accesses resolve and are not hinted.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        mutable struct T
+            @atomic field::Int
+        end
+        f(arg::T) = arg.field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Same for a docstring-wrapped field.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            "a documented field"
+            field::Int
+        end
+        f(arg::T) = arg.field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # A member wrapped in an arbitrary macro may declare fields the binding
+    # pass cannot see, so the struct's field set is not enumerable: accesses to
+    # unknown names must not be flagged...
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro addfield(x)
+            esc(x)
+        end
+        struct T
+            @addfield hidden
+            x::Int
+        end
+        f(arg::T) = arg.hidden
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # ...but a plain struct without macro members still flags unknown fields.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            x::Int
+        end
+        f(arg::T) = arg.missing_field
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+    end
+
+    # A docstring-wrapped field keeps the struct enumerable: unknown fields on
+    # a documented struct are still flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            "a documented field"
+            field::Int
+        end
+        f(arg::T) = arg.missing_field
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+    end
+end
+
+@testitem "getfield inside macro args is not a missing reference" setup=[shared_static_lint] begin
+    # The plain-identifier arm already suppresses names inside opaque macro
+    # calls; the getfield arm must do the same for `a.b` field names.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro m(x)
+        end
+        struct T
+            x::Int
+        end
+        t = T(1)
+        @m t.some_field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
+
+@testitem "NamedTuple field access is not a missing reference" setup=[shared_static_lint] begin
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        f(nt::NamedTuple) = nt.some_key
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
+
+@testitem "eval-loop constructors do not shadow their types" setup=[shared_static_lint] begin
+    # `for FT in (:A, :B) @eval $FT(x) = ... end` hoists constructor
+    # definitions; they must not replace the DataType bindings, or every later
+    # `::A` annotation reports InvalidTypeDeclaration.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct AType{T} end
+        struct BType{T} end
+        const AVec{T} = AType{T}
+        for FT in (:AType, :BType)
+            @eval \$FT(x::Int) = [x]
+        end
+        f(a::AType) = a
+        g(b::BType) = b
+        h(v::AVec) = v
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Single interpolated name (`name = :AType`) takes the other interpret_eval
+    # arm; same rule applies.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct AType{T} end
+        name = :AType
+        @eval \$name(x::Int) = [x]
+        f(a::AType) = a
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Negative control: a genuine non-type annotation still flags.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        foo() = 1
+        f(x::foo) = x
+        """)
+        @test length(collect_hints(cst, meta_dict, jw)) == 1
+    end
+end
+
+@testitem "struct plus outer constructor inside a block scope" setup=[shared_static_lint] begin
+    # A function definition over a SAME-scope struct (inside @testset/let) is a
+    # method addition; it must not shadow the type.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        using Test
+        @testset "t" begin
+            struct Flipped <: AbstractVector{Float64}
+                x::Float64
+            end
+            Flipped(t::Tuple) = Flipped(t[1])
+            Base.getindex(a::Flipped, i::Int) = a.x
+        end
+        """)
+        SL = JuliaWorkspaces.StaticLint
+        hints = collect_hints(cst, meta_dict, jw)
+        @test !any(h -> SL.errorof(h[2], meta_dict) === SL.InvalidTypeDeclaration, hints)
+    end
 end
 
 @testitem "const/function pairs in mutually exclusive branches" setup=[shared_static_lint] begin

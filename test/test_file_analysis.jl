@@ -2250,3 +2250,51 @@ end
     @test !any(d -> occursin("method matching", d.message) ||
                     occursin("method call error", d.message), fa.diagnostics)
 end
+
+@testitem "invalidation: a body edit in a testitem-included helper backdates" setup=[FileAnalysisWS] begin
+    import JuliaWorkspaces.Salsa.TraceLogging as TL
+
+    mutable struct TICountReceiver <: TL.AbstractTraceReceiver
+        counts::Dict{String,Int}
+    end
+    TICountReceiver() = TICountReceiver(Dict{String,Int}())
+    TL.receive_span(r::TICountReceiver, span::TL.TraceSpan) =
+        (r.counts[span.name] = get(r.counts, span.name, 0) + 1; nothing)
+
+    TESTS = URI("file:///t/test/tests.jl")
+    SHARED = URI("file:///t/test/shared.jl")
+
+    jw = ws_with(Dict(
+        TESTS => """
+        @testitem "one" begin
+            include("shared.jl")
+            helper(1)
+        end
+        """,
+        SHARED => "helper(x) = x + 1\n",
+    ))
+    rt = jw.runtime
+
+    # untraced baseline
+    fa0 = JuliaWorkspaces.derived_file_analysis(rt, TESTS, TESTS)
+    @test !isempty(fa0.meta)
+    inv0 = JuliaWorkspaces.derived_file_inventory(rt, SHARED)
+    JuliaWorkspaces.derived_module_tree(rt, TESTS)
+
+    # A body-only edit in the helper: the test item's segment must not encode
+    # position, or the inventory would differ and the whole tree would rebuild.
+    JuliaWorkspaces.update_file!(jw, TextFile(SHARED, SourceText("helper(x) = x * 42\n", "julia")))
+    @test isequal(inv0, JuliaWorkspaces.derived_file_inventory(rt, SHARED))
+
+    recv = TICountReceiver()
+    TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, TESTS, TESTS), recv)
+    @test get(recv.counts, "derived_file_analysis", 0) == 0
+    @test get(recv.counts, "derived_module_tree", 0) == 0
+
+    # Renaming a top-level name in the helper DOES change what the test item
+    # sees, so that analysis must re-execute.
+    JuliaWorkspaces.update_file!(jw, TextFile(SHARED, SourceText("renamed_helper(x) = x\n", "julia")))
+    recv2 = TICountReceiver()
+    TL.with_tracing(() -> JuliaWorkspaces.derived_file_analysis(rt, TESTS, TESTS), recv2)
+    @test get(recv2.counts, "derived_file_analysis", 0) == 1
+end

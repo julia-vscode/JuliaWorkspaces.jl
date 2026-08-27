@@ -851,13 +851,16 @@ end
     end
     nm(t) = t === nothing ? "nothing" : _isany(t) ? "Any" : string(_basename(t))
 
+    # An integer literal takes the machine `Int`, so its name is word-size dependent.
+    INT = "Core.$(Symbol(Int))"
+
     # Disagreeing assignments: BOTH bindings widen, including the earlier one —
     # a use between them can still see the later value at runtime.
     @test nm.(types_of("function f(c)\n    x = nothing\n    g(x)\n    x = 1\nend\n", "x")) ==
         ["Any", "Any"]
 
     # Agreement is left alone
-    @test nm.(types_of("function f(c)\n    x = 1\n    g(x)\n    x = 2\nend\n", "x")) == ["Core.Int64", "Core.Int64"]
+    @test nm.(types_of("function f(c)\n    x = 1\n    g(x)\n    x = 2\nend\n", "x")) == [INT, INT]
 
     # They settle on the nearest type covering both, not on `Any`: `Real` still
     # rules out a `String` parameter, which `Any` would not.
@@ -871,7 +874,7 @@ end
         ["nothing", "Any"]
 
     # A name assigned once is untouched
-    @test nm.(types_of("function f()\n    x = 1\n    g(x)\nend\n", "x")) == ["Core.Int64"]
+    @test nm.(types_of("function f()\n    x = 1\n    g(x)\nend\n", "x")) == [INT]
 
     # Method accumulation is not rebinding
     @test all(t -> !_isany(t), types_of("f(x) = 1\nf(x, y) = 2\n", "f"))
@@ -891,7 +894,7 @@ end
     end
     """, "x")
     # the outer `x` is assigned once and keeps its type
-    @test nm(outer[1]) == "Core.Int64"
+    @test nm(outer[1]) == INT
     # the closure's parameter stays un-inferred, its two assignments widen
     @test nm.(outer[2:end]) == ["nothing", "Any", "Any"]
 end

@@ -4,6 +4,7 @@
 [![Build Status](https://github.com/julia-vscode/JuliaWorkspaces.jl/actions/workflows/juliaci.yml/badge.svg?branch=main)](https://github.com/julia-vscode/JuliaWorkspaces.jl/actions/workflows/juliaci.yml)
 
 The analysis engine that powers [LanguageServer.jl](https://github.com/julia-vscode/LanguageServer.jl).
+See also [LintApp.jl](https://github.com/julia-vscode/LintApp.jl) a standalone command-line application that using JuliaWorkspaces to do linting.
 
 JuliaWorkspaces.jl takes a set of files — Julia sources, `Project.toml` /
 `Manifest.toml`, configuration files — and answers questions about them:

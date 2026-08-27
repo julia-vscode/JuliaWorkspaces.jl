@@ -373,7 +373,7 @@ end
     end
 end
 
-@testitem "scratch env: TestEnv activates against the scratch env" tags = [:integration] begin
+@testitem "scratch env: TestEnv activates against the scratch env" begin
     include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
     import Pkg
 

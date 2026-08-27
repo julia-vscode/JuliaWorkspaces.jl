@@ -386,9 +386,7 @@ function interpret_eval(x::EXPR, state)
                     toplevel_binding = Binding(rhs, b.val, nothing, [])
                     settype!(toplevel_binding, b.type)
                     infer_type(toplevel_binding, tls, state)
-                    if scopehasbinding(tls, valofid(toplevel_binding.name))
-                        tls.names[valofid(toplevel_binding.name)] = toplevel_binding # TODO: do we need to check whether this adds a method?
-                    else
+                    if !_eval_binding_is_method_addition(tls, valofid(toplevel_binding.name), toplevel_binding.val)
                         tls.names[valofid(toplevel_binding.name)] = toplevel_binding
                     end
                 elseif is_loop_iterator(ref.val) && (names = maybe_quoted_list(rhs_of_iterator(ref.val))) !== nothing
@@ -397,9 +395,7 @@ function interpret_eval(x::EXPR, state)
                         toplevel_binding = Binding(name, b.val, nothing, [])
                         settype!(toplevel_binding, b.type)
                         infer_type(toplevel_binding, tls, state)
-                        if scopehasbinding(tls, valofid(toplevel_binding.name))
-                            tls.names[valofid(toplevel_binding.name)] = toplevel_binding # TODO: do we need to check whether this adds a method?
-                        else
+                        if !_eval_binding_is_method_addition(tls, valofid(toplevel_binding.name), toplevel_binding.val)
                             tls.names[valofid(toplevel_binding.name)] = toplevel_binding
                         end
                     end
@@ -409,6 +405,23 @@ function interpret_eval(x::EXPR, state)
     end
 end
 
+
+# An `@eval`-hoisted function definition over an existing function or type
+# binding is a METHOD ADDITION and must not replace the toplevel binding.
+# `for FT in (:OffsetArray, :OffsetVector) @eval $FT(x) = ... end` constructor
+# loops otherwise retype the DataType binding as a Function, turning every
+# later `::OffsetArray` annotation into an InvalidTypeDeclaration. Mirrors the
+# "do nothing, name resolves to the root method" arm of `add_binding`.
+function _eval_binding_is_method_addition(tls, name_str, newval)
+    (newval isa EXPR && CSTParser.defines_function(newval)) || return false
+    scopehasbinding(tls, name_str) || return false
+    existing = tls.names[name_str]
+    if existing isa Binding && (existing.val isa Binding || existing.val isa SymbolServer.FunctionStore || existing.val isa SymbolServer.DataTypeStore)
+        existing = existing.val
+    end
+    return (existing isa Binding && (CoreTypes.isfunction(existing.type) || CoreTypes.isdatatype(existing.type))) ||
+           existing isa SymbolServer.FunctionStore || existing isa SymbolServer.DataTypeStore
+end
 
 function rhs_of_iterator(x::EXPR)
     if isassignment(x)
@@ -570,6 +583,12 @@ function _handle_testitem(x::EXPR, state::Toplevel)
     # item_scope we just created).
     tctx = enclosing_tree_context(state.scope)
 
+    # The body's own module-tree node — this is what makes names from a file
+    # `include`d in the body resolve. Seeded before the injections below so
+    # they can overwrite nothing of it (they only touch `names` and other
+    # `modules` keys).
+    _seed_testitem_tree_context!(item_scope, x, state, tctx)
+
     # If default_imports=true, add Test and the parent package module
     default_imports && state.simulate_testitem_runtime && _inject_testitem_default_imports!(item_scope, state, tctx)
 
@@ -638,6 +657,43 @@ function _handle_testitem(x::EXPR, state::Toplevel)
     # NOTE: We intentionally do NOT call process_EXPR(body, state) here.
     # The body will be processed by the standard traverse() in process_EXPR,
     # which will use the scope we just created (pushed by scopes()).
+    return
+end
+
+"""
+    _seed_testitem_tree_context!(scope, x, state, tctx)
+
+Point the testitem-family body's scope at its OWN node in the module tree.
+
+The inventory walker records a `@testitem`/`@testmodule`/`@testsnippet` body as
+a `:testitem` node (`InventoryTestItem`), so an `include(...)` written in the
+body splices the target's declarations there rather than into the enclosing
+file's module — which is what actually happens at runtime. Re-seeding
+`:__tree__` to the child context for that node is what lets `resolve_ref`'s
+existing `scope.modules` lookup find those names.
+
+The segment comes from `derived_testitem_segments` rather than being
+re-derived here: the inventory walker only visits top-level-ish statements
+while StaticLint traverses everything, so an independent implementation would
+drift and silently point at a node that does not exist.
+
+Deliberately NOT gated on `state.simulate_testitem_runtime` (unlike the
+default-imports and setup injections): this is tree structure, not runtime
+simulation, and it cannot cycle — `derived_testitem_segments` and the
+`derived_module_*` queries reach only the inventory and the CST, never
+`derived_test_setups_in_file` or `derived_file_analysis`.
+"""
+function _seed_testitem_tree_context!(scope::Scope, x::EXPR, state::Toplevel, tctx)
+    # Whole-closure mode has no tree context to descend from — there,
+    # `followinclude` really does traverse the target into this scope.
+    tctx === nothing && return
+    seg = get(derived_testitem_segments(state.runtime, state.uri), UInt64(objectid(x)), nothing)
+    seg === nothing && return
+    scope.modules[:__tree__] = child_module_context(tctx, seg)
+    # Plain data, so it survives `strip_module_contexts!` and the freeze: this
+    # is how the absolute-module-path walk recovers the segment at request time
+    # (`_in_file_module_names`), when the context handle above is long gone.
+    scope.testitem_segment = seg
     return
 end
 
@@ -745,6 +801,7 @@ function _handle_testmodule(x::EXPR, state::Toplevel)
     mod_scope.modules = Dict{Symbol,Any}()
     mod_scope.modules[:Base] = getsymbols(state)[:Base]
     mod_scope.modules[:Core] = getsymbols(state)[:Core]
+    _seed_testitem_tree_context!(mod_scope, x, state, enclosing_tree_context(state.scope))
 
     # Create a binding for the module name
     binding = Binding(name_expr, x, nothing, EXPR[], true)
@@ -789,7 +846,10 @@ function _handle_testsnippet(x::EXPR, state::Toplevel)
     snip_scope.modules[:Base] = getsymbols(state)[:Base]
     snip_scope.modules[:Core] = getsymbols(state)[:Core]
 
-    default_imports && state.simulate_testitem_runtime && _inject_testitem_default_imports!(snip_scope, state, enclosing_tree_context(state.scope))
+    tctx = enclosing_tree_context(state.scope)
+    _seed_testitem_tree_context!(snip_scope, x, state, tctx)
+
+    default_imports && state.simulate_testitem_runtime && _inject_testitem_default_imports!(snip_scope, state, tctx)
 
     # Body will be traversed by the standard traverse() in process_EXPR,
     # using this isolating scope (pushed by scopes()).

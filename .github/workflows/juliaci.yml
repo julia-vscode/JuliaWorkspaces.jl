@@ -12,7 +12,8 @@ jobs:
     with:
       include-all-compatible-minor-versions: true
       include-rc-versions: true
-      filter: 'dirname(filename) == joinpath(pwd(), "test")'
+      # Which files hold test items is decided by JuliaTestItems.toml, not here.
+      github_job_prep_script: .github/ci_prep.jl
     permissions: write-all
     secrets:
       codecov_token: ${{ secrets.CODECOV_TOKEN }}

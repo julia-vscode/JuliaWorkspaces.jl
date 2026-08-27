@@ -19,6 +19,8 @@ Details of a test item.
 - `option_default_imports`::Bool
 - option_tags::Vector{Symbol}
 - option_setup::Vector{Symbol}
+- `option_skip`::Union{Bool,String} — a literal `true`/`false`, or the source text of an
+  expression that the test process evaluates just before the test item would run.
 """
 struct TestItemDetail
     uri::URI
@@ -30,8 +32,9 @@ struct TestItemDetail
     option_default_imports::Bool
     option_tags::Vector{Symbol}
     option_setup::Vector{Symbol}
+    option_skip::Union{Bool,String}
 end
-_key(x::TestItemDetail) = (x.uri, x.id, x.name, x.code, _range_key(x.range), _range_key(x.code_range), x.option_default_imports, x.option_tags, x.option_setup)
+_key(x::TestItemDetail) = (x.uri, x.id, x.name, x.code, _range_key(x.range), _range_key(x.code_range), x.option_default_imports, x.option_tags, x.option_setup, x.option_skip)
 Base.:(==)(a::TestItemDetail, b::TestItemDetail) = _key(a) == _key(b)
 Base.isequal(a::TestItemDetail, b::TestItemDetail) = isequal(_key(a), _key(b))
 Base.hash(x::TestItemDetail, h::UInt) = hash(_key(x), hash(TestItemDetail, h))
@@ -208,12 +211,23 @@ end
 """
     struct JuliaTestEnv
 
-Details of a Julia test environment.
+What a test item in some file needs in order to run. Not a resolved environment:
+these are the ingredients a runner builds one from (see [`get_test_env`](@ref)).
 
-- package_name::String
-- package_uri::Union{URI,Nothing}
-- project_uri::Union{URI,Nothing}
-- `env_content_hash`::Union{UInt,Nothing}
+- `package_name::Union{String,Nothing}` — name of the package that owns the file.
+- `package_uri::Union{URI,Nothing}` — its folder, whose `Project.toml` carries
+  `name`, `uuid` and `version`. `nothing` when the file is not inside a package,
+  in which case its test items cannot run.
+- `project_uri::Union{URI,Nothing}` — the project whose `Manifest.toml` supplies
+  the version pins, or `nothing` to use the package folder itself. It is either
+  the package folder or a project whose manifest `dev`s the package; it supplies
+  pins only, never dependencies, since the test environment is built from the
+  package's test target.
+- `env_content_hash::Union{String,Nothing}` — an opaque hash of everything the
+  environment is built from: the project's Project and Manifest, the package's
+  own pair, and the package's `test/Project.toml` and `test/Manifest.toml`. A
+  runner reuses a test process while this matches and restarts it when it
+  changes.
 """
 @auto_hash_equals struct JuliaTestEnv
     package_name::Union{String,Nothing}
@@ -377,6 +391,36 @@ end
 
 SContext(dynamic_feature) = SContext(dynamic_feature, nothing)
 
+# Scratch.jl appends an entry to ~/.julia/logs/scratch_usage.toml on the first
+# get_scratch! of every process, without any locking. With many short-lived
+# processes hitting this at once (parallel test workers constructing
+# JuliaWorkspace) the append races Pkg.gc's non-atomic rewrite of the same
+# file and corrupts it. Let the append through at most once per day
+# machine-wide — a marker file inside the scratch dir carries the
+# cross-process state — and suppress it otherwise. The daily append is still
+# needed so Pkg.gc keeps considering the scratch space in use.
+function get_scratch_rate_limited(scratch_key)
+    marker = joinpath(first(Base.DEPOT_PATH), "scratchspaces",
+        string(Base.PkgId(@__MODULE__).uuid), scratch_key, ".usage_stamped")
+    stamped_recently = try
+        isfile(marker) && time() - mtime(marker) < 24 * 60 * 60
+    catch
+        false
+    end
+    if stamped_recently
+        return withenv("JULIA_SCRATCH_TRACK_ACCESS" => "0") do
+            Scratch.@get_scratch!(scratch_key)
+        end
+    else
+        path = Scratch.@get_scratch!(scratch_key)
+        try
+            touch(marker)
+        catch
+        end
+        return path
+    end
+end
+
 """
     struct JuliaWorkspace
 
@@ -433,36 +477,6 @@ Create an empty workspace. To build one directly from folders on disc, use
   projects or test environments are created; only real project environments
   are watched. Defaults to `true`.
 """
-# Scratch.jl appends an entry to ~/.julia/logs/scratch_usage.toml on the first
-# get_scratch! of every process, without any locking. With many short-lived
-# processes hitting this at once (parallel test workers constructing
-# JuliaWorkspace) the append races Pkg.gc's non-atomic rewrite of the same
-# file and corrupts it. Let the append through at most once per day
-# machine-wide — a marker file inside the scratch dir carries the
-# cross-process state — and suppress it otherwise. The daily append is still
-# needed so Pkg.gc keeps considering the scratch space in use.
-function get_scratch_rate_limited(scratch_key)
-    marker = joinpath(first(Base.DEPOT_PATH), "scratchspaces",
-        string(Base.PkgId(@__MODULE__).uuid), scratch_key, ".usage_stamped")
-    stamped_recently = try
-        isfile(marker) && time() - mtime(marker) < 24 * 60 * 60
-    catch
-        false
-    end
-    if stamped_recently
-        return withenv("JULIA_SCRATCH_TRACK_ACCESS" => "0") do
-            Scratch.@get_scratch!(scratch_key)
-        end
-    else
-        path = Scratch.@get_scratch!(scratch_key)
-        try
-            touch(marker)
-        catch
-        end
-        return path
-    end
-end
-
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
