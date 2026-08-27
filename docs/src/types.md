@@ -85,6 +85,7 @@ See [Configuration](configuration.md) for the file format these describe.
 
 ```@docs
 LintRule
+LintTier
 EffectiveLintConfig
 EffectiveFormatConfig
 GlobPattern

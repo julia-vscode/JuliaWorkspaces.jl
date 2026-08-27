@@ -5,11 +5,11 @@
 
     f = URI("file:///t/src/T.jl")
     make() = ModuleTree(f,
-        [ModuleNode(String[], false, nothing, [f],
+        [ModuleNode(String[], :root, false, nothing, [f],
             Dict("g" => ItemRef(f, 2)), ["g"], String[],
             [ResolvedImport(:using, ImportTarget(:external, ["Base64"]),
                             JuliaWorkspaces.ImportSymbol[], nothing, ItemRef(f, 1))]),
-         ModuleNode(["M"], false, ItemRef(f, 3), [f], Dict{String,ItemRef}(), String[], String[], ResolvedImport[])],
+         ModuleNode(["M"], :module, false, ItemRef(f, 3), [f], Dict{String,ItemRef}(), String[], String[], ResolvedImport[])],
         Dict(f => String[]))
 
     a = make(); b = make()
@@ -195,6 +195,120 @@ end
     root_node = module_node(tree, String[])
     @test count(==(a_uri), root_node.files) == 1
     @test root_node.files == [root_uri, a_uri]
+end
+
+@testitem "module tree: a helper splices into EVERY test item that includes it" setup=[ModuleTreeWS] begin
+    # The whole point of the test-item exception to first-include-wins: under
+    # the plain rule only the first body would see `helper`.
+    sh = URI("file:///t/src/shared.jl")
+    tree, root_uri, jw = tree_of("""
+    @testitem "one" begin
+        include("shared.jl")
+    end
+    @testitem "two" begin
+        include("shared.jl")
+    end
+    @testitem "three" begin
+        include("shared.jl")
+    end
+    """; extra_files=Dict(sh => "helper() = 1\n"))
+
+    ti_nodes = filter(n -> n.kind === :testitem, tree.modules)
+    @test length(ti_nodes) == 3
+    @test all(n -> haskey(n.declared, "helper"), ti_nodes)
+    @test all(n -> sh in n.files, ti_nodes)
+
+    # Node kinds are the semantic marker.
+    @test module_node(tree, String[]).kind === :root
+    # The helper's own analysis context is the FIRST splice.
+    @test tree.file_modules[sh] == ti_nodes[1].path
+
+    # Nothing leaks into the enclosing module: neither the helper's names nor
+    # the test items themselves are declared there.
+    root_node = module_node(tree, String[])
+    @test !haskey(root_node.declared, "helper")
+    @test isempty(root_node.declared)
+    for n in ti_nodes
+        @test !haskey(root_node.declared, only(n.path))
+    end
+
+    # ...and they are not visible names of the enclosing module either.
+    vis = JuliaWorkspaces.derived_module_visible_names_idfree(jw.runtime, root_uri, String[])
+    @test !haskey(vis, "helper")
+    @test !any(k -> startswith(k, "#"), keys(vis))
+
+    # A test item binds no self-name inside itself.
+    own = JuliaWorkspaces.derived_module_visible_names_idfree(jw.runtime, root_uri, ti_nodes[1].path)
+    @test haskey(own, "helper")
+    @test !haskey(own, only(ti_nodes[1].path))
+end
+
+@testitem "module tree: is_testitem_path covers nested paths" setup=[ModuleTreeWS] begin
+    using JuliaWorkspaces: is_testitem_path
+
+    tree, root_uri, jw = tree_of("""
+    module M
+    end
+    @testitem "t" begin
+        module Inner
+        end
+    end
+    """)
+    rt = jw.runtime
+    ti = only(filter(n -> n.kind === :testitem, tree.modules))
+
+    @test is_testitem_path(rt, root_uri, ti.path)
+    @test is_testitem_path(rt, root_uri, vcat(ti.path, ["Inner"]))
+    @test !is_testitem_path(rt, root_uri, String[])
+    @test !is_testitem_path(rt, root_uri, ["M"])
+end
+
+@testitem "module tree: methods and arities are visible in every test item" setup=[ModuleTreeWS] begin
+    sh = URI("file:///t/src/shared.jl")
+    tree, root_uri, jw = tree_of("""
+    @testitem "one" begin
+        include("shared.jl")
+    end
+    @testitem "two" begin
+        include("shared.jl")
+    end
+    """; extra_files=Dict(sh => "helper(x) = 1\n"))
+    rt = jw.runtime
+
+    # `_walk_spliced_binding_items!` mirrors the splice rule, so the method and
+    # arity indices must see the helper at BOTH paths, not just the first.
+    for n in filter(n -> n.kind === :testitem, tree.modules)
+        @test !isempty(JuliaWorkspaces.derived_method_items(rt, root_uri, n.path, "helper"))
+        @test !isempty(JuliaWorkspaces.derived_method_arities(rt, root_uri, n.path, "helper"))
+    end
+end
+
+@testitem "module tree: a self-including test item terminates" setup=[ModuleTreeWS] begin
+    # Per-path admission means the global visited set can no longer stop this;
+    # the DFS-chain guard has to.
+    tree, root_uri, _ = tree_of("""
+    @testitem "t" begin
+        include("F.jl")
+    end
+    """)
+    @test module_node(tree, String[]) !== nothing
+    @test length(filter(n -> n.kind === :testitem, tree.modules)) == 1
+end
+
+@testitem "module tree: mutually including files under test items terminate" setup=[ModuleTreeWS] begin
+    a_uri = URI("file:///t/src/a.jl")
+    b_uri = URI("file:///t/src/b.jl")
+    tree, _, _ = tree_of("""
+    @testitem "t" begin
+        include("a.jl")
+    end
+    """; extra_files=Dict(
+        a_uri => "include(\"b.jl\")\nfa() = 1\n",
+        b_uri => "include(\"a.jl\")\nfb() = 2\n",
+    ))
+    ti = only(filter(n -> n.kind === :testitem, tree.modules))
+    @test haskey(ti.declared, "fa")
+    @test haskey(ti.declared, "fb")
 end
 
 @testitem "module tree: include cycles terminate" setup=[ModuleTreeWS] begin

@@ -2,7 +2,7 @@
 
 ## Struct revision
 
-### Struct revision  is supported on Julia 1.12+
+### Struct revision is supported on Julia 1.12+
 
 Starting with Julia 1.12, Revise can handle changes to struct definitions. When you modify
 a struct, Revise will automatically re-evaluate the struct definition and any methods or
@@ -166,7 +166,7 @@ struct MyVec{T}
 end
 ```
 
-If you change `MyVecType{T}` from `Vector{T}` to `AbstractVector{T}`, the struct `A` will
+If you change `MyVecType{T}` from `Vector{T}` to `AbstractVector{T}`, the struct `MyVec` will
 **not** be automatically re-evaluated because Revise does not track the dependency edge
 from `MyVecType` to `MyVec`. The same applies to `const` bindings and other global bindings
 that are referenced in type definitions.
@@ -191,6 +191,14 @@ already evaluated the macro or generated function.
 You may explicitly call `revise(MyModule)` to force reevaluating every definition in module
 `MyModule`.
 Note that when a macro changes, you have to revise all of the modules that *use* it.
+
+### Removing a name from `export` (Julia before 1.14)
+
+On Julia versions before 1.14, deleting a name from a module's `export` list
+leaves the name accessible in any module that had already done `using
+ThatModule`. Revise itself supports retracting exported names, but it relies on
+a Julia feature that will only become available starting with Julia 1.14
+(https://github.com/JuliaLang/julia/pull/62131).
 
 ### [Code that depends on data](@id data)
 
@@ -224,6 +232,60 @@ it's part of the same expression and Revise will re-evaluate the expression.
 
 The maintainers have no intention of ever "fixing" this limitation, as it would
 require adding enormous bloat to every session for very little actual benefit.
+
+### [Code already running in a task (including `Threads.@spawn`)](@id world-age-tasks)
+
+Revise installs revised methods as *new* definitions, which take effect in a new
+[world age](https://docs.julialang.org/en/v1/manual/methods/#Redefining-Methods).
+A task observes only the methods that existed when it *started running*: calls
+made from within the task dispatch at the task's fixed world age. Consequently a
+long-running task that began before you edited the source keeps executing the old
+definitions, even though Revise has successfully installed the new ones.
+
+This is most surprising with `Threads.@spawn` (or `@async`), because the REPL
+returns to the prompt and everything *appears* up to date—a fresh call from the
+REPL, or a newly spawned task, sees the revised code—while a background worker
+silently keeps running the old code:
+
+```julia
+f() = 1
+worker = Threads.@spawn while true
+    @show f()      # keeps printing 1, even after `f` is revised to return 2
+    sleep(1)
+end
+```
+
+The same limitation can also surface as an outright error rather than silent
+staleness. If a task pinned to an older world age dispatches a method or closure
+that was *created* after the task started, Julia raises a world-age error like
+
+```
+MethodError: no method matching f()
+The applicable method may be too new: running in world age 27916, while current world is 27952.
+```
+
+Examples that can trigger this include reactive or event-loop frameworks with
+runner Tasks.
+
+This is a consequence of Julia's world-age semantics, not something Revise can
+change: Revise cannot retroactively advance the world age of a task that is
+already running. There are two workarounds:
+
+- restart the task after revising, so the new task picks up the current world age; or
+- route the calls that should track revisions through
+  [`Base.invokelatest`](https://docs.julialang.org/en/v1/base/base/#Base.invokelatest),
+  which dispatches at the latest world age:
+
+```julia
+worker = Threads.@spawn while true
+    @show Base.invokelatest(f)   # picks up revisions to `f`
+    sleep(1)
+end
+```
+
+The same caveat applies to any long-lived loop started before a revision,
+including a `while true` loop running directly at the REPL; see also
+[Editing code that defines REPL](@ref editREPL).
 
 ### Distributed computing (multiple workers) and anonymous functions
 
@@ -267,7 +329,34 @@ end # module
 and the corresponding edit to the code would be to modify it to `greetcaller(x) = greet("Bar")`
 and `remotecall_fetch(greetcaller, p, 1)`.
 
-### `include(mapexpr, filename)` is not supported
+### `include(mapexpr, filename)` requires Julia 1.14 for packages
 
-Julia supports the ability to modify source code after parsing and before evaluation.
-Supporting this is a TODO item but is not yet implemented.
+Julia supports the ability to modify source code after parsing and before evaluation,
+via `include(mapexpr, filename)`. Revising such files applies the same transform.
+For files included this way *while a package loads*, Revise depends on a record kept
+by Julia (`Base.include_mapexprs`) that is available starting with Julia 1.14; on
+older Julia versions the transform is silently dropped when the file is revised.
+No version restriction applies to [`includet`](@ref)/[`Revise.track`](@ref) (which
+accept a leading `mapexpr` of their own) or to `include(mapexpr, filename)` statements
+*added* to an already-loaded package, since those transforms are discovered without
+the load-time record.
+
+### Precompilation by another process can discard Revise's baseline
+
+For a precompiled package, Revise reads the "before" state of a source file from the
+package's `*.ji` cache, and does so only when that file is first revised. The path of the
+cache is determined by the active project and the compile flags rather than by the source,
+so a `using` or `Pkg.precompile` in a *separate* process — running the test suite or a
+script in a fresh Julia while an interactive session stays open — replaces the very file
+Revise recorded.
+
+On platforms where an open handle stays attached to a file that has been renamed away,
+Revise holds one on each cache it watches, so the snapshot survives the rebuild and
+revision continues normally. Elsewhere, a rebuilt cache costs nothing as long as it was
+built from the same source; only a file whose content differs between the build the
+session loaded and the build now on disk loses its baseline. For such a file there is
+nothing left to compare an edit against, so Revise does not guess: it makes no attempt to
+revise it, raises a [`Revise.StaleCacheError`](@ref) naming the file, and turns the prompt
+yellow for the rest of the session. The file's definitions stay as the session loaded
+them; restart Julia to pick up their current state. Every other file, and every other
+package, continues to revise as usual.

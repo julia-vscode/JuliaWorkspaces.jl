@@ -289,7 +289,11 @@ struct EffectiveLintConfig
     selected::Bool
 end
 
-EffectiveLintConfig() = EffectiveLintConfig(copy(_PRESET_DEFAULT), Dict{Symbol,Dict{Symbol,Any}}(), true)
+# Defaults, with scope supplied by the caller: config resolution decides whether
+# a file is in scope from the whole ancestor chain, so it knows `selected` even
+# on the paths where it has no config file to read settings from.
+EffectiveLintConfig(selected::Bool) = EffectiveLintConfig(copy(_PRESET_DEFAULT), Dict{Symbol,Dict{Symbol,Any}}(), selected)
+EffectiveLintConfig() = EffectiveLintConfig(true)
 
 function _lint_config_fields_equal(a::EffectiveLintConfig, b::EffectiveLintConfig, eq)
     eq(a.severities, b.severities) && eq(a.options, b.options) && eq(a.selected, b.selected)

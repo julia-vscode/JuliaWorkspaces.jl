@@ -7,8 +7,20 @@ mutable struct Scope
     # a wildcard `using X` in this scope failed to resolve: any unresolved
     # identifier in this scope could be an export of the unknown module
     unresolved_wildcard_import::Bool
+    # For a `@testitem`/`@testmodule`/`@testsnippet` body scope: the module-tree
+    # segment naming its `:testitem` node (see `_seed_testitem_tree_context!`).
+    # `nothing` everywhere else.
+    #
+    # Recorded on the scope rather than looked up per query because a test-item
+    # scope's `expr` is a MACROCALL, so the module-path walk that reads module
+    # nesting off the scope chain (`_in_file_module_names`) cannot otherwise
+    # tell it apart from a plain block — and unlike `modules[:__tree__]`, this
+    # is plain data, so it survives `strip_module_contexts!` and the freeze into
+    # the per-file analysis value.
+    testitem_segment::Union{Nothing,String}
 end
-Scope(parent, expr, names, modules, overloaded) = Scope(parent, expr, names, modules, overloaded, false)
+Scope(parent, expr, names, modules, overloaded) = Scope(parent, expr, names, modules, overloaded, false, nothing)
+Scope(parent, expr, names, modules, overloaded, uwi) = Scope(parent, expr, names, modules, overloaded, uwi, nothing)
 Scope(expr) = Scope(nothing, expr, Dict{Symbol,Binding}(), nothing, nothing)
 function Base.show(io::IO, s::Scope)
     printstyled(io, headof(s.expr))

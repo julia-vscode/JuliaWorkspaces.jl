@@ -1440,3 +1440,121 @@ end
     # nothing shares only Any with Int
     @test occursin("Any", hover("\n    y\n"))
 end
+
+@testitem "Hover: keyword docstrings" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, _sanitize_docstring
+    using JuliaWorkspaces.URIs2: URI
+
+    source = """
+    function foo(x)
+        if x > 0
+            return x
+        end
+        for i = 1:3
+        end
+        while false
+        end
+        x
+    end
+
+    mutable struct S
+        a
+    end
+
+    abstract type A end
+
+    bar(x::T) where {T} = x
+    """
+    uri = URI("file:///hoverkw/test.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    # Hover in the middle of the keyword token of `marker`'s first occurrence.
+    hover(marker) = get_hover_text(jw, uri, first(findfirst(marker, source)) + 1)
+
+    # The same text the layer renders: Base's keyword docs, sanitized.
+    kwdoc(k) = _sanitize_docstring(string(Base.Docs.parsedoc(Base.Docs.keywords[Symbol(k)])))
+
+    @test occursin(kwdoc("function"), hover("function foo"))
+    @test occursin(kwdoc("if"), hover("if x > 0"))
+    @test occursin(kwdoc("return"), hover("return x"))
+    @test occursin(kwdoc("for"), hover("for i"))
+    @test occursin(kwdoc("while"), hover("while false"))
+    @test occursin(kwdoc("where"), hover("where {T}"))
+
+    # Two-word keywords map to their joint entry, not to the first token alone.
+    @test occursin(kwdoc("mutable struct"), hover("mutable struct"))
+    @test occursin(kwdoc("mutable struct"), hover("struct S"))
+    @test occursin(kwdoc("abstract type"), hover("abstract type"))
+    @test occursin(kwdoc("abstract type"), hover("type A"))
+
+    # `end` keeps its "what does this close" line, with the docstring below it.
+    fn_end = hover("end\n\nmutable")
+    @test occursin("Closes function definition for `foo(x)`", fn_end)
+    @test occursin(kwdoc("end"), fn_end)
+
+    # An identifier is not a keyword: no keyword docs bleed into its hover.
+    @test !occursin(kwdoc("for"), something(hover("bar(x::T)"), ""))
+end
+
+@testitem "Hover: an indexing `end` documents the keyword and closes nothing" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, _sanitize_docstring
+    using JuliaWorkspaces.URIs2: URI
+
+    # The index `end` is an ARGUMENT of whatever expression holds it — directly
+    # under the `ref`, or nested arbitrarily deep inside it. Only an `end` held
+    # as a block's trivia closes something.
+    source = """
+    f(A) = A[end]
+    g(A) = A[end - 1]
+    h(A) = A[Int(ceil(sin(end)))]
+    k(A) = begin
+        A
+    end
+    """
+    uri = URI("file:///hoverkwend/test.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    enddoc = _sanitize_docstring(string(Base.Docs.parsedoc(Base.Docs.keywords[:end])))
+    hover(marker) = get_hover_text(jw, uri, first(findfirst(marker, source)) + 1)
+
+    for marker in ("end]", "end - 1", "end)))")
+        result = hover(marker)
+        @test result !== nothing
+        @test !occursin("Closes", result)
+        @test occursin(enddoc, result)
+    end
+
+    # A real block closer still says what it closes, docstring below.
+    closer = hover("end\n")
+    @test occursin("Closes", closer)
+    @test occursin(enddoc, closer)
+end
+
+@testitem "Hover: `where` documents the keyword only where it is one" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, _sanitize_docstring
+    using JuliaWorkspaces.URIs2: URI
+
+    # `where` is a contextual keyword: as a variable name it is an ordinary
+    # identifier, and must not pick up the keyword docs.
+    source = """
+    where = 2
+    y = where + 2
+    f(x::T) where {T} = x
+    """
+    uri = URI("file:///hoverwhere/test.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    wheredoc = _sanitize_docstring(string(Base.Docs.parsedoc(Base.Docs.keywords[:where])))
+    hover(marker) = something(get_hover_text(jw, uri, first(findfirst(marker, source)) + 1), "")
+
+    @test !occursin(wheredoc, hover("where = 2"))
+    @test !occursin(wheredoc, hover("where + 2"))
+    # …and the variable still hovers as a variable.
+    @test occursin("where", hover("where = 2"))
+
+    # The real keyword position is unaffected.
+    @test occursin(wheredoc, hover("where {T}"))
+end

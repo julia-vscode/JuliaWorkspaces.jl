@@ -1,0 +1,6 @@
+# Scopes test-item discovery for this repository. See docs/src/configuration.md.
+#
+# `testdata/` holds fixture packages whose `@testitem` blocks are input to the
+# tests, not tests themselves. `packages/` and `packages-old/` hold vendored
+# dependencies, which carry their own suites and are not ours to run.
+exclude = ["testdata/**", "packages/**", "packages-old/**"]

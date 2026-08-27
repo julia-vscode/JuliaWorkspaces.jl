@@ -8,6 +8,7 @@ This is a static analysis engine for Julia projects and mainly backs LanguageSer
     - Restart the session when unexpected failures occur (due to accumulation of state) or when making changes to structs/`@derived` functions
 - Always run tests first via `TestItemRunner`
 - For checkpointing/final validation, run tests in a new process with `Pkg.test()`
+- Which files hold test items is decided by `JuliaTestItems.toml` at the repo root — don't reintroduce path filtering in `test/runtests.jl` or in the CI workflow
 - Fix any test or type errors until the whole suite is green.
 - Add or update tests for the code you change, even if nobody asked.
 - Keep code comments brief and to-the-point. Don't reference random non-representative examples

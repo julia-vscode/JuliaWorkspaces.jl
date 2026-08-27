@@ -9,10 +9,15 @@ should be tracked.
 Fields:
 - `trackedfiles`: map from basename to `PkgId` for each watched file
 - `file_ctimes`: last-seen `ctime` for each tracked file, used to detect changes
+- `file_hashes`: content hash for each tracked file, recorded when the file is
+  queued for revision. Disambiguates a filesystem event whose ctime matches the
+  stored one: kernel timestamps have tick resolution, so an unchanged ctime can
+  mean either a duplicate notification or a same-tick rewrite.
 """
 mutable struct WatchList
     trackedfiles::Dict{String,PkgId}
     file_ctimes::Dict{String,Float64}
+    file_hashes::Dict{String,UInt64}
 end
 
 """
@@ -102,16 +107,17 @@ It also has the following fields:
 - `exprstack`: used when descending into `@eval` statements: `ex` (used in creating the `ExInfo` object) is the first entry in the stack
 - `allsigs`: a list of all method signatures defined by a given expression (cached in `CodeTracking.method_info`)
 - `typeinfos`: a list of all type definitions defined by a given expression (not cached in CodeTracking)
-- `includes`: a list of `module=>filename` for any `include` statements encountered while the
-  expression was parsed.
+- `includes`: a list of `(module, mapexpr, filename)` for any `include` statements encountered
+  while the expression was parsed. `mapexpr` is the transform passed to
+  `include(mapexpr, filename)`, or `identity` for plain `include(filename)`.
 """
 struct ExInfo
     exprstack::Vector{Expr}
     allsigs::Vector{SigInfo}
     typeinfos::Vector{TypeInfo}
-    includes::Vector{Pair{Module,String}}
+    includes::Vector{Tuple{Module,Function,String}}
 end
-ExInfo(ex::Expr) = ExInfo(Expr[ex], SigInfo[], TypeInfo[], Pair{Module,String}[])
+ExInfo(ex::Expr) = ExInfo(Expr[ex], SigInfo[], TypeInfo[], Tuple{Module,Function,String}[])
 
 """
     get_extended_data(ext::ExtendedData, owner::Symbol) -> ext::Union{ExtendedData,Nothing}
@@ -174,6 +180,30 @@ function replace_extended_data(siginfo::SigInfo, owner::Symbol, @nospecialize(da
 end
 
 const ExprsInfos = OrderedDict{RelocatableExpr,Union{Nothing,Vector{Union{SigInfo,TypeInfo}}}}
+
+# `TypePredictions`
+#
+# Per-revision record of whether the incoming source preserves each type it
+# (re)defines, built by `predict_changes!` before any deletions are applied.
+#
+# - `preserved[(mod, name)]` is `true` when evaluating the new code is predicted to
+#   keep the existing binding `mod.name`: the new definition is equivalent per the
+#   runtime's own redefinition checks (`Core.resolve_typegroup`'s internal
+#   equivalence test, or `Core._equiv_typedef`/`Core._typebody!` on older
+#   versions), so evaluation reuses the existing type and the `const` re-assert
+#   leaves the binding partition untouched. `delete_missing!` consults this to skip the expensive subtype-tree
+#   walk in `handle_type_deletion!` (issue #1022).
+# - `skipped` records every `(typeinfo, oldtype)` whose deletion walk was skipped on
+#   the strength of a prediction. Predictions are made before any queued change is
+#   applied, so a same-revision change to a binding the type's structure depends on
+#   (a field-type alias, a supertype, a parameter bound) can falsify them; `revise`
+#   re-checks each entry after evaluation and runs the walk late for stale ones.
+struct TypePredictions
+    preserved::Dict{Tuple{Module,Symbol},Bool}
+    skipped::Vector{Tuple{TypeInfo,Type}}
+end
+TypePredictions() = TypePredictions(Dict{Tuple{Module,Symbol},Bool}(), Tuple{TypeInfo,Type}[])
+
 const DepDictVals = Tuple{Module,RelocatableExpr}
 const DepDict = Dict{Symbol,Set{DepDictVals}}
 
@@ -213,7 +243,7 @@ or that the method table/signature pairs have not yet been cached.
 
 The first `mod` key is guaranteed to be the module into which this file was `include`d.
 
-To create a `ModuleExprsInfos` from a source file, see [`Revise.parse_source`](@ref).
+To create a `ModuleExprsInfos` from a source file, see [`Revise.parse_and_maybe_eval_source`](@ref).
 """
 const ModuleExprsInfos = OrderedDict{Module,ExprsInfos}
 
@@ -232,11 +262,17 @@ ModuleExprsInfos(mod::Module) = ModuleExprsInfos(mod=>ExprsInfos())
 Base.isempty(fm::ModuleExprsInfos) = length(fm) == 1 && isempty(first(values(fm)))
 
 """
-    FileInfo(mod_exs_infos::ModuleExprsInfos, cachefile="")
+    FileInfo(mod_exs_infos::ModuleExprsInfos, cachefile=""; mapexpr=identity)
 
 Structure to hold the per-module expressions found when parsing a
 single file.
 `mod_exs_infos` holds the [`Revise.ModuleExprsInfos`](@ref) for the file.
+
+`mapexpr` is the transform passed to `include(mapexpr, filename)` when the file was
+included (`identity` for plain `include`). Parsing the file for revision applies the
+same transform to each top-level expression, matching what `include` evaluated.
+A file included more than once with different `mapexpr`s has one `FileInfo` per
+inclusion (see `Revise.fileindices`).
 
 Optionally, a `FileInfo` can also record the path to a cache file holding the original source code.
 This is applicable only for precompiled modules and `Base`.
@@ -250,24 +286,26 @@ Source cache files greatly reduce the overhead of using Revise.
 """
 struct FileInfo
     mod_exs_infos::ModuleExprsInfos
+    mapexpr::Function                                  # transform applied to each top-level expression (identity if none)
     cachefile::String
-    cachefilename::String                              # the source path as recorded inside `cachefile`, used to read from the cache
+    cachefilename::String                              # the source path as recorded inside `cachefile`; the lookup key for reading from the cache
+    cachesrcid::Union{Nothing,UInt64}                  # identifies the source text `cachefile` holds for this file (`nothing` if unknown)
     cacheexprs::Vector{Tuple{Module,Expr}}             # "unprocessed" exprs, used to support @require
     extracted::Base.RefValue{Bool}                     # true if signatures have been processed from mod_exs_infos
     parsed::Base.RefValue{Bool}                        # true if mod_exs_infos have been parsed from cachefile
 end
-FileInfo(mod_exs_infos::ModuleExprsInfos, cachefile="", cachefilename="") =
-    FileInfo(mod_exs_infos, cachefile, cachefilename, Tuple{Module,Expr}[], Ref(false), Ref(false))
+FileInfo(mod_exs_infos::ModuleExprsInfos, cachefile="", cachefilename=""; mapexpr::Function=identity, cachesrcid=nothing) =
+    FileInfo(mod_exs_infos, mapexpr, cachefile, cachefilename, cachesrcid, Tuple{Module,Expr}[], Ref(false), Ref(false))
 
 """
-    FileInfo(mod::Module, cachefile="", cachefilename="")
+    FileInfo(mod::Module, cachefile="", cachefilename=""; mapexpr=identity, cachesrcid=nothing)
 
 Initialize an empty FileInfo for a file that is `include`d into `mod`.
 """
-FileInfo(mod::Module, cachefile::AbstractString="", cachefilename::AbstractString="") =
-    FileInfo(ModuleExprsInfos(mod), cachefile, cachefilename)
+FileInfo(mod::Module, cachefile::AbstractString="", cachefilename::AbstractString=""; mapexpr::Function=identity, cachesrcid=nothing) =
+    FileInfo(ModuleExprsInfos(mod), cachefile, cachefilename; mapexpr, cachesrcid)
 
-FileInfo(fm::ModuleExprsInfos, fi::FileInfo) = FileInfo(fm, fi.cachefile, fi.cachefilename, copy(fi.cacheexprs), Ref(fi.extracted[]), Ref(fi.parsed[]))
+FileInfo(fm::ModuleExprsInfos, fi::FileInfo) = FileInfo(fm, fi.mapexpr, fi.cachefile, fi.cachefilename, fi.cachesrcid, copy(fi.cacheexprs), Ref(fi.extracted[]), Ref(fi.parsed[]))
 
 function Base.show(io::IO, fi::FileInfo)
     print(io, "FileInfo(")
@@ -276,6 +314,9 @@ function Base.show(io::IO, fi::FileInfo)
         print(io, "=>")
         show(io, exs_infos)
         print(io, ", ")
+    end
+    if fi.mapexpr !== identity
+        print(io, "with mapexpr ", fi.mapexpr, ", ")
     end
     if !isempty(fi.cachefile)
         print(io, "with cachefile ", fi.cachefile)
@@ -289,6 +330,12 @@ end
 A structure holding the data required to handle a particular package.
 `path` is the top-level directory defining the package,
 and `fileinfos` holds the [`Revise.FileInfo`](@ref) for each file defining the package.
+`cachebuildid` is the build id of the precompile cache this session loaded the package
+from, and identifies the source snapshot the `FileInfo`s read from that cache (see
+[`Revise.rewritten_caches`](@ref)); it is zero for packages not loaded from a cache.
+`cacheio` is a handle held open on that cache file, which on platforms where a rename
+does not disturb open handles keeps the snapshot readable even after another process
+replaces the file; it is `nothing` when no handle is held.
 
 For the `PkgData` associated with `Main` (e.g., for files loaded with [`includet`](@ref)),
 the corresponding `path` entry will be empty.
@@ -297,9 +344,11 @@ mutable struct PkgData
     info::PkgFiles
     fileinfos::Vector{FileInfo}
     requirements::Vector{PkgId}
+    cachebuildid::UInt128        # build id of the precompile cache this session loaded (0 if none)
+    cacheio::Union{Nothing,IOStream}   # handle held open on that cache file, where the platform allows it
 end
 
-PkgData(id::PkgId, path) = PkgData(PkgFiles(id, path), FileInfo[], PkgId[])
+PkgData(id::PkgId, path) = PkgData(PkgFiles(id, path), FileInfo[], PkgId[], zero(UInt128), nothing)
 PkgData(id::PkgId, ::Nothing) = PkgData(id, "")
 function PkgData(id::PkgId)
     bp = basepath(id)
@@ -319,6 +368,14 @@ function fileindex(info::PkgData, file::AbstractString)
         String(f) == String(file) && return i
     end
     return nothing
+end
+
+# A single file may be `include`d into several modules, in which case it appears
+# once in `srcfiles` per inclusion, each with its own `FileInfo` (issue #730).
+# `fileindices` returns every such index so a revision updates all of them.
+function fileindices(info::PkgData, file::AbstractString)
+    sf = String(file)
+    return Int[i for (i, f) in enumerate(srcfiles(info)) if String(f) == sf]
 end
 
 function hasfile(info::PkgData, file::AbstractString)
@@ -409,6 +466,63 @@ function Base.showerror(io::IO, ex::ReviseEvalException; blame_revise::Bool=true
     if blame_revise
         println(io, "\nRevise evaluation error at ", ex.loc)
     end
+end
+
+"""
+    StaleCacheError(id::PkgId, file::String)
+
+Reports that `file` cannot be revised because the precompile cache of `id` no longer
+holds the source this session loaded it from, leaving nothing to compare the current
+source against. See [`Revise.rewritten_caches`](@ref).
+"""
+struct StaleCacheError <: Exception
+    id::PkgId
+    file::String
+end
+
+function Base.showerror(io::IO, err::StaleCacheError)
+    print(io, """
+        $(err.file) cannot be revised: the precompile cache of $(err.id.name) was rebuilt by another process, and the source this session loaded for this file is no longer recorded anywhere, so there is nothing to compare the current source against.
+        The definitions in this file remain as they were when the session loaded them. Restart Julia to pick up their current state.""")
+end
+
+"""
+    SignatureExtractionError(mod::Module, loc::String, exc::Exception)
+
+Reports a failure to reconstruct method signatures using partial evaluation.
+"""
+struct SignatureExtractionError <: Exception
+    mod::Module
+    loc::String
+    exc
+    SignatureExtractionError(mod::Module, loc::String, @nospecialize exc) = new(mod, loc, exc)
+end
+
+function captured_stacktrace(ex::SignatureExtractionError)
+    cause = ex.exc
+    while cause isa ReviseEvalException
+        cause.stacktrace === nothing || return cause.stacktrace
+        cause = cause.exc
+    end
+    return nothing
+end
+
+function Base.showerror(io::IO, ex::SignatureExtractionError)
+    print(io, "failed to extract method signatures for ", ex.mod, " at ", ex.loc)
+    print(io, "\nRevise could not determine which methods this top-level expression defines")
+    print(io, "\nwithout re-running module initialization. Generated definitions may depend")
+    print(io, "\non temporary state created by earlier top-level operations, such as mutation")
+    print(io, "\nor `@eval`. To make this file revisable, derive each generated definition")
+    print(io, "\ndirectly from stable inputs rather than from state built by preceding")
+    print(io, "\noperations. (`mode = :sigs` does not replay all assignments and side effects.)")
+    print(io, "\n\ncaused by: ")
+    cause = ex.exc
+    while cause isa ReviseEvalException
+        cause = cause.exc
+    end
+    showerror(io, cause)
+    stacktrace = captured_stacktrace(ex)
+    stacktrace === nothing || Base.show_backtrace(io, stacktrace)
 end
 
 struct GitRepoException <: Exception
