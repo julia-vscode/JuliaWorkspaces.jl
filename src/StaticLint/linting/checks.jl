@@ -1385,6 +1385,7 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
             push!(errs, (pos, x))
         end
     elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict) &&
+            !in_macrocall_arg(x, env, meta_dict) &&
             !in_existence_guarded_branch(x, env, meta_dict)
         push!(errs, (pos, x))
     end
@@ -1480,9 +1481,10 @@ function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
             if !(lhsref isa Binding)
                 # Not clear what is happening here.
                 return false
-            elseif lhsref.type isa SymbolServer.DataTypeStore && !(isempty(lhsref.type.fieldnames) || isunionfaketype(lhsref.type.name) || has_getproperty_method(lhsref.type, env))
+            elseif lhsref.type isa SymbolServer.DataTypeStore && !(isempty(lhsref.type.fieldnames) || isunionfaketype(lhsref.type.name) || isnamedtuplefaketype(lhsref.type.name) || has_getproperty_method(lhsref.type, env))
                 return true
-            elseif lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
+            elseif lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type) &&
+                   struct_fields_statically_enumerable(lhsref.type.val, meta_dict)
                 # We may have infered the lhs type after the semantic pass that was resolving references.
                 return !scopehasbinding(scopeof(lhsref.type.val, meta_dict), valofid(x))
             end
@@ -1539,6 +1541,26 @@ function is_type_of_call_to_getproperty(x::EXPR)
 end
 
 isunionfaketype(t::SymbolServer.FakeTypeName) = t.name.name === :Union && t.name.parent isa SymbolServer.VarRef && t.name.parent.name === :Core
+
+# `NamedTuple` field sets depend on the value's type parameters, which the
+# static `fieldnames` of the `DataTypeStore` cannot represent.
+isnamedtuplefaketype(t::SymbolServer.FakeTypeName) = t.name.name === :NamedTuple && t.name.parent isa SymbolServer.VarRef && t.name.parent.name === :Core
+
+# Only known field-modifier macros (`@atomic`, docstrings) are unwrapped when
+# struct field bindings are collected (see `mark_bindings!`); a member wrapped
+# in any other macrocall may still declare a field the binding pass cannot see,
+# so the struct's field set cannot be enumerated and a missing-field report
+# would be a guess.
+function struct_fields_statically_enumerable(strct::EXPR, meta_dict)
+    (strct.args !== nothing && length(strct.args) >= 3 && strct.args[3].args !== nothing) || return true
+    for arg in strct.args[3].args
+        CSTParser.defines_function(arg) && continue
+        if CSTParser.ismacrocall(arg) && !(arg.args !== nothing && length(arg.args) > 1 && hasbinding(last(arg.args), meta_dict))
+            return false
+        end
+    end
+    return true
+end
 
 function check_typeparams(x::EXPR, meta_dict)
     if iswhere(x)
