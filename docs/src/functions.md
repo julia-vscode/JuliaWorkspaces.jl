@@ -24,6 +24,8 @@ add_file!
 remove_file!
 remove_all_children!
 set_active_project!
+set_v2_enabled!
+set_macro_expansion!
 set_indirect_file_content!
 clear_indirect_file!
 ```

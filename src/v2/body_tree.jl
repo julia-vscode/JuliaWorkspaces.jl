@@ -48,7 +48,9 @@ struct BodyTree{K}
 
     # `K` is a 16-bit primitive kind type: the vendored JuliaSyntax `Kind`.
     function BodyTree{K}(kind::K, @nospecialize(val), children::Union{Nothing,Vector{BodyTree{K}}}) where {K}
-        h = hash(reinterpret(UInt16, kind), 0xb0d1743e5eed0000 % UInt64)
+        # Fold with a native-`UInt` seed (`Base.hash` has no UInt64-seed methods
+        # on 32-bit platforms), widening into the UInt64 field at the end.
+        h = hash(reinterpret(UInt16, kind), 0xb0d1743e5eed0000 % UInt)
         h = hash(typeof(val), h)
         h = hash(val, h)
         if children === nothing
@@ -59,7 +61,7 @@ struct BodyTree{K}
                 h = hash(c.hash, h)
             end
         end
-        return new{K}(kind, val, children, h)
+        return new{K}(kind, val, children, h % UInt64)
     end
 end
 

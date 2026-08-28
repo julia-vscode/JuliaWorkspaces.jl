@@ -96,7 +96,9 @@ while non-macro edits change nothing. (Known gap, M2: a macro whose output
 depends on a non-macro helper function does not re-key.)
 """
 Salsa.@derived function derived_v2_package_macro_defs_hash(rt, package_uri)
-    h = UInt64(0x6d6163646566735f)   # "macdefs_"
+    # Native-`UInt` hash seed (32-bit `Base.hash` takes no UInt64 seed),
+    # widened to the documented UInt64 at the end.
+    h = 0x6d6163646566735f % UInt   # "macdefs_"
     for f in sort!(collect(derived_julia_files(rt)); by=string)
         derived_package_for_file(rt, f) == package_uri || continue
         for row in derived_v2_file_skeleton(rt, f).items
@@ -104,7 +106,7 @@ Salsa.@derived function derived_v2_package_macro_defs_hash(rt, package_uri)
             h = hash(derived_v2_item_body_hash(rt, V2ItemRef(f, row.id)), h)
         end
     end
-    return h
+    return h % UInt64
 end
 
 """
@@ -139,7 +141,7 @@ Salsa.@derived function derived_v2_expansion_context(rt, uri)
     end
 
     sort!(unique!(stmts))
-    return (ctx_hash=hash(macro_defs_hash, hash(stmts, UInt64(0x7632657870437478))),   # "v2expCtx"
+    return (ctx_hash=hash(macro_defs_hash, hash(stmts, 0x7632657870437478 % UInt)) % UInt64,   # "v2expCtx"
             imports=stmts)
 end
 

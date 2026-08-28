@@ -6,6 +6,10 @@ makedocs(
     authors="Uwe Fechner <uwe.fechner.msc@gmail.com> and contributors",
     sitename="JuliaWorkspaces.jl",
     checkdocs=:exports,
+    # The vendored JuliaSyntax/JuliaLowering copy exports upstream's documented
+    # API; those docstrings are not part of this manual. Ignoring the wrapper
+    # module skips its submodules too.
+    checkdocs_ignored_modules=[JuliaWorkspaces.VendoredLowering],
     pages=[
         "Home" => "index.md",
         "Architecture" => "architecture.md",
