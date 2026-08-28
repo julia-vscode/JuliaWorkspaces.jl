@@ -14,7 +14,12 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     export module_name, find_module_by_name, find_first
     export ws_files, find_identifiers, find_binding
 
-    const TEST_URI = JuliaWorkspaces.URIs2.uri"file://test.jl"
+    const TEST_URI = JuliaWorkspaces.URIs2.uri"file:///test.jl"
+
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    const LINT_OPT_IN = "[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n"
+    const LINT_OPT_IN_URI = JuliaWorkspaces.URIs2.uri"file:///JuliaLint.toml"
 
     # New-structure equivalent of the old `StaticLint.collect_hints(cst, server)`:
     # returns the diagnostics produced for the single test file.
@@ -60,6 +65,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     function parse_and_pass(s; dynamic::DynamicMode=DynamicOff)
         our_uri = TEST_URI
         jw = JuliaWorkspaces.JuliaWorkspace(;dynamic=dynamic, store_path=shared_store_path())
+        add_file!(jw, TextFile(LINT_OPT_IN_URI, SourceText(LINT_OPT_IN, "toml")))
         add_file!(jw, TextFile(our_uri, SourceText(s, "julia")))
 
         if dynamic==DynamicIndexingOnly
@@ -141,6 +147,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     # traversal tests that go through `derived_file_analysis`).
     function ws_files(pairs::Pair{<:JuliaWorkspaces.URIs2.URI,<:AbstractString}...)
         jw = JuliaWorkspaces.JuliaWorkspace()
+        add_file!(jw, TextFile(LINT_OPT_IN_URI, SourceText(LINT_OPT_IN, "toml")))
         for (u, s) in pairs
             add_file!(jw, TextFile(u, SourceText(s, "julia")))
         end
@@ -1134,7 +1141,7 @@ end
         """)
 
     # Checks that documented symbols are skipped
-    @test isempty(get_diagnostic(jw, uri"file://test.jl"))
+    @test isempty(get_diagnostic(jw, uri"file:///test.jl"))
 end
 
 @testitem "check_call imported function overload" setup=[shared_static_lint] begin
@@ -1147,7 +1154,7 @@ end
         """)
 
     # Checks that documented symbols are skipped
-    @test isempty(get_diagnostic(jw, uri"file://test.jl"))
+    @test isempty(get_diagnostic(jw, uri"file:///test.jl"))
 end
 
 @testitem "check_call strip type declaration from signature" setup=[shared_static_lint] begin
@@ -1158,7 +1165,7 @@ end
         """)
 
     # ensure we strip all type decl code from around signature
-    @test isempty(get_diagnostic(jw, uri"file://test.jl"))
+    @test isempty(get_diagnostic(jw, uri"file:///test.jl"))
 end
 
 @testitem "check_call strip nested where clauses (#436)" setup=[shared_static_lint] begin
