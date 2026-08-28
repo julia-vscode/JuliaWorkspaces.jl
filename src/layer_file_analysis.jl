@@ -183,6 +183,20 @@ function StaticLint.tree_context_declares_datatype(ctx::TreeModuleContext, name:
     return _is_datatype_kind(vn.kind)
 end
 
+# See `StaticLint.tree_context_imports_datatype`'s docstring: `name` is an
+# imported external symbol whose store resolves to a datatype (directly, or a
+# constructor FunctionStore extending one).
+function StaticLint.tree_context_imports_datatype(ctx::TreeModuleContext, name::String, env)::Bool
+    visible = derived_module_visible_names_idfree(ctx.rt, ctx.root, ctx.path)
+    vn = get(visible, name, nothing)
+    vn === nothing && return false
+    vn.kind === :external_symbol || return false
+    store = StaticLint.resolve_treeref_store(_tree_ref_for(ctx, name, vn), env)
+    store isa SymbolServer.DataTypeStore && return true
+    return store isa SymbolServer.FunctionStore &&
+        SymbolServer._lookup(store.extends, StaticLint.getsymbols(env)) isa SymbolServer.DataTypeStore
+end
+
 # The tree path of the module a module-kinded VisibleName DENOTES, or
 # `nothing` when it isn't a module of this root's tree (external and
 # workspace-package modules chain no further in-file). `VisibleName` doesn't

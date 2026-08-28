@@ -5393,3 +5393,139 @@ end
         @test isempty(collect_hints(cst, meta_dict, jw))
     end
 end
+
+@testitem "eval-loop constructors do not shadow their types" setup=[shared_static_lint] begin
+    # `for FT in (:A, :B) @eval $FT(x) = ... end` hoists constructor
+    # definitions; they must not replace the DataType bindings, or every later
+    # `::A` annotation reports InvalidTypeDeclaration.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct AType{T} end
+        struct BType{T} end
+        const AVec{T} = AType{T}
+        for FT in (:AType, :BType)
+            @eval \$FT(x::Int) = [x]
+        end
+        f(a::AType) = a
+        g(b::BType) = b
+        h(v::AVec) = v
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Single interpolated name (`name = :AType`) takes the other interpret_eval
+    # arm; same rule applies.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct AType{T} end
+        name = :AType
+        @eval \$name(x::Int) = [x]
+        f(a::AType) = a
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Negative control: a genuine non-type annotation still flags.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        foo() = 1
+        f(x::foo) = x
+        """)
+        @test length(collect_hints(cst, meta_dict, jw)) == 1
+    end
+end
+
+@testitem "struct plus outer constructor inside a block scope" setup=[shared_static_lint] begin
+    # A function definition over a SAME-scope struct (inside @testset/let) is a
+    # method addition; it must not shadow the type.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        using Test
+        @testset "t" begin
+            struct Flipped <: AbstractVector{Float64}
+                x::Float64
+            end
+            Flipped(t::Tuple) = Flipped(t[1])
+            Base.getindex(a::Flipped, i::Int) = a.x
+        end
+        """)
+        SL = JuliaWorkspaces.StaticLint
+        hints = collect_hints(cst, meta_dict, jw)
+        @test !any(h -> SL.errorof(h[2], meta_dict) === SL.InvalidTypeDeclaration, hints)
+    end
+end
+
+@testitem "const/function pairs in mutually exclusive branches" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue, CannotDeclareConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # `const` in one branch, assignment-form function in the other (Parsers'
+    # OncePerTask fallback idiom): only one branch ever runs.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        if isdefined(Base, :OncePerTask)
+            const _get_bigint = Base.OncePerTask{BigInt}(() -> BigInt())
+        else
+            _get_bigint() = 1
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    # `using Base: @x` in one @static branch, `const var"@x" = ...` in the
+    # other (StaticArrays' @_inline_meta shim).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @static if VERSION < v"1.8.0-DEV.410"
+            using Base: @_inline_meta
+        else
+            const var"@_inline_meta" = Base.var"@inline"
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDeclareConst)
+    end
+
+    # A genuine same-branch clash is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        const f = 1
+        f() = 2
+        """)
+        @test has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
+@testitem "let-global function with additional top-level methods" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # UnicodeFun's closure-capture idiom: `global f` + `function f(...)` inside
+    # `let`, plus more methods of `f` at top level. All are method additions.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        let subscript_map = Dict('a' => 'b')
+            global to_subscript
+            function to_subscript(x::Char)
+                subscript_map[x]
+            end
+        end
+        function to_subscript(x::Int)
+            Char(x)
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
+@testitem "const rebinding of an imported name" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDeclareConst, InvalidRedefofConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # `import HDF5; const HDF5 = Base.get_extension(...).HDF5` — an egal
+    # rebind of the imported module, legal at runtime.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        import Printf
+        const Printf = Base.get_extension(Main, :Whatever).Printf
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDeclareConst)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
+end

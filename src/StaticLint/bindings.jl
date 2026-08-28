@@ -176,8 +176,10 @@ function mark_bindings!(x::EXPR, state)
 end
 
 function is_bare_local_decl(b)
+    # a bare `global x` declaration (`let ...; global f; function f() ... end`)
+    # assigns no value either — same exemption as bare `local x`
     b isa Binding && b.type === nothing && b.val isa EXPR && isidentifier(b.val) &&
-        parentof(b.val) isa EXPR && headof(parentof(b.val)) === :local
+        parentof(b.val) isa EXPR && (headof(parentof(b.val)) === :local || headof(parentof(b.val)) === :global)
 end
 
 function mark_binding!(x::EXPR, meta_dict, val=x)
@@ -492,10 +494,18 @@ function add_binding(x, state, scope=state.scope)
                         # would turn one unresolvable import into a
                         # "function already has a value" diagnostic per
                         # method definition.
+                    elseif existing_binding isa Binding && existing_binding.val isa EXPR &&
+                           !in_same_if_branch(x, existing_binding.val)
+                        # `if isdefined(...) const f = ... else f() = ... end`:
+                        # mutually exclusive branches never both execute, so the
+                        # function definition does not clash with the other
+                        # branch's value — the same exemption check_const_decl
+                        # applies to const/const branch pairs.
                     else
                         seterror!(x, CannotDefineFuncAlreadyHasValue, meta_dict)
                     end
-                elseif is_toplevel_scope(tls) && (ctx = enclosing_tree_context(tls)) !== nothing && tree_context_declares_datatype(ctx, name)
+                elseif is_toplevel_scope(tls) && (ctx = enclosing_tree_context(tls)) !== nothing &&
+                        (tree_context_declares_datatype(ctx, name) || tree_context_imports_datatype(ctx, name, state.env))
                     # Per-file traversal mode: `name` is a DATATYPE declared in
                     # a SIBLING file of this module — visible only through the
                     # module tree, so the `scopehasbinding(tls, name)` arm above
@@ -516,6 +526,14 @@ function add_binding(x, state, scope=state.scope)
                     # a local function binding here would shadow the struct and
                     # make in-file `::name` annotations resolve to a
                     # non-DataType (a false `InvalidTypeDeclaration`).
+                elseif scopehasbinding(scope, name) && scope.names[name] isa Binding && CoreTypes.isdatatype(scope.names[name].type)
+                    # A function definition over a SAME-scope datatype binding
+                    # (a struct + outer constructor inside a @testset/let
+                    # block) is a method addition: keep the type binding, or
+                    # every later `::name` annotation in the block resolves to
+                    # a non-DataType (a false InvalidTypeDeclaration). The
+                    # `tls` arm above only sees toplevel/function scopes, so
+                    # block scopes never reach it.
                 else
                     scope.names[name] = b
                     if !hasref(b.name, meta_dict)
