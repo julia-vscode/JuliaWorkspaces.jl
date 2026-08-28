@@ -6,8 +6,15 @@
     const SL = JuliaWorkspaces.StaticLint
     const CST = JuliaWorkspaces.CSTParser
 
+    # `incorrect_call_args`, `missing_reference` and `unresolved_import` are off
+    # in the `default` preset (measured false-positive rates). This suite exists
+    # to test those analyses, so every fixture workspace opts back into them at
+    # the severities `default` used to carry.
+    const LINT_OPT_IN = "[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n"
+
     function ws_with(files::Dict{URI,String})
         jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///t/JuliaLint.toml"), SourceText(LINT_OPT_IN, "toml")))
         for (u, s) in files
             add_file!(jw, TextFile(u, SourceText(s, "julia")))
         end
@@ -1836,6 +1843,9 @@ end
     manifest = URI("file:///t/parity/Manifest.toml")
     src = URI("file:///t/parity/src/ParityPkg.jl")
     jw = JuliaWorkspace()
+    # This fixture builds its workspace directly rather than via `ws_with`, so
+    # it has to opt into the demoted rules itself.
+    add_file!(jw, TextFile(URI("file:///t/JuliaLint.toml"), SourceText(LINT_OPT_IN, "toml")))
     add_file!(jw, TextFile(proj, SourceText("""
     name = "ParityPkg"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0011"

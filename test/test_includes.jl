@@ -275,6 +275,9 @@ end
     shared_uri = URI("file:///inclshared/src/shared.jl")
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///inclshared/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///inclshared/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///inclshared/Manifest.toml"), SourceText(manifest_toml, "toml")))
     # Two independent roots both include the same file.
@@ -526,6 +529,9 @@ end
     root_uri = URI("file:///pollutedmod/src/PollutedMod.jl")
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///pollutedmod/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///pollutedmod/Project.toml"), SourceText("""
     name = "PollutedMod"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef03"
@@ -563,6 +569,10 @@ end
     using JuliaWorkspaces.URIs2: URI
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///orphA/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///orphB/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     # Package A: entry has a computed include; data.jl is an orphan (nothing
     # statically includes it) — it is very likely the computed include's
     # target, so its bare missing refs are suppressed.

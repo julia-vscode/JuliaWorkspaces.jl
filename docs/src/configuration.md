@@ -324,6 +324,34 @@ Every preset must classify every rule. This is enforced when `lint_rules.jl`
 loads, so a rule added without a decision fails the build rather than appearing
 in everyone's `default` at whatever severity a fallback happened to pick.
 
+### Rules that are off by default
+
+Three rules are classified `off` in `default` despite being long-standing
+checks: `incorrect_call_args`, `missing_reference` and `unresolved_import`.
+
+They share a limitation. Each needs a complete picture of something the
+analysis often cannot see in full — the method set of a callee, every name a
+module actually defines, the environment an import resolves against. Where that
+picture is incomplete the rule reports anyway, and on a corpus sweep of the 100
+most-depended-upon registered packages their sampled false-positive rates were
+93%, 78% and 77% respectively, together accounting for roughly 92% of every
+false positive measured. A check that is wrong more often than right should not
+fire on a project that never asked for it.
+
+All three remain on in `strict`, and any project can restore one:
+
+```toml
+[rules]
+missing_reference = "warning"
+```
+
+They are worth turning on deliberately — they find real bugs, and the sweep that
+measured their false positives also turned up genuine `UndefVarError`s and
+`MethodError`s through them. Expect to spend time tuning around the noise.
+
+Note that an untitled/unsaved buffer has no path, so no `JuliaLint.toml` can
+govern it; such buffers always lint under `default` and cannot opt back in.
+
 ### The rules
 
 | Rule | Default | Reports |
@@ -335,7 +363,7 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |
 | `shadowed_config` | `info` | A config file that supersedes another of the same kind in an enclosing directory |
 | `environment_errors` | `info` | A project/test environment that could not be resolved, reported on its `Project.toml` |
-| `incorrect_call_args` | `info` | Wrong argument count/type; calls to method-less functions |
+| `incorrect_call_args` | `off` | Wrong argument count/type; calls to method-less functions. Off by default; see “Rules that are off by default” below |
 | `incorrect_iter_spec` | `info` | Loop iterators that will likely error |
 | `index_from_length` | `info` | Indexing off `1:length(...)`/`1:size(...)` instead of `eachindex`/`axes`. Ranges that don't start at 1 (`2:length(x)`) are not flagged — they have no direct rewrite |
 | `nothing_comparison` | `info` | `== nothing` / `!= nothing` instead of `isnothing`/`===` |
@@ -355,8 +383,8 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `unused_binding` | `hint` | Variables assigned but never used |
 | `relative_import` | `info` | A relative import with more dots than available nesting |
 | `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
-| `missing_reference` | `warning` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default) |
-| `unresolved_import` | `warning` | Imports whose target could not be resolved |
+| `missing_reference` | `off` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default). Off by default; see “Rules that are off by default” below |
+| `unresolved_import` | `off` | Imports whose target could not be resolved. Off by default; see “Rules that are off by default” below |
 
 ### Rules and code actions
 
