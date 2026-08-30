@@ -194,7 +194,10 @@ const LINT_RULES = LintRule[
     # ── Purely syntactic rules (see lint_syntax_rules.jl) ────────────────────
     # New rules ship `:off` outside `strict` so an upgrade never switches them
     # on for existing projects; promotion to default-on is a deliberate,
-    # sweep-validated release decision.
+    # sweep-validated release decision. The one exception is
+    # `detached_docstring`, and even it caps at `:warning`: no new rule may
+    # enter `default` at `:error`, so an upgrade never flips `julialint`'s
+    # exit code.
     LintRule(id = :nan_comparison, tier = TierSyntax,
         severity_default = :off, severity_strict = :warning,
         doc_link = URI("https://docs.julialang.org/en/v1/base/numbers/#Base.isnan")),
@@ -209,9 +212,11 @@ const LINT_RULES = LintRule[
     LintRule(id = :async_task, tier = TierSyntax,
         severity_default = :off, severity_strict = :warning),
     # The text is discarded outright rather than a style opinion, so it does not
-    # follow the `:off`-by-default convention for a new rule.
+    # follow the `:off`-by-default convention for a new rule. `:warning`, not
+    # `:error`: the detector is a heuristic, and only the definitional
+    # breakage rules below may fail CI out of the box.
     LintRule(id = :detached_docstring, tier = TierSyntax,
-        severity_default = :error, severity_strict = :error),
+        severity_default = :warning, severity_strict = :warning),
 
     # ── Rules backed by analyses other than StaticLint ───────────────────────
     LintRule(id = :syntax_errors, tier = TierSyntax,

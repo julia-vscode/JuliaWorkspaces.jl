@@ -290,10 +290,10 @@ end
     # One finding per detached docstring.
     @test length(dd_diags("$D\n# c\n$X\n$D\n# c\ng(x) = 2\n")) == 2
 
-    # Reported as an error in the default preset.
+    # Reported as a warning in the default preset.
     src = "$D\n# c\n$X\n"
     d = only(dd_diags(src))
-    @test d.severity === :error
+    @test d.severity === :warning
     @test occursin("immediately followed", d.message)
     # The range is exactly the string, not the enclosing container.
     @test src[first(d.range):last(d.range)-1] == D
