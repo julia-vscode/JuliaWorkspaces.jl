@@ -208,6 +208,10 @@ const LINT_RULES = LintRule[
         severity_default = :off, severity_strict = :warning),
     LintRule(id = :async_task, tier = TierSyntax,
         severity_default = :off, severity_strict = :warning),
+    # The text is discarded outright rather than a style opinion, so it does not
+    # follow the `:off`-by-default convention for a new rule.
+    LintRule(id = :detached_docstring, tier = TierSyntax,
+        severity_default = :error, severity_strict = :error),
 
     # ── Rules backed by analyses other than StaticLint ───────────────────────
     LintRule(id = :syntax_errors, tier = TierSyntax,
@@ -319,15 +323,15 @@ Base.isequal(a::EffectiveLintConfig, b::EffectiveLintConfig) = _lint_config_fiel
 Base.hash(c::EffectiveLintConfig, h::UInt) =
     hash(c.severities, hash(c.options, hash(c.selected, hash(EffectiveLintConfig, h))))
 
+# No severity fallback: every preset classifies every rule (by construction),
+# and an effective config always starts from a preset, so a miss here means the
+# caller passed something that is not a rule id — which should be loud.
 """
     rule_severity(config, rule_id) -> Symbol
 
 The configured severity of `rule_id`, or its `default` preset severity when the
 config does not mention it.
 """
-# No severity fallback: every preset classifies every rule (by construction),
-# and an effective config always starts from a preset, so a miss here means the
-# caller passed something that is not a rule id — which should be loud.
 rule_severity(config::EffectiveLintConfig, rule_id::Symbol) =
     get(config.severities, rule_id, _PRESET_DEFAULT[rule_id])
 

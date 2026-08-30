@@ -198,13 +198,15 @@ end
         :config_errors => :error,
         :shadowed_config => :information,
         :environment_errors => :information,
-        # Syntactic rules added with the rule registry; off outside `strict`.
+        # Syntactic rules added with the rule registry; off outside `strict`,
+        # except `detached_docstring` (see its LintRule entry).
         :nan_comparison => :off,
         :duplicate_branch_condition => :off,
         :string_concat_style => :off,
         :bare_using => :off,
         :debug_statement => :off,
         :async_task => :off,
+        :detached_docstring => :error,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 

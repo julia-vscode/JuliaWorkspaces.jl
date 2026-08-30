@@ -721,6 +721,32 @@ end
 _store_extended_in_workspace(rt, root, env, func_ref) =
     !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
 
+# Roots we can attribute a splice context to without an include edge: the
+# package entry file, standard tool entry points, and @testitem files (which
+# carry their own analysis context). Every OTHER root exists either because it
+# genuinely is a standalone script or because a computed include loads it —
+# indistinguishable statically.
+function _is_recognized_entry_point(rt, uri)
+    _file_has_testitems(rt, uri) && return true
+
+    fp = uri2filepath(uri)
+    fp === nothing && return false
+    name = lowercase(basename(fp))
+    dir = lowercase(basename(dirname(fp)))
+    name == "runtests.jl" && dir == "test" && return true
+    name == "make.jl" && dir == "docs" && return true
+
+    pkg_folder = derived_package_for_file(rt, uri)
+    if pkg_folder !== nothing
+        pkg = derived_package(rt, pkg_folder)
+        if pkg !== nothing
+            entry = joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl")
+            lowercase(fp) == lowercase(entry) && return true
+        end
+    end
+    return false
+end
+
 """
     derived_file_analysis(rt, root::URI, file::URI) -> FileAnalysis
 
@@ -768,32 +794,6 @@ frame reads the whole `derived_module_tree` value. Consequences:
   reference an actually-shifted name re-execute, and those MUST (their
   outbound `ItemRef`s change).
 """
-# Roots we can attribute a splice context to without an include edge: the
-# package entry file, standard tool entry points, and @testitem files (which
-# carry their own analysis context). Every OTHER root exists either because it
-# genuinely is a standalone script or because a computed include loads it —
-# indistinguishable statically.
-function _is_recognized_entry_point(rt, uri)
-    _file_has_testitems(rt, uri) && return true
-
-    fp = uri2filepath(uri)
-    fp === nothing && return false
-    name = lowercase(basename(fp))
-    dir = lowercase(basename(dirname(fp)))
-    name == "runtests.jl" && dir == "test" && return true
-    name == "make.jl" && dir == "docs" && return true
-
-    pkg_folder = derived_package_for_file(rt, uri)
-    if pkg_folder !== nothing
-        pkg = derived_package(rt, pkg_folder)
-        if pkg !== nothing
-            entry = joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl")
-            lowercase(fp) == lowercase(entry) && return true
-        end
-    end
-    return false
-end
-
 Salsa.@derived function derived_file_analysis(rt, root, file)
     @debug "derived_file_analysis" root=root file=file
 
