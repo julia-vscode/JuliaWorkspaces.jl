@@ -13,14 +13,14 @@
 # when rebuilt-but-unchanged (structural isequal over shared stores), but a
 # *changed* env would still invalidate any tree that depended on it.
 
+# `@auto_hash_equals` is load-bearing: the fallback for an immutable struct is
+# field-wise egality, whereas `URI`'s own `==`/`hash` must be the ones used —
+# Salsa's early exit compares whole values with `isequal`.
 """
     ItemRef(file, id)
 
 Reference to a top-level item (in a file inventory) by file URI and item ID.
 """
-# `@auto_hash_equals` is load-bearing: the fallback for an immutable struct is
-# field-wise egality, whereas `URI`'s own `==`/`hash` must be the ones used —
-# Salsa's early exit compares whole values with `isequal`.
 @auto_hash_equals struct ItemRef
     file::URI
     id::Int64   # Int64, not Int: an item id needs 62 bits (see `_mint_ids!`)

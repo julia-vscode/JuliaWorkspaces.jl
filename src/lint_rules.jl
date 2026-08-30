@@ -319,15 +319,15 @@ Base.isequal(a::EffectiveLintConfig, b::EffectiveLintConfig) = _lint_config_fiel
 Base.hash(c::EffectiveLintConfig, h::UInt) =
     hash(c.severities, hash(c.options, hash(c.selected, hash(EffectiveLintConfig, h))))
 
+# No severity fallback: every preset classifies every rule (by construction),
+# and an effective config always starts from a preset, so a miss here means the
+# caller passed something that is not a rule id — which should be loud.
 """
     rule_severity(config, rule_id) -> Symbol
 
 The configured severity of `rule_id`, or its `default` preset severity when the
 config does not mention it.
 """
-# No severity fallback: every preset classifies every rule (by construction),
-# and an effective config always starts from a preset, so a miss here means the
-# caller passed something that is not a rule id — which should be loud.
 rule_severity(config::EffectiveLintConfig, rule_id::Symbol) =
     get(config.severities, rule_id, _PRESET_DEFAULT[rule_id])
 
