@@ -208,6 +208,10 @@ const LINT_RULES = LintRule[
         severity_default = :off, severity_strict = :warning),
     LintRule(id = :async_task, tier = TierSyntax,
         severity_default = :off, severity_strict = :warning),
+    # The text is discarded outright rather than a style opinion, so it does not
+    # follow the `:off`-by-default convention for a new rule.
+    LintRule(id = :detached_docstring, tier = TierSyntax,
+        severity_default = :error, severity_strict = :error),
 
     # ── Rules backed by analyses other than StaticLint ───────────────────────
     LintRule(id = :syntax_errors, tier = TierSyntax,

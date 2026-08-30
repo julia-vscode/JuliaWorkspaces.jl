@@ -263,8 +263,11 @@ rules run on the JuliaSyntax tree of a single file alone
 | `bare_using` | `using Foo` without an explicit name list; prefer `using Foo: x, y` or `import Foo`. |
 | `debug_statement` | A leftover `@show`. |
 | `async_task` | `@async`, which pins the task to the current thread; consider `Threads.@spawn`. |
+| `detached_docstring` | A string that looks like a docstring but is not attached to anything, because a comment or a blank line sits between it and the expression it documents. The text is evaluated and discarded. |
 
-All of these are currently `"off"` outside the `strict` preset.
+All of these are `"off"` outside the `strict` preset, except `detached_docstring`,
+which reports as an error in every preset but `minimal`: a severed docstring
+discards its text outright rather than expressing a style preference.
 
 ### Severities
 
