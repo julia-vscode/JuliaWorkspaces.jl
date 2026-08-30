@@ -206,7 +206,7 @@ end
         :bare_using => :off,
         :debug_statement => :off,
         :async_task => :off,
-        :detached_docstring => :error,
+        :detached_docstring => :warning,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 

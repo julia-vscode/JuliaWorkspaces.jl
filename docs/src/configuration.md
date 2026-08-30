@@ -266,7 +266,7 @@ rules run on the JuliaSyntax tree of a single file alone
 | `detached_docstring` | A string that looks like a docstring but is not attached to anything, because a comment or a blank line sits between it and the expression it documents. The text is evaluated and discarded. |
 
 All of these are `"off"` outside the `strict` preset, except `detached_docstring`,
-which reports as an error in every preset but `minimal`: a severed docstring
+which reports as a warning in every preset but `minimal`: a severed docstring
 discards its text outright rather than expressing a style preference.
 
 ### Severities
@@ -320,6 +320,10 @@ A preset name **floats**: it tracks the tool rather than pinning a frozen rule
 set, so upgrading the tooling can change what a preset reports. To keep that
 from breaking projects on upgrade, a rule that did not exist before enters
 existing presets as `"off"`; promoting it is a deliberate, changelogged change.
+The one exception so far is `detached_docstring`, which found its way into
+`default` directly because its finding is outright discarded program text — and
+even that class of rule enters at `"warning"` at most, never `"error"`, so an
+upgrade can never change `julialint`'s exit status.
 Version-pinning syntax (`preset = "default@2"`) may be added later — bare names
 will keep floating, so nothing written today changes meaning.
 
