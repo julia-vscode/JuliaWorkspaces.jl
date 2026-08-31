@@ -15,6 +15,17 @@ workspace_from_folders
 add_folder_from_disc!
 add_file_from_disc!
 update_file_from_disc!
+collect_workspace_paths
+```
+
+## Path selection
+
+The directory walk above and the per-file config attribution both answer to
+these predicates on a [`PathFilter`](@ref).
+
+```@docs
+path_selected
+dir_selected
 ```
 
 ## Mutating a workspace
