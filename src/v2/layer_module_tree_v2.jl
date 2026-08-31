@@ -151,8 +151,16 @@ cannot be turned into a URI — which is exactly what
 This replaces v1's route through `StaticLint.collect_include_analysis`: v2
 carries the literal string in the skeleton and resolves it here, so no part of
 the v2 stack needs StaticLint.
+
+Deliberately a plain function, NOT a Salsa query, despite the `derived_` name
+(kept for its call sites): it is pure in `(uri, path)` and reads no inputs, so
+memoization bought nothing — and its Salsa-wrapper instantiation reliably
+crashes LLVM (misched/regalloc segfault, LLVM 18 and 20) when JIT-compiled
+under `--code-coverage` instrumentation, taking every coverage CI leg down
+with it. The runtime argument is accepted and ignored so callers read like the
+neighboring queries.
 """
-Salsa.@derived function derived_v2_include_target(rt, uri, path)
+function derived_v2_include_target(_, uri, path)
     path === nothing && return nothing
     isempty(path) && return nothing
     return try
