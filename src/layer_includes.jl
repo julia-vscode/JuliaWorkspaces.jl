@@ -266,7 +266,12 @@ end
 function _include_diagnostic(offset, span, code)
     rng = (offset + 1):(offset + span + 1)
     description = StaticLint.LintCodeDescriptions[code]
-    return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl")
+    # Computed and function-body includes are analysis-boundary NOTICES, not
+    # include errors: the rule id rides on the diagnostic so the emission join
+    # routes them (and their severity) to `analysis_boundary`.
+    rule = (code === StaticLint.ComputedInclude || code === StaticLint.RuntimeInclude) ?
+        :analysis_boundary : :include_errors
+    return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl", rule)
 end
 
 function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited, result)
@@ -279,6 +284,7 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited,
     # still a duplicate, and so is a repeat further down that body's include
     # subtree, which inherits these sets.
     testitem_visited = Dict{Int,Tuple{Set{URI},Set{URI}}}()
+    runtime_targets = derived_file_include_data(rt, uri).runtime_targets
 
     for (offset, span, target, guarded, testitem_ctx) in derived_file_include_records(rt, uri)
         seen, guarded_seen = testitem_ctx === nothing ?
@@ -286,16 +292,30 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited,
             get!(() -> (Set{URI}(), Set{URI}()), testitem_visited, testitem_ctx)
 
         if target === nothing
-            # A computed include path: the target file cannot be attributed,
-            # so it is analyzed without this module's context and bare
-            # missing-reference checking is unreliable in this module (see
-            # `derived_module_has_computed_include`). One honest diagnostic
-            # here replaces the storm of false missing_reference positives
-            # the unattributed file would otherwise produce. Guarded computed
-            # includes (`const depsjl = joinpath(...); isfile(depsjl) &&
-            # include(depsjl)`) abstain like the rest; the missing-reference
-            # relaxation applies either way.
-            guarded || push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.ComputedInclude))
+            # An unattributable include: the target is analyzed without this
+            # module's context and bare missing-reference checking is
+            # unreliable in this module (see
+            # `derived_module_has_computed_include`). One honest notice here
+            # replaces the storm of false missing_reference positives the
+            # unattributed file would otherwise produce. Guarded includes
+            # (`const depsjl = joinpath(...); isfile(depsjl) && include(depsjl)`)
+            # abstain like the rest; the missing-reference relaxation applies
+            # either way.
+            #
+            # Two flavors: a LITERAL path inside a function body (spliced at
+            # run time — the SciML `@safetestset … include("x.jl")` thunks) is
+            # a runtime boundary whose target can still be existence-checked;
+            # everything else is a computed path.
+            rtarget = get(runtime_targets, offset, nothing)
+            if !guarded
+                code = if rtarget !== nothing
+                    derived_text_file_content(rt, rtarget) === nothing ?
+                        StaticLint.MissingFile : StaticLint.RuntimeInclude
+                else
+                    StaticLint.ComputedInclude
+                end
+                push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, code))
+            end
             continue
         end
 

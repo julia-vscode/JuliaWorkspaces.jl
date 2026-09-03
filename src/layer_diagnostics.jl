@@ -366,9 +366,12 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         # MissingFile) are a purely structural analysis that does not depend on
         # a project/environment, so they are reported independently of the
         # semantic static-lint pass above.
-        if enabled(:include_errors)
+        # ComputedInclude / RuntimeInclude are analysis-boundary notices and
+        # carry that rule id on the diagnostic; the rest stay include_errors.
+        if enabled(:include_errors) || enabled(:analysis_boundary)
             for d in derived_include_diagnostics(rt, uri)
-                emit!(d.range, :include_errors, d.message, d.uri, d.source)
+                rule = d.code === nothing ? :include_errors : d.code
+                enabled(rule) && emit!(d.range, rule, d.message, d.uri, d.source)
             end
         end
     end

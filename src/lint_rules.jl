@@ -164,7 +164,6 @@ const LINT_RULES = LintRule[
             StaticLint.IncludePathContainsNULL,
             StaticLint.FileTooBig,
             StaticLint.FileNotAvailable,
-            StaticLint.ComputedInclude,
         ]),
     LintRule(id = :missing_reference, tier = TierSemantic,
         severity_default = :warning, severity_strict = :warning,
@@ -235,7 +234,8 @@ const LINT_RULES = LintRule[
     # convention, by maintainer direction): silence about silencing would
     # leave users believing the suppressed rules ran clean.
     LintRule(id = :analysis_boundary, tier = TierWorkspace,
-        severity_minimal = :off, severity_default = :information, severity_strict = :warning),
+        severity_minimal = :off, severity_default = :information, severity_strict = :warning,
+        codes = [StaticLint.ComputedInclude, StaticLint.RuntimeInclude]),
 ]
 
 const LINT_RULES_BY_ID = Dict{Symbol,LintRule}(r.id => r for r in LINT_RULES)

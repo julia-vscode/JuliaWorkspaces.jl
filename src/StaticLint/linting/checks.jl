@@ -38,6 +38,7 @@
     FunctionHasNoMethods,
     UnresolvedImport,
     ComputedInclude,
+    RuntimeInclude,
 )
 
 const LintCodeDescriptions = Dict{LintCodes,String}(
@@ -59,6 +60,7 @@ const LintCodeDescriptions = Dict{LintCodes,String}(
     DuplicateInclude => "This file has already been included.",
     MissingFile => "The included file can not be found.",
     ComputedInclude => "The include path could not be determined statically. The included file is analyzed without this module's context, and missing_reference, incorrect_call_args, type_piracy, invalid_type_declaration, kw_default_mismatch and incorrect_iter_spec are not applied in this module.",
+    RuntimeInclude => "This `include` runs inside a function body, so its target is spliced at run time rather than analyzed in this module's context; missing_reference, incorrect_call_args, type_piracy, invalid_type_declaration, kw_default_mismatch and incorrect_iter_spec are not applied in this module.",
     InvalidModuleName => "Module name matches that of its parent.",
     TypePiracy => "An imported function has been extended without using module defined typed arguments.",
     UnusedFunctionArgument => "An argument is included in a function signature but not used within its body.",
