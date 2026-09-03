@@ -27,6 +27,10 @@ include("layer_includes.jl")
 include("layer_inventory.jl")
 include("layer_module_tree.jl")
 include("v2/v2.jl")
+# TomlSyntax needs the vendored JuliaSyntax loaded by v2/ (kinds register at
+# include time) and nothing else from the package.
+include("TomlSyntax/TomlSyntax.jl")
+include("layer_toml_tree.jl")
 include("layer_visibility.jl")
 include("layer_scope_modules.jl")
 

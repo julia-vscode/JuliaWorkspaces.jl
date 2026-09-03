@@ -244,6 +244,13 @@ using PrecompileTools: @setup_workload, @compile_workload
         get_diagnostics_blocking(jw)
         get_test_items(jw)
 
+        # TomlSyntax: the recovering tree API and the table pass (the project
+        # files above already exercised the parse-result path).
+        let tree = TomlSyntax.parsetoml(TomlSyntax.TomlNode,
+                "a = [1,\n[t]\nb = 1979-05-27T07:32:00Z\nc = {x = 1}\n"; ignore_errors=true)
+            TomlSyntax.build_table(tree)
+        end
+
         # Symbol-cache serialization round-trip: compiles the package-cache
         # write/read path used when loading .jstore files at runtime.
         let store_name = haskey(SymbolServer.stdlibs, :Logging) ? :Logging : first(keys(SymbolServer.stdlibs))

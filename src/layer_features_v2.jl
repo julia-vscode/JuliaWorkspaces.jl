@@ -565,20 +565,26 @@ function _v2f_block_candidates(skel, maps, docs, text::String, pm::Vector{String
         dr = get(docs, id, nothing)
         if dr !== nothing
             ds0 = _v2f_start0(dr)
-            # The stored doc range covers the CONTENT; the wrapper begins at
-            # the opening delimiter — scan back over the whitespace a
-            # triple-quote opener leaves (`\"\"\"\n`), then the quotes.
+            # The stored doc range normally covers the CONTENT, and the
+            # wrapper begins at the opening delimiter — scan back over the
+            # whitespace a triple-quote opener leaves (`\"\"\"\n`), then the
+            # quotes. A docstring with embedded quotes is stored WITH its
+            # delimiters (the EST's string node then spans the literal), and
+            # scanning back from it would latch onto a quote on the previous
+            # line; a range that starts on a quote is complete as it is.
             # Codeunit-wise: byte indexing must not trip on multibyte chars.
-            j = ds0   # 1-based index of the byte just before the content
-            while j >= 1 && codeunit(text, j) in
-                  (UInt8(' '), UInt8('\t'), UInt8('\n'), UInt8('\r'))
-                j -= 1
-            end
-            if j >= 3 && codeunit(text, j) == UInt8('"') &&
-               codeunit(text, j - 1) == UInt8('"') && codeunit(text, j - 2) == UInt8('"')
-                ds0 = j - 3
-            elseif j >= 1 && codeunit(text, j) == UInt8('"')
-                ds0 = j - 1
+            if !(ds0 < ncodeunits(text) && codeunit(text, ds0 + 1) == UInt8('"'))
+                j = ds0   # 1-based index of the byte just before the content
+                while j >= 1 && codeunit(text, j) in
+                      (UInt8(' '), UInt8('\t'), UInt8('\n'), UInt8('\r'))
+                    j -= 1
+                end
+                if j >= 3 && codeunit(text, j) == UInt8('"') &&
+                   codeunit(text, j - 1) == UInt8('"') && codeunit(text, j - 2) == UInt8('"')
+                    ds0 = j - 3
+                elseif j >= 1 && codeunit(text, j) == UInt8('"')
+                    ds0 = j - 1
+                end
             end
             s0 = min(s0, ds0)
         end

@@ -109,7 +109,8 @@ From the bottom up:
 | Layer file | Responsibility |
 | --- | --- |
 | `layer_files.jl` | File-set queries: which files exist, which are Julia, and resolving regular-vs-indirect content. |
-| `layer_syntax_trees.jl` | Parsing: JuliaSyntax parse results and trees, the legacy CSTParser tree, and TOML parsing. |
+| `layer_syntax_trees.jl` | Parsing: JuliaSyntax parse results and trees, and the legacy CSTParser tree. |
+| `layer_toml_tree.jl` | TOML files: the `TomlSyntax` parse products (table plus diagnostics at real ranges) and the TOML item walk (skeleton, bodies, maps), the v2 pattern applied to TOML. |
 | `layer_includes.jl` | The `include(...)` graph and its roots. |
 | `layer_static_lint.jl` | Semantic analysis via StaticLint's `semantic_pass`. |
 | `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`. |
@@ -271,7 +272,9 @@ which is the include manifest. The load order mirrors the dependency stack:
 2. **Dynamic feature** — the shared protocol plus `dynamic_fsm.jl`,
    `dynamic_messages.jl`, `dynamic_feature.jl`.
 3. **Core** — `types.jl`, `sourcetext.jl`, `inputs.jl`.
-4. **Layer stack** — `layer_files.jl`, `layer_syntax_trees.jl`, the bundled
+4. **Layer stack** — `layer_files.jl`, `layer_syntax_trees.jl`, the v2 stack
+   (`v2/`, which loads the vendored JuliaSyntax), the `TomlSyntax` submodule
+   and `layer_toml_tree.jl` on top of it, the bundled
    `StaticLint`, then the tooling-configuration trio (`lint_rules.jl`,
    `config_common.jl`, `lint_emission.jl` — see
    [Configuration](configuration.md)), then the remaining `layer_*.jl` files

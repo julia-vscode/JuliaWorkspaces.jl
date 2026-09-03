@@ -686,3 +686,23 @@ end
     b_off = JW._get_current_block_range(jw_off.runtime, FT_URI, o)
     @test b_on == b_off
 end
+
+@testitem "block range: a docstring with embedded quotes" setup=[FeatV2WS] begin
+    # The EST stores a docstring that contains quote characters WITH its
+    # delimiters (a plain one is content only). Scanning back for the opening
+    # quotes from such a range used to latch onto the `"` closing `v"1.0.0"`
+    # on the previous line, so the const's block ended before its own stop.
+    src = "const X = v\"1.0.0\"\n\n\"\"\"\n    T(text; version=v\"1.0.0\")\n\"\"\"\nmutable struct T\n    a::Int\nend\n"
+    jw_on = ft_workspace(src)
+    jw_off = ft_workspace(src; flag=false)
+    for needle in ("const X", "v\"1.0.0\"", "mutable struct", "a::Int")
+        o = off0(src, needle)
+        b_on = JW._get_current_block_range(jw_on.runtime, FT_URI, o)
+        b_off = JW._get_current_block_range(jw_off.runtime, FT_URI, o)
+        @test b_on == b_off
+    end
+    b = JW._get_current_block_range(jw_on.runtime, FT_URI, off0(src, "const X"))
+    @test b.block_stop.line == 3   # the documented struct's block starts at its docstring
+    b = JW._get_current_block_range(jw_on.runtime, FT_URI, off0(src, "a::Int"))
+    @test b.block_start.line == 3
+end
