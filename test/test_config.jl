@@ -116,7 +116,7 @@ end
         :global_const_decl => :information,
         :unused_binding => :hint,
         :const_decl => :information,
-        :relative_import => :information,
+        :relative_import => :off,   # runtime nesting of included helpers is unknowable; dots saturate at Main
         :include_errors => :warning,
         :missing_reference => :warning,
         :unresolved_import => :warning,

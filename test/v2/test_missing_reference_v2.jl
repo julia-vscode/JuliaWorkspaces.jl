@@ -171,3 +171,25 @@ end
         @test isempty(mr_diags(jw))
     end
 end
+
+@testitem "missing_reference: doc signatures and guarded imports" setup=[MissRefV2WS] begin
+    # A documented bare method signature never evaluates — its argument
+    # names are not reads (AbstractFFTs, Compat, DBInterface, InverseFunctions).
+    jw = mr_workspace("\"\"\"\n    stack(f, iter)\n\nDocs.\n\"\"\"\nstack(f, iter)\n")
+    @test isempty(mr_diags(jw))
+
+    # A `using`/`import` inside a try/if body may bring in any name: the
+    # module is blind for missing_reference (with a boundary notice), so a
+    # name that import may provide is not flagged.
+    jw = mr_workspace("""
+    try
+        import GR_jll
+    catch
+    end
+    f() = GR_jll.libGR
+    g() = something_from_gr()
+    """)
+    @test isempty(mr_diags(jw))
+    @test !isempty(filter(d -> d.code === :analysis_boundary && occursin("conditional", d.message),
+                          JuliaWorkspaces.get_diagnostic(jw, MR_URI)))
+end

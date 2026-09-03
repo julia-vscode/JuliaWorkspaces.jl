@@ -461,13 +461,20 @@ end
 # the skeleton — the skeleton's equality contract is body-independent, and
 # these are body facts. Addresses are BodyTree preorder, reattachable through
 # `derived_v2_file_maps`.
-const V2BodyMarker = @NamedTuple{addr::Int32, kind::Symbol}  # :computed_include | :opaque_eval
+const V2BodyMarker = @NamedTuple{addr::Int32, kind::Symbol}  # :computed_include | :opaque_eval | :guarded_import
 
 function _v2_scan_body_markers!(out::Vector{V2BodyMarker}, bt::BodyTree{V2Kind},
                                 addr::Base.RefValue{Int}, qdepth::Int)
     myaddr = (addr[] += 1)
     if qdepth == 0
-        if _v2_is_includeish_call(bt)
+        if bt.kind == JS2.K"using" || bt.kind == JS2.K"import"
+            # A `using`/`import` inside an item body (`try; import GR_jll;
+            # catch; end`, an `if` branch of a build script) brings names the
+            # walk cannot see — the import row machinery only sees top-level
+            # statements. Unlike the other markers this blinds missing_reference
+            # only: an import cannot add methods to a name already visible.
+            push!(out, (addr=Int32(myaddr), kind=:guarded_import))
+        elseif _v2_is_includeish_call(bt)
             push!(out, (addr=Int32(myaddr), kind=:computed_include))
         elseif (bt.kind == JS2.K"macrocall" && bt.children !== nothing &&
                 !isempty(bt.children) && _macro_name_string(bt.children[1]) == "eval") ||
@@ -526,6 +533,11 @@ Salsa.@derived function derived_v2_module_has_computed_include(rt, root, path)
     # Includes inside item bodies (function/loop/let/try) splice at runtime —
     # always beyond static resolution, exactly like a computed path.
     return _v2_module_has_body_marker(rt, root, path, :computed_include)
+end
+
+"Whether the module at `path` has a `using`/`import` inside an item body (try/if/…)."
+Salsa.@derived function derived_v2_module_has_guarded_import(rt, root, path)
+    return _v2_module_has_body_marker(rt, root, path, :guarded_import)
 end
 
 "Whether the module at `path` contains a top-level macrocall with unmodelled effects."

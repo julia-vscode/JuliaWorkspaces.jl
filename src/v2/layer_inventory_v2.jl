@@ -376,7 +376,10 @@ function _v2_is_callable_object_sig(bt::BodyTree)
     while callee.kind == JS2.K"parens" && _v2_nchildren(callee) >= 1
         callee = _v2_children(callee)[1]
     end
-    return callee.kind == JS2.K"::" && _v2_nchildren(callee) == 2
+    # Binary `a::T` (named instance) or unary `::Type{X}` (anonymous typed
+    # callee: `(::Type{JLArray{T,N} where T})(x) = …`, which must not declare a
+    # function named `Type` shadowing `Core.Type`).
+    return callee.kind == JS2.K"::" && _v2_nchildren(callee) >= 1
 end
 
 # An import path node: `(. A B)` for `A.B`, `(. "." "." Sib)` for `..Sib`.

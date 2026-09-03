@@ -153,7 +153,7 @@ const LINT_RULES = LintRule[
             StaticLint.CannotDefineFuncAlreadyHasValue,
         ]),
     LintRule(id = :relative_import, tier = TierSemantic,
-        severity_default = :information, severity_strict = :warning,
+        severity_default = :off, severity_strict = :warning,
         codes = [StaticLint.RelativeImportTooManyDots]),
     LintRule(id = :include_errors, tier = TierWorkspace,
         severity_minimal = :warning, severity_default = :warning, severity_strict = :warning,

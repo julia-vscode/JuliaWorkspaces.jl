@@ -203,3 +203,13 @@ end
         join(first(v2_only, 40), "\n  "))
     @test v2_only == String[]
 end
+
+@testitem "pointless_boolean: literals inside @static conditions are load-bearing" setup=[ShapeRulesWS] begin
+    # `@static (cond && true) && isa(x, T)`: `@static` only accepts
+    # if/&&/||/ternary forms, so the `&& true` turns a version check into a
+    # compile-time Bool — JuliaInterpreter's idiom, four sweep FPs.
+    @test isempty(sh_diags("f(x) = @static (VERSION >= v\"1.6\" && true) && isa(x, Int)\n", :pointless_boolean))
+    @test isempty(sh_diags("f(x) = @static (isdefined(Base, :foo) || false) ? 1 : 2\n", :pointless_boolean))
+    # Outside `@static` the same literal still flags.
+    @test !isempty(sh_diags("f(x) = (isa(x, Int) && true) && g(x)\n", :pointless_boolean))
+end

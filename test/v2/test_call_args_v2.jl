@@ -213,3 +213,45 @@ end
         join(first(v2_only, 40), "\n  "))
     @test v2_only == String[]
 end
+
+@testitem "call args: round-2 corpus FP classes decline" setup=[CallArgsWS] begin
+    # An aliased callee shares its method table with the canonical name: a
+    # workspace extension of `Base.isapprox` makes `≈` partial too
+    # (MathOptInterface's 3-arg `isapprox(x, y, config)`).
+    jw = ca_workspace("""
+    struct Config end
+    Base.isapprox(x, y, c::Config) = true
+    f(a, b) = ≈(a, b, Config())
+    """)
+    @test isempty(ca_diags(jw))
+
+    # Calls under a version/existence gate target an API of another Julia.
+    jw = ca_workspace("""
+    function g(A)
+        if VERSION < v"0.7"
+            return cholesky(A, :L, Val(true))
+        end
+        return sum(A, 1, 2, 3, 4, 5, 6)
+    end
+    """)
+    @test isempty(filter(d -> occursin("cholesky", d.message) || d.range == 0:0, ca_diags(jw)))
+
+    # A qualifier that is a local of the item is a value, not a module.
+    jw = ca_workspace("""
+    function h(get_ext)
+        Metal = get_ext(:Metal)
+        return Metal.functional()
+    end
+    """)
+    @test isempty(ca_diags(jw))
+
+    # The arity description is the UNION of method ranges, never their hull.
+    jw = ca_workspace("""
+    k(a, b) = 1
+    k(a, b, c) = 2
+    k(a, b, c, d, e) = 3
+    use() = k(1, 2, 3, 4)
+    """)
+    d = only(ca_diags(jw))
+    @test occursin("Expected 2 to 3 or 5 arguments, got 4", d.message)
+end

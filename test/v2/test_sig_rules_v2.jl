@@ -100,6 +100,14 @@ end
     Cat(x, y) = x + y
     f(v::Cat) = v
     """, :invalid_type_declaration))
+    # A name this module IMPORTS and then extends with constructor methods
+    # (IJulia's `import IJulia: Comm` + `Comm(target, …) = …`): the local
+    # events are all function-like, but the type lives at the import target.
+    @test isempty(sr_diags("""
+    import Base: Set
+    Set(a, b, c) = Set([a, b, c])
+    f(s::Set) = s
+    """, :invalid_type_declaration))
     # A name brought in from another workspace module is unknown here — accept.
     @test isempty(sr_diags("""
     module Inner
@@ -166,4 +174,26 @@ end
     isempty(v2_only) || println("v2-only findings (false-positive candidates):\n  " *
         join(first(v2_only, 40), "\n  "))
     @test v2_only == String[]
+end
+
+@testitem "sig rules: round-2 survivors stay silent" setup=[SigRulesWS] begin
+    # `(::Type{X})(args)` is a callable-TYPE constructor: it must not declare
+    # a function named `Type` that shadows `Core.Type` (JLArrays).
+    @test isempty(sr_diags("""
+    struct JLArray{T,N} end
+    (::Type{JLArray{T,N} where T})(x::AbstractArray{S,N}) where {S,N} = 1
+    f(T::Type) = T
+    """, :invalid_type_declaration))
+    # `x::Vararg` is legal even though `Core.Vararg` is not a DataType.
+    @test isempty(sr_diags("f(content::Vararg) = content\n", :invalid_type_declaration))
+    # A definition inside a version-gated branch owns its name on the Julia
+    # it targets: no import-then-extend piracy across branches (DataDeps,
+    # ProgressLogging).
+    @test isempty(sr_diags("""
+    @static if isdefined(Base, :url_filename)
+        using Base: url_filename
+    else
+        url_filename(u::AbstractString) = basename(u)
+    end
+    """, :type_piracy))
 end

@@ -189,3 +189,21 @@ end
     @test isempty(unexpected)
     @test issubset(EXPECTED_LOWERING_ERROR_FILES, keys(offenders))   # ratchet
 end
+
+@testitem "lowering_errors: `\$` at the top level of an own-root package file is a template" setup=[LoweringErrWS] begin
+    # ExproniconLite's `__include_generated__` wraps each src file in
+    # `quote … end` via include_string, so `$(Expr(:symbolicgoto, …))` at
+    # top level is interpolation, not an error. Own-root non-entry file of a
+    # package ⇒ template; the entry file / a plain script still reports.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///tpl/Project.toml"), SourceText(
+        "name = \"Tpl\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9b1\"\nversion = \"1.0.0\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///tpl/src/Tpl.jl"), SourceText("module Tpl\nend\n", "julia")))
+    tmpl = URI("file:///tpl/src/analysis/split.jl")
+    add_file!(jw, TextFile(tmpl, SourceText("f(x) = \$(Expr(:symbolicgoto, :done))\n", "julia")))
+    JW.set_v2_enabled!(jw, true)
+    @test !any(d -> d.code === :lowering_errors, get_diagnostic(jw, tmpl))
+    # Other lowering errors in such a file still report (dead legacy syntax).
+    add_file!(jw, TextFile(URI("file:///tpl/src/analysis/old.jl"), SourceText("1 = 2\n", "julia")))
+    @test any(d -> d.code === :lowering_errors, get_diagnostic(jw, URI("file:///tpl/src/analysis/old.jl")))
+end

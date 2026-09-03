@@ -71,11 +71,17 @@ end
     @test isempty(ki_diags("f(; x::Int = 1.5) = x\n", :kw_default_mismatch; flag=false))
 end
 
+@testitem "iter spec: a numeric literal iterator is legal one-element iteration" setup=[KwIterWS] begin
+    # `for x in 2.1` iterates once over the number — a deliberate idiom
+    # (SLEEFPirates' accuracy tests). The old "will likely error" claim was
+    # false, so the literal arm is gone; only `length(x)` remains.
+    @test isempty(ki_diags("function f()\n    for i in 5\n    end\nend\n", :incorrect_iter_spec))
+    @test isempty(ki_diags("function f()\n    for i = 1.5\n    end\nend\n", :incorrect_iter_spec))
+end
+
 @testitem "iter spec: positives" setup=[KwIterWS] begin
-    msg = "A loop iterator has been used that will likely error."
+    msg = "Iterating over `length(x)` iterates the single integer once; use `1:length(x)` or `eachindex(x)` to iterate the elements."
     for src in [
-        "function f()\n    for i in 5\n    end\nend\n",
-        "function f()\n    for i = 1.5\n    end\nend\n",
         "f(v) = [i for i in length(v)]\n",
         "function f(v)\n    for i in length(v)\n    end\nend\n",
         "function f(v)\n    for i in Base.length(v)\n    end\nend\n",
@@ -85,9 +91,9 @@ end
         @test only(ds).message == msg
     end
     # Multi-spec loops report the offending spec.
-    src = "function f(xs)\n    for i in 1:3, j in 5\n    end\nend\n"
+    src = "function f(xs)\n    for i in 1:3, j in length(xs)\n    end\nend\n"
     d = only(ki_diags(src, :incorrect_iter_spec))
-    @test startswith(lstrip(src[d.range]), "j in 5")
+    @test startswith(lstrip(src[d.range]), "j in length(xs)")
 end
 
 @testitem "iter spec: negatives" setup=[KwIterWS] begin

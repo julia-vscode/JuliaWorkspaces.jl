@@ -156,3 +156,16 @@ end
         config="[rules]\nconst_decl = \"off\"\n")
     @test isempty(cd_diags(jw))
 end
+
+@testitem "v2 const_decl: constructor methods on parametric aliases" setup=[ConstDeclV2WS] begin
+    # A parametric type alias plus a constructor method on it — legal
+    # (RandomExtensions' MakeN family), not "already has a value".
+    jw = cd_workspace("Root.jl" => """
+    struct Make{T,X} end
+    Make0{T} = Make{T,Tuple{}}
+    Make1{T} = Make{T,Tuple{X}} where X
+    Make0{T}() where {T} = Make{T,Tuple{}}()
+    Make1{T}(x) where {T} = Make{T,Tuple{typeof(x)}}()
+    """)
+    @test isempty(cd_diags(jw))
+end

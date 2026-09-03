@@ -86,6 +86,9 @@ Salsa.@derived function derived_v2_external_module_member_kind(rt, root::URI, pa
     haskey(store, Symbol(name)) || return :absent
     v = store[Symbol(name)]
     v isa SymbolServer.ModuleStore && return :module
+    # `Core.Vararg` is a `TypeofVararg` instance, not a `DataType`, so the
+    # cache files it as a value — but `x::Vararg` is a legal annotation.
+    name == "Vararg" && return :datatype
     # The datatype/value split resolves VarRef forwards and, for constructor
     # FunctionStores, follows `.extends` (`Base.Int` is the constructor whose
     # extends points at Core's DataTypeStore — the same rule v1's
@@ -190,6 +193,24 @@ Salsa.@derived function derived_v2_external_method_arities(rt, root::URI, path::
         end
     end
     return out
+end
+
+"""
+    derived_v2_external_canonical_name(rt, root, path, name) -> Union{Nothing,String}
+
+The name the store knows the function `name` under after alias resolution
+(`≈` → `"isapprox"`: `const ≈ = isapprox` is a `VarRef` to the real
+`FunctionStore`), or `nothing` when `name` does not resolve to a function.
+"""
+Salsa.@derived function derived_v2_external_canonical_name(rt, root::URI, path::Vector{String}, name::String)
+    store = _v2_resolve_external_store(rt, root, path)
+    store === nothing && return nothing
+    haskey(store, Symbol(name)) || return nothing
+    env = _v2_resolve_env(rt, root)
+    b = StaticLint.maybe_lookup(store[Symbol(name)], env)
+    b isa SymbolServer.FunctionStore || return nothing
+    vr = b.name
+    return vr isa SymbolServer.VarRef ? String(vr.name) : nothing
 end
 
 """

@@ -102,8 +102,15 @@ Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
            _v2_is_bare_signature(body)
             return result
         end
+        # A `$` at top level of an OWN-ROOT, non-entry package file is a code
+        # template consumed by a custom loader (ExproniconLite's
+        # `__include_generated__` wraps each file in `quote … end` via
+        # `include_string`): the file never runs as written, so the error is
+        # an artifact of reading a template as a program.
+        template_file = _derived_v2_own_root_package_file(rt, ref.file)
         for f in low.findings
             f.addr == Int32(0) && continue   # no user address to report at
+            template_file && startswith(f.msg, "`\$` expression outside string or quote") && continue
             push!(result, (addr=f.addr, rule_id=:lowering_errors, msg=f.msg))
         end
         return result
@@ -398,6 +405,20 @@ end
 
 _v2_const_like(k::Symbol) = _v2_is_datatype_kind(k) || k === :const || k === :enum_member
 
+# Whether an item is a parametric type alias assignment (`Name{T} = …`,
+# possibly `const`-wrapped): its name denotes a TYPE, so later constructor
+# methods extend it rather than redefine it.
+function _v2_is_curly_alias_item(rt, ref::V2ItemRef)
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return false
+    node = body
+    while (node.kind == JS2.K"const" || node.kind == JS2.K"global") && _v2_nchildren(node) >= 1
+        node = _v2_children(node)[1]
+    end
+    (node.kind == JS2.K"=" && _v2_nchildren(node) >= 1) || return false
+    return _v2_children(node)[1].kind == JS2.K"curly"
+end
+
 Salsa.@derived function derived_v2_module_const_decl_findings(rt, root, path)
     result = @NamedTuple{ref::V2ItemRef, msg::String}[]
     events = derived_v2_module_decl_events(rt, root, path)
@@ -434,7 +455,11 @@ Salsa.@derived function derived_v2_module_const_decl_findings(rt, root, path)
                 if _v2_const_like(kind)
                     push!(result, (ref=ref,
                         msg="Cannot declare constant `$name`; it already has a value."))
-                elseif (kind === :function || kind === :macro) && pk in (:assignment, :global)
+                elseif (kind === :function || kind === :macro) && pk in (:assignment, :global) &&
+                       !_v2_is_curly_alias_item(rt, prev[2])
+                    # `Make0{T} = Make{T,Tuple{}}` then `Make0{T}() where {T} = …`:
+                    # a parametric type alias plus a constructor method on it
+                    # (RandomExtensions) — legal, not a redefinition.
                     push!(result, (ref=ref,
                         msg="Cannot define function `$name`; it already has a value."))
                 elseif kind in (:assignment, :global) && _v2_const_like(pk)
@@ -700,6 +725,26 @@ Salsa.@derived function _derived_v2_missing_ref_file_suppressed(rt, uri)
     return false
 end
 
+# An own-root file INSIDE a package folder that is not the package's entry
+# point (nor runtests/make): a file nothing statically includes, reached only
+# through a loader the linter cannot follow — the shape under which a top-level
+# `$` marks a code template (ExproniconLite's `include_string`-wrapped sources).
+Salsa.@derived function _derived_v2_own_root_package_file(rt, uri)
+    derived_v2_best_root_for_uri(rt, uri) == uri || return false
+    fp = uri2filepath(uri)
+    fp === nothing && return false
+    name = lowercase(basename(fp))
+    dir = lowercase(basename(dirname(fp)))
+    (name == "runtests.jl" && dir == "test") && return false
+    (name == "make.jl" && dir == "docs") && return false
+    pkg_folder = derived_package_for_file(rt, uri)
+    pkg_folder === nothing && return false
+    pkg = derived_package(rt, pkg_folder)
+    pkg === nothing && return false
+    entry = joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl")
+    return lowercase(fp) != lowercase(entry)
+end
+
 """
     derived_item_missing_reference_findings(rt, ref) -> Vector{SemanticFinding}
 
@@ -714,6 +759,13 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
     low = derived_item_lowering(rt, ref)
     (low === nothing || low.status !== :ok) && return result
     ref.id in derived_v2_under_macrocall_ids(rt, ref.file) && return result
+    # A documented bare method signature (`"""docs""" f(::A, x)`) is a
+    # doc-system target that never evaluates: its argument names are not
+    # reads of anything.
+    if haskey(derived_v2_file_doc_ranges(rt, ref.file), ref.id)
+        b = derived_item_lowering_body(rt, ref)
+        b !== nothing && _v2_is_bare_signature(b) && return result
+    end
     body = derived_item_lowering_body(rt, ref)
     body === nothing && return result
     _test_block_target(body) !== nothing && return result
@@ -732,6 +784,9 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
     derived_v2_module_unresolved_wildcard_using(rt, root, path) && return result
     derived_v2_module_has_computed_include(rt, root, path) && return result
     derived_v2_module_has_opaque_macrocall(rt, root, path) && return result
+    # A `using`/`import` inside a try/if body may bring any name — this rule's
+    # blindness only (imports add no methods to already-visible names).
+    derived_v2_module_has_guarded_import(rt, root, path) && return result
 
     visible = derived_v2_module_visible_names_idfree(rt, root, path)
     implicit = derived_v2_implicit_scope_names(rt, root, derived_v2_module_is_bare(rt, root, path))
@@ -863,18 +918,24 @@ function _v2_compare_f_call(ref::MethodArity, (act_min, act_max, act_kws))
     return true
 end
 
-# The `_arity_desc` port: render the arity constraint of a method set.
+# Render the arity constraint of a method set as the UNION of the methods'
+# ranges ("2 to 3 or 5"), never their hull: "Expected 2 to 5 arguments, got
+# 4" (DataFrames, methods of arity 2–3 and 5) was self-contradictory.
 function _v2_arity_desc(arities::Vector{MethodArity})
-    mins = sort!(unique(a.minargs for a in arities))
-    if any(a.maxargs == typemax(Int) for a in arities)
-        return string("at least ", minimum(mins))
-    elseif length(mins) == 1 && all(a.maxargs == mins[1] for a in arities)
-        return string(mins[1])
-    else
-        lo = minimum(a.minargs for a in arities)
-        hi = maximum(a.maxargs for a in arities)
-        return lo == hi ? string(lo) : string(lo, " to ", hi)
+    any(a.maxargs == typemax(Int) for a in arities) &&
+        return string("at least ", minimum(a.minargs for a in arities))
+    ivs = sort!(unique!([(a.minargs, a.maxargs) for a in arities]))
+    merged = Tuple{Int,Int}[]
+    for (lo, hi) in ivs
+        if !isempty(merged) && lo <= merged[end][2] + 1
+            merged[end] = (merged[end][1], max(merged[end][2], hi))
+        else
+            push!(merged, (lo, hi))
+        end
     end
+    parts = [lo == hi ? string(lo) : string(lo, " to ", hi) for (lo, hi) in merged]
+    length(parts) == 1 && return parts[1]
+    return join(parts[1:end-1], ", ") * " or " * parts[end]
 end
 
 # The specific reason sentence for a non-matching call, or `nothing` for the
@@ -894,6 +955,28 @@ function _v2_call_mismatch_reason(arities::Vector{MethodArity}, (act_min, act_ma
             return string("Unsupported keyword `", kw, "`.")
     end
     return nothing
+end
+
+# The store's canonical function name behind an unqualified external callee
+# when it is an alias (`≈` → `isapprox`), else `nothing`. Only the implicit
+# Base/Core scope and `using`-brought names are consulted — the two ways an
+# alias reaches a call site unqualified.
+function _v2_callee_canonical_name(rt, root, path::Vector{String},
+                                   qual::Vector{String}, name::String)
+    isempty(qual) || return nothing
+    face = get(derived_v2_module_visible_names_idfree(rt, root, path), name, nothing)
+    modpath = if face === nothing
+        bare = derived_v2_module_is_bare(rt, root, path)
+        insorted(name, derived_v2_implicit_scope_names(rt, root, bare)) || return nothing
+        derived_v2_external_module_member_kind(rt, root, ["Base"], name) === :absent ?
+            ["Core"] : ["Base"]
+    elseif face.origin === :using_external && face.kind === :external_symbol
+        face.origin_module
+    else
+        return nothing
+    end
+    canon = derived_v2_external_canonical_name(rt, root, modpath, name)
+    return canon == name ? nothing : canon
 end
 
 # Seam arities are plain named tuples (the seam file cannot name v2 types);
@@ -997,6 +1080,14 @@ function _v2_call_sites!(emit, bt::BodyTree{V2Kind}, addr::Base.RefValue{Int},
         return nothing
     end
     bt.children === nothing && return nothing
+    # Calls under a version/existence gate (`if VERSION < v"0.7"`, `@static if
+    # isdefined(Base, :f)`) target an API that only exists on the gated Julia;
+    # checking them against today's store is meaningless — skip the branch.
+    if qdepth == 0 && (k == JS2.K"if" || k == JS2.K"elseif") && !isempty(bt.children) &&
+       _v2_mentions_existence_guard(bt.children[1])
+        addr[] += bt_node_count(bt) - 1
+        return nothing
+    end
     if k == JS2.K"function" || k == JS2.K"macro" || k == JS2.K"="
         sig = _v2_func_sig(bt)
         sig !== nothing && push!(skip, sig)
@@ -1088,8 +1179,21 @@ Salsa.@derived function derived_item_call_args_findings(rt, ref::V2ItemRef)
             ok || return
         end
 
+        # A qualifier that is a LOCAL of this item (`Metal = get_extension(…);
+        # Metal.functional()`) is a value, not a module: unknowable, decline.
+        if !isempty(qual) &&
+           any(b -> !b.is_internal && (b.kind === :local || b.kind === :argument) &&
+                    b.name == qual[1], low.bindings)
+            return
+        end
+
         partial === nothing && (partial = derived_v2_partial_method_names(rt, root))
         name in partial && return
+        # An aliased callee (`≈` is `const ≈ = isapprox` in Base) shares its
+        # method table with the canonical name; a workspace extension of THAT
+        # name (`Base.isapprox(x, y, config)`) makes the alias partial too.
+        canon = _v2_callee_canonical_name(rt, root, path, qual, name)
+        canon !== nothing && canon in partial && return
 
         resolved = _v2_callee_arities(rt, root, path, qual, name)
         resolved === nothing && return
@@ -1374,6 +1478,20 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
                 end
             end
             flag = saw_local && proven_nontype
+            # A name this module also IMPORTS and then extends with methods
+            # (`import IJulia: Comm` + `Comm(target, …) = …`): the local
+            # events are all function-like, but the type lives at the import
+            # target — unknown here, accept.
+            if flag
+                for ri in derived_v2_module_imports(rt, root, path)
+                    if any(s -> (s.alias === nothing ? s.name : s.alias) == n, ri.symbols) ||
+                       (isempty(ri.symbols) && ri.kind === :import &&
+                        !isempty(ri.target.path) && last(ri.target.path) == n)
+                        flag = false
+                        break
+                    end
+                end
+            end
         elseif prov === :external
             flag = derived_v2_external_module_member_kind(rt, root, info, n) === :value
         end
@@ -1430,6 +1548,11 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
     # ── type_piracy (import-then-extend) ────────────────────────────────────
     (fname === nothing || !isempty(_v2_qualified_name(_v2_unwrap_to_name(cs[1]))[1])) &&
         return result
+    # A definition inside a version/feature-gated branch (`@static if
+    # !isdefined(Downloads, :url_filename)` → own definition; the import sits
+    # in the other branch) owns its name on the Julia it targets — the
+    # import-then-extend reading is meaningless across branches.
+    skel.items[idx].conditional && return result
     _v2_extends_external_import(rt, root, path, fname) || return result
     for (i, arg0) in enumerate(cs)
         i == 1 && continue
@@ -1501,10 +1624,13 @@ function _v2_shape_rules!(out::Vector{SemanticFinding}, bt::BodyTree{V2Kind},
     cs = bt.children
 
     if qdepth == 0
-        if k == JS2.K"||" && length(cs) >= 1 && _v2_bool_literal(cs[1])
+        # Inside an `@static` condition a boolean literal is load-bearing:
+        # `@static (cond && true) && isa(...)` is the idiom that turns a
+        # version/isdefined check into a compile-time Bool (JuliaInterpreter).
+        if !static_arg && k == JS2.K"||" && length(cs) >= 1 && _v2_bool_literal(cs[1])
             push!(out, (addr=Int32(myaddr), rule_id=:pointless_boolean,
                 msg="The first argument of a `||` call is a boolean literal."))
-        elseif k == JS2.K"&&" && length(cs) >= 2 &&
+        elseif !static_arg && k == JS2.K"&&" && length(cs) >= 2 &&
                (_v2_bool_literal(cs[1]) || _v2_bool_literal(cs[2]))
             push!(out, (addr=Int32(myaddr), rule_id=:pointless_boolean,
                 msg="An argument of a `&&` call is a boolean literal."))
@@ -1520,7 +1646,13 @@ function _v2_shape_rules!(out::Vector{SemanticFinding}, bt::BodyTree{V2Kind},
         _v2_literal_use!(out, bt, myaddr)
     end
 
-    child_static = qdepth == 0 && k == JS2.K"macrocall" && _v2_macrocall_name(bt) == "@static"
+    # `@static`'s argument is the whole boolean expression that follows it
+    # (`@static (cond && true) && isa(x, T)` parses with the outer `&&` as the
+    # macro's argument), often parenthesized: the flag passes through parens
+    # and `&&`/`||` nodes so every literal in that condition counts as
+    # load-bearing. It does NOT pass into `if` bodies — those are ordinary code.
+    child_static = (qdepth == 0 && k == JS2.K"macrocall" && _v2_macrocall_name(bt) == "@static") ||
+                   (static_arg && (k == JS2.K"parens" || k == JS2.K"&&" || k == JS2.K"||"))
     for c in cs
         _v2_shape_rules!(out, c, addr, child_depth, child_static)
     end
@@ -1659,10 +1791,11 @@ Salsa.@derived function derived_item_iter_spec_findings(rt, ref::V2ItemRef)
         _v2_nchildren(spec) == 2 || return
         rng = _v2_children(spec)[2]
         flag = false
-        if rng.children === nothing && rng.val isa Union{Integer,AbstractFloat} &&
-           !(rng.val isa Bool)
-            flag = true
-        elseif rng.kind == JS2.K"call" && _v2_nchildren(rng) >= 1
+        # A bare numeric literal iterator (`for x in 2.1`) is LEGAL
+        # one-element iteration — a deliberate idiom in SLEEFPirates' tests —
+        # so only the `length(x)` shape (iterating a single Int by mistake,
+        # e.g. `for i in length(a)` — three real bugs in the sweep) remains.
+        if rng.kind == JS2.K"call" && _v2_nchildren(rng) >= 1
             q, n = _v2_qualified_name(_v2_children(rng)[1])
             if n == "length"
                 prov, info = _v2_type_provenance(rt, root, path, q, n)
@@ -1670,7 +1803,7 @@ Salsa.@derived function derived_item_iter_spec_findings(rt, ref::V2ItemRef)
             end
         end
         flag && push!(result, (addr=Int32(spec_addr), rule_id=:incorrect_iter_spec,
-            msg="A loop iterator has been used that will likely error."))
+            msg="Iterating over `length(x)` iterates the single integer once; use `1:length(x)` or `eachindex(x)` to iterate the elements."))
     end
     return result
 end
@@ -1693,7 +1826,11 @@ const _V2_BOUNDARY_EVAL_MSG =
     "invisible to the linter, so $(_V2_BOUNDARY_SUPPRESSED_RULES) are not " *
     "applied in this module."
 
-"One `analysis_boundary` finding per opaque `@eval`/`eval` in the item."
+const _V2_BOUNDARY_IMPORT_MSG =
+    "This conditional `using`/`import` may bring in names the linter cannot " *
+    "see, so missing_reference is not applied in this module."
+
+"One `analysis_boundary` finding per opaque `@eval`/`eval` or guarded import in the item."
 Salsa.@derived function derived_item_boundary_findings(rt, ref::V2ItemRef)
     result = SemanticFinding[]
     body = derived_item_lowering_body(rt, ref)
@@ -1704,8 +1841,11 @@ Salsa.@derived function derived_item_boundary_findings(rt, ref::V2ItemRef)
         push!(result, (addr=Int32(1), rule_id=:analysis_boundary, msg=_V2_BOUNDARY_EVAL_MSG))
     else
         for m in derived_v2_item_body_markers(rt, ref)
-            m.kind === :opaque_eval || continue
-            push!(result, (addr=m.addr, rule_id=:analysis_boundary, msg=_V2_BOUNDARY_EVAL_MSG))
+            if m.kind === :opaque_eval
+                push!(result, (addr=m.addr, rule_id=:analysis_boundary, msg=_V2_BOUNDARY_EVAL_MSG))
+            elseif m.kind === :guarded_import
+                push!(result, (addr=m.addr, rule_id=:analysis_boundary, msg=_V2_BOUNDARY_IMPORT_MSG))
+            end
         end
     end
     return result
