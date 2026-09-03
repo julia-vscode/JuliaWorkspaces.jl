@@ -1016,6 +1016,126 @@ function _v2_walk_if_chain!(state::_V2WalkState, node, parent_module::Vector{Str
     return
 end
 
+# ── static @eval-loop extraction ────────────────────────────────────────────
+#
+# The v2 counterpart of v1's `interpret_eval`, tightly scoped to the corpus'
+# dominant metaprogramming idiom:
+#
+#     for f in (:sin, :cos)          for (f, g) in ((:a, :b), (:c, :d))
+#         @eval $f(x) = …                @eval $f(x) = $g(x)
+#     end                            end
+#
+# When the loop iterates a LITERAL tuple/vect of quoted symbols (or tuples of
+# them for a destructure) and its body is nothing but `@eval` statements whose
+# definitions put a loop variable in name position, the defined names are
+# enumerable without executing anything. Success both declares the names and
+# clears the opaque-eval blindness for the item.
+
+# The loop-variable name in a definition's NAME position: `$f` possibly under
+# `const`/`where`/return-`::`/`curly`/`call`, else `nothing`.
+function _v2_eval_defn_template(defn::BodyTree, vars::Vector{String})
+    node = defn
+    kind = :assignment
+    if node.kind == JS2.K"const" && _v2_nchildren(node) >= 1
+        kind = :const
+        node = _v2_children(node)[1]
+    end
+    if node.kind == JS2.K"function" && _v2_nchildren(node) >= 1
+        kind = :function
+        node = _v2_children(node)[1]
+    elseif node.kind == JS2.K"=" && _v2_nchildren(node) >= 1
+        node = _v2_children(node)[1]
+    else
+        return nothing
+    end
+    while (node.kind == JS2.K"where" || node.kind == JS2.K"::") && _v2_nchildren(node) >= 1
+        node = _v2_children(node)[1]
+    end
+    if node.kind == JS2.K"call" && _v2_nchildren(node) >= 1
+        kind === :const || (kind = :function)
+        node = _v2_children(node)[1]
+    end
+    node.kind == JS2.K"curly" && _v2_nchildren(node) >= 1 &&
+        (node = _v2_children(node)[1])
+    (node.kind == JS2.K"$" && _v2_nchildren(node) == 1) || return nothing
+    v = _v2_leaf_string(_v2_children(node)[1])
+    (v !== nothing && v in vars) || return nothing
+    return (v, kind)
+end
+
+"Extracted `V2Decl`s of an @eval loop, or `nothing` when the shape doesn't qualify."
+function _v2_extract_eval_loop(bt::BodyTree)
+    bt.kind == JS2.K"for" || return nothing
+    _v2_nchildren(bt) == 2 || return nothing
+    iterspec, body = _v2_children(bt)
+    (iterspec.kind == JS2.K"=" && _v2_nchildren(iterspec) == 2) || return nothing
+    var_node, iter = _v2_children(iterspec)
+
+    vars = String[]
+    if var_node.kind == JS2.K"Identifier"
+        v = _v2_leaf_string(var_node)
+        v === nothing && return nothing
+        push!(vars, v)
+    elseif var_node.kind == JS2.K"tuple"
+        for c in _v2_children(var_node)
+            c.kind == JS2.K"Identifier" || return nothing
+            v = _v2_leaf_string(c)
+            v === nothing && return nothing
+            push!(vars, v)
+        end
+    else
+        return nothing
+    end
+    isempty(vars) && return nothing
+
+    # Quoted symbols arrive as `inert`-wrapped identifiers.
+    _sym(node) = node.kind == JS2.K"inert" && _v2_nchildren(node) == 1 ?
+        _v2_leaf_string(_v2_children(node)[1]) : nothing
+    (iter.kind == JS2.K"tuple" || iter.kind == JS2.K"vect") || return nothing
+    rows = Vector{Vector{String}}()
+    for row in _v2_children(iter)
+        if length(vars) == 1
+            s = _sym(row)
+            s === nothing && return nothing
+            push!(rows, [s])
+        else
+            (row.kind == JS2.K"tuple" && _v2_nchildren(row) == length(vars)) || return nothing
+            vals = String[]
+            for cell in _v2_children(row)
+                s = _sym(cell)
+                s === nothing && return nothing
+                push!(vals, s)
+            end
+            push!(rows, vals)
+        end
+    end
+    isempty(rows) && return nothing
+
+    body.kind == JS2.K"block" || return nothing
+    templates = Tuple{String,Symbol}[]
+    for stmt in _v2_children(body)
+        stmt.kind == JS2.K"macrocall" || return nothing
+        cs = _v2_children(stmt)
+        (length(cs) >= 3 && _v2_leaf_string(cs[1]) == "@eval") || return nothing
+        for defn in cs[3:end]
+            defn.kind == JS2.K"Value" && continue
+            t = _v2_eval_defn_template(defn, vars)
+            t === nothing && return nothing
+            push!(templates, t)
+        end
+    end
+    isempty(templates) && return nothing
+
+    out = V2Decl[]
+    for (v, kind) in templates
+        idx = findfirst(==(v), vars)
+        for vals in rows
+            push!(out, V2Decl(vals[idx], String[], kind, String[]))
+        end
+    end
+    return out
+end
+
 # Whether a parse subtree contains a `$` interpolation anywhere. Deliberately
 # depth-blind: even `$` nested under an inner `quote` reaches evaluation when
 # `@eval` runs the whole form, so any occurrence makes the definition opaque.
@@ -1334,7 +1454,13 @@ function _v2_classify(bt::BodyTree, kind_override::Union{Nothing,Symbol}=nothing
     k = bt.kind
     cs = _v2_children(bt)
 
-    if k == JS2.K"function" || k == JS2.K"macro"
+    if k == JS2.K"for"
+        # The statically-extractable @eval loop declares its generated names
+        # (see `_v2_extract_eval_loop`); every other loop declares nothing.
+        decls = _v2_extract_eval_loop(bt)
+        decls !== nothing && append!(out, decls)
+
+    elseif k == JS2.K"function" || k == JS2.K"macro"
         isempty(cs) && return out
         k == JS2.K"function" && _v2_is_callable_object_sig(cs[1]) && return out
         q, n = _v2_qualified_name(_v2_unwrap_to_name(cs[1]))

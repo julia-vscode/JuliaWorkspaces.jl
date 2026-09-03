@@ -26,8 +26,9 @@
 end
 
 @testitem "analysis_boundary: interpolated @eval notices and blinds" setup=[BoundaryWS] begin
-    # Top-level interpolated @eval: one notice, module blinded.
-    src = "for f in (:a, :b)\n    @eval \$f(x) = x\nend\n"
+    # A loop over a non-literal collection: one notice, module blinded
+    # (the literal-tuple form is extractable and covered separately).
+    src = "syms = (:a, :b)\nfor f in syms\n    @eval \$f(x) = x\nend\n"
     jw = ab_workspace(src)
     ds = ab_diags(jw)
     @test length(ds) == 1
@@ -63,6 +64,38 @@ end
     # `$` inside a quote that is merely DATA (no eval) is not a boundary.
     jw = ab_workspace("q(x) = :(g(\$x))\n")
     @test isempty(ab_diags(jw))
+end
+
+@testitem "analysis_boundary: extractable @eval loops declare and stay silent" setup=[BoundaryWS] begin
+    # `for f in (:a, :b); @eval $f(x) = … end` iterates literal symbols: the
+    # generated names are enumerable statically — declared, no blindness, no
+    # notice (v1's interpret_eval counterpart).
+    src = "for f in (:generated_a, :generated_b)\n    @eval \$f(x) = x\nend\nuse_it() = generated_a(1)\n"
+    jw = ab_workspace(src)
+    @test isempty(ab_diags(jw))
+    @test !JW.derived_v2_module_has_opaque_macrocall(jw.runtime, AB_URI, String[])
+    names = JW.derived_v2_module_names(jw.runtime, AB_URI, String[])
+    @test get(names, "generated_a", nothing) === :function
+    @test get(names, "generated_b", nothing) === :function
+    @test !any(d -> d.code === :missing_reference && occursin("generated_a", d.message),
+               JuliaWorkspaces.get_diagnostic(jw, AB_URI))
+
+    # Destructured loops and const forms extract too.
+    jw = ab_workspace("for (f, s) in ((:pa, :sa), (:pb, :sb))\n    @eval \$f(x) = \$s\nend\n")
+    @test isempty(ab_diags(jw))
+    names = JW.derived_v2_module_names(jw.runtime, AB_URI, String[])
+    @test haskey(names, "pa") && haskey(names, "pb")
+    jw = ab_workspace("for c in (:red, :green)\n    @eval const \$c = 1\nend\n")
+    @test isempty(ab_diags(jw))
+    @test get(JW.derived_v2_module_names(jw.runtime, AB_URI, String[]), "red", nothing) === :const
+
+    # A non-literal iteration cannot extract: boundary notice + blindness stay.
+    jw = ab_workspace("for f in name_list\n    @eval \$f(x) = x\nend\n")
+    @test length(ab_diags(jw)) == 1
+    @test JW.derived_v2_module_has_opaque_macrocall(jw.runtime, AB_URI, String[])
+    # A computed name position cannot extract either.
+    jw = ab_workspace("for f in (:a, :b)\n    @eval \$(Symbol(f, :_new))(x) = x\nend\n")
+    @test length(ab_diags(jw)) == 1
 end
 
 @testitem "analysis_boundary: flag and preset gates" setup=[BoundaryWS] begin

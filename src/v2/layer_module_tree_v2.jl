@@ -490,6 +490,13 @@ Salsa.@derived function derived_v2_item_body_markers(rt, ref::V2ItemRef)
     body === nothing && return V2BodyMarker[]
     out = V2BodyMarker[]
     _v2_scan_body_markers!(out, body, Ref(0), 0)
+    # A statically-extractable @eval loop is NOT a boundary: its generated
+    # names are declared by classification, so neither blindness nor a notice
+    # applies. (Extraction requires the body to be @eval statements only, so
+    # include markers cannot coexist with it.)
+    if any(m -> m.kind === :opaque_eval, out) && _v2_extract_eval_loop(body) !== nothing
+        filter!(m -> m.kind !== :opaque_eval, out)
+    end
     return out
 end
 
