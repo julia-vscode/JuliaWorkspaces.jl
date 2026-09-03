@@ -177,13 +177,22 @@ end
 # cause false negatives, never false positives). NOTE: consequently
 # use-before-definition analysis must not be shipped while macros are opaque
 # (a synthesized read may precede the real assignment).
+# All-underscore identifiers are write-only: synthesizing a READ of one is a
+# guaranteed validation failure ("write-only … cannot be used in expressions"),
+# so `for _ in xs` or a `_`-destructure inside a macrocall/quote must never
+# become a synthesized read (the top-500 sweep's dominant lowering_errors FP).
+_is_writeonly_name(v) =
+    v isa Union{Symbol,AbstractString} && !isempty(string(v)) &&
+    all(==('_'), string(v))
+
 function _collect_macrocall_identifiers!(kids::Vector{JS2.SyntaxTree}, bt::BodyTree{V2Kind}, addr::Base.RefValue{Int})
     myaddr = (addr[] += 1)
     if bt.children === nothing
         # Macro names themselves parse as identifiers spelled `@name` (v2
         # stores identifier names as String); they are not variable reads.
         if bt.kind == JS2.K"Identifier" &&
-           !(bt.val isa Union{Symbol,AbstractString} && startswith(string(bt.val), "@"))
+           !(bt.val isa Union{Symbol,AbstractString} && startswith(string(bt.val), "@")) &&
+           !_is_writeonly_name(bt.val)
             push!(kids, JS2.SyntaxTree(bt.kind, nothing, bt.val, LineNumberNode(myaddr, :body), nothing))
         end
         return nothing
@@ -231,9 +240,22 @@ function _materialize_addr0(bt::BodyTree{V2Kind})
 end
 
 function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::Int = 0,
-                      expansions::Dict{UInt64,BodyTree{V2Kind}} = _EMPTY_EXPANSIONS)
+                      expansions::Dict{UInt64,BodyTree{V2Kind}} = _EMPTY_EXPANSIONS,
+                      eq_to_kw::Bool = false)
     myaddr = (addr[] += 1)
     src = LineNumberNode(myaddr, :body)
+    # `@nospecialize(arg = default)` in a signature: the parser only rewrites
+    # `=` to `kw` under call/dotcall/parameters PARENTS, and inside the
+    # macrocall the parent was the macro — so when the transparent unwrap drops
+    # the wrapper, a raw `=` would land in the positional list and fail
+    # validation ("expected identifier or `identifier::type`"). Re-wrap it
+    # here, mirroring what JuliaLowering's own `strip_arg_meta` path produces.
+    # Direct `=` children of a call were already rewritten by the parser, so
+    # this only ever fires on macro-unwrapped targets.
+    if eq_to_kw && bt.kind == JS2.K"=" && bt.children !== nothing && length(bt.children) == 2
+        kids = JS2.SyntaxTree[_materialize(c, addr, qdepth, expansions) for c in bt.children]
+        return JS2.SyntaxTree(JS2.K"kw", kids, bt.val, src, nothing)
+    end
     # Structurally transparent macros unwrap to the form they wrap. The skipped
     # children still consume their addresses so the preorder numbering stays
     # aligned with `derived_v2_file_maps`.
@@ -243,7 +265,7 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
             for c in bt.children[1:end-1]
                 addr[] += bt_node_count(c)
             end
-            return _materialize(target, addr, qdepth, expansions)
+            return _materialize(target, addr, qdepth, expansions, eq_to_kw)
         end
         test_block = _test_block_target(bt)
         if test_block !== nothing
@@ -284,9 +306,13 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
         return JS2.SyntaxTree(bt.kind, nothing, bt.val, src, nothing)
     else
         child_depth = _quote_depth(bt.kind, qdepth)
+        # Children of a call-argument list may need the `=`→`kw` rewrite when
+        # a transparent macro unwraps into them (see above).
+        child_eq = bt.kind == JS2.K"call" || bt.kind == JS2.K"dotcall" ||
+                   bt.kind == JS2.K"parameters"
         kids = Vector{JS2.SyntaxTree}()
         for c in bt.children
-            push!(kids, _materialize(c, addr, child_depth, expansions))
+            push!(kids, _materialize(c, addr, child_depth, expansions, child_eq))
         end
         node = JS2.SyntaxTree(bt.kind, kids, bt.val, src, nothing)
 
@@ -317,7 +343,8 @@ end
 function _collect_quoted_identifiers!(reads::Vector{JS2.SyntaxTree}, bt::BodyTree{V2Kind}, addr::Base.RefValue{Int})
     if bt.children === nothing
         if bt.kind == JS2.K"Identifier" &&
-           !(bt.val isa Union{Symbol,AbstractString} && startswith(string(bt.val), "@"))
+           !(bt.val isa Union{Symbol,AbstractString} && startswith(string(bt.val), "@")) &&
+           !_is_writeonly_name(bt.val)
             push!(reads, JS2.SyntaxTree(bt.kind, nothing, bt.val,
                                         LineNumberNode(addr[], :body), nothing))
         end
@@ -328,6 +355,14 @@ function _collect_quoted_identifiers!(reads::Vector{JS2.SyntaxTree}, bt::BodyTre
     end
     return nothing
 end
+
+# The lint pipeline validates at STABLE Julia's (flisp) semantics: this rule's
+# charter is "would this raise on the Julia people run today", and 1.14-only
+# strictness (write-only `_` reads in forms legal on ≤1.13, e.g.
+# `f(x::_) where {_}` and generator reads) flagged shipped-legal code across
+# the top-500 corpus. `is_flisp_compat` is `version < v"1.14"`, so any lower
+# version engages the compat relaxations; the package's own floor is 1.12.
+const _LINT_SYNTAX_VERSION = v"1.12"
 
 # ── the frame ───────────────────────────────────────────────────────────────
 
@@ -402,7 +437,7 @@ function _lower_item(body::BodyTree{V2Kind},
     try
         world = Base.get_world_counter()
         anchor = Module(:JWLoweringAnchor)
-        ex0 = JL2.rebase_layers(st, anchor, JL2.JL_NEW_SYNTAX_VERSION)
+        ex0 = JL2.rebase_layers(st, anchor, _LINT_SYNTAX_VERSION)
         ex1 = JL2.expand_forms_1(ex0, world, true)
         ctx2, ex2 = JL2.expand_forms_2(ex1, world)
         ctx3, ex3 = JL2.resolve_scopes(ctx2, ex2; soft_scope=false)
@@ -450,7 +485,7 @@ function _lower_item_soft_scope(body::BodyTree{V2Kind},
             Core.eval(anchor, Expr(:global, Expr(:(=), Symbol(n), nothing)))
         end
         world = Base.get_world_counter()
-        ex0 = JL2.rebase_layers(st, anchor, JL2.JL_NEW_SYNTAX_VERSION)
+        ex0 = JL2.rebase_layers(st, anchor, _LINT_SYNTAX_VERSION)
         ex1 = JL2.expand_forms_1(ex0, world, true)
         ctx2, ex2 = JL2.expand_forms_2(ex1, world)
         ctx3, _ = JL2.resolve_scopes(ctx2, ex2; soft_scope=false)

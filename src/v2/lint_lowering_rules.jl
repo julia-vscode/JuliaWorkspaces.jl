@@ -55,6 +55,19 @@ projection. Backdates across position-only edits (its only dependency is the
 position-free `derived_item_lowering`). Empty when lowering is unavailable,
 errored, or absent — degradation is silence, never noise.
 """
+# A bare method-signature shape: a `call`/`dotcall`, possibly under `where` or
+# return-`::` wrappers — what the doc system accepts as a signature target.
+function _v2_is_bare_signature(bt::BodyTree{V2Kind})
+    node = bt
+    while node.kind == JS2.K"where" ||
+          (node.kind == JS2.K"::" && _v2_nchildren(node) == 2)
+        cs = _v2_children(node)
+        isempty(cs) && return false
+        node = cs[1]
+    end
+    return node.kind == JS2.K"call" || node.kind == JS2.K"dotcall"
+end
+
 Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
     result = SemanticFinding[]
     low = derived_item_lowering(rt, ref)
@@ -80,6 +93,15 @@ Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
         # strips them (`function (@main)(args)` loses its name), so structural
         # errors can be artifacts of the stripping.
         isempty(derived_v2_item_expansion_sites(rt, ref)) || return result
+        # A documented bare method signature (`"""docs""" f(::A, ::B)`) is a
+        # doc-system target, never evaluated — the doc macro swallows the call
+        # form whole, so nothing inside it can ever raise at runtime: silence.
+        # Only bare call shapes qualify; a documented function/assignment
+        # lowers as real code and keeps its errors.
+        if body !== nothing && haskey(derived_v2_file_doc_ranges(rt, ref.file), ref.id) &&
+           _v2_is_bare_signature(body)
+            return result
+        end
         for f in low.findings
             f.addr == Int32(0) && continue   # no user address to report at
             push!(result, (addr=f.addr, rule_id=:lowering_errors, msg=f.msg))
@@ -383,7 +405,12 @@ Salsa.@derived function derived_v2_module_const_decl_findings(rt, root, path)
 
     skels = Dict{URI,Any}()
     skel_of(uri) = get!(() -> derived_v2_file_skeleton(rt, uri), skels, uri)
+    # Files spliced through a conditional include (`@static if` gates picking
+    # one of several implementation files) carry the same only-one-branch-runs
+    # exemption as items that are themselves conditional.
+    cond_files = derived_v2_module_tree(rt, root).conditional_files
     function usable_item(ref::V2ItemRef)
+        ref.file in cond_files && return false
         for r in skel_of(ref.file).items
             r.id == ref.id &&
                 return r.interpretable && !r.under_macrocall && !r.conditional
@@ -454,6 +481,33 @@ end
 # `is_defined_and_owned_global`'s PARTITION_KIND_GLOBAL test). Kept separate
 # so `derived_item_lowering` stays body-only pure.
 
+# Names bound as `catch` exception variables. A catch var is ALWAYS a new
+# local — but desugaring writes it as an assignment inside the permeable catch
+# scope (see JuliaLowering `expand_try`), so `is_ambiguous_local` marks it
+# against a same-named seeded global. Never a genuine soft-scope hazard.
+function _v2_collect_catch_vars!(out::Set{String}, bt::BodyTree{V2Kind})
+    # Parse-level `try` is flisp-shaped: children are blocks with the catch
+    # variable as a bare `Identifier` DIRECT child between them (`false` when
+    # absent) — there is no `K"catch"` wrapper node at this layer.
+    if bt.kind == JS2.K"try" && bt.children !== nothing
+        for v in bt.children
+            if v.children === nothing && v.kind == JS2.K"Identifier" &&
+               v.val isa Union{Symbol,AbstractString}
+                push!(out, string(v.val))
+            end
+        end
+    end
+    bt.children === nothing && return out
+    for c in bt.children
+        _v2_collect_catch_vars!(out, c)
+    end
+    return out
+end
+
+"Item-row order for `id` in `skel`, or `nothing` when `id` has no item row."
+_v2_item_order(skel, id) =
+    (i = findfirst(r -> r.id == id, skel.items); i === nothing ? nothing : skel.items[i].order)
+
 # The soft (permeable) scope shapes: desugaring mints `neutral_scope` for
 # for/while and try blocks only; function bodies and `let` are hard scope.
 function _v2_has_soft_scope_shape(bt::BodyTree{V2Kind}, qdepth::Int=0)
@@ -486,11 +540,28 @@ Salsa.@derived function derived_item_soft_scope_findings(rt, ref::V2ItemRef)
     idx === nothing && return result
     path = vcat(_derived_v2_splice_prefix(rt, ref.file), skel.items[idx].parent_module)
 
-    seeds = sort!(String[n for (n, k) in derived_v2_module_names(rt, root, path)
-                         if k === :assignment || k === :global])
-    isempty(seeds) && return result
+    # Only globals declared BEFORE this item can make its soft-scope
+    # assignments ambiguous: when the loop runs, a textually later global does
+    # not exist yet, so Julia itself binds a new local without any warning.
+    # Same-file events compare item order; events from other spliced files
+    # keep the seed conservatively (their relative order is include-dependent).
+    item_order = skel.items[idx].order
+    seed_set = Set{String}()
+    for (n, k, eref) in derived_v2_module_decl_events(rt, root, path)
+        (k === :assignment || k === :global) || continue
+        n in seed_set && continue
+        if eref.file == ref.file
+            eorder = _v2_item_order(skel, eref.id)
+            (eorder === nothing || eorder < item_order) || continue
+        end
+        push!(seed_set, n)
+    end
+    isempty(seed_set) && return result
+    seeds = sort!(collect(seed_set))
 
+    catch_vars = _v2_collect_catch_vars!(Set{String}(), body)
     for (addr, name) in _lower_item_soft_scope(body, derived_item_expansions(rt, ref), seeds)
+        name in catch_vars && continue
         push!(result, (addr=addr, rule_id=:soft_scope_ambiguity,
             msg="Assignment to `$name` in soft scope is ambiguous because a global " *
                 "variable by the same name exists: `$name` will be treated as a new local. " *
@@ -586,9 +657,16 @@ Salsa.@derived function _derived_v2_package_has_computed_include(rt, folder)
     prefix = string(folder)
     for uri in derived_v2_all_julia_files(rt)
         startswith(string(uri), prefix) || continue
-        for inc in derived_v2_file_skeleton(rt, uri).includes
+        skel = derived_v2_file_skeleton(rt, uri)
+        for inc in skel.includes
             inc.path === nothing && return true
             derived_v2_include_target(rt, uri, inc.path) === nothing && return true
+        end
+        # Includes inside item bodies (function/loop) splice at runtime — the
+        # ColorSchemes shape: 37 data files loaded from inside a function.
+        for r in skel.items
+            any(m -> m.kind === :computed_include,
+                derived_v2_item_body_markers(rt, V2ItemRef(uri, r.id))) && return true
         end
     end
     return false
@@ -1191,8 +1269,12 @@ const _V2_KW_DEFAULT_CHECKS = Dict{String,Function}(
     "Int128" => v -> false,
 )
 
+# The kind gate matters: a `K"Identifier"` leaf carries its NAME as a `String`
+# in `val`, so without it an identifier default (`x::Int = SOME_CONST`) would
+# masquerade as a String literal and always "mismatch".
 _v2_literal_value(bt::BodyTree{V2Kind}) =
-    bt.children === nothing && bt.val isa Union{Integer,AbstractFloat,String,Char} ?
+    bt.children === nothing && _v2_is_literal_kind(bt.kind) &&
+    bt.val isa Union{Integer,AbstractFloat,String,Char} ?
     bt.val : nothing
 
 _v2_is_literal_kind(k) =
@@ -1270,9 +1352,28 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
         n === nothing && return
         (isempty(q) && n in wnames) && return
         prov, info = _v2_type_provenance(rt, root, path, q, n)
+        # Flag only what is PROVEN not to be a type; every unknown accepts
+        # (v1's `is_never_datatype` polarity — its fallback returns `false`).
         flag = false
-        if prov === :workspace
-            flag = info === :function || info === :macro
+        if prov === :workspace && (info === :function || info === :macro)
+            # The winner kind can be a constructor method shadowing a `const`
+            # alias of the same name (`const Categorical{..} = ..` plus
+            # `Categorical(p) = ..` — the FillArrays pattern v1 escapes via
+            # `_defines_constructor_method`). Consult the raw event stream:
+            # flag only when the name is declared in THIS module and every
+            # declaration is function/macro-like; a name that never appears
+            # here (e.g. brought in via a workspace `using`) stays unknown.
+            saw_local = false
+            proven_nontype = true
+            for (en, ek, _) in derived_v2_module_decl_events(rt, root, path)
+                en == n || continue
+                saw_local = true
+                if !(ek === :function || ek === :macro)
+                    proven_nontype = false
+                    break
+                end
+            end
+            flag = saw_local && proven_nontype
         elseif prov === :external
             flag = derived_v2_external_module_member_kind(rt, root, info, n) === :value
         end
@@ -1574,6 +1675,42 @@ Salsa.@derived function derived_item_iter_spec_findings(rt, ref::V2ItemRef)
     return result
 end
 
+# ── analysis_boundary ───────────────────────────────────────────────────────
+#
+# One notice per construct the linter cannot see through, so silence about the
+# suppressed rules is never mistaken for a clean bill. Computed includes keep
+# their existing `include_errors`/ComputedInclude notice (v1 machinery, emitted
+# under v2 too); this rule covers the `@eval`/`eval` boundaries, which had none.
+
+# The semantic rules that early-return on the module blindness flags —
+# keep in sync with the `derived_v2_module_has_*` gates in this file.
+const _V2_BOUNDARY_SUPPRESSED_RULES =
+    "missing_reference, incorrect_call_args, type_piracy, " *
+    "invalid_type_declaration, kw_default_mismatch and incorrect_iter_spec"
+
+const _V2_BOUNDARY_EVAL_MSG =
+    "This `eval` cannot be analyzed statically: whatever it defines is " *
+    "invisible to the linter, so $(_V2_BOUNDARY_SUPPRESSED_RULES) are not " *
+    "applied in this module."
+
+"One `analysis_boundary` finding per opaque `@eval`/`eval` in the item."
+Salsa.@derived function derived_item_boundary_findings(rt, ref::V2ItemRef)
+    result = SemanticFinding[]
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return result
+    if body.kind == JS2.K"macrocall" && body.children !== nothing &&
+       !isempty(body.children) && _macro_name_string(body.children[1]) == "eval"
+        # A top-level interpolated `@eval`, recorded as an opaque row.
+        push!(result, (addr=Int32(1), rule_id=:analysis_boundary, msg=_V2_BOUNDARY_EVAL_MSG))
+    else
+        for m in derived_v2_item_body_markers(rt, ref)
+            m.kind === :opaque_eval || continue
+            push!(result, (addr=m.addr, rule_id=:analysis_boundary, msg=_V2_BOUNDARY_EVAL_MSG))
+        end
+    end
+    return result
+end
+
 """
     derived_semantic_lint_findings(rt, uri) -> Vector{LintFinding}
 
@@ -1619,6 +1756,7 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     shape_rules_on = rule_enabled(config, :pointless_boolean) ||
         rule_enabled(config, :const_if_condition) ||
         rule_enabled(config, :literal_use)
+    boundary_on = rule_enabled(config, :analysis_boundary)
 
     for row in derived_v2_file_skeleton(rt, uri).items
         ref = V2ItemRef(uri, row.id)
@@ -1646,6 +1784,10 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
         if shape_rules_on
             sh = derived_item_shape_findings(rt, ref)
             isempty(sh) || (item_findings = vcat(item_findings, sh))
+        end
+        if boundary_on
+            bf = derived_item_boundary_findings(rt, ref)
+            isempty(bf) || (item_findings = vcat(item_findings, bf))
         end
         isempty(item_findings) && continue
         ranges = get(maps, row.id, nothing)

@@ -56,6 +56,12 @@ end
     """, :kw_default_mismatch))
     # Non-literal defaults are never checked.
     @test isempty(ki_diags("f(; x::Int = g()) = x\n", :kw_default_mismatch))
+    # Identifier defaults are non-literals too: a `K"Identifier"` leaf carries
+    # its name as a `String` in `val`, which must not read as a String literal
+    # (const-global and prior-argument defaults, the top-500 sweep's 62/62 FP).
+    @test isempty(ki_diags("const KMAX = 10\nf(; x::Int = KMAX) = x\n", :kw_default_mismatch))
+    @test isempty(ki_diags("f(m::Int, n::Int = m) = m + n\n", :kw_default_mismatch))
+    @test isempty(ki_diags("f(; v::Char = WRITE_VERSION) = v\n", :kw_default_mismatch))
     # A same-named workspace type or an alias declines.
     @test isempty(ki_diags("struct Int end\nf(; x::Int = 1.5) = x\n", :kw_default_mismatch))
     @test isempty(ki_diags("const MyInt = Int\nf(; x::MyInt = 1.5) = x\n", :kw_default_mismatch))

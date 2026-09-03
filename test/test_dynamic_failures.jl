@@ -295,4 +295,9 @@ end
 
     # A project failure that merely quotes those words is the project's problem.
     @test !_is_infra_failure(ErrorException("IOError: EACCES"))
+
+    # A dropped child pipe is the transport's failure, never the project's —
+    # it must take the retry+silent path, not become an `environment_errors`
+    # diagnostic (the top-500 sweep surfaced 7 of these on project files).
+    @test _is_infra_failure(JSONRPC.TransportError("Write task IOError", nothing))
 end

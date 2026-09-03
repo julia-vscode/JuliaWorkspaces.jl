@@ -86,6 +86,29 @@ end
     @test isempty(sr_diags("f(; x::Int = 1) = x\n", :invalid_type_declaration))
     # Alias chains decline.
     @test isempty(sr_diags("const MyInt = Int\nf(x::MyInt) = x\n", :invalid_type_declaration))
+    # Base Union aliases and `Union where` aliases are types (GenericStore in
+    # the cache; the seam widens them to :datatype).
+    @test isempty(sr_diags("f(x::Base.Callable) = x\n", :invalid_type_declaration))
+    @test isempty(sr_diags("f(x::AbstractVecOrMat) = x\n", :invalid_type_declaration))
+    @test isempty(sr_diags("f(x::StridedMatrix) = x\n", :invalid_type_declaration))
+    @test isempty(sr_diags("f(x::Type) = x\n", :invalid_type_declaration))
+    # Constructor methods on a `const` alias shadow its winner kind with
+    # :function; the raw event stream keeps the alias visible, so the
+    # annotation stays accepted (the FillArrays/Categorical pattern).
+    @test isempty(sr_diags("""
+    const Cat = Int
+    Cat(x, y) = x + y
+    f(v::Cat) = v
+    """, :invalid_type_declaration))
+    # A name brought in from another workspace module is unknown here — accept.
+    @test isempty(sr_diags("""
+    module Inner
+    g() = 1
+    export g
+    end
+    using .Inner
+    f(x::g) = x
+    """, :invalid_type_declaration))
     # The range points at the declaration (map ranges may keep trailing
     # trivia).
     src = "f(x::1) = x\n"

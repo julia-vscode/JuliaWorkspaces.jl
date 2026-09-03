@@ -130,3 +130,79 @@ end
     isempty(mismatches) || println("roots_for_uri mismatches:\n  " * join(sort!(mismatches), "\n  "))
     @test mismatches == String[]
 end
+
+@testitem "v2 body markers: function-body includes and @eval loops blind the module" begin
+    # The ColorSchemes shape, pinned for v2 (mirrors the v1 test in
+    # test/test_includes.jl): data files loaded via include(joinpath(var, ...))
+    # from INSIDE a function, plus an @eval-per-key loop. The walker never
+    # descends such bodies for items; the body-marker scan must still blind the
+    # module so missing_reference stays silent in the orphan and the module.
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
+        set_v2_enabled!, set_input_env_ready!, get_diagnostic
+    using JuliaWorkspaces.URIs2: URI
+
+    root_uri = URI("file:///cs/src/CSLike.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///cs/Project.toml"), SourceText("""
+    name = "CSLike"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef07"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///cs/Manifest.toml"), SourceText("""
+    julia_version = "1.12.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module CSLike
+    const colorschemes = Dict{Symbol,Any}()
+    function loadallschemes()
+        datadir = joinpath(dirname(@__DIR__), "data")
+        include(joinpath(datadir, "schemes.jl"))
+        for key in keys(colorschemes)
+            @eval const \$key = colorschemes[\$(QuoteNode(key))]
+        end
+    end
+    loadallschemes()
+    end
+    """, "julia")))
+    orphan = URI("file:///cs/data/schemes.jl")
+    add_file!(jw, TextFile(orphan, SourceText("loadcolorscheme(:x, [RGB(0.1, 0.2, 0.3)])\n", "julia")))
+
+    set_v2_enabled!(jw, true)
+    set_input_env_ready!(jw.runtime, true)
+
+    # The blindness flags see through the function body.
+    @test JW.derived_v2_module_has_computed_include(jw.runtime, root_uri, ["CSLike"])
+    @test JW.derived_v2_module_has_opaque_macrocall(jw.runtime, root_uri, ["CSLike"])
+
+    # No missing_reference anywhere: not in the module (blinded), not in the
+    # orphan (package-has-computed-include suppression).
+    @test !any(d -> d.code === :missing_reference, get_diagnostic(jw, root_uri))
+    @test !any(d -> d.code === :missing_reference, get_diagnostic(jw, orphan))
+end
+
+@testitem "v2 body markers: quote contents and marker-free bodies stay clean" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!, set_v2_enabled!
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("file:///bm/src/R.jl")
+    jw = JuliaWorkspace()
+    # An include inside a quote is data, not an analysis boundary; a plain
+    # function body without include/@eval carries no markers.
+    add_file!(jw, TextFile(uri, SourceText("""
+    f() = quote
+        include("not_really.jl")
+    end
+    g(x) = x + 1
+    """, "julia")))
+    set_v2_enabled!(jw, true)
+    @test !JW.derived_v2_module_has_computed_include(jw.runtime, uri, String[])
+    @test !JW.derived_v2_module_has_opaque_macrocall(jw.runtime, uri, String[])
+end

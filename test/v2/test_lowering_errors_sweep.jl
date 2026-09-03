@@ -90,6 +90,43 @@ end
     @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
 end
 
+@testitem "lowering_errors: corpus FP classes stay silent" setup=[LoweringErrWS] begin
+    # Documented bare method signatures are doc-system targets, never
+    # evaluated — the whole call form is swallowed by the doc macro.
+    for src in [
+        "\"\"\"docs\"\"\"\nf(::Int, ::String)\n",
+        "\"\"\"docs\"\"\"\nf(x::Int, y::AbstractString = \"s\")\n",
+        "\"\"\"docs\"\"\"\nf(x::T) where {T}\n",
+        "\"\"\"docs\"\"\"\nf(x; kwargs...)\n",
+        "\"\"\"docs\"\"\"\nBase.getindex(::MyType, i)\n",
+    ]
+        jw, uri = le_workspace(src)
+        @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+    end
+    # ...but an UNdocumented bare `::` call is still the real error it is.
+    jw, uri = le_workspace("f(::Int, ::String)\n")
+    @test any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+
+    # All-underscore names inside quotes/macrocalls must not become
+    # synthesized reads ("write-only identifiers cannot be used").
+    jw, uri = le_workspace("q() = quote\n    _, a = f()\n    g(a)\nend\n")
+    @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+    jw, uri = le_workspace("h(s) = s === :_\n")
+    @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+
+    # ≤1.13 validation semantics: `_` as a where-typevar is legal on every
+    # released Julia (readable_underscore relaxation).
+    jw, uri = le_workspace("f(x::_) where {_} = 1\n")
+    @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+
+    # `@nospecialize(arg = default)`: the transparent unwrap re-wraps the raw
+    # `=` as `kw`, keeping the optional-parameter form valid.
+    jw, uri = le_workspace("f(@nospecialize(x = 1)) = x\n")
+    @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+    jw, uri = le_workspace("g(a, @nospecialize(b = nothing); c = 2) = a\n")
+    @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+end
+
 @testitem "lowering_errors: findings backdate across position-only edits" setup=[LoweringErrWS] begin
     src = "f() = try g() end\n"
     jw, uri = le_workspace(src)

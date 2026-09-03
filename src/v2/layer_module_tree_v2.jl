@@ -87,6 +87,10 @@ The complete module structure of a root file and everything it includes.
     root::URI
     modules::Vector{V2ModuleNode}
     file_modules::Dict{URI,Vector{String}}
+    # Files spliced through a CONDITIONAL include (an `include` inside an
+    # `if`/`@static if` branch, transitively): only one gate's files run, so
+    # declaration-conflict rules must not pair declarations across them.
+    conditional_files::Set{URI}
 end
 
 "Look up a module by absolute path; `nothing` when absent."
@@ -221,13 +225,15 @@ function _v2_build_tree_structure(rt, root::URI)
     ensure_node!(String[])
 
     file_modules = Dict{URI,Vector{String}}()
+    conditional_files = Set{URI}()
     # First include wins in true source order; later includes of an already
     # visited file are skipped, and cycles terminate. Seeded with `root` so a
     # file including itself is caught too.
     visited = Set{URI}([root])
 
-    function splice_file!(F::URI, P::Vector{String})
+    function splice_file!(F::URI, P::Vector{String}, cond::Bool)
         file_modules[F] = P
+        cond && push!(conditional_files, F)
         push!(ensure_node!(P).files, F)
 
         inv = derived_v2_file_inventory(rt, F)
@@ -293,13 +299,13 @@ function _v2_build_tree_structure(rt, root::URI)
                 target in visited && continue
                 derived_has_content(rt, target) || continue
                 push!(visited, target)
-                splice_file!(target, newP)
+                splice_file!(target, newP, cond || inc.conditional)
             end
         end
     end
 
-    splice_file!(root, String[])
-    return builders, file_modules
+    splice_file!(root, String[], false)
+    return builders, file_modules, conditional_files
 end
 
 # Resolve `segs` as a chain of nested tree-module children starting at `anchor`.
@@ -357,7 +363,7 @@ inventories only.
 Salsa.@derived function derived_v2_module_tree(rt, root)
     @debug "derived_v2_module_tree" root=root
 
-    builders, file_modules = _v2_build_tree_structure(rt, root)
+    builders, file_modules, conditional_files = _v2_build_tree_structure(rt, root)
     workspace_roots = derived_v2_workspace_package_roots(rt)
 
     nodes = V2ModuleNode[]
@@ -373,7 +379,7 @@ Salsa.@derived function derived_v2_module_tree(rt, root)
                                   b.declared, b.declared_kinds,
                                   b.exports, b.publics, imports, b.decl_events))
     end
-    return V2ModuleTree(root, nodes, file_modules)
+    return V2ModuleTree(root, nodes, file_modules, conditional_files)
 end
 
 # ── selectors ───────────────────────────────────────────────────────────────
@@ -444,6 +450,62 @@ end
 # splice path alone would miss everything inside a nested `module` block, which
 # is exactly where an unresolvable include or an opaque macro hides.
 
+# ── body markers (analysis boundaries inside item bodies) ───────────────────
+#
+# The walker never descends into `function`/`for`/`while`/`let`/`try` bodies
+# for item enumeration — but an `include` or `@eval` in there still splices or
+# defines names at module level when the item runs (ColorSchemes loads its 37
+# data files from inside a function, then `@eval`s a const per scheme). This
+# per-item scan finds them so the blindness flags below can see through the
+# walker's structural horizon. Markers live in a DERIVED per-item query, not
+# the skeleton — the skeleton's equality contract is body-independent, and
+# these are body facts. Addresses are BodyTree preorder, reattachable through
+# `derived_v2_file_maps`.
+const V2BodyMarker = @NamedTuple{addr::Int32, kind::Symbol}  # :computed_include | :opaque_eval
+
+function _v2_scan_body_markers!(out::Vector{V2BodyMarker}, bt::BodyTree{V2Kind},
+                                addr::Base.RefValue{Int}, qdepth::Int)
+    myaddr = (addr[] += 1)
+    if qdepth == 0
+        if _v2_is_includeish_call(bt)
+            push!(out, (addr=Int32(myaddr), kind=:computed_include))
+        elseif (bt.kind == JS2.K"macrocall" && bt.children !== nothing &&
+                !isempty(bt.children) && _macro_name_string(bt.children[1]) == "eval") ||
+               (bt.kind == JS2.K"call" && bt.children !== nothing &&
+                !isempty(bt.children) && _v2_leaf_string(bt.children[1]) == "eval")
+            push!(out, (addr=Int32(myaddr), kind=:opaque_eval))
+        end
+    end
+    bt.children === nothing && return nothing
+    cd = _quote_depth(bt.kind, qdepth)
+    for c in bt.children
+        _v2_scan_body_markers!(out, c, addr, cd)
+    end
+    return nothing
+end
+
+"Analysis-boundary constructs inside one item's body (quote contents excluded)."
+Salsa.@derived function derived_v2_item_body_markers(rt, ref::V2ItemRef)
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return V2BodyMarker[]
+    out = V2BodyMarker[]
+    _v2_scan_body_markers!(out, body, Ref(0), 0)
+    return out
+end
+
+# Whether any item spliced into the module at `path` carries a marker of `kind`.
+function _v2_module_has_body_marker(rt, root, path, kind::Symbol)
+    tree = derived_v2_module_tree(rt, root)
+    for (uri, p) in tree.file_modules
+        for r in derived_v2_file_skeleton(rt, uri).items
+            vcat(p, r.parent_module) == path || continue
+            any(m -> m.kind === kind, derived_v2_item_body_markers(rt, V2ItemRef(uri, r.id))) &&
+                return true
+        end
+    end
+    return false
+end
+
 "Whether the module at `path` contains an `include` whose target cannot be resolved."
 Salsa.@derived function derived_v2_module_has_computed_include(rt, root, path)
     tree = derived_v2_module_tree(rt, root)
@@ -454,7 +516,9 @@ Salsa.@derived function derived_v2_module_has_computed_include(rt, root, path)
             derived_v2_include_target(rt, uri, inc.path) === nothing && return true
         end
     end
-    return false
+    # Includes inside item bodies (function/loop/let/try) splice at runtime —
+    # always beyond static resolution, exactly like a computed path.
+    return _v2_module_has_body_marker(rt, root, path, :computed_include)
 end
 
 "Whether the module at `path` contains a top-level macrocall with unmodelled effects."
@@ -465,5 +529,7 @@ Salsa.@derived function derived_v2_module_has_opaque_macrocall(rt, root, path)
             vcat(p, om.parent_module) == path && return true
         end
     end
-    return false
+    # `@eval`/`eval` inside item bodies defines names the walk cannot see —
+    # the same unmodelled-effects class as an opaque top-level macrocall.
+    return _v2_module_has_body_marker(rt, root, path, :opaque_eval)
 end

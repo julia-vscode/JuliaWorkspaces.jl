@@ -134,6 +134,11 @@ the argument is computed — resolution to a `URI` is the module tree's job
     id::Int64
     path::Union{Nothing,String}
     parent_module::Vector{String}
+    # True when the include sits inside an `if`/`elseif`/`else` branch
+    # (`@static if` included): only one branch runs, so declaration-conflict
+    # rules must not pair declarations from differently-gated included files
+    # (same contract as `V2ItemRow.conditional`, propagated through the splice).
+    conditional::Bool
 end
 
 """
@@ -355,6 +360,23 @@ function _v2_unwrap_to_name(bt::BodyTree)
             return node
         end
     end
+end
+
+# `function (a::T)(x) … end` / `(d::Shift)(x) = …`: a signature whose CALLEE is
+# itself a binary `::` declaration defines a method ON THE TYPE — it binds no
+# module-level name at all (`a` is the instance parameter, and unwrapping the
+# callee would wrongly declare it, colliding with any real module binding `a`).
+function _v2_is_callable_object_sig(bt::BodyTree)
+    node = bt
+    while (node.kind == JS2.K"where" || node.kind == JS2.K"::") && _v2_nchildren(node) >= 1
+        node = _v2_children(node)[1]
+    end
+    (node.kind == JS2.K"call" && _v2_nchildren(node) >= 1) || return false
+    callee = _v2_children(node)[1]
+    while callee.kind == JS2.K"parens" && _v2_nchildren(callee) >= 1
+        callee = _v2_children(callee)[1]
+    end
+    return callee.kind == JS2.K"::" && _v2_nchildren(callee) == 2
 end
 
 # An import path node: `(. A B)` for `A.B`, `(. "." "." Sib)` for `..Sib`.
@@ -622,6 +644,27 @@ function _v2_is_include_call(bt::BodyTree)
     return _v2_leaf_string(cs[1]) == "include"
 end
 
+# DETECTION-only widening of `_v2_is_include_call`: also `includet` and dotted
+# `Base.include`/`Main.include`/`M.include` forms. These never splice (their
+# target module/runtime semantics are not modelled) — they exist so the
+# body-marker scan can flag them as analysis boundaries, matching v1's
+# collector which accepts `includet` and dotted callees.
+function _v2_is_includeish_call(bt::BodyTree)
+    bt.kind == JS2.K"call" || return false
+    cs = _v2_children(bt)
+    length(cs) >= 2 || return false
+    callee = cs[1]
+    s = _v2_leaf_string(callee)
+    (s == "include" || s == "includet") && return true
+    if callee.kind == JS2.K"."
+        ccs = _v2_children(callee)
+        isempty(ccs) && return false
+        t = _v2_leaf_string(ccs[end])
+        return t == "include" || t == "includet"
+    end
+    return false
+end
+
 # The literal path argument of an include call, or `nothing` when computed.
 # One computed idiom IS statically resolvable and common enough to support:
 # `include(joinpath(@__DIR__, "a", "b.jl"))` — `@__DIR__` is the including
@@ -834,7 +877,7 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
         state.maps[id] = ranges
         return order, id, bt
     elseif _v2_is_include_call(bt)
-        push!(skel.includes, V2Include(order, id, _v2_include_path(bt), pm))
+        push!(skel.includes, V2Include(order, id, _v2_include_path(bt), pm, state.in_if > 0))
         # Bodies and maps are stored for include rows too (they carry no item
         # row, so nothing analysis-side enumerates them): document links walks
         # them for the path string literal's range.
@@ -856,7 +899,7 @@ function _v2_emit!(state::_V2WalkState, node, parent_module::Vector{String}, int
     if inner.kind == JS2.K"=" && _v2_nchildren(inner) >= 2
         rhs = _v2_children(inner)[2]
         _v2_is_include_call(rhs) &&
-            push!(skel.includes, V2Include(order, id, _v2_include_path(rhs), pm))
+            push!(skel.includes, V2Include(order, id, _v2_include_path(rhs), pm, state.in_if > 0))
     end
     return order, id, bt
 end
@@ -973,6 +1016,16 @@ function _v2_walk_if_chain!(state::_V2WalkState, node, parent_module::Vector{Str
     return
 end
 
+# Whether a parse subtree contains a `$` interpolation anywhere. Deliberately
+# depth-blind: even `$` nested under an inner `quote` reaches evaluation when
+# `@eval` runs the whole form, so any occurrence makes the definition opaque.
+function _v2_contains_interp(st)
+    (JS2.kind(st) == JS2.K"$" || JS2.kind(st) == JS2.K"syntaxunquote") && return true
+    cs = JS2.children(st)
+    cs === nothing && return false
+    return any(_v2_contains_interp, cs)
+end
+
 function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{String}, interpretable::Bool)
     cs = JS2.children(node)
     name = length(cs) >= 1 ? _v2_node_macro_name(cs[1]) : nothing
@@ -999,8 +1052,12 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
     end
 
     # Effects we do not model: record the macrocall itself, then still walk its
-    # arguments so visible definitions inside remain ordinary items.
-    if !_v2_macro_name_effects_known(name)
+    # arguments so visible definitions inside remain ordinary items. An `@eval`
+    # with `$` interpolation is the same class — `@eval const $key = …` defines
+    # a name the walk cannot know — so it gets an opaque row too (uninterpolated
+    # `@eval f(x) = 1` keeps its inner definition as an ordinary modeled item).
+    if !_v2_macro_name_effects_known(name) ||
+       (name == "@eval" && any(_v2_contains_interp, cs[2:end]))
         ranges = UnitRange{Int}[]
         bt = _build_body_tree_v2!(ranges, node)
         order, id = _v2_mint_ids!(state.alloc, _v2_statement_id_key(bt, parent_module))
@@ -1279,6 +1336,7 @@ function _v2_classify(bt::BodyTree, kind_override::Union{Nothing,Symbol}=nothing
 
     if k == JS2.K"function" || k == JS2.K"macro"
         isempty(cs) && return out
+        k == JS2.K"function" && _v2_is_callable_object_sig(cs[1]) && return out
         q, n = _v2_qualified_name(_v2_unwrap_to_name(cs[1]))
         n === nothing && return out
         kind = k == JS2.K"function" ? :function : :macro
@@ -1317,9 +1375,13 @@ function _v2_classify(bt::BodyTree, kind_override::Union{Nothing,Symbol}=nothing
             inner = _v2_children(inner)[1]
         end
         if inner.kind == JS2.K"call"
-            # A method definition in short form.
+            _v2_is_callable_object_sig(inner) && return out
+            # A method definition in short form. `const f(::Type{T}) = …`
+            # STILL defines a method — a second such definition adds a method
+            # rather than redeclaring a constant (the SLEEFPirates idiom) — so
+            # the kind stays `:function` regardless of a const/global wrapper.
             q, n = _v2_qualified_name(_v2_unwrap_to_name(inner))
-            n !== nothing && push!(out, V2Decl(n, q, something(kind_override, :function), String[]))
+            n !== nothing && push!(out, V2Decl(n, q, :function, String[]))
         elseif inner.kind == JS2.K"curly"
             # Typealias: `Vector{T} = Array{T,1}`.
             q, n = _v2_qualified_name(_v2_unwrap_to_name(inner))

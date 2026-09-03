@@ -88,6 +88,44 @@ end
     @test isempty(cd_diags(jw))
 end
 
+@testitem "v2 const_decl: corpus FP classes stay silent" setup=[ConstDeclV2WS] begin
+    # `const f(::Type{T}) = …` defines a METHOD; a second one adds a method,
+    # never redeclares a constant (the SLEEFPirates idiom, 14/25 of the
+    # sweep's sampled const_decl FPs).
+    jw = cd_workspace("Root.jl" => """
+    const vrange(::Type{Float64}) = 1.0
+    const vrange(::Type{Float32}) = 1.0f0
+    """)
+    @test isempty(cd_diags(jw))
+
+    # Callable-object methods bind no module-level name: the signature's `a`
+    # is the instance parameter, not a declaration colliding with a real `a`.
+    jw = cd_workspace("Root.jl" => """
+    struct Dense end
+    a = 1
+    function (a::Dense)(x)
+        return x
+    end
+    """)
+    @test isempty(cd_diags(jw))
+    jw = cd_workspace("Root.jl" => """
+    struct Shift end
+    (D::Shift)(x) = x
+    const D = Shift()
+    """)
+    @test isempty(cd_diags(jw))
+
+    # Includes inside mutually exclusive `@static if` branches: only one
+    # branch's file ever runs, so their declarations must not pair.
+    jw = cd_workspace(
+        "Root.jl" => "@static if Sys.iswindows()\n    include(\"win.jl\")\nelse\n    include(\"unix.jl\")\nend\n",
+        "win.jl" => "const backend = :win\n",
+        "unix.jl" => "const backend = :unix\n")
+    @test isempty(cd_diags(jw))
+    @test isempty(cd_diags(jw; uri=cd_uri("win.jl")))
+    @test isempty(cd_diags(jw; uri=cd_uri("unix.jl")))
+end
+
 @testitem "v2 const_decl: cross-file conflicts in one module" setup=[ConstDeclV2WS] begin
     jw = cd_workspace(
         "Root.jl" => "module M\nconst x = 1\ninclude(\"other.jl\")\nend\n",

@@ -117,4 +117,9 @@ end
     @test mk("Int") === :datatype
     @test mk("map") === :value
     @test mk("Filesystem") === :module
+    # Union-valued consts and `Union where` aliases live in GenericStore with a
+    # type-naming FakeTypeName — they are types, not values.
+    @test mk("Callable") === :datatype        # const Callable = Union{Function,Type}
+    @test mk("AbstractVecOrMat") === :datatype
+    @test mk("StridedMatrix") === :datatype   # Union{...} where {T,...}
 end

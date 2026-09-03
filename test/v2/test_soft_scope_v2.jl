@@ -34,6 +34,23 @@ end
     @test Base.binding_kind(m, :probe) === Base.PARTITION_KIND_GLOBAL
 end
 
+@testitem "soft scope: corpus FP classes stay silent" setup=[SoftScopeWS] begin
+    # A global assigned only AFTER the loop does not exist when the loop runs:
+    # Julia silently binds a new local, no warning — so neither do we (14/16
+    # of the sweep's sampled soft-scope FPs).
+    jw = ss_workspace("for i in 1:3\n    df = i\nend\ndf = 0\n")
+    @test isempty(ss_diags(jw))
+    jw = ss_workspace("while true\n    result = 1\n    break\nend\nresult = nothing\n")
+    @test isempty(ss_diags(jw))
+    # …but declared before, it still fires.
+    jw = ss_workspace("df = 0\nfor i in 1:3\n    df = i\nend\n")
+    @test !isempty(ss_diags(jw))
+
+    # A `catch` exception variable is always a new local, never ambiguous.
+    jw = ss_workspace("err = 1\ntry\n    g()\ncatch err\nend\n")
+    @test isempty(ss_diags(jw))
+end
+
 @testitem "soft scope: positives" setup=[SoftScopeWS] begin
     # The canonical shape: a global, then a separate top-level loop assigning it.
     src = "s = 0\nfor i in 1:3\n    s += 1\nend\n"

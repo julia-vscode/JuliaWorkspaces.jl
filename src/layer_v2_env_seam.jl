@@ -99,6 +99,18 @@ Salsa.@derived function derived_v2_external_module_member_kind(rt, root::URI, pa
         ext = SymbolServer._lookup(resolved.extends, StaticLint.getsymbols(env))
         ext isa SymbolServer.DataTypeStore && return :datatype
     end
+    # Union-valued consts (`const Callable = Union{Function,Type}`) and
+    # `Union{...} where ...` aliases (`StridedMatrix`) fail the cache writer's
+    # `unwrap_unionall(x) isa DataType` test and land in `GenericStore`, whose
+    # `typ` then records `FakeTypeName(typeof(value))`. A `typ` naming `Union`,
+    # `UnionAll`, `DataType` or `Type` means the member's VALUE is itself a
+    # type, so annotation checks must treat it as one.
+    if resolved isa SymbolServer.GenericStore && resolved.typ isa SymbolServer.FakeTypeName
+        tn = resolved.typ.name
+        if tn isa SymbolServer.VarRef && tn.name in (:Union, :UnionAll, :DataType, :Type)
+            return :datatype
+        end
+    end
     return :value
 end
 
