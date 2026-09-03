@@ -647,16 +647,18 @@ function _v2_is_include_call(bt::BodyTree)
     return _v2_leaf_string(cs[1]) == "include"
 end
 
-# DETECTION-only widening of `_v2_is_include_call`: also `includet` and dotted
-# `Base.include`/`Main.include`/`M.include` forms. These never splice (their
-# target module/runtime semantics are not modelled) — they exist so the
-# body-marker scan can flag them as analysis boundaries, matching v1's
-# collector which accepts `includet` and dotted callees.
+# DETECTION-only widening of `_v2_is_include_call`: also `includet`. Neither
+# splices — they exist so the body-marker scan can flag them as analysis
+# boundaries. Dotted forms (`Base.include(m, path)`, `M.include(path)`) are
+# deliberately NOT boundaries of the enclosing module: they name their target
+# module explicitly, and the packages that write them are implementing
+# include itself (FilePathsBase's `Base.include(mapexpr, m, ::AbstractPath)`)
+# — blinding their whole module cost a labeled real bug in the corpus.
 function _v2_is_includeish_call(bt::BodyTree)
     bt.kind == JS2.K"call" || return false
     cs = _v2_children(bt)
     length(cs) >= 2 || return false
-    s = _v2_callee_name(cs[1])
+    s = _v2_leaf_string(cs[1])
     return s == "include" || s == "includet"
 end
 
@@ -1616,6 +1618,12 @@ const V2ExpansionHarvest = @NamedTuple{decls::Vector{V2Decl}, exports::Vector{St
 function _v2_expansion_unmodelled(bt::BodyTree{V2Kind}, nimports::Base.RefValue{Int})::Bool
     k = bt.kind
     k == JS2.K"module" && return true
+    # `$(Expr(:toplevel, …))` / `$(Expr(Symbol("hygienic-scope"), …))`: the
+    # child could only print the expansion through the Expr fallback, so the
+    # parsed text is not the code the macro produced. The one benign splice
+    # is `$(Expr(:meta, …))` — `@__doc__`/`@inline` markers inside generated
+    # function bodies (BitFlags' `@bitflag`), which declare nothing.
+    (k == JS2.K"$" || k == JS2.K"syntaxunquote") && return !_v2_is_meta_splice(bt)
     if k == JS2.K"call"
         cs = _v2_children(bt)
         if !isempty(cs)
@@ -1643,6 +1651,20 @@ function _v2_harvest_statement!(h::V2ExpansionHarvest, bt::BodyTree{V2Kind})::Bo
         for c in cs[min(2, length(cs) + 1):end]
             _v2_harvest_statement!(h, c) || return false
         end
+    elseif k == JS2.K"let"
+        # A `let` at module level hides everything but what it declares
+        # `global` (Rmath's `let gc_tracking_obj = []; global f; function f()
+        # … end end`): harvest exactly those names.
+        _v2_harvest_globals!(h, bt)
+    elseif k == JS2.K"for" || k == JS2.K"while" || k == JS2.K"try"
+        # A loop/try declares nothing — unless it declares globals, whose
+        # names may then be computed per iteration: opaque.
+        _v2_contains_kind(bt, JS2.K"global") && return false
+    elseif k == JS2.K"global" && _v2_nchildren(bt) >= 1 &&
+           _v2_leaf_string(_v2_children(bt)[1]) !== nothing
+        # A bare `global f` declaration (no value): the name exists at module
+        # level once the surrounding code assigns it.
+        push!(h.decls, V2Decl(_v2_leaf_string(_v2_children(bt)[1]), String[], :global, String[]))
     elseif k == JS2.K"using" || k == JS2.K"import"
         push!(h.imports, bt)
     elseif k == JS2.K"export" || k == JS2.K"public"
@@ -1674,6 +1696,50 @@ function _v2_harvest_statement!(h::V2ExpansionHarvest, bt::BodyTree{V2Kind})::Bo
         append!(h.decls, _v2_classify(bt))
     end
     return true
+end
+
+# `$(Expr(:meta, …))`: a `$` whose argument is an `Expr` call with a first
+# argument spelling `meta` (a quoted symbol, possibly `inert`-wrapped).
+function _v2_is_meta_splice(bt::BodyTree{V2Kind})
+    cs = _v2_children(bt)
+    length(cs) == 1 || return false
+    call = cs[1]
+    call.kind == JS2.K"call" || return false
+    ccs = _v2_children(call)
+    length(ccs) >= 2 || return false
+    _v2_callee_name(ccs[1]) == "Expr" || return false
+    node = ccs[2]
+    while node.children !== nothing && !isempty(node.children) &&
+          (node.kind == JS2.K"quote" || node.kind == JS2.K"inert")
+        node = node.children[1]
+    end
+    return _v2_leaf_string(node) == "meta"
+end
+
+_v2_contains_kind(bt::BodyTree{V2Kind}, k) =
+    bt.kind == k || (bt.children !== nothing && any(c -> _v2_contains_kind(c, k), bt.children))
+
+# Every `global` declaration under `bt`, at any depth, as `:global` decls
+# (bare `global f`, `global x = 1`, `global a, b`).
+function _v2_harvest_globals!(h::V2ExpansionHarvest, bt::BodyTree{V2Kind})
+    if bt.kind == JS2.K"global"
+        for c in _v2_children(bt)
+            s = _v2_leaf_string(c)
+            if s !== nothing
+                push!(h.decls, V2Decl(s, String[], :global, String[]))
+            else
+                for d in _v2_classify(c, :global)
+                    isempty(d.qualifier) && push!(h.decls, d)
+                end
+            end
+        end
+        return
+    end
+    bt.children === nothing && return
+    for c in bt.children
+        _v2_harvest_globals!(h, c)
+    end
+    return
 end
 
 """
@@ -1736,17 +1802,27 @@ Salsa.@derived function derived_v2_file_inventory_expanded(rt, uri)
             push!(items, V2InventoryItem(row.order, row.id, d.name, d.qualifier,
                                          d.kind, d.field_names, row.parent_module))
         end
-        isempty(h.exports) ||
-            (exports = vcat(exports, [V2Export(row.order, row.id, :export, h.exports, row.parent_module)]))
-        isempty(h.publics) ||
-            (exports = vcat(exports, [V2Export(row.order, row.id, :public, h.publics, row.parent_module)]))
+        # Exports and imports the macrocall's ARGUMENTS already spelled (the
+        # walker enumerated them) are not added twice.
+        if !isempty(h.exports) || !isempty(h.publics)
+            already = Set{Tuple{Symbol,String}}((e.kind, n) for e in exports
+                                                if e.parent_module == row.parent_module for n in e.names)
+            ex = filter(n -> !((:export, n) in already), h.exports)
+            pu = filter(n -> !((:public, n) in already), h.publics)
+            isempty(ex) ||
+                (exports = vcat(exports, [V2Export(row.order, row.id, :export, ex, row.parent_module)]))
+            isempty(pu) ||
+                (exports = vcat(exports, [V2Export(row.order, row.id, :public, pu, row.parent_module)]))
+        end
         if !isempty(h.imports)
             scratch = V2FileSkeleton(V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[],
                                      V2OpaqueMacro[], V2TestItem[], V2TestError[])
             for ibt in h.imports
                 _v2_emit_import!(scratch, ibt, row.order, row.id, row.parent_module)
             end
-            imports = vcat(imports, scratch.imports)
+            seen = Set((i.kind, i.path, i.symbols, i.alias, i.parent_module) for i in imports)
+            fresh = filter(i -> !((i.kind, i.path, i.symbols, i.alias, i.parent_module) in seen), scratch.imports)
+            isempty(fresh) || (imports = vcat(imports, fresh))
         end
     end
     isempty(cleared) && return base

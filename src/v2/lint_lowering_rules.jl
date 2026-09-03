@@ -356,9 +356,15 @@ Salsa.@derived function derived_v2_unresolved_import_findings(rt, uri)
     # (`import A, B, C`) is one item id but SEVERAL resolved imports, so a
     # per-skeleton-row walk would conflate them (each path gets its own
     # finding, exactly as v1 marks each path expression separately).
+    # Only imports the user WROTE: the expanded tree also carries imports
+    # harvested from macro expansions (keyed by the macrocall's id), and a
+    # finding on those would surface at the macrocall once the DJP settles,
+    # about a statement that is not in the source.
+    written = Set{Int64}(imp.id for imp in skel.imports)
     for path in unique!([vcat(splice, imp.parent_module) for imp in skel.imports])
         for ri in derived_v2_module_imports(rt, root, path)
             ri.from.file == uri || continue
+            ri.from.id in written || continue
             # Dots exceeding the nesting are `relative_import`'s finding — v1's
             # no-double-diagnosis rule (`first_unresolved_import_component`
             # skips paths already carrying errors). `:unresolved` targets keep
@@ -662,6 +668,20 @@ function _v2_missing_ref_intervals!(out::Vector{UnitRange{Int32}}, bt::BodyTree{
     return nothing
 end
 
+# Whether `bt` (outside quotes) contains a macrocall whose name is not in the
+# effects tables and for which `expansions` holds no parsed expansion (keyed
+# by the site's hash, as `_materialize` splices it).
+function _v2_has_unexpanded_unknown_macro(bt::BodyTree{V2Kind}, expansions, qdepth::Int)
+    if qdepth == 0 && _is_opaque_macrocall(bt)
+        mc = bt.kind == JS2.K"do" ? bt.children[1] : bt
+        name = _v2_macrocall_name(mc)
+        !_v2_macro_name_effects_known(name) && !haskey(expansions, bt.hash) && return true
+    end
+    bt.children === nothing && return false
+    cd = _quote_depth(bt.kind, qdepth)
+    return any(c -> _v2_has_unexpanded_unknown_macro(c, expansions, cd), bt.children)
+end
+
 # The item-level existence-guard gate: a body that mentions `isdefined`,
 # `@isdefined`, or `VERSION` anywhere is skipped whole (v1 exempts only the
 # guarded branch; whole-item is the conservative superset).
@@ -770,6 +790,12 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
     body === nothing && return result
     _test_block_target(body) !== nothing && return result
     _v2_mentions_existence_guard(body) && return result
+    # The item-level twin of module blindness: a macrocall in the body whose
+    # effects are not modeled AND whose expansion is unavailable (no DJP,
+    # failed, unparseable, pending) may bind any name the rest of the item
+    # then reads (MacroTools' `@capture(ex, f_(args__))` idiom) — the
+    # identifier fallback cannot know, so the item is silent.
+    _v2_has_unexpanded_unknown_macro(body, derived_item_expansions(rt, ref), 0) && return result
 
     root = derived_v2_best_root_for_uri(rt, ref.file)
     root === nothing && return result

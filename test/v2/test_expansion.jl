@@ -46,6 +46,16 @@
         return JW.ExpansionKey((env.env_hash, ctx.ctx_hash, site.mac_hash))
     end
 
+    # The key of the first expansion site of the file's `idx`-th item (any
+    # kind) — for body-level macrocalls.
+    function exp_key_for_site(jw, uri, idx)
+        id = JW.derived_v2_file_skeleton(jw.runtime, uri).items[idx].id
+        env = JW.derived_v2_expansion_env(jw.runtime, uri)
+        ctx = JW.derived_v2_expansion_context(jw.runtime, uri)
+        site = first(JW.derived_v2_item_expansion_sites(jw.runtime, JW.V2ItemRef(uri, id)))
+        return JW.ExpansionKey((env.env_hash, ctx.ctx_hash, site.mac_hash))
+    end
+
     exp_blind(jw, uri) = JW.derived_v2_module_has_opaque_macrocall(jw.runtime, uri, String[])
     exp_names(jw, uri) = JW.derived_v2_module_names(jw.runtime, uri, String[])
     const EXP_OPT_IN = "[rules]\nanalysis_boundary = \"warning\"\n"
@@ -346,10 +356,34 @@ end
         "module Inner\nend",
         "@unknown_leftover foo",
         "try\n    using Statistics\ncatch\nend",
+        # The child's Expr-printer fallback (BitFlags' `Expr(:toplevel, …)`
+        # with hygienic-scope nodes): parseable, but not the macro's code.
+        "\$(Expr(:toplevel, :(primitive type Foo 8 end)))",
+        # Globals declared inside a loop may be computed per iteration.
+        "for i in 1:3\n    global f\nend",
     ]
         settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text=text))
         @test exp_blind(jw, uri)
     end
+
+    # A `let` declares only its globals (Rmath's deferred-free idiom): those
+    # names are harvested, the module is not blind.
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok,
+        text="let tracker = []\n    global foo_deferred\n    function foo_deferred()\n        tracker\n    end\n    helper() = 1\nend"))
+    @test !exp_blind(jw, uri)
+    @test exp_names(jw, uri)["foo_deferred"] === :global
+    @test !haskey(exp_names(jw, uri), "helper")
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="global bare_g\nglobal assigned_g = 2"))
+    @test exp_names(jw, uri)["bare_g"] === :global
+    @test exp_names(jw, uri)["assigned_g"] === :global
+
+    # A `$(Expr(:meta, :doc))` marker inside a generated function (BitFlags'
+    # `@bitflag`) is a benign splice — harvested, not opaque.
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok,
+        text="primitive type Flags <: Integer 32 end\nfunction Flags(x::Integer)\n    \$(Expr(:meta, :doc))\n    x\nend\nconst FLAG_A = Flags(1)"))
+    @test !exp_blind(jw, uri)
+    @test exp_names(jw, uri)["Flags"] === :primitive
+    @test exp_names(jw, uri)["FLAG_A"] === :const
 
     # Two opaque rows, one still pending: blind until both settle.
     jw2, uri2 = exp_make_jw("@defgen foo\n@defgen bar\n")
@@ -368,6 +402,107 @@ end
     # Flag off: the expanded inventory IS the static one — blind.
     JW.set_macro_expansion!(jw, false)
     @test exp_blind(jw, uri)
+end
+
+@testitem "expansion: an unexpanded unknown macro in a body blinds the item for missing_reference" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    # MacroTools' idiom: `@capture` binds `fcall`/`body`, which the rest of
+    # the function reads. Unexpanded, the fallback cannot know that.
+    src = """
+    function splitdef(fdef)
+        @capture(fdef, function fcall_ body_ end)
+        return (fcall, body)
+    end
+    plain(x) = undefined_thing(x)
+    """
+    jw, uri = exp_make_jw(src)
+    set_input_env_ready!(jw.runtime, true)
+    mr(jw, uri) = [d.message for d in get_diagnostic(jw, uri) if d.code === :missing_reference]
+    # Pending: the item is silent; the plain item still reports.
+    @test mr(jw, uri) == ["Missing reference: undefined_thing"]
+    # `@capture` itself is not an unresolved reference either.
+    @test !any(occursin("capture", m) for m in mr(jw, uri))
+    # Failed / unparseable: still silent.
+    settle!(jw, exp_key_for_site(jw, uri, 1) => (status=:failed, text="boom"))
+    @test mr(jw, uri) == ["Missing reference: undefined_thing"]
+    settle!(jw, exp_key_for_site(jw, uri, 1) => (status=:ok, text="if #= x =#, fcall = nothing, body = nothing"))
+    @test mr(jw, uri) == ["Missing reference: undefined_thing"]
+    # A clean expansion binding the names: the item is analyzed, nothing new.
+    settle!(jw, exp_key_for_site(jw, uri, 1) => (status=:ok, text="begin\n    fcall = fdef.args[1]\n    body = fdef.args[2]\n    true\nend"))
+    @test mr(jw, uri) == ["Missing reference: undefined_thing"]
+    # …and an expansion that does NOT bind them makes the reads real findings.
+    settle!(jw, exp_key_for_site(jw, uri, 1) => (status=:ok, text="true"))
+    @test sort(mr(jw, uri)) == ["Missing reference: body", "Missing reference: fcall", "Missing reference: undefined_thing"]
+    # A known effect-free macro never blinds the item.
+    jw2, uri2 = exp_make_jw("function g(x)\n    @info \"hi\"\n    return undefined_thing(x)\nend\n")
+    set_input_env_ready!(jw2.runtime, true)
+    @test mr(jw2, uri2) == ["Missing reference: undefined_thing"]
+end
+
+@testitem "expansion decls: harvested imports never surface as unresolved_import, arguments are not doubled" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    # A macro whose expansion `using`s something unresolvable: the module's
+    # imports gain the row (visibility), but no unresolved_import diagnostic
+    # appears at the macrocall — the user never wrote that statement.
+    jw, uri = exp_make_jw("@load_deps\nexport a\n")
+    set_input_env_ready!(jw.runtime, true)
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="using NoSuchDep_xyz\nexport a, b\nb() = 1"))
+    imps = JW.derived_v2_module_imports(jw.runtime, uri, String[])
+    @test any(i -> i.target.path == ["NoSuchDep_xyz"], imps)
+    @test !any(d -> d.code === :unresolved_import, get_diagnostic(jw, uri))
+    # `a` was exported by the source already: exported once; `b` is new.
+    @test sort(JW.derived_v2_module_exports(jw.runtime, uri, String[])) == ["a", "b"]
+
+    # An import spelled in the macro's arguments is one row, not two.
+    jw2, uri2 = exp_make_jw("@wrap_using using Statistics\n")
+    settle!(jw2, exp_key_for(jw2, uri2, 1) => (status=:ok, text="using Statistics"))
+    @test count(i -> i.target.path == ["Statistics"], JW.derived_v2_module_imports(jw2.runtime, uri2, String[])) == 1
+end
+
+@testitem "expansion: diagnostics only grow as expansions settle" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    # The pending-state contract: whatever is reported while every expansion
+    # is still pending must still be reported after they settle — nothing
+    # appears and then vanishes when the DJP catches up. One file mixing a
+    # clean top-level macro, a `@capture`-style body macro, a genuine missing
+    # reference and an expansion with an unresolvable import.
+    src = """
+    @defgen foo
+    @load_deps
+    function splitdef(fdef)
+        @capture(fdef, function fcall_ body_ end)
+        return (fcall, body)
+    end
+    use_it() = foo(1) + undefined_thing()
+    unused_arg(x) = 1
+    """
+    keyof(d) = (d.code, first(d.range), d.message)
+    for (config, outcomes) in [
+            (nothing, [(status=:ok, text="foo(x) = x"), (status=:ok, text="using NoSuchDep_xyz"),
+                       (status=:ok, text="begin\n    fcall = fdef.args[1]\n    body = fdef.args[2]\nend")]),
+            (nothing, [(status=:failed, text="boom"), (status=:failed, text="boom"), (status=:failed, text="boom")]),
+            (EXP_OPT_IN, [(status=:failed, text="boom"), (status=:ok, text="using NoSuchDep_xyz"), (status=:failed, text="boom")]),
+        ]
+        jw, uri = exp_make_jw(src)
+        config === nothing ||
+            add_file!(jw, TextFile(URI("file:///pkg/JuliaLint.toml"), SourceText(config, "toml")))
+        set_input_env_ready!(jw.runtime, true)
+        before = Set(keyof(d) for d in get_diagnostic(jw, uri))
+        @test !any(k -> k[1] === :analysis_boundary, before)
+        # Settle one site at a time: every intermediate state must also be
+        # a superset of the previous one.
+        keys_ = [exp_key_for(jw, uri, 1), exp_key_for(jw, uri, 2), exp_key_for_site(jw, uri, 3)]
+        settled = Pair{JW.ExpansionKey,JW.ExpansionOutcome}[]
+        prev = before
+        for (k, o) in zip(keys_, outcomes)
+            push!(settled, k => o)
+            settle!(jw, settled...)
+            now = Set(keyof(d) for d in get_diagnostic(jw, uri))
+            @test issubset(prev, now)
+            prev = now
+        end
+        @test ("Missing reference: undefined_thing" in (k[3] for k in prev)) == (outcomes[1].status === :ok)
+    end
 end
 
 @testitem "expansion decls: restated argument definitions are not redeclarations" setup=[ExpansionWS] begin

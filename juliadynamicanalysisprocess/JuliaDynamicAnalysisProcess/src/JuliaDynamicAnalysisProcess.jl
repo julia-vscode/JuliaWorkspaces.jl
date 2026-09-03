@@ -184,6 +184,19 @@ function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id:
     end
 end
 
+# `macroexpand(recursive=true)` does not descend into an `Expr(:toplevel)`
+# result (BitFlags' `@bitflag`, `@enum`-style DSLs), leaving `hygienic-scope`
+# nodes that `string` can only print as `$(Expr(...))` — unparseable on the
+# host. Expand each top-level statement itself and hand the result back as a
+# plain block, which prints as ordinary code.
+function _expand_fully(mod::Module, expr)
+    expanded = macroexpand(mod, expr; recursive=true)
+    if expanded isa Expr && expanded.head === :toplevel
+        expanded = Expr(:block, (macroexpand(mod, a; recursive=true) for a in expanded.args)...)
+    end
+    return expanded
+end
+
 function expand_macros_request(params::JuliaDynamicAnalysisProtocol.ExpandMacrosParams, state::JuliaDynamicAnalysisProcessState, token)
     # Pick up on-disk edits to tracked (deved) packages, so re-expansions
     # requested after a macro-definition edit see the new definition.
@@ -203,14 +216,14 @@ function expand_macros_request(params::JuliaDynamicAnalysisProtocol.ExpandMacros
                 error("macrocall text did not parse")
             end
             expanded = try
-                macroexpand(ctx, expr; recursive=true)
+                _expand_fully(ctx, expr)
             catch err
                 err isa InterruptException && rethrow()
                 # The real-module guess can miss macros that come from the
                 # file's own imports (`using Test` in a test helper): retry in
                 # the scratch module before giving up.
                 fallback === nothing && rethrow()
-                macroexpand(fallback, expr; recursive=true)
+                _expand_fully(fallback, expr)
             end
             JuliaDynamicAnalysisProtocol.ExpandMacroResultEntry(e.key, "ok", string(expanded))
         catch err
