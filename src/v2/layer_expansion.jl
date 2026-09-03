@@ -125,11 +125,16 @@ and the own package's macro-defs hash, so deved macro edits re-key (D2b).
 Salsa.@derived function derived_v2_expansion_context(rt, uri)
     root = derived_v2_best_root_for_uri(rt, uri)   # v2's own root discovery
     root === nothing && return nothing
-    path = derived_v2_file_module_path(rt, root, uri)
+    # The STATIC tree, deliberately: the expanded tree folds settled expansions
+    # in (`derived_v2_file_inventory_expanded`), which read this context — a
+    # dependency on it here would be a Salsa cycle. Module paths are identical
+    # in both trees (an expansion never splices files); imports differ only by
+    # what expansions add, which the child does not need to expand.
+    path = derived_v2_file_module_path_static(rt, root, uri)
     path === nothing && return nothing
 
     stmts = String[]
-    for imp in derived_v2_module_imports(rt, root, path)
+    for imp in derived_v2_module_imports_static(rt, root, path)
         s = _expansion_import_statement(imp)
         s === nothing || push!(stmts, s)
     end
@@ -257,6 +262,74 @@ Salsa.@derived function derived_item_expansions(rt, ref::V2ItemRef)
         bt === nothing || (out[s.mac_hash] = bt)
     end
     return isempty(out) ? _EMPTY_EXPANSIONS : out
+end
+
+# ── expansion-derived declarations ──────────────────────────────────────────
+#
+# A top-level macrocall the walker does not model (`skeleton.opaque_macros`)
+# blinds its module: whatever the macro defines is invisible. Once the DJP has
+# expanded it successfully that is no longer true — the expansion's top-level
+# definitions are ordinary code. These queries turn a settled `:ok` expansion
+# into inventory rows (`derived_v2_file_inventory_expanded`) and clear the row
+# from the opaque set, so a module whose every opaque macrocall expanded is
+# analyzed in full, and a macro boundary is reported (opt-in) only when the
+# expansion actually failed or was never possible.
+
+"Where an item's expansion stands, plus the child's error text when it failed."
+const V2ExpansionStatus = @NamedTuple{status::Symbol, error::String}
+
+const _V2_EXPANSION_NONE = (status=:none, error="")
+
+# The first line of the child's failure text, bounded, for the boundary notice.
+function _v2_expansion_error_line(text::AbstractString)
+    line = String(strip(first(split(text, r"\r?\n"; limit=2))))
+    return length(line) > 200 ? first(line, 197) * "…" : line
+end
+
+"""
+    derived_v2_item_expansion_status(rt, ref) -> (status, error)
+
+`:disabled` (the feature flag is off), `:none` (the item has no expansion
+site), `:no_env` (nothing to expand in — no environment or no module
+context), `:pending`, `:ok` (every site settled `:ok`), or `:failed` with the
+first failed site's error text. Position-free; backdates with the outcomes.
+"""
+Salsa.@derived function derived_v2_item_expansion_status(rt, ref::V2ItemRef)
+    input_macro_expansion(rt) || return (status=:disabled, error="")
+    sites = derived_v2_item_expansion_sites(rt, ref)
+    isempty(sites) && return _V2_EXPANSION_NONE
+    env = derived_v2_expansion_env(rt, ref.file)
+    env === nothing && return (status=:no_env, error="")
+    ctx = derived_v2_expansion_context(rt, ref.file)
+    ctx === nothing && return (status=:no_env, error="")
+    for s in sites
+        outcome = derived_macro_expansion(rt, ExpansionKey((env.env_hash, ctx.ctx_hash, s.mac_hash)))
+        outcome === nothing && return (status=:pending, error="")
+        outcome.status === :ok ||
+            return (status=:failed, error=_v2_expansion_error_line(outcome.text))
+    end
+    return (status=:ok, error="")
+end
+
+"""
+    derived_v2_item_expansion_decls(rt, ref) -> Union{Nothing,V2ExpansionHarvest}
+
+What an opaque macrocall row contributes at module level through its settled
+`:ok` expansion, or `nothing` while it must stay opaque: not expanded
+(pending, failed, unavailable), unparseable, or expanded to code the
+inventory cannot model (see `_v2_harvest_expansion`). An interpolating
+`@eval` never clears — its expansion is the `eval` call, the boundary itself.
+"""
+Salsa.@derived function derived_v2_item_expansion_decls(rt, ref::V2ItemRef)
+    derived_v2_item_expansion_status(rt, ref).status === :ok || return nothing
+    body = derived_item_lowering_body(rt, ref)
+    body === nothing && return nothing
+    body.kind == JS2.K"macrocall" || return nothing
+    _v2_macrocall_name(body) == "@eval" && return nothing
+    # The row's single site is its root: `mac_hash == body.hash`.
+    exp = get(derived_item_expansions(rt, ref), body.hash, nothing)
+    exp === nothing && return nothing
+    return _v2_harvest_expansion(exp)
 end
 
 # ── readiness gating ────────────────────────────────────────────────────────

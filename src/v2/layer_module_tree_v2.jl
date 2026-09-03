@@ -217,7 +217,10 @@ function _v2_declare!(node::_V2ModuleNodeBuilder, name::String, ref::V2ItemRef, 
     return
 end
 
-function _v2_build_tree_structure(rt, root::URI)
+# `inventory(rt, uri)` is the per-file inventory query the structure is built
+# from: the static `derived_v2_file_inventory`, or
+# `derived_v2_file_inventory_expanded` with settled macro expansions folded in.
+function _v2_build_tree_structure(rt, root::URI, inventory::Function)
     builders = Dict{Vector{String},_V2ModuleNodeBuilder}()
     ensure_node!(path::Vector{String}) = get!(_V2ModuleNodeBuilder, builders, path)
 
@@ -236,7 +239,7 @@ function _v2_build_tree_structure(rt, root::URI)
         cond && push!(conditional_files, F)
         push!(ensure_node!(P).files, F)
 
-        inv = derived_v2_file_inventory(rt, F)
+        inv = inventory(rt, F)
 
         # Every record kind is merged into ONE event stream ordered by the
         # walker's per-file `order`, and processed in a single pass with
@@ -355,15 +358,33 @@ function _v2_classify_import(builders, workspace_roots, AP::Vector{String}, imp:
 end
 
 """
+    derived_v2_module_tree_static(rt, root) -> V2ModuleTree
+
+The module structure of `root` and its include closure, built from the static
+v2 inventories only — nothing a macro expansion adds. This is the tree the
+expansion CONTEXT is computed from (`derived_v2_expansion_context`), which is
+why it must not see expansions: the expanded tree depends on them. Every
+other consumer wants `derived_v2_module_tree`.
+"""
+Salsa.@derived function derived_v2_module_tree_static(rt, root)
+    @debug "derived_v2_module_tree_static" root=root
+    return _v2_finish_tree(rt, root, _v2_build_tree_structure(rt, root, derived_v2_file_inventory)...)
+end
+
+"""
     derived_v2_module_tree(rt, root) -> V2ModuleTree
 
-The module structure of `root` and its include closure, built from v2
-inventories only.
+The module structure of `root` and its include closure: the static tree plus
+whatever settled macro expansions declare (`derived_v2_file_inventory_expanded`).
+With the expansion flag off this is the static tree itself.
 """
 Salsa.@derived function derived_v2_module_tree(rt, root)
+    input_macro_expansion(rt) || return derived_v2_module_tree_static(rt, root)
     @debug "derived_v2_module_tree" root=root
+    return _v2_finish_tree(rt, root, _v2_build_tree_structure(rt, root, derived_v2_file_inventory_expanded)...)
+end
 
-    builders, file_modules, conditional_files = _v2_build_tree_structure(rt, root)
+function _v2_finish_tree(rt, root, builders, file_modules, conditional_files)
     workspace_roots = derived_v2_workspace_package_roots(rt)
 
     nodes = V2ModuleNode[]
@@ -387,6 +408,17 @@ end
 "The absolute module path `uri`'s top level splices into within `root`, or `nothing`."
 Salsa.@derived function derived_v2_file_module_path(rt, root, uri)
     return get(derived_v2_module_tree(rt, root).file_modules, uri, nothing)
+end
+
+# The static-tree twins of `derived_v2_file_module_path` / `derived_v2_module_imports`,
+# for the expansion context only (see `derived_v2_module_tree_static`).
+Salsa.@derived function derived_v2_file_module_path_static(rt, root, uri)
+    return get(derived_v2_module_tree_static(rt, root).file_modules, uri, nothing)
+end
+
+Salsa.@derived function derived_v2_module_imports_static(rt, root, path)
+    node = v2_module_node(derived_v2_module_tree_static(rt, root), path)
+    return node === nothing ? V2ResolvedImport[] : node.imports
 end
 
 "Whether a module exists at `path` in `root`'s tree."
@@ -540,11 +572,17 @@ Salsa.@derived function derived_v2_module_has_guarded_import(rt, root, path)
     return _v2_module_has_body_marker(rt, root, path, :guarded_import)
 end
 
-"Whether the module at `path` contains a top-level macrocall with unmodelled effects."
+"""
+Whether the module at `path` contains a top-level macrocall with unmodelled
+effects. Expansion-aware: a macrocall the DJP expanded cleanly has left the
+expanded inventory's `opaque_macros` (its definitions are ordinary rows), so
+only macros that genuinely resist analysis — expansion failed, unavailable,
+or still pending — keep the module blind.
+"""
 Salsa.@derived function derived_v2_module_has_opaque_macrocall(rt, root, path)
     tree = derived_v2_module_tree(rt, root)
     for (uri, p) in tree.file_modules
-        for om in derived_v2_file_skeleton(rt, uri).opaque_macros
+        for om in derived_v2_file_inventory_expanded(rt, uri).opaque_macros
             vcat(p, om.parent_module) == path && return true
         end
     end

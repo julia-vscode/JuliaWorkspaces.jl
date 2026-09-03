@@ -9,8 +9,10 @@
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!, get_diagnostic
     using JuliaWorkspaces.URIs2: URI
 
-    function lr_workspace(src; flag=true)
+    function lr_workspace(src; flag=true, config=nothing)
         jw = JuliaWorkspace()
+        config === nothing ||
+            add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"), SourceText(config, "toml")))
         uri = URI("file:///pr/src/a.jl")
         add_file!(jw, TextFile(uri, SourceText(src, "julia")))
         flag && JW.set_v2_enabled!(jw, true)
@@ -155,8 +157,9 @@ end
     jw, uri = lr_workspace("module A\nmodule B\nend\nend\n")
     @test !any(d -> d[1] === :module_name, lr_codes(jw, uri))
 
-    # Too many leading dots at the top level of a single-file workspace.
-    jw, uri = lr_workspace("using ..Foo\n")
+    # Too many leading dots at the top level of a single-file workspace
+    # (`relative_import` is off in the default preset — opt in).
+    jw, uri = lr_workspace("using ..Foo\n"; config="[rules]\nrelative_import = \"warning\"\n")
     diags = [d for d in JuliaWorkspaces.get_diagnostic(jw, uri) if d.code === :relative_import]
     @test length(diags) == 1
     @test diags[1].message == "Relative import has more leading dots than available module nesting."

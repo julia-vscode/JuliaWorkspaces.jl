@@ -421,6 +421,8 @@ end
     root_uri = URI("file:///computedincl/src/CompIncl.jl")
 
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///computedincl/JuliaLint.toml"),
+        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///computedincl/Project.toml"), SourceText("""
     name = "CompIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef01"
@@ -451,6 +453,8 @@ end
     root_uri = URI("file:///customincl/src/CustIncl.jl")
 
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///customincl/JuliaLint.toml"),
+        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///customincl/Project.toml"), SourceText("""
     name = "CustIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef02"
@@ -490,6 +494,8 @@ end
     root_uri = URI("file:///fnincl/src/FnIncl.jl")
 
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///fnincl/JuliaLint.toml"),
+        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///fnincl/Project.toml"), SourceText("""
     name = "FnIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef06"
@@ -618,6 +624,8 @@ end
     root_uri = URI("file:///guardincl/src/GuardIncl.jl")
 
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///guardincl/JuliaLint.toml"),
+        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///guardincl/Project.toml"), SourceText("""
     name = "GuardIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef20"
@@ -802,10 +810,12 @@ end
 
     # The SciML runtests shape: `@safetestset "x" include("x.jl")` inside a
     # 0-arg thunk. The path is a plain literal and the file exists — that is a
-    # runtime boundary (analysis_boundary, information), NOT "the path could
-    # not be determined statically", and never an include_errors warning.
+    # runtime boundary (analysis_boundary, opt-in), NOT "the path could not be
+    # determined statically", and never an include_errors warning.
     root_uri = URI("file:///rti/src/RtI.jl")
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///rti/JuliaLint.toml"),
+        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(root_uri, SourceText("""
     module RtI
     function load()
@@ -819,7 +829,7 @@ end
     diags = get_diagnostic(jw, root_uri)
     notice = only(filter(d -> contains(d.message, "runs inside a function body"), diags))
     @test notice.code === :analysis_boundary
-    @test notice.severity === :information
+    @test notice.severity === :warning
     @test !any(d -> contains(d.message, "could not be determined statically"), diags)
     @test !any(d -> d.code === :include_errors, diags)
     # The runtime include is not an include-graph edge: lu_test.jl stays a root.
@@ -835,21 +845,33 @@ end
     @test only(missing).code === :include_errors
 end
 
-@testitem "computed include: the notice is an analysis_boundary information, not an include_errors warning" begin
+@testitem "computed include: the notice is an opt-in analysis_boundary, not an include_errors warning" begin
     using JuliaWorkspaces: set_input_env_ready!
     using JuliaWorkspaces.URIs2: URI
 
-    root_uri = URI("file:///cin/src/CIn.jl")
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(root_uri, SourceText("""
+    src = """
     for f in readdir(@__DIR__)
         include(f)
     end
-    """, "julia")))
+    """
+    root_uri = URI("file:///cin/src/CIn.jl")
+
+    # Default preset: silence. The linter does not report on what it cannot
+    # analyze; it only suppresses the affected rules.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText(src, "julia")))
+    set_input_env_ready!(jw.runtime, true)
+    @test isempty(get_diagnostic(jw, root_uri))
+
+    # Opted in: one notice naming the suppressed rules, at the configured severity.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///cin/JuliaLint.toml"),
+        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText(src, "julia")))
     set_input_env_ready!(jw.runtime, true)
     d = only(filter(d -> contains(d.message, "could not be determined statically"), get_diagnostic(jw, root_uri)))
     @test d.code === :analysis_boundary
-    @test d.severity === :information
+    @test d.severity === :warning
     @test occursin("missing_reference", d.message)
 end
 

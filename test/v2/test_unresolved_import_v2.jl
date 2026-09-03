@@ -12,8 +12,10 @@
 
     const UI_URI = URI("file:///ui/src/F.jl")
 
-    function ui_workspace(src::String; flag=true)
+    function ui_workspace(src::String; flag=true, config=nothing)
         jw = JuliaWorkspace()
+        config === nothing ||
+            add_file!(jw, TextFile(URI("file:///ui/JuliaLint.toml"), SourceText(config, "toml")))
         add_file!(jw, TextFile(UI_URI, SourceText(src, "julia")))
         flag && set_v2_enabled!(jw, true)
         return jw
@@ -53,8 +55,9 @@ end
     @test occursin("`Nowhere`", only(ui_diags(jw)).message)
 
     # Dots exceeding the nesting are relative_import's finding, not this
-    # rule's (v1's no-double-diagnosis).
-    jw = ui_workspace("module P\nusing ....Foo\nend\n")
+    # rule's (v1's no-double-diagnosis). relative_import is off by default,
+    # so opt in to see its side of the split.
+    jw = ui_workspace("module P\nusing ....Foo\nend\n"; config="[rules]\nrelative_import = \"warning\"\n")
     @test isempty(ui_diags(jw))
     @test any(d -> d.code === :relative_import, get_diagnostic(jw, UI_URI))
 

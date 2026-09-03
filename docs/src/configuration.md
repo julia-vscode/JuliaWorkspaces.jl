@@ -332,7 +332,7 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `syntax_warnings` | `off` | Julia syntax warnings |
 | `lowering_errors` | `error` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — the file will not load. Experimental, requires the lowering-lint flag; when active it supersedes `duplicate_function_argument`/`break_continue`/`global_const_decl` |
 | `soft_scope_ambiguity` | `information` | Julia's soft-scope ambiguity warning, statically: an un-annotated assignment in a top-level `for`/`while`/`try` to a name that is also a plain module global (Julia warns at run time and treats it as a new local). Experimental, requires the lowering-lint flag |
-| `analysis_boundary` | `information` | A construct the linter cannot see through (an interpolated `@eval`, a runtime `eval`) silences the semantic rules in its module; this notice on the construct names them. Computed and function-body `include`s count too |
+| `analysis_boundary` | `off` | Opt-in: one notice per construct the linter cannot see through (a computed or function-body `include`, an interpolated `@eval`, a runtime `eval`, a `using`/`import` inside `try`/`if`, a macro whose expansion failed) naming the rules it silences in that module. See [Analysis boundaries](@ref) |
 | `testitem_errors` | `error` | Malformed `@testitem` blocks |
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |
@@ -360,6 +360,37 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
 | `missing_reference` | `warning` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default) |
 | `unresolved_import` | `warning` | Imports whose target could not be resolved |
+
+### Analysis boundaries
+
+Some constructs put part of a program beyond static analysis: an `include`
+whose path is computed or that runs inside a function body, an `@eval` with
+`$` interpolation or a bare `eval(...)` call, a `using`/`import` guarded by
+`try` or `if`, and a top-level macro the linter does not model whose expansion
+could not be obtained (the dynamic analysis process is off, the file has no
+environment, or the macro raised an error when expanded). Whatever such a
+construct defines or brings into scope is invisible, so any rule that would
+otherwise report false positives — `missing_reference`, `incorrect_call_args`,
+`type_piracy`, `invalid_type_declaration`, `kw_default_mismatch` and
+`incorrect_iter_spec` — is silently switched off in the smallest scope that
+contains the construct, its module. A macro the dynamic analysis process
+*did* expand successfully is not a boundary: the names its expansion defines
+are analyzed like ordinary code.
+
+The `default` and `minimal` presets say nothing about this. The linter never
+reports on code merely because it cannot analyze it. To find out what is
+holding analysis back, opt in:
+
+```toml
+[rules]
+analysis_boundary = "warning"   # or "error" for CI
+```
+
+(`preset = "strict"` includes it at `warning`.) Each boundary construct then
+gets one diagnostic naming the rules it suppresses; rewrite it — a literal
+`include` path, an explicit list of definitions instead of an interpolated
+`@eval`, an unconditional import — and the full diagnostic set comes back for
+that module.
 
 ### Rules and code actions
 

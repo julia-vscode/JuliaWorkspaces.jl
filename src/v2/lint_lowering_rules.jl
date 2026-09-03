@@ -1852,7 +1852,42 @@ const _V2_BOUNDARY_IMPORT_MSG =
     "This conditional `using`/`import` may bring in names the linter cannot " *
     "see, so missing_reference is not applied in this module."
 
-"One `analysis_boundary` finding per opaque `@eval`/`eval` or guarded import in the item."
+# Whether a top-level macrocall body is one the walker records as an opaque
+# row for its NAME (an unmodelled macro) — as opposed to the isolating test
+# macros, `@enum`, and the interpolating `@eval` handled separately.
+function _v2_is_unmodelled_macro_body(body::BodyTree{V2Kind})
+    body.kind == JS2.K"macrocall" || return false
+    name = _v2_macrocall_name(body)
+    name === nothing && return false
+    name == "@enum" && return false
+    name in V2_ISOLATED_SCOPE_MACROS && return false
+    return !_v2_macro_name_effects_known(name)
+end
+
+# The notice for an opaque top-level macrocall that did NOT clear through
+# expansion, or `nothing` (cleared, or still pending — settles later).
+function _v2_macro_boundary_msg(rt, ref::V2ItemRef, body::BodyTree{V2Kind})
+    derived_v2_item_expansion_decls(rt, ref) === nothing || return nothing
+    st = derived_v2_item_expansion_status(rt, ref)
+    st.status === :pending && return nothing
+    reason = if st.status === :failed
+        isempty(st.error) ? "its expansion failed" : "its expansion failed: " * st.error
+    elseif st.status === :disabled
+        "macro expansion is disabled"
+    elseif st.status === :no_env
+        "there is no environment to expand it in"
+    elseif st.status === :ok
+        "it expands to code the linter cannot model"
+    else
+        "its expansion is unavailable"
+    end
+    name = something(_v2_macrocall_name(body), "?")
+    return "Macro `$name` cannot be analyzed statically ($reason): whatever it " *
+           "defines is invisible to the linter, so $(_V2_BOUNDARY_SUPPRESSED_RULES) " *
+           "are not applied in this module."
+end
+
+"One `analysis_boundary` finding per opaque `@eval`/`eval`, unexpanded macro, or guarded import in the item."
 Salsa.@derived function derived_item_boundary_findings(rt, ref::V2ItemRef)
     result = SemanticFinding[]
     body = derived_item_lowering_body(rt, ref)
@@ -1861,6 +1896,13 @@ Salsa.@derived function derived_item_boundary_findings(rt, ref::V2ItemRef)
        !isempty(body.children) && _macro_name_string(body.children[1]) == "eval"
         # A top-level interpolated `@eval`, recorded as an opaque row.
         push!(result, (addr=Int32(1), rule_id=:analysis_boundary, msg=_V2_BOUNDARY_EVAL_MSG))
+    elseif _v2_is_unmodelled_macro_body(body)
+        # An opaque top-level macrocall is a boundary only while the DJP has
+        # not expanded it (failed, unavailable) — a clean expansion makes its
+        # definitions ordinary rows. Its arguments' inner items report their
+        # own body markers.
+        msg = _v2_macro_boundary_msg(rt, ref, body)
+        msg === nothing || push!(result, (addr=Int32(1), rule_id=:analysis_boundary, msg=msg))
     else
         for m in derived_v2_item_body_markers(rt, ref)
             if m.kind === :opaque_eval

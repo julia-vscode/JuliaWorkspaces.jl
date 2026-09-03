@@ -1,7 +1,8 @@
 # `analysis_boundary` (lint_lowering_rules.jl): one notice per construct the
 # linter cannot see through, so the silence of the suppressed rules is never
-# mistaken for a clean result. Computed includes keep their ComputedInclude
-# notice (include_errors); this rule covers `@eval`/`eval` boundaries.
+# mistaken for a clean result. OPT-IN: the default preset ships it off (the
+# linter is silent about what it cannot analyze), so these tests turn it on
+# explicitly; the "preset gates" item covers the silent default.
 
 @testsnippet BoundaryWS begin
     using JuliaWorkspaces
@@ -11,8 +12,9 @@
     using JuliaWorkspaces.URIs2: URI
 
     const AB_URI = URI("file:///ab/src/R.jl")
+    const AB_OPT_IN = "[rules]\nanalysis_boundary = \"warning\"\n"
 
-    function ab_workspace(src::String; flag=true, config=nothing)
+    function ab_workspace(src::String; flag=true, config=AB_OPT_IN)
         jw = JuliaWorkspace()
         config !== nothing &&
             add_file!(jw, TextFile(URI("file:///ab/JuliaLint.toml"), SourceText(config, "toml")))
@@ -33,7 +35,7 @@ end
     ds = ab_diags(jw)
     @test length(ds) == 1
     @test occursin("missing_reference", only(ds).message)
-    @test only(ds).severity === :information
+    @test only(ds).severity === :warning
     @test JW.derived_v2_module_has_opaque_macrocall(jw.runtime, AB_URI, String[])
 
     # The same @eval inside a function body: the body-marker path.
@@ -99,14 +101,45 @@ end
 end
 
 @testitem "analysis_boundary: flag and preset gates" setup=[BoundaryWS] begin
-    src = "for f in (:a, :b)\n    @eval \$f(x) = x\nend\n"
+    src = "for f in name_list\n    @eval \$f(x) = x\nend\n"
     # v2 flag off: nothing (v2-only producer).
     jw = ab_workspace(src; flag=false)
     @test isempty(ab_diags(jw))
     # Rule off by config.
     jw = ab_workspace(src; config="[rules]\nanalysis_boundary = \"off\"\n")
     @test isempty(ab_diags(jw))
+    # The DEFAULT preset is silent about boundaries — but the module is still
+    # blind (suppression happens regardless of whether anyone is told).
+    jw = ab_workspace(src; config=nothing)
+    @test isempty(ab_diags(jw))
+    @test JW.derived_v2_module_has_opaque_macrocall(jw.runtime, AB_URI, String[])
     # Minimal preset ships it off.
     jw = ab_workspace(src; config="preset = \"minimal\"\n")
     @test isempty(ab_diags(jw))
+    # Strict opts in at warning; an explicit "error" is honored.
+    jw = ab_workspace(src; config="preset = \"strict\"\n")
+    @test only(ab_diags(jw)).severity === :warning
+    jw = ab_workspace(src; config="[rules]\nanalysis_boundary = \"error\"\n")
+    @test only(ab_diags(jw)).severity === :error
+end
+
+@testitem "analysis_boundary: the default preset reports nothing for any boundary class" setup=[BoundaryWS] begin
+    using JuliaWorkspaces: set_input_env_ready!
+    # Every construct class that blinds a module: interpolated @eval (top
+    # level and in a body), bare eval, guarded import, computed include,
+    # function-body include. None of them produces ANY diagnostic under the
+    # default preset — not a boundary notice, not an include_errors warning.
+    for src in [
+        "const names = (:a, :b)\n@eval \$(names[1])(x) = x\n",
+        "function load!(d)\n    for k in keys(d)\n        @eval const \$k = 1\n    end\nend\n",
+        "function g(ex)\n    eval(ex)\nend\n",
+        "try\n    import GR_jll\ncatch\nend\n",
+        "for f in readdir(@__DIR__)\n    include(f)\nend\n",
+        "function load()\n    include(\"other.jl\")\nend\n",
+    ]
+        jw = ab_workspace(src; config=nothing)
+        add_file!(jw, TextFile(URI("file:///ab/src/other.jl"), SourceText("x = 1\n", "julia")))
+        set_input_env_ready!(jw.runtime, true)
+        @test isempty(get_diagnostic(jw, AB_URI))
+    end
 end

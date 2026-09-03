@@ -32,6 +32,23 @@
 
     settle!(jw, pairs...) = JW.set_input_macro_expansions!(jw.runtime,
         Dict{JW.ExpansionKey,JW.ExpansionOutcome}(pairs...))
+
+    # The expansion key of the file's `idx`-th OPAQUE macrocall row (its single
+    # site), computed directly so it stays valid after the key has settled.
+    # (A macrocall's arguments are walked into items of their own, so plain
+    # item indices do not enumerate the macrocalls.)
+    function exp_key_for(jw, uri, idx)
+        rows = filter(r -> r.kind === :opaque_macrocall, JW.derived_v2_file_skeleton(jw.runtime, uri).items)
+        id = rows[idx].id
+        env = JW.derived_v2_expansion_env(jw.runtime, uri)
+        ctx = JW.derived_v2_expansion_context(jw.runtime, uri)
+        site = only(JW.derived_v2_item_expansion_sites(jw.runtime, JW.V2ItemRef(uri, id)))
+        return JW.ExpansionKey((env.env_hash, ctx.ctx_hash, site.mac_hash))
+    end
+
+    exp_blind(jw, uri) = JW.derived_v2_module_has_opaque_macrocall(jw.runtime, uri, String[])
+    exp_names(jw, uri) = JW.derived_v2_module_names(jw.runtime, uri, String[])
+    const EXP_OPT_IN = "[rules]\nanalysis_boundary = \"warning\"\n"
 end
 
 @testitem "expansion: harvest finds opaque macrocalls with content keys" setup=[ExpansionWS] begin
@@ -237,4 +254,176 @@ end
     add_file!(jw, TextFile(orphan, SourceText("h(x) = @check_args x\n", "julia")))
     @test JW.derived_v2_expansion_context(jw.runtime, orphan).modpath == ["MP"]
     @test JW.derived_v2_expansion_context(jw.runtime, URI("file:///mp/src/MP.jl")).modpath == ["MP"]
+end
+
+# ── expansion-derived declarations ──────────────────────────────────────────
+
+@testitem "expansion decls: a clean expansion declares its names and un-blinds the module" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    jw, uri = exp_make_jw("""
+    @defgen foo
+    use_it() = foo(1)
+    """)
+    set_input_env_ready!(jw.runtime, true)
+    ref = JW.V2ItemRef(uri, JW.derived_v2_file_skeleton(jw.runtime, uri).items[1].id)
+
+    # Pending: the macrocall is opaque, the module blind, nothing declared —
+    # and the default preset says nothing about it.
+    @test exp_blind(jw, uri)
+    @test !haskey(exp_names(jw, uri), "foo")
+    @test JW.derived_v2_item_expansion_status(jw.runtime, ref).status === :pending
+    @test !any(d -> d.code === :analysis_boundary, get_diagnostic(jw, uri))
+
+    # Settled clean: `foo` is an ordinary declaration, the module sees again,
+    # and the later use resolves.
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="foo(x) = x + 1"))
+    @test JW.derived_v2_item_expansion_status(jw.runtime, ref).status === :ok
+    @test !exp_blind(jw, uri)
+    @test exp_names(jw, uri)["foo"] === :function
+    @test !any(d -> d.code === :missing_reference, get_diagnostic(jw, uri))
+    @test !any(d -> d.code === :analysis_boundary, get_diagnostic(jw, uri))
+
+    # The static tree (what the expansion context is computed from) never
+    # sees the harvested declaration — that is the cycle guard.
+    @test !haskey(JW.derived_v2_module_tree_static(jw.runtime, uri).modules[1].declared, "foo")
+    @test haskey(JW.derived_v2_module_tree(jw.runtime, uri).modules[1].declared, "foo")
+end
+
+@testitem "expansion decls: blocks, docstrings, exports and imports are harvested" setup=[ExpansionWS] begin
+    jw, uri = exp_make_jw("@define_all\n")
+    # Several top-level statements (parsed into one block), a `begin` block
+    # inside, a docstring wrapper, exports, a `public` (top level only, the
+    # parser rejects it inside a block), imports, and a hygiene gensym.
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="""
+    begin
+        struct Gen
+            a
+        end
+        Gen(x) = Gen(1)
+    end
+    Core.@doc "docs" helper(y) = y
+    const LIMIT = 3
+    export Gen, helper
+    public LIMIT
+    using Statistics
+    import LinearAlgebra: dot as dt
+    var"#7#hidden"() = 1
+    """))
+    @test !exp_blind(jw, uri)
+    names = exp_names(jw, uri)
+    @test names["Gen"] === :struct
+    @test names["helper"] === :function
+    @test names["LIMIT"] === :const
+    @test !any(startswith("#"), keys(names))
+    @test JW.derived_v2_module_exports(jw.runtime, uri, String[]) == ["Gen", "helper"]
+    imps = JW.derived_v2_module_imports(jw.runtime, uri, String[])
+    @test any(i -> i.kind === :using && i.target.path == ["Statistics"], imps)
+    @test any(i -> i.kind === :import && i.target.path == ["LinearAlgebra"] &&
+                   i.symbols == [(name="dot", alias="dt")], imps)
+end
+
+@testitem "expansion decls: what keeps a macrocall opaque" setup=[ExpansionWS] begin
+    # Failed: blind.
+    jw, uri = exp_make_jw("@defgen foo\n")
+    ref = JW.V2ItemRef(uri, JW.derived_v2_file_skeleton(jw.runtime, uri).items[1].id)
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:failed, text="LoadError: UndefVarError: `@defgen` not defined\n  stack"))
+    @test exp_blind(jw, uri)
+    @test JW.derived_v2_item_expansion_decls(jw.runtime, ref) === nothing
+    st = JW.derived_v2_item_expansion_status(jw.runtime, ref)
+    @test st.status === :failed
+    @test st.error == "LoadError: UndefVarError: `@defgen` not defined"
+
+    # Unparseable `:ok` text: blind.
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="\$(Expr(:meta, :garbage) 12 ["))
+    @test exp_blind(jw, uri)
+
+    # An `eval`/`include` inside the expansion, a nested module, an
+    # unexpanded unknown macro, or an import below statement level: blind.
+    for text in [
+        "Core.eval(@__MODULE__, :(x = 1))",
+        "for n in names\n    eval(:(\$n() = 1))\nend",
+        "include(\"gen.jl\")",
+        "module Inner\nend",
+        "@unknown_leftover foo",
+        "try\n    using Statistics\ncatch\nend",
+    ]
+        settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text=text))
+        @test exp_blind(jw, uri)
+    end
+
+    # Two opaque rows, one still pending: blind until both settle.
+    jw2, uri2 = exp_make_jw("@defgen foo\n@defgen bar\n")
+    settle!(jw2, exp_key_for(jw2, uri2, 1) => (status=:ok, text="foo() = 1"))
+    @test exp_blind(jw2, uri2)
+    @test haskey(exp_names(jw2, uri2), "foo")
+    settle!(jw2, exp_key_for(jw2, uri2, 1) => (status=:ok, text="foo() = 1"),
+                 exp_key_for(jw2, uri2, 2) => (status=:ok, text="bar() = 2"))
+    @test !exp_blind(jw2, uri2)
+
+    # An interpolating `@eval` never clears, whatever the child returned.
+    jw3, uri3 = exp_make_jw("const names = (:a, :b)\n@eval \$(names[1])(x) = x\n")
+    settle!(jw3, exp_key_for(jw3, uri3, 1) => (status=:ok, text="Core.eval(Main, :(a(x) = x))"))
+    @test exp_blind(jw3, uri3)
+
+    # Flag off: the expanded inventory IS the static one — blind.
+    JW.set_macro_expansion!(jw, false)
+    @test exp_blind(jw, uri)
+end
+
+@testitem "expansion decls: restated argument definitions are not redeclarations" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    # `@wrap struct S … end`: the walker already enumerated `S` from the
+    # arguments; the expansion restating it must not pair as a const_decl
+    # conflict, and the module is un-blinded.
+    jw, uri = exp_make_jw("@wrap struct S\n    a::Int\nend\n")
+    set_input_env_ready!(jw.runtime, true)
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="begin\n    struct S\n        a::Int\n    end\n    Base.hash(s::S, h::UInt) = hash(s.a, h)\nend"))
+    @test !exp_blind(jw, uri)
+    @test exp_names(jw, uri)["S"] === :struct
+    @test count(e -> e[1] == "S", JW.derived_v2_module_decl_events(jw.runtime, uri, String[])) == 1
+    @test !any(d -> d.code === :const_decl, get_diagnostic(jw, uri))
+end
+
+@testitem "expansion decls: the opt-in boundary notice for unexpanded macros" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    function notice_jw(src; config=EXP_OPT_IN)
+        jw, uri = exp_make_jw(src)
+        config === nothing ||
+            add_file!(jw, TextFile(URI("file:///pkg/JuliaLint.toml"), SourceText(config, "toml")))
+        set_input_env_ready!(jw.runtime, true)
+        return jw, uri
+    end
+    notices(jw, uri) = filter(d -> d.code === :analysis_boundary, get_diagnostic(jw, uri))
+
+    # Pending: no notice yet (it settles later).
+    jw, uri = notice_jw("@defgen foo\nuse_it() = foo(1)\n")
+    @test isempty(notices(jw, uri))
+    # Failed: one warning at the macrocall, naming the macro, the error's
+    # first line and the suppressed rules.
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:failed, text="UndefVarError: `@defgen` not defined\nmore"))
+    ns = notices(jw, uri)
+    @test length(ns) == 1
+    @test ns[1].severity === :warning
+    @test occursin("Macro `@defgen`", ns[1].message)
+    @test occursin("expansion failed: UndefVarError: `@defgen` not defined", ns[1].message)
+    @test !occursin("more", ns[1].message)
+    @test occursin("missing_reference", ns[1].message)
+    @test !any(d -> d.code === :missing_reference, get_diagnostic(jw, uri))
+    # Expanded to unmodelled code.
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="include(\"gen.jl\")"))
+    @test occursin("cannot model", only(notices(jw, uri)).message)
+    # Clean: the notice goes away with the blindness.
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="foo(x) = x"))
+    @test isempty(notices(jw, uri))
+
+    # Expansion disabled: the notice says so.
+    JW.set_macro_expansion!(jw, false)
+    @test occursin("macro expansion is disabled", only(notices(jw, uri)).message)
+
+    # The default preset: silent in every one of those states.
+    jw, uri = notice_jw("@defgen foo\nuse_it() = foo(1)\n"; config=nothing)
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:failed, text="boom"))
+    @test isempty(get_diagnostic(jw, uri))
+    JW.set_macro_expansion!(jw, false)
+    @test isempty(get_diagnostic(jw, uri))
 end

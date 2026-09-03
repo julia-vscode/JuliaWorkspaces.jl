@@ -139,9 +139,10 @@ end
         :lowering_errors => :error,
         # Small rule batch: Julia's soft-scope ambiguity warning, statically.
         :soft_scope_ambiguity => :information,
-        # The analysis-boundary notice ships ON in default (maintainer
-        # direction): silence about silenced rules would read as a clean bill.
-        :analysis_boundary => :information,
+        # The analysis-boundary notice is OPT-IN (maintainer direction): the
+        # default preset never reports on code merely because it cannot be
+        # analyzed; strict promotes it to warning.
+        :analysis_boundary => :off,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 

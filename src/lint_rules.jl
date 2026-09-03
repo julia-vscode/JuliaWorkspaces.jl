@@ -227,14 +227,17 @@ const LINT_RULES = LintRule[
     # fails every resolve), so informational rather than CI-breaking.
     LintRule(id = :environment_errors, tier = TierProject,
         severity_default = :information, severity_strict = :warning),
-    # An analysis boundary: a construct the linter cannot see through (an
-    # interpolated `@eval`, a runtime `include`/`eval`) silences a set of
-    # semantic rules in its module, and this notice on the construct says so.
-    # Deliberately ON in the default preset (deviating from the new-rules-off
-    # convention, by maintainer direction): silence about silencing would
-    # leave users believing the suppressed rules ran clean.
+    # An analysis boundary: a construct the linter cannot see through (a
+    # computed or function-body `include`, an interpolated `@eval`/`eval`, a
+    # guarded import, a macro whose expansion failed) silences a set of
+    # semantic rules in its module. The default preset is SILENT about it by
+    # design (maintainer direction): the linter never reports on things it
+    # merely cannot analyze — it just drops the affected rules in the
+    # smallest scope. Users opt in (`analysis_boundary = "warning"`, or the
+    # strict preset) to be told what blocks analysis, and get the full
+    # diagnostic set back by avoiding those constructs.
     LintRule(id = :analysis_boundary, tier = TierWorkspace,
-        severity_minimal = :off, severity_default = :information, severity_strict = :warning,
+        severity_minimal = :off, severity_default = :off, severity_strict = :warning,
         codes = [StaticLint.ComputedInclude, StaticLint.RuntimeInclude]),
 ]
 

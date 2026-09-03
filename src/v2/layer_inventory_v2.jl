@@ -656,16 +656,23 @@ function _v2_is_includeish_call(bt::BodyTree)
     bt.kind == JS2.K"call" || return false
     cs = _v2_children(bt)
     length(cs) >= 2 || return false
-    callee = cs[1]
+    s = _v2_callee_name(cs[1])
+    return s == "include" || s == "includet"
+end
+
+# The trailing name of a call's callee: `f` → "f", `Base.f` → "f" (the EST
+# spells the member as `(. Base (inert f))`), anything else → `nothing`.
+function _v2_callee_name(callee::BodyTree)
     s = _v2_leaf_string(callee)
-    (s == "include" || s == "includet") && return true
-    if callee.kind == JS2.K"."
-        ccs = _v2_children(callee)
-        isempty(ccs) && return false
-        t = _v2_leaf_string(ccs[end])
-        return t == "include" || t == "includet"
+    s !== nothing && return s
+    callee.kind == JS2.K"." || return nothing
+    ccs = _v2_children(callee)
+    isempty(ccs) && return nothing
+    node = ccs[end]
+    if node.kind == JS2.K"inert" && _v2_nchildren(node) >= 1
+        node = _v2_children(node)[1]
     end
-    return false
+    return _v2_leaf_string(node)
 end
 
 # The literal path argument of an include call, or `nothing` when computed.
@@ -1592,4 +1599,157 @@ Salsa.@derived function derived_v2_file_inventory(rt, uri)
     end
     return V2FileInventory(items, skel.imports, skel.exports, skel.includes,
                            skel.modules, skel.opaque_macros)
+end
+
+# ── expansion harvest ───────────────────────────────────────────────────────
+
+"The module-level effects of one parsed macro expansion (see `_v2_harvest_expansion`)."
+const V2ExpansionHarvest = @NamedTuple{decls::Vector{V2Decl}, exports::Vector{String},
+                                       publics::Vector{String}, imports::Vector{BodyTree{V2Kind}}}
+
+# Whether `bt` (at any depth, quotes included — conservatively) contains a
+# construct that keeps an expansion opaque: an `eval`/`include`-class call, an
+# `@eval`, or a nested `module`. Also counts `using`/`import` statements, so
+# the caller can check that every one of them was harvested at statement
+# level (one under a `try` would be a guarded import the inventory cannot
+# model).
+function _v2_expansion_unmodelled(bt::BodyTree{V2Kind}, nimports::Base.RefValue{Int})::Bool
+    k = bt.kind
+    k == JS2.K"module" && return true
+    if k == JS2.K"call"
+        cs = _v2_children(bt)
+        if !isempty(cs)
+            s = _v2_callee_name(cs[1])
+            s in ("eval", "include", "includet", "include_string", "evalfile") && return true
+        end
+    elseif k == JS2.K"macrocall"
+        _v2_macrocall_name(bt) == "@eval" && return true
+    elseif k == JS2.K"using" || k == JS2.K"import"
+        nimports[] += 1
+    end
+    bt.children === nothing && return false
+    return any(c -> _v2_expansion_unmodelled(c, nimports), bt.children)
+end
+
+function _v2_harvest_statement!(h::V2ExpansionHarvest, bt::BodyTree{V2Kind})::Bool
+    k = bt.kind
+    if k == JS2.K"block" || k == JS2.K"toplevel"
+        for c in _v2_children(bt)
+            _v2_harvest_statement!(h, c) || return false
+        end
+    elseif k == JS2.K"if" || k == JS2.K"elseif"
+        # [cond, then, else?]: every branch's declarations are visible names.
+        cs = _v2_children(bt)
+        for c in cs[min(2, length(cs) + 1):end]
+            _v2_harvest_statement!(h, c) || return false
+        end
+    elseif k == JS2.K"using" || k == JS2.K"import"
+        push!(h.imports, bt)
+    elseif k == JS2.K"export" || k == JS2.K"public"
+        names = k == JS2.K"export" ? h.exports : h.publics
+        for c in _v2_children(bt)
+            s = _v2_leaf_string(c)
+            s !== nothing && push!(names, s)
+        end
+    elseif k == JS2.K"macrocall"
+        # `macroexpand` is recursive, so a macrocall left in an expansion is
+        # one lowering handles itself: a docstring wrapper (unwrap to the
+        # documented statement), or a modeled macro whose arguments are the
+        # definitions (walk them, as the inventory walker does). Anything
+        # else may define names — opaque.
+        name = _v2_macrocall_name(bt)
+        args = _v2_macro_args(bt)
+        if _v2_is_doc_macro(name)
+            isempty(args) || return _v2_harvest_statement!(h, args[end])
+        elseif name == "@enum"
+            append!(h.decls, _v2_classify(bt))
+        elseif _v2_macro_name_effects_known(name) && !(name in V2_ISOLATED_SCOPE_MACROS)
+            for a in args
+                _v2_harvest_statement!(h, a) || return false
+            end
+        else
+            return false
+        end
+    else
+        append!(h.decls, _v2_classify(bt))
+    end
+    return true
+end
+
+"""
+    _v2_harvest_expansion(bt) -> Union{Nothing,V2ExpansionHarvest}
+
+The module-level effects of a parsed macro expansion: declarations (through
+`_v2_classify`, statement by statement — `begin`/`toplevel` blocks and `if`
+branches descended, docstring wrappers unwrapped), `export`/`public` names,
+and `using`/`import` statements. `nothing` when the expansion contains
+something the inventory cannot model — a nested `module`, an `eval`/`include`
+call, an `@eval`, an unexpanded macro, or a `using`/`import` below statement
+level — in which case the macrocall stays opaque. Hygiene gensyms (`#12#f`)
+are not names anyone can reference and are dropped. Pure in the `BodyTree`.
+"""
+function _v2_harvest_expansion(bt::BodyTree{V2Kind})
+    nimports = Ref(0)
+    _v2_expansion_unmodelled(bt, nimports) && return nothing
+    h = (decls=V2Decl[], exports=String[], publics=String[], imports=BodyTree{V2Kind}[])
+    _v2_harvest_statement!(h, bt) || return nothing
+    length(h.imports) == nimports[] || return nothing
+    filter!(d -> !startswith(d.name, "#"), h.decls)
+    return h
+end
+
+"""
+    derived_v2_file_inventory_expanded(rt, uri) -> V2FileInventory
+
+`derived_v2_file_inventory` plus what settled macro expansions add: for every
+opaque macrocall row the DJP expanded cleanly, the expansion's module-level
+declarations, exports and imports become rows (same order/id/module as the
+macrocall), and the row leaves `opaque_macros` — so the module is blind only
+while some macrocall in it genuinely resists analysis. With the expansion
+flag off this IS the static inventory (one extra Salsa edge).
+
+The static inventory must stay expansion-free: the expansion context is
+computed from the static module tree, and a dependency from there back into
+the expansions would be a Salsa cycle.
+"""
+Salsa.@derived function derived_v2_file_inventory_expanded(rt, uri)
+    base = derived_v2_file_inventory(rt, uri)
+    input_macro_expansion(rt) || return base
+    skel = derived_v2_file_skeleton(rt, uri)
+    any(r -> r.kind === :opaque_macrocall, skel.items) || return base
+
+    items = copy(base.items)
+    imports = base.imports
+    exports = base.exports
+    declared = Set{String}(it.name for it in base.items if isempty(it.qualifier))
+    cleared = Set{Int64}()
+    for row in skel.items
+        row.kind === :opaque_macrocall || continue
+        h = derived_v2_item_expansion_decls(rt, V2ItemRef(uri, row.id))
+        h === nothing && continue
+        push!(cleared, row.id)
+        for d in h.decls
+            # The macrocall's ARGUMENTS were walked into ordinary items already
+            # (`@mymacro struct S … end` enumerates `S`); the expansion restating
+            # such a definition must not read as a redeclaration.
+            (isempty(d.qualifier) && d.name in declared) && continue
+            push!(items, V2InventoryItem(row.order, row.id, d.name, d.qualifier,
+                                         d.kind, d.field_names, row.parent_module))
+        end
+        isempty(h.exports) ||
+            (exports = vcat(exports, [V2Export(row.order, row.id, :export, h.exports, row.parent_module)]))
+        isempty(h.publics) ||
+            (exports = vcat(exports, [V2Export(row.order, row.id, :public, h.publics, row.parent_module)]))
+        if !isempty(h.imports)
+            scratch = V2FileSkeleton(V2ItemRow[], V2Import[], V2Export[], V2Include[], V2Module[],
+                                     V2OpaqueMacro[], V2TestItem[], V2TestError[])
+            for ibt in h.imports
+                _v2_emit_import!(scratch, ibt, row.order, row.id, row.parent_module)
+            end
+            imports = vcat(imports, scratch.imports)
+        end
+    end
+    isempty(cleared) && return base
+    opaque = filter(om -> !(om.id in cleared), base.opaque_macros)
+    return V2FileInventory(items, imports, exports, base.includes, base.modules, opaque)
 end

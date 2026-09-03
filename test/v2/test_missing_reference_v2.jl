@@ -179,16 +179,21 @@ end
     @test isempty(mr_diags(jw))
 
     # A `using`/`import` inside a try/if body may bring in any name: the
-    # module is blind for missing_reference (with a boundary notice), so a
-    # name that import may provide is not flagged.
-    jw = mr_workspace("""
+    # module is blind for missing_reference (silently in the default preset;
+    # with a boundary notice when opted in), so a name that import may
+    # provide is not flagged.
+    src = """
     try
         import GR_jll
     catch
     end
     f() = GR_jll.libGR
     g() = something_from_gr()
-    """)
+    """
+    jw = mr_workspace(src)
+    @test isempty(mr_diags(jw))
+    @test !any(d -> d.code === :analysis_boundary, JuliaWorkspaces.get_diagnostic(jw, MR_URI))
+    jw = mr_workspace(src; config="[rules]\nanalysis_boundary = \"warning\"\n")
     @test isempty(mr_diags(jw))
     @test !isempty(filter(d -> d.code === :analysis_boundary && occursin("conditional", d.message),
                           JuliaWorkspaces.get_diagnostic(jw, MR_URI)))
