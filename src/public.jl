@@ -166,7 +166,7 @@ function _reconcile_expansions!(jw::JuliaWorkspace)
     isempty(required) && return
 
     # Group new work per (env child, module context).
-    groups = Dict{Tuple{DJPKey,String},@NamedTuple{imports::Vector{String}, entries::Vector{ExpansionEntry}}}()
+    groups = Dict{Tuple{DJPKey,String},@NamedTuple{imports::Vector{String}, ctx_module::Vector{String}, entries::Vector{ExpansionEntry}}}()
     for r in required
         r.key in df.requested_expansions && continue
 
@@ -183,7 +183,7 @@ function _reconcile_expansions!(jw::JuliaWorkspace)
 
         push!(df.requested_expansions, r.key)
         g = get!(groups, (r.env_key, r.ctx_id)) do
-            (imports=r.imports, entries=ExpansionEntry[])
+            (imports=r.imports, ctx_module=r.ctx_module, entries=ExpansionEntry[])
         end
         push!(g.entries, (key=r.key, text=macro_text))
     end
@@ -199,7 +199,7 @@ function _reconcile_expansions!(jw::JuliaWorkspace)
                 bytes += ncodeunits(g.entries[i].text)
                 i += 1
             end
-            put!(df.in_channel, ExpansionBatchMsg(env_key, ctx_id, g.imports, batch))
+            put!(df.in_channel, ExpansionBatchMsg(env_key, ctx_id, g.imports, g.ctx_module, batch))
         end
     end
 
@@ -738,6 +738,24 @@ function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{Cancel
                 yield()
             end
         end
+        # Macro-expansion settlement, for one-shot flows: expansion batches
+        # leave the host only through `_reconcile!` (the mutation path) and
+        # never count as pending work items, so without this a CLI run would
+        # return before any expansion settles — the flag would be a silent
+        # no-op outside an editor. Send batches for whatever the pass above
+        # made newly required, then wait while any REQUESTED key is still
+        # unsettled: every batch settles eventually (`:failed` on timeout,
+        # immediately under non-persistent modes) and every settle path pings
+        # the update channel. Required-but-unrequestable entries (volatile map
+        # misses) are deliberately not waited on — no wakeup would come.
+        if jw.dynamic_feature !== nothing && input_macro_expansion(jw.runtime)
+            _reconcile!(jw)
+            settled = input_macro_expansions(jw.runtime)
+            if any(k -> !haskey(settled, k), jw.dynamic_feature.requested_expansions)
+                _wait_for_dynamic_update(jw, cancel_token)
+                continue
+            end
+        end
         is_ready(jw) && break
         wait_until_ready(jw; cancel_token=cancel_token)
     end
@@ -869,17 +887,23 @@ function wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTo
     @debug "wait_until_ready"
 
     while !is_ready(jw)
-        if cancel_token !== nothing
-            wait(jw.dynamic_feature.update_channel, cancel_token)
-        else
-            wait(jw.dynamic_feature.update_channel)
-        end
-        # Drain the update_channel and process any dynamic results
-        while isready(jw.dynamic_feature.update_channel)
-            take!(jw.dynamic_feature.update_channel)
-        end
-        process_from_dynamic(jw)
+        _wait_for_dynamic_update(jw, cancel_token)
     end
+end
+
+# One blocking round of the dynamic-update pump: wait for the reactor's
+# coalesced wakeup, drain it, and fold the results into the Salsa inputs.
+function _wait_for_dynamic_update(jw::JuliaWorkspace, cancel_token)
+    if cancel_token !== nothing
+        wait(jw.dynamic_feature.update_channel, cancel_token)
+    else
+        wait(jw.dynamic_feature.update_channel)
+    end
+    while isready(jw.dynamic_feature.update_channel)
+        take!(jw.dynamic_feature.update_channel)
+    end
+    process_from_dynamic(jw)
+    return
 end
 
 """

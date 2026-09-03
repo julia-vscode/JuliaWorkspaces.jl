@@ -47,6 +47,11 @@ end
 @dict_readable struct ExpandMacrosParams <: JSONRPC.Outbound
     ctxId::String                # identifies the module context for caching
     imports::Vector{String}      # canonical import/using statements defining it
+    # The module path of the expansion site within its package (first segment
+    # is the package root module), so the child can expand in the REAL module —
+    # where internal, unexported macros resolve. Empty: no module context; the
+    # child falls back to a scratch module fed only by `imports`.
+    ctxModule::Vector{String}
     entries::Vector{ExpandMacroEntry}
 end
 

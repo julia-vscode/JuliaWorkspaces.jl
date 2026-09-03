@@ -169,3 +169,72 @@ end
     @test JW.derived_file_expansion_ready(jw2.runtime, uri2)
 end
 
+
+@testitem "expansion env: manifest-less packages route to the standalone project" setup=[ExpansionWS] begin
+    # A plain checkout (Project.toml, no Manifest.toml) has no project in
+    # `derived_project_for_file`'s sense, but the dynamic tier materializes a
+    # standalone scratch project for it — expansion batches route there (M1b).
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///nm/Project.toml"), SourceText(
+        "name = \"NoManifest\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9a6\"\nversion = \"1.0.0\"\n", "toml")))
+    uri = URI("file:///nm/src/a.jl")
+    add_file!(jw, TextFile(uri, SourceText("f(x) = @somemacro x\n", "julia")))
+    JW.set_v2_enabled!(jw, true)
+    JW.set_macro_expansion!(jw, true)
+
+    env = JW.derived_v2_expansion_env(jw.runtime, uri)
+    @test env !== nothing
+    @test env.key isa JW.CreateStandaloneProjectKey
+    pkg = JW.derived_package(jw.runtime, URI("file:///nm"))
+    @test env.env_hash == pkg.content_hash
+    # The harvest picks the site up through the standalone env.
+    @test !isempty(JW.derived_required_macro_expansions(jw.runtime))
+
+    # Test files' env is the TEST child, which the expansion revive path
+    # cannot serve — deferred, expansion stays off for them.
+    test_uri = URI("file:///nm/test/runtests.jl")
+    add_file!(jw, TextFile(test_uri, SourceText("g() = @somemacro 1\n", "julia")))
+    @test JW.derived_v2_expansion_env(jw.runtime, test_uri) === nothing
+
+    # A manifest-bearing package keeps the watch-env route.
+    jw2, uri2 = exp_make_jw("f(x) = @somemacro x\n")
+    @test JW.derived_v2_expansion_env(jw2.runtime, uri2).key isa JW.WatchEnvironmentKey
+end
+
+@testitem "expansion ctx: module path travels and re-keys the context" setup=[ExpansionWS] begin
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///mp/Project.toml"), SourceText(
+        "name = \"MP\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9a7\"\nversion = \"1.0.0\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///mp/Manifest.toml"), SourceText(
+        "julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///mp/src/MP.jl"), SourceText(
+        "module MP\nmodule Sub\ninclude(\"b.jl\")\nend\ninclude(\"a.jl\")\nend\n", "julia")))
+    uri = URI("file:///mp/src/a.jl")
+    add_file!(jw, TextFile(uri, SourceText("f(x) = @check_args x\n", "julia")))
+    sub_uri = URI("file:///mp/src/b.jl")
+    add_file!(jw, TextFile(sub_uri, SourceText("g(x) = @check_args x\n", "julia")))
+    JW.set_v2_enabled!(jw, true)
+    JW.set_macro_expansion!(jw, true)
+
+    ctx = JW.derived_v2_expansion_context(jw.runtime, uri)
+    @test ctx.modpath == ["MP"]
+    req = JW.derived_required_macro_expansions(jw.runtime)
+    a_req = only(r for r in req if r.file == uri)
+    @test a_req.ctx_module == ["MP"]
+
+    # A file spliced into a nested submodule carries the deeper path.
+    sub_ctx = JW.derived_v2_expansion_context(jw.runtime, sub_uri)
+    @test sub_ctx.modpath == ["MP", "Sub"]
+    # Both contexts carry the same imports (just `using MP`), so the module
+    # path alone must separate the ctx hashes — the child caches per ctx id,
+    # and distinct modules must never share a cache slot.
+    @test sub_ctx.imports == ctx.imports
+    @test sub_ctx.ctx_hash != ctx.ctx_hash
+
+    # A computed-include orphan of the package (and the entry file itself)
+    # falls back to the package root module, so internal macros still resolve.
+    orphan = URI("file:///mp/src/orphan.jl")
+    add_file!(jw, TextFile(orphan, SourceText("h(x) = @check_args x\n", "julia")))
+    @test JW.derived_v2_expansion_context(jw.runtime, orphan).modpath == ["MP"]
+    @test JW.derived_v2_expansion_context(jw.runtime, URI("file:///mp/src/MP.jl")).modpath == ["MP"]
+end

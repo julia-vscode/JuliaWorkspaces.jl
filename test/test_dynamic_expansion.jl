@@ -10,7 +10,7 @@
     key = WatchEnvironmentKey("/ws/p1", UInt64(1))
     ek = ExpansionKey((UInt64(1), UInt64(2), UInt64(3)))
 
-    handle!(df, ExpansionBatchMsg(key, "c1", String[], ExpansionEntry[(key=ek, text="@m x")]))
+    handle!(df, ExpansionBatchMsg(key, "c1", String[], String[], ExpansionEntry[(key=ek, text="@m x")]))
 
     msg = take!(df.out_channel)
     @test msg isa MacroExpansionsResult
@@ -28,7 +28,7 @@ end
     key = WatchEnvironmentKey("/ws/p1", UInt64(1))   # never required, never launched
     ek = ExpansionKey((UInt64(1), UInt64(2), UInt64(3)))
 
-    handle!(df, ExpansionBatchMsg(key, "c1", String[], ExpansionEntry[(key=ek, text="@m x")]))
+    handle!(df, ExpansionBatchMsg(key, "c1", String[], String[], ExpansionEntry[(key=ek, text="@m x")]))
 
     msg = take!(df.out_channel)
     @test msg isa MacroExpansionsResult
@@ -48,8 +48,8 @@ end
     df.procs[key] = DynamicJuliaProcess(key, "/ws/p1", nothing, :watch_environment)
     ek1 = ExpansionKey((UInt64(1), UInt64(2), UInt64(3)))
     ek2 = ExpansionKey((UInt64(1), UInt64(2), UInt64(4)))
-    handle!(df, ExpansionBatchMsg(key, "c1", String[], ExpansionEntry[(key=ek1, text="@m x")]))
-    handle!(df, ExpansionBatchMsg(key, "c1", String[], ExpansionEntry[(key=ek2, text="@m y")]))
+    handle!(df, ExpansionBatchMsg(key, "c1", String[], String[], ExpansionEntry[(key=ek1, text="@m x")]))
+    handle!(df, ExpansionBatchMsg(key, "c1", String[], String[], ExpansionEntry[(key=ek2, text="@m y")]))
     @test length(df.expansion_queue[key]) == 2
     @test !isready(df.out_channel)
 

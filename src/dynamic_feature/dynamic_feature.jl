@@ -165,14 +165,17 @@ _expansion_key_string(k::ExpansionKey) =
     string(k.env_hash, base=16) * "-" * string(k.ctx_hash, base=16) * "-" * string(k.mac_hash, base=16)
 
 """
-    expand_macros(djp, ctx_id, imports, entries, timeout_seconds) -> Vector{ExpansionOutcomeEntry}
+    expand_macros(djp, ctx_id, imports, ctx_module, entries, timeout_seconds) -> Vector{ExpansionOutcomeEntry}
 
 Send one expansion batch to the env's persistent child and map the child's
 keyed answers back onto `ExpansionKey`s. Entries the child did not answer
-(malformed reply) settle as `:failed`.
+(malformed reply) settle as `:failed`. A failed entry keeps the child's
+(truncated) error text for debuggability — consumers key on `status`, never
+on the text, so this is observability only.
 """
 function expand_macros(djp::DynamicJuliaProcess, ctx_id::String, imports::Vector{String},
-                       entries::Vector{ExpansionEntry}, timeout_seconds::Int=0)
+                       ctx_module::Vector{String}, entries::Vector{ExpansionEntry},
+                       timeout_seconds::Int=0)
     result = _send_djp_request(
         djp,
         timeout_seconds,
@@ -180,6 +183,7 @@ function expand_macros(djp::DynamicJuliaProcess, ctx_id::String, imports::Vector
         JuliaDynamicAnalysisProtocol.ExpandMacrosParams(
             ctx_id,
             imports,
+            ctx_module,
             [JuliaDynamicAnalysisProtocol.ExpandMacroEntry(_expansion_key_string(e.key), e.text) for e in entries]
         )
     )
@@ -192,7 +196,7 @@ function expand_macros(djp::DynamicJuliaProcess, ctx_id::String, imports::Vector
         k === nothing && continue
         push!(answered, k)
         push!(outcomes, (key=k, status=r.status == "ok" ? :ok : :failed,
-                         text=r.status == "ok" ? r.result : ""))
+                         text=r.status == "ok" ? r.result : first(r.result, 500)))
     end
     for e in entries
         e.key in answered || push!(outcomes, (key=e.key, status=:failed, text=""))
@@ -1816,8 +1820,8 @@ function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
     push!(df.expansion_inflight, key)
     transition!(djp.fsm, DynamicProcessIndexing; reason="macro expansion batch")
     @async try
-        outcomes = expand_macros(djp, batch.ctx_id, batch.imports, batch.entries,
-                                 DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS)
+        outcomes = expand_macros(djp, batch.ctx_id, batch.imports, batch.ctx_module,
+                                 batch.entries, DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS)
         put!(df.in_channel, ExpansionBatchDoneMsg(key, outcomes))
     catch err
         @info "Macro expansion batch failed" key exception=(err, catch_backtrace())

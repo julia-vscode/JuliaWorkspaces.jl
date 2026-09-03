@@ -112,11 +112,15 @@ end
 """
     derived_v2_expansion_context(rt, uri) -> Union{Nothing,NamedTuple}
 
-`(ctx_hash, imports)` for `uri`'s module: the sorted canonical import
+`(ctx_hash, imports, modpath)` for `uri`'s module: the sorted canonical import
 statements the child evals into a scratch module before expanding, plus a
 `using <OwnPackage>` line so package-level macros resolve via the compiled
-package. The hash additionally folds in the own package's macro-defs hash, so
-deved macro edits re-key (D2b). `nothing` when the file has no module context.
+package, plus the file's module path within its root — the child uses it to
+expand in the REAL module (where internal, unexported macros resolve), falling
+back to the scratch module when resolution fails. The hash additionally folds
+in the module path (distinct modules must never share a child ctx cache slot)
+and the own package's macro-defs hash, so deved macro edits re-key (D2b).
+`nothing` when the file has no module context.
 """
 Salsa.@derived function derived_v2_expansion_context(rt, uri)
     root = derived_v2_best_root_for_uri(rt, uri)   # v2's own root discovery
@@ -132,17 +136,28 @@ Salsa.@derived function derived_v2_expansion_context(rt, uri)
 
     pkg_uri = derived_package_for_file(rt, uri)
     macro_defs_hash = UInt64(0)
+    modpath = path
     if pkg_uri !== nothing
         pkg = derived_package(rt, pkg_uri)
         if pkg !== nothing
             push!(stmts, "using " * pkg.name)
             macro_defs_hash = derived_v2_package_macro_defs_hash(rt, pkg_uri)
+            # An own-root file of a package with an empty splice path is
+            # almost always a computed-include orphan (Distributions loads
+            # every univariate file through `include(joinpath(...))` in a
+            # loop) — or the entry file, whose sites live inside the root
+            # module anyway. Assume the package root module so internal
+            # macros still resolve; a wrong guess makes the child's
+            # `macroexpand` fail and settle `:failed`, which is exactly the
+            # scratch-fallback behavior it replaces.
+            isempty(modpath) && (modpath = [pkg.name])
         end
     end
 
     sort!(unique!(stmts))
-    return (ctx_hash=hash(macro_defs_hash, hash(stmts, 0x7632657870437478 % UInt)) % UInt64,   # "v2expCtx"
-            imports=stmts)
+    return (ctx_hash=hash(modpath, hash(macro_defs_hash, hash(stmts, 0x7632657870437478 % UInt))) % UInt64,   # "v2expCtx"
+            imports=stmts,
+            modpath=modpath)
 end
 
 """
@@ -155,13 +170,38 @@ identifier fallback.
 """
 Salsa.@derived function derived_v2_expansion_env(rt, uri)
     project_uri = derived_project_for_file(rt, uri)
-    project_uri === nothing && return nothing
-    project = derived_project(rt, project_uri)
-    project === nothing && return nothing
-    project_path = uri2filepath(project_uri)
-    project_path === nothing && return nothing
-    return (key=WatchEnvironmentKey(project_path, project.content_hash),
-            env_hash=project.content_hash)
+    if project_uri !== nothing
+        project = derived_project(rt, project_uri)
+        project === nothing && return nothing
+        project_path = uri2filepath(project_uri)
+        project_path === nothing && return nothing
+        return (key=WatchEnvironmentKey(project_path, project.content_hash),
+                env_hash=project.content_hash)
+    end
+    # M1b: a manifest-less package checkout (plain git clone) has no project in
+    # `derived_project_for_file`'s sense, but the dynamic tier already
+    # materializes a standalone scratch project for it — `Pkg.develop`ing the
+    # package, kept alive under DynamicPersistent, revivable through the
+    # refresh machinery — so expansion batches route there. The conditions
+    # mirror the CreateStandaloneProjectKey arm of
+    # `derived_required_dynamic_projects`: a key outside the required set
+    # would settle every batch `:failed` at the reactor gate.
+    input_resolve_workspace_environments(rt) || return nothing
+    pkg_uri = derived_package_for_file(rt, uri)
+    pkg_uri === nothing && return nothing
+    pkg_uri in derived_project_folders(rt) && return nothing
+    _is_package_deved_in_workspace(rt, pkg_uri) && return nothing
+    pkg = derived_package(rt, pkg_uri)
+    pkg === nothing && return nothing
+    pkg_path = uri2filepath(pkg_uri)
+    pkg_path === nothing && return nothing
+    # Test files' environment is the TEST child, which the expansion revive
+    # path cannot serve (`_scratch_ready_result` has no WatchTestEnvironmentKey
+    # method — reaching `refresh_queue` would MethodError the reactor):
+    # deferred, expansion stays off for them.
+    _file_needs_test_env(rt, pkg_path, uri) && return nothing
+    return (key=CreateStandaloneProjectKey(pkg_path, pkg.content_hash),
+            env_hash=pkg.content_hash)
 end
 
 # ── consuming settled results ───────────────────────────────────────────────
@@ -260,7 +300,8 @@ end
 
 "One expansion the workspace still needs, with everything the host must know to request it."
 const V2RequiredExpansion = @NamedTuple{key::ExpansionKey, env_key::DJPKey, ctx_id::String,
-                                        imports::Vector{String}, file::URI, item_id::Int64, addr::Int}
+                                        imports::Vector{String}, ctx_module::Vector{String},
+                                        file::URI, item_id::Int64, addr::Int}
 
 """
     derived_required_macro_expansions(rt) -> Vector{V2RequiredExpansion}
@@ -287,7 +328,7 @@ Salsa.@derived function derived_required_macro_expansions(rt)
                 key = ExpansionKey((env.env_hash, ctx.ctx_hash, s.mac_hash))
                 haskey(settled, key) && continue
                 push!(out, (key=key, env_key=env.key, ctx_id=ctx_id, imports=ctx.imports,
-                            file=uri, item_id=row.id, addr=s.addr))
+                            ctx_module=ctx.modpath, file=uri, item_id=row.id, addr=s.addr))
             end
         end
     end

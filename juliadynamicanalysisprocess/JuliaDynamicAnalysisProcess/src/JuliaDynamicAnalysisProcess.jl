@@ -10,14 +10,18 @@ include("scratch_env.jl")
 struct JuliaDynamicAnalysisProcessState
     endpoint::JSONRPC.JSONRPCEndpoint
     # Module-context cache for macro expansion, keyed by the parent's ctxId.
-    # Each module holds the eval'd import statements of one file-module context;
-    # the packages behind them are already loaded in this session (get_store
-    # imported every manifest package), so building one is cheap.
-    ctx_modules::Dict{String,Module}
+    # Each entry pairs the PRIMARY expansion module (the real package module
+    # when the ctx path resolved, where internal macros live) with the scratch
+    # fallback holding the eval'd import statements — an expansion is tried in
+    # the primary first, then the fallback, so a wrong module guess can never
+    # lose what the imports alone would have expanded. The packages behind the
+    # imports are already loaded in this session (get_store imported every
+    # manifest package), so building a context is cheap.
+    ctx_modules::Dict{String,Tuple{Module,Union{Nothing,Module}}}
 end
 
 JuliaDynamicAnalysisProcessState(endpoint::JSONRPC.JSONRPCEndpoint) =
-    JuliaDynamicAnalysisProcessState(endpoint, Dict{String,Module}())
+    JuliaDynamicAnalysisProcessState(endpoint, Dict{String,Tuple{Module,Union{Nothing,Module}}}())
 
 # Progress callback for SymbolServer.get_store that forwards each report to the
 # parent process as an `indexProgress` notification.
@@ -137,10 +141,11 @@ end
 # bookkeeping.
 const MAX_CTX_MODULES = 64
 
-function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id::AbstractString, imports::Vector{String})
+function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id::AbstractString,
+                                imports::Vector{String}, ctx_module::Vector{String})
     return get!(state.ctx_modules, ctx_id) do
         length(state.ctx_modules) >= MAX_CTX_MODULES && empty!(state.ctx_modules)
-        # Default module: Base is in scope, as it is in any user file.
+        # Scratch module: Base is in scope, as it is in any user file.
         m = Module(Symbol(:ExpansionCtx_, ctx_id))
         for stmt in imports
             try
@@ -151,7 +156,31 @@ function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id:
                 # per entry below instead of blocking the whole batch.
             end
         end
-        m
+        # When the sites live inside a package module, prefer the REAL module:
+        # only there do internal, unexported macros
+        # (`Distributions.@check_args`) resolve. The imports above loaded the
+        # package (`using <Pkg>`), so its root module is a name in `m` and
+        # submodules chain by getfield — pure navigation of loaded modules,
+        # nothing from the workspace is ever evaluated. The scratch module
+        # stays as the per-entry fallback (see `expand_macros_request`): a
+        # wrong module guess — a test helper whose macros come from `using
+        # Test`, an orphan that really lives elsewhere — must never lose what
+        # the imports alone would have expanded.
+        if !isempty(ctx_module)
+            try
+                # `invokelatest`: the `using` bindings eval'd above only exist
+                # in a NEWER world than this function activation — a plain
+                # `getfield` here cannot see them yet.
+                real = Base.invokelatest(getfield, m, Symbol(ctx_module[1]))
+                for seg in ctx_module[2:end]
+                    real = Base.invokelatest(getfield, real, Symbol(seg))
+                end
+                real isa Module && return (real, m)
+            catch err
+                err isa InterruptException && rethrow()
+            end
+        end
+        (m, nothing)
     end
 end
 
@@ -165,7 +194,7 @@ function expand_macros_request(params::JuliaDynamicAnalysisProtocol.ExpandMacros
         @warn "Revise failed before macro expansion" exception=(err, catch_backtrace())
     end
 
-    ctx = _expansion_ctx_module!(state, params.ctxId, params.imports)
+    ctx, fallback = _expansion_ctx_module!(state, params.ctxId, params.imports, params.ctxModule)
 
     entries = map(params.entries) do e
         try
@@ -173,7 +202,16 @@ function expand_macros_request(params::JuliaDynamicAnalysisProtocol.ExpandMacros
             if expr isa Expr && expr.head in (:incomplete, :error)
                 error("macrocall text did not parse")
             end
-            expanded = macroexpand(ctx, expr; recursive=true)
+            expanded = try
+                macroexpand(ctx, expr; recursive=true)
+            catch err
+                err isa InterruptException && rethrow()
+                # The real-module guess can miss macros that come from the
+                # file's own imports (`using Test` in a test helper): retry in
+                # the scratch module before giving up.
+                fallback === nothing && rethrow()
+                macroexpand(fallback, expr; recursive=true)
+            end
             JuliaDynamicAnalysisProtocol.ExpandMacroResultEntry(e.key, "ok", string(expanded))
         catch err
             err isa InterruptException && rethrow()

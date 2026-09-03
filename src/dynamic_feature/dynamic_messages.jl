@@ -136,6 +136,10 @@ struct ExpansionBatchMsg <: DynamicReactorMessage
     env_key::DJPKey
     ctx_id::String
     imports::Vector{String}
+    # Module path of the expansion sites within their package (see
+    # `ExpandMacrosParams.ctxModule`): lets the child expand in the real
+    # module, where internal macros resolve.
+    ctx_module::Vector{String}
     entries::Vector{ExpansionEntry}
 end
 
