@@ -215,6 +215,48 @@ function _collect_macrocall_identifiers!(kids::Vector{JS2.SyntaxTree}, bt::BodyT
     return nothing
 end
 
+# A cmd literal keeps its `$x` / `$(expr)` interpolations INSIDE a raw
+# `CmdString` (the EST spells `` `ffmpeg -v $level` `` as `@cmd "ffmpeg -v
+# $level"`), so the identifier walk above never sees them. Synthesize their
+# reads at address 0 from Base's own shell parser (no evaluation): otherwise
+# `level` reads as an unused binding while the expansion is pending or
+# failed, and the finding vanishes once the DJP splices `Base.cmd_gen(…)` —
+# the appear-then-vanish the pending-state contract forbids. Address 0 keeps
+# the reads out of missing_reference (a use the source does not spell).
+function _collect_cmd_interpolation_reads!(kids::Vector{JS2.SyntaxTree}, bt::BodyTree{V2Kind})
+    cs = bt.children
+    (cs === nothing || isempty(cs)) && return nothing
+    _macro_name_string(cs[1]) == "cmd" || return nothing
+    for c in cs
+        (c.kind == JS2.K"CmdString" && c.val isa AbstractString) || continue
+        occursin('$', c.val) || continue
+        ex = try
+            Base.shell_parse(String(c.val))[1]
+        catch err
+            err isa InterruptException && rethrow()
+            continue
+        end
+        names = Symbol[]
+        _collect_expr_symbols!(names, ex)
+        for s in unique!(names)
+            _is_writeonly_name(s) && continue
+            push!(kids, JS2.SyntaxTree(JS2.K"Identifier", nothing, String(s), LineNumberNode(0, :body), nothing))
+        end
+    end
+    return nothing
+end
+
+function _collect_expr_symbols!(out::Vector{Symbol}, ex)
+    if ex isa Symbol
+        push!(out, ex)
+    elseif ex isa Expr
+        for a in ex.args
+            _collect_expr_symbols!(out, a)
+        end
+    end
+    return out
+end
+
 # Quote nesting depth, tracked exactly as JuliaLowering's own
 # `collect_unquoted!` does: `quote` deepens, `$` unwraps one level.
 function _quote_depth(k, qdepth::Int)
@@ -303,6 +345,7 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
             for c in bt.children
                 _collect_macrocall_identifiers!(kids, c, addr)
             end
+            _collect_cmd_interpolation_reads!(kids, bt)
         end
         # The union guard (design doc: DJP-side macro expansion): when the DJP
         # delivered an expansion for this macrocall, splice it at address 0 as

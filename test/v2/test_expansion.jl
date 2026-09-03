@@ -459,6 +459,39 @@ end
     @test count(i -> i.target.path == ["Statistics"], JW.derived_v2_module_imports(jw2.runtime, uri2, String[])) == 1
 end
 
+@testitem "expansion: cmd-literal interpolations are reads in every expansion state" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    # `run(`ffmpeg -v $level`)`: the EST keeps `$level` inside a raw CmdString,
+    # so without the synthesized reads `level` looked unused while the
+    # expansion was pending or failed — and the finding vanished once the DJP
+    # spliced `Base.cmd_gen(…)` (Plots' animation.jl in the corpus).
+    src = """
+    function g(fn, loop)
+        verbose_level = 3
+        pattern = joinpath("a", "b")
+        run(`ffmpeg -v \$verbose_level -i \$(basename(pattern)) -loop \$loop \$fn`)
+    end
+    """
+    jw, uri = exp_make_jw(src)
+    set_input_env_ready!(jw.runtime, true)
+    unused(jw, uri) = [d.message for d in get_diagnostic(jw, uri)
+                       if d.code in (:unused_binding, :unused_function_argument)]
+    @test isempty(unused(jw, uri))                                    # pending
+    @test !any(d -> d.code === :missing_reference, get_diagnostic(jw, uri))
+    key = exp_key_for_site(jw, uri, 1)
+    settle!(jw, key => (status=:failed, text=""))
+    @test isempty(unused(jw, uri))                                    # failed
+    settle!(jw, key => (status=:ok, text="Base.cmd_gen(((\"ffmpeg\",), (\"-v\",), (verbose_level,), (\"-i\",), (basename(pattern),), (\"-loop\",), (loop,), (fn,)))"))
+    @test isempty(unused(jw, uri))                                    # ok
+    # A genuinely unused local next to the cmd still reports, in every state.
+    jw2, uri2 = exp_make_jw("function h(fn)\n    dead = 1\n    run(`open \$fn`)\nend\n")
+    set_input_env_ready!(jw2.runtime, true)
+    @test unused(jw2, uri2) == ["Variable `dead` has been assigned but not used."]
+    # No interpolation: nothing synthesized, and the flag stays off-path.
+    JW.set_macro_expansion!(jw2, false)
+    @test unused(jw2, uri2) == ["Variable `dead` has been assigned but not used."]
+end
+
 @testitem "expansion: diagnostics only grow as expansions settle" setup=[ExpansionWS] begin
     using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
     # The pending-state contract: whatever is reported while every expansion
