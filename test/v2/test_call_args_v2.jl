@@ -255,3 +255,34 @@ end
     d = only(ca_diags(jw))
     @test occursin("Expected 2 to 3 or 5 arguments, got 4", d.message)
 end
+
+@testitem "call args: a package's Base extensions are visible from its other roots" setup=[CallArgsWS] begin
+    # `Base.delete!(::Token)` defined in src/ (under `Base.@propagate_inbounds`)
+    # and `import Base: size` + `size(d::MD, i)` must make 1-arg `delete!` and
+    # 2-arg `size` valid in the package's TEST files and computed-include
+    # orphans, which are their own roots (DataStructures, Distributions).
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ca/Project.toml"), SourceText(
+        "name = \"Root\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n", "toml")))
+    add_file!(jw, TextFile(CA_URI, SourceText("""
+    module Root
+    import Base: size
+    struct Token end
+    struct MD end
+    Base.@propagate_inbounds function Base.delete!(t::Token)
+        return t
+    end
+    size(d::MD, i) = 1
+    for f in readdir(@__DIR__)
+        include(joinpath("matrix", f))
+    end
+    end
+    """, "julia")))
+    test_uri = URI("file:///ca/test/runtests.jl")
+    add_file!(jw, TextFile(test_uri, SourceText("using Root\nt = Root.Token()\ndelete!(t)\nsize(Root.MD(), 1)\n", "julia")))
+    orphan = URI("file:///ca/src/matrix/wishart.jl")
+    add_file!(jw, TextFile(orphan, SourceText("g(d::MD) = size(d, 1)\n", "julia")))
+    set_v2_enabled!(jw, true)
+    @test isempty(ca_diags(jw; uri=test_uri))
+    @test isempty(ca_diags(jw; uri=orphan))
+end

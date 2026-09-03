@@ -957,6 +957,19 @@ function _v2_call_mismatch_reason(arities::Vector{MethodArity}, (act_min, act_ma
     return nothing
 end
 
+# The partial-method names of the file's package ENTRY root (`src/<Pkg>.jl`):
+# every qualified extension and import-then-extend written anywhere in the
+# package's static include tree, visible from any other root of the package.
+Salsa.@derived function _derived_v2_package_partial_method_names(rt, uri)
+    pkg_folder = derived_package_for_file(rt, uri)
+    pkg_folder === nothing && return Set{String}()
+    pkg = derived_package(rt, pkg_folder)
+    pkg === nothing && return Set{String}()
+    entry = filepath2uri(joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl"))
+    derived_has_file(rt, entry) || return Set{String}()
+    return derived_v2_partial_method_names(rt, entry)
+end
+
 # The store's canonical function name behind an unqualified external callee
 # when it is an alias (`≈` → `isapprox`), else `nothing`. Only the implicit
 # Base/Core scope and `using`-brought names are consulted — the two ways an
@@ -1147,6 +1160,7 @@ Salsa.@derived function derived_item_call_args_findings(rt, ref::V2ItemRef)
     end
 
     partial = nothing   # demanded lazily, once a candidate call exists
+    pkg_partial = nothing
     _v2_call_sites!(body, Ref(0), 0, Base.IdSet{BodyTree{V2Kind}}()) do call, call_addr
         _v2_call_has_splat(call) && return
         callee = _v2_children(call)[1]
@@ -1194,6 +1208,14 @@ Salsa.@derived function derived_item_call_args_findings(rt, ref::V2ItemRef)
         # name (`Base.isapprox(x, y, config)`) makes the alias partial too.
         canon = _v2_callee_canonical_name(rt, root, path, qual, name)
         canon !== nothing && canon in partial && return
+        # Cross-root visibility: a package's own extension of an external
+        # function (`Base.delete!(::Token)` in DataStructures' src/,
+        # `size(::MatrixDistribution, i)` in Distributions) must count from
+        # EVERY root under that package — test files and computed-include
+        # orphans are their own roots and would otherwise resolve the callee
+        # to the store alone, flagging calls the package itself makes valid.
+        pkg_partial === nothing && (pkg_partial = _derived_v2_package_partial_method_names(rt, ref.file))
+        (name in pkg_partial || (canon !== nothing && canon in pkg_partial)) && return
 
         resolved = _v2_callee_arities(rt, root, path, qual, name)
         resolved === nothing && return
