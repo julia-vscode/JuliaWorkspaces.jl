@@ -145,6 +145,18 @@ function _macro_name_string(bt::BodyTree{V2Kind})
     return startswith(s, "@") ? s[2:end] : s
 end
 
+# `x` / `x::T` — the left-hand shapes of a keyword/optional argument. A call
+# shape (`f(x) = …`, `f(x)::T = …`) is a short-form DEFINITION passed as an
+# argument (`g((@inline noop(x...) = nothing))`, Symbolics) and must stay an
+# assignment: re-wrapping it as `kw` produced a false lowering error.
+function _is_kw_lhs(bt::BodyTree{V2Kind})
+    bt.kind == JS2.K"Identifier" && return true
+    if bt.kind == JS2.K"::" && bt.children !== nothing && !isempty(bt.children)
+        return bt.children[1].kind == JS2.K"Identifier"
+    end
+    return false
+end
+
 "The wrapped argument of a structurally transparent macrocall, else `nothing`."
 function _transparent_macro_target(bt::BodyTree{V2Kind})
     bt.kind == JS2.K"macrocall" || return nothing
@@ -244,18 +256,6 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
                       eq_to_kw::Bool = false)
     myaddr = (addr[] += 1)
     src = LineNumberNode(myaddr, :body)
-    # `@nospecialize(arg = default)` in a signature: the parser only rewrites
-    # `=` to `kw` under call/dotcall/parameters PARENTS, and inside the
-    # macrocall the parent was the macro — so when the transparent unwrap drops
-    # the wrapper, a raw `=` would land in the positional list and fail
-    # validation ("expected identifier or `identifier::type`"). Re-wrap it
-    # here, mirroring what JuliaLowering's own `strip_arg_meta` path produces.
-    # Direct `=` children of a call were already rewritten by the parser, so
-    # this only ever fires on macro-unwrapped targets.
-    if eq_to_kw && bt.kind == JS2.K"=" && bt.children !== nothing && length(bt.children) == 2
-        kids = JS2.SyntaxTree[_materialize(c, addr, qdepth, expansions) for c in bt.children]
-        return JS2.SyntaxTree(JS2.K"kw", kids, bt.val, src, nothing)
-    end
     # Structurally transparent macros unwrap to the form they wrap. The skipped
     # children still consume their addresses so the preorder numbering stays
     # aligned with `derived_v2_file_maps`.
@@ -264,6 +264,22 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
         if target !== nothing
             for c in bt.children[1:end-1]
                 addr[] += bt_node_count(c)
+            end
+            # `@nospecialize(arg = default)` in a signature: the parser only
+            # rewrites `=` to `kw` under call/dotcall/parameters PARENTS, and
+            # inside the macrocall the parent was the macro — so dropping the
+            # wrapper would land a raw `=` in the positional list and fail
+            # validation ("expected identifier or `identifier::type`"). Re-wrap
+            # it here, mirroring JuliaLowering's own `strip_arg_meta` path.
+            # ONLY for macro-unwrapped targets: a raw `=` that is a direct call
+            # child is an assignment EXPRESSION the parser deliberately kept
+            # (`(m = match(r, s)) !== nothing`), and rewriting it silently
+            # unbinds `m` — the top-500 round-2 missing_reference regression.
+            if eq_to_kw && target.kind == JS2.K"=" && target.children !== nothing &&
+               length(target.children) == 2 && _is_kw_lhs(target.children[1])
+                tsrc = LineNumberNode((addr[] += 1), :body)
+                kids = JS2.SyntaxTree[_materialize(c, addr, qdepth, expansions) for c in target.children]
+                return JS2.SyntaxTree(JS2.K"kw", kids, target.val, tsrc, nothing)
             end
             return _materialize(target, addr, qdepth, expansions, eq_to_kw)
         end

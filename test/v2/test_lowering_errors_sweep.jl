@@ -125,6 +125,11 @@ end
     @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
     jw, uri = le_workspace("g(a, @nospecialize(b = nothing); c = 2) = a\n")
     @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
+    # …but a short-form DEFINITION passed as a call argument keeps its `=`:
+    # only identifier / `x::T` left-hand sides are keyword shapes (Symbolics
+    # `SpawnFetch(fs, args, (@inline noop(x...) = nothing))`).
+    jw, uri = le_workspace("h(g) = g(1, (@inline noop(x...) = nothing))\n")
+    @test !any(c -> c[1] === :lowering_errors, le_codes(jw, uri))
 end
 
 @testitem "lowering_errors: findings backdate across position-only edits" setup=[LoweringErrWS] begin

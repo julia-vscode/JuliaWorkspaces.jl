@@ -152,3 +152,22 @@ end
     jw = mr_workspace("f() = undefined_name_xyz\n"; flag=false)
     @test !any(d -> d.source == "JuliaWorkspaces.jl", mr_diags(jw))
 end
+
+@testitem "missing_reference: assignments nested inside expressions bind" setup=[MissRefV2WS] begin
+    # A raw `=` that is a direct child of a call is an assignment EXPRESSION
+    # the parser deliberately kept (`kw` rewriting happens only in the parser,
+    # or for macro-unwrapped signature arguments) — it must bind its name for
+    # the rest of the scope. The round-2 sweep caught the transparent-macro
+    # `=`→`kw` re-wrap over-applying here: 27/50 sampled missing_reference
+    # findings were `if (m = match(...)) !== nothing` shapes.
+    for src in [
+        "g(s) = if (m = match(r\"a\", s)) !== nothing\n    m.match\nelse\n    nothing\nend\n",
+        "k(F) = ((n = length(F)) > 0 || throw(ArgumentError(\"x\")); n)\n",
+        "function p(xs)\n    while (l = length(xs)) > 0\n        pop!(xs)\n        l -= 1\n    end\nend\n",
+        "q(c, r, bm) = (bm = bm[c, r]) == 0 ? nothing : bm\n",
+        "w(a, f, c) = if a && (b = f()) != c\n    b\nend\n",
+    ]
+        jw = mr_workspace(src)
+        @test isempty(mr_diags(jw))
+    end
+end
