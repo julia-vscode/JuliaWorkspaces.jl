@@ -123,6 +123,32 @@ and the own package's macro-defs hash, so deved macro edits re-key (D2b).
 `nothing` when the file has no module context.
 """
 Salsa.@derived function derived_v2_expansion_context(rt, uri)
+    return _v2_expansion_context_for(rt, uri, String[])
+end
+
+"""
+    derived_v2_item_expansion_context(rt, ref) -> Union{Nothing,NamedTuple}
+
+The expansion context of one ITEM: the file's context when the item sits at
+the file's top level, else the context of the module the file declares
+around it (`module Commons … @generic_functions … end` inside
+`Commons.jl`: the macro is defined in `PlotsBase.Commons`, so the child must
+expand there — the file-level module `PlotsBase` cannot see it). Its imports
+are that module's own.
+"""
+Salsa.@derived function derived_v2_item_expansion_context(rt, ref::V2ItemRef)
+    skel = derived_v2_file_skeleton(rt, ref.file)
+    idx = findfirst(r -> r.id == ref.id, skel.items)
+    idx === nothing && return nothing
+    inner = skel.items[idx].parent_module
+    isempty(inner) && return derived_v2_expansion_context(rt, ref.file)
+    return _v2_expansion_context_for(rt, ref.file, inner)
+end
+
+_v2_strip_leading(inner::Vector{String}, name::AbstractString) =
+    (!isempty(inner) && inner[1] == name) ? inner[2:end] : inner
+
+function _v2_expansion_context_for(rt, uri, inner::Vector{String})
     root = derived_v2_best_root_for_uri(rt, uri)   # v2's own root discovery
     root === nothing && return nothing
     # The STATIC tree, deliberately: the expanded tree folds settled expansions
@@ -130,8 +156,9 @@ Salsa.@derived function derived_v2_expansion_context(rt, uri)
     # dependency on it here would be a Salsa cycle. Module paths are identical
     # in both trees (an expansion never splices files); imports differ only by
     # what expansions add, which the child does not need to expand.
-    path = derived_v2_file_module_path_static(rt, root, uri)
-    path === nothing && return nothing
+    file_path = derived_v2_file_module_path_static(rt, root, uri)
+    file_path === nothing && return nothing
+    path = vcat(file_path, inner)
 
     stmts = String[]
     for imp in derived_v2_module_imports_static(rt, root, path)
@@ -155,13 +182,17 @@ Salsa.@derived function derived_v2_expansion_context(rt, uri)
             # macros still resolve; a wrong guess makes the child's
             # `macroexpand` fail and settle `:failed`, which is exactly the
             # scratch-fallback behavior it replaces.
-            isempty(modpath) && (modpath = [pkg.name])
+            # The in-file module path follows; a leading segment that IS the
+            # assumed root (the entry file's own `module MyPkg … end`) is not
+            # repeated.
+            isempty(file_path) && (modpath = vcat([pkg.name], _v2_strip_leading(inner, pkg.name)))
             # An extension file's module is not a submodule of the parent by
             # name — `Base.get_extension(Parent, :ParentBarExt)` finds it
             # once parent and triggers are loaded (the child falls back to
-            # that when `getfield` misses).
+            # that when `getfield` misses). The ext file declares that module
+            # itself, so the in-file path starts with it.
             ext = derived_extension_for_file(rt, uri)
-            ext === nothing || (modpath = [pkg.name, ext.ext_name])
+            ext === nothing || (modpath = vcat([pkg.name, ext.ext_name], _v2_strip_leading(inner, ext.ext_name)))
         end
     end
 
@@ -289,7 +320,7 @@ Salsa.@derived function derived_item_expansions(rt, ref::V2ItemRef)
     isempty(sites) && return _EMPTY_EXPANSIONS
     env = derived_v2_expansion_env(rt, ref.file)
     env === nothing && return _EMPTY_EXPANSIONS
-    ctx = derived_v2_expansion_context(rt, ref.file)
+    ctx = derived_v2_item_expansion_context(rt, ref)
     ctx === nothing && return _EMPTY_EXPANSIONS
 
     out = Dict{UInt64,BodyTree{V2Kind}}()
@@ -337,7 +368,7 @@ Salsa.@derived function derived_v2_item_expansion_status(rt, ref::V2ItemRef)
     isempty(sites) && return _V2_EXPANSION_NONE
     env = derived_v2_expansion_env(rt, ref.file)
     env === nothing && return (status=:no_env, error="")
-    ctx = derived_v2_expansion_context(rt, ref.file)
+    ctx = derived_v2_item_expansion_context(rt, ref)
     ctx === nothing && return (status=:no_env, error="")
     for s in sites
         outcome = derived_macro_expansion(rt, ExpansionKey((env.env_hash, ctx.ctx_hash, s.mac_hash)))
@@ -393,12 +424,15 @@ Salsa.@derived function derived_file_expansion_ready(rt, uri)
     derived_lowering_lint_active(rt, uri) || return true
     env = derived_v2_expansion_env(rt, uri)
     env === nothing && return true          # no env: expansion impossible, settled
-    ctx = derived_v2_expansion_context(rt, uri)
-    ctx === nothing && return true
 
     settled = input_macro_expansions(rt)
     for row in derived_v2_file_skeleton(rt, uri).items
-        for s in derived_v2_item_expansion_sites(rt, V2ItemRef(uri, row.id))
+        ref = V2ItemRef(uri, row.id)
+        sites = derived_v2_item_expansion_sites(rt, ref)
+        isempty(sites) && continue
+        ctx = derived_v2_item_expansion_context(rt, ref)
+        ctx === nothing && continue          # no module context: nothing to wait for
+        for s in sites
             key = ExpansionKey((env.env_hash, ctx.ctx_hash, s.mac_hash))
             haskey(settled, key) || return false
         end
@@ -429,12 +463,14 @@ Salsa.@derived function derived_required_macro_expansions(rt)
         derived_lowering_lint_active(rt, uri) || continue
         env = derived_v2_expansion_env(rt, uri)
         env === nothing && continue
-        ctx = derived_v2_expansion_context(rt, uri)
-        ctx === nothing && continue
-        ctx_id = string(ctx.ctx_hash, base=16)
         for row in derived_v2_file_skeleton(rt, uri).items
             ref = V2ItemRef(uri, row.id)
-            for s in derived_v2_item_expansion_sites(rt, ref)
+            sites = derived_v2_item_expansion_sites(rt, ref)
+            isempty(sites) && continue
+            ctx = derived_v2_item_expansion_context(rt, ref)
+            ctx === nothing && continue
+            ctx_id = string(ctx.ctx_hash, base=16)
+            for s in sites
                 key = ExpansionKey((env.env_hash, ctx.ctx_hash, s.mac_hash))
                 haskey(settled, key) && continue
                 push!(out, (key=key, env_key=env.key, ctx_id=ctx_id, imports=ctx.imports,

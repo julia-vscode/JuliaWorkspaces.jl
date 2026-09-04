@@ -61,6 +61,32 @@
     const EXP_OPT_IN = "[rules]\nanalysis_boundary = \"warning\"\n"
 end
 
+@testitem "expansion: a site inside an in-file module expands in that module" setup=[ExpansionWS] begin
+    # PlotsBase's `Commons.jl` declares `module Commons` with its own macro
+    # and uses it inside: the child must expand in `PlotsBase.Commons`, not
+    # in the file's splice module `PlotsBase`, or the macro is undefined.
+    src = "module Commons\nusing Printf\nmacro gen(names...)\n    :(nothing)\nend\n@gen a b\nend\n@gen c\n"
+    jw, uri = exp_make_jw(src)
+    rows = filter(r -> r.kind === :opaque_macrocall, JW.derived_v2_file_skeleton(jw.runtime, uri).items)
+    @test length(rows) == 2
+    inner = only(filter(r -> r.parent_module == ["Commons"], rows))
+    outer = only(filter(r -> isempty(r.parent_module), rows))
+    ctx_inner = JW.derived_v2_item_expansion_context(jw.runtime, JW.V2ItemRef(uri, inner.id))
+    ctx_outer = JW.derived_v2_item_expansion_context(jw.runtime, JW.V2ItemRef(uri, outer.id))
+    @test ctx_inner.modpath == ["MyPkg", "Commons"]
+    @test ctx_outer.modpath == ["MyPkg"]
+    @test ctx_outer == JW.derived_v2_expansion_context(jw.runtime, uri)
+    @test "using Printf" in ctx_inner.imports
+    @test !("using Printf" in ctx_outer.imports)
+    @test ctx_inner.ctx_hash != ctx_outer.ctx_hash
+    # The required set carries the item's own context to the child.
+    req = JW.derived_required_macro_expansions(jw.runtime)
+    by_item = Dict(r.item_id => r for r in req)
+    @test by_item[inner.id].ctx_module == ["MyPkg", "Commons"]
+    @test by_item[outer.id].ctx_module == ["MyPkg"]
+    @test by_item[inner.id].ctx_id != by_item[outer.id].ctx_id
+end
+
 @testitem "expansion: an expansion the lowering cannot digest falls back to the source" setup=[ExpansionWS] begin
     # StatsPlots' `@recipe function f(...)  group != nothing … end`: the DSL
     # expands cleanly to an `apply_recipe` method the lowering rejects. The
