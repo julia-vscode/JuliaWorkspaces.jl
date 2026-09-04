@@ -180,6 +180,52 @@ end
     @test _snapshot(child) == before_child
 end
 
+@testitem "child: a workspace member loads by identity from the root project" begin
+    # `using Member` from a `[workspace]` root fails (`[deps]` does not name
+    # the member) although the manifest locates it — the expansion context
+    # binds it by PkgId instead, so the real module (and its macros) is found.
+    mod = Module(:WorkspaceMembersUnderTest)
+    Base.include(mod, normpath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "workspace_members.jl")))
+
+    @test Base.invokelatest(mod._bare_import_name, "using Mem") == "Mem"
+    @test Base.invokelatest(mod._bare_import_name, "import Mem") == "Mem"
+    @test Base.invokelatest(mod._bare_import_name, "using Mem: f") === nothing
+    @test Base.invokelatest(mod._bare_import_name, "using ..Mem") === nothing
+
+    root = mktempdir()
+    uuid = "aaaaaaaa-9999-0000-1111-444444444444"
+    write(joinpath(root, "Project.toml"), "[workspace]\nprojects = [\"Mem\"]\n")
+    write(joinpath(root, "Manifest.toml"), """
+    julia_version = "$(VERSION)"
+    manifest_format = "2.0"
+    project_hash = "x"
+
+    [[deps.MemWsMember]]
+    path = "Mem"
+    uuid = "$uuid"
+    version = "0.1.0"
+    """)
+    mkpath(joinpath(root, "Mem", "src"))
+    write(joinpath(root, "Mem", "Project.toml"), "name = \"MemWsMember\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+    write(joinpath(root, "Mem", "src", "MemWsMember.jl"),
+        "module MemWsMember\nmacro twice(x)\n    :(\$(esc(x)) * 2)\nend\nend\n")
+
+    prev = Base.ACTIVE_PROJECT[]
+    Base.ACTIVE_PROJECT[] = joinpath(root, "Project.toml")
+    try
+        @test Base.identify_package("MemWsMember") === nothing
+        id = Base.invokelatest(mod._manifest_pkgid, "MemWsMember")
+        @test id == Base.PkgId(Base.UUID(uuid), "MemWsMember")
+        @test Base.invokelatest(mod._manifest_pkgid, "NoSuchMember") === nothing
+        member = Base.invokelatest(mod._require_from_manifest, "MemWsMember")
+        @test member isa Module && nameof(member) === :MemWsMember
+        @test Base.invokelatest(Core.eval, member, :(@twice 3)) == 6
+    finally
+        Base.ACTIVE_PROJECT[] = prev
+    end
+end
+
 @testitem "scratch env: a package only the manifest devs resolves by name" begin
     include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
     import Pkg

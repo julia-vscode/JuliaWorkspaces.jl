@@ -7,6 +7,7 @@ include("../../../shared/julia_dynamic_analysis_process_protocol.jl")
 include("symbolserver.jl")
 include("scratch_env.jl")
 
+include("workspace_members.jl")
 struct JuliaDynamicAnalysisProcessState
     endpoint::JSONRPC.JSONRPCEndpoint
     # Module-context cache for macro expansion, keyed by the parent's ctxId.
@@ -179,7 +180,20 @@ function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id:
             catch err
                 err isa InterruptException && rethrow()
                 # A failing import degrades this context: macros from it error
-                # per entry below instead of blocking the whole batch.
+                # per entry below instead of blocking the whole batch — except
+                # a bare `using Member` of a workspace member, which the root
+                # project cannot name but its manifest locates (Plots'
+                # `PlotsBase`): bind it by identity, so the real-module walk
+                # below still reaches the module whose macros the sites use.
+                name = _bare_import_name(stmt)
+                if name !== nothing
+                    try
+                        mod = _require_from_manifest(name)
+                        mod === nothing || Core.eval(m, :(const $(Symbol(name)) = $mod))
+                    catch err2
+                        err2 isa InterruptException && rethrow()
+                    end
+                end
             end
         end
         # When the sites live inside a package module, prefer the REAL module:
