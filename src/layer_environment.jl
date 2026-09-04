@@ -503,11 +503,18 @@ function _is_package_script_file(rt, package_folder_uri, uri)
     return !_file_needs_test_env(rt, package_path, uri)
 end
 
-"The names of the running Julia's standard libraries (`Pkg.Types.stdlibs()`)."
+"The names of the running Julia's standard libraries (the folders of `Sys.STDLIB`)."
 Salsa.@derived function derived_stdlib_names(rt)
+    # `readdir(Sys.STDLIB)` rather than `Pkg.Types.stdlibs()`: the same
+    # names, without JIT-compiling Pkg's registry machinery inside the lint
+    # process.
     names = Set{String}()
-    for (_, info) in Pkg.Types.stdlibs()
-        push!(names, String(info isa Tuple ? info[1] : info.name))
+    try
+        for entry in readdir(Sys.STDLIB)
+            isdir(joinpath(Sys.STDLIB, entry)) && push!(names, entry)
+        end
+    catch err
+        err isa InterruptException && rethrow()
     end
     return names
 end

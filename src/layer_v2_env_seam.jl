@@ -117,6 +117,28 @@ Salsa.@derived function derived_v2_external_module_member_kind(rt, root::URI, pa
     return :value
 end
 
+"""
+    derived_v2_external_ctor_arity_reliable(rt, root, path, name) -> Bool
+
+Whether the store's method list for the external TYPE `name` is its complete
+constructor set: true only for a non-parametric `DataTypeStore`. A type alias
+(`Point2f`, a `GenericStore` over a `UnionAll`) or a parametric type inherits
+`(::Type{T})(…)` constructor families (StaticArrays) the cache records
+nowhere near the alias, so arity checks on their calls are unreliable.
+"""
+Salsa.@derived function derived_v2_external_ctor_arity_reliable(rt, root::URI, path::Vector{String}, name::String)
+    store = _v2_resolve_external_store(rt, root, path)
+    store === nothing && return false
+    haskey(store, Symbol(name)) || return false
+    env = _v2_resolve_env(rt, root)
+    resolved = StaticLint.maybe_lookup(store[Symbol(name)], env)
+    if resolved isa SymbolServer.FunctionStore
+        resolved = SymbolServer._lookup(resolved.extends, StaticLint.getsymbols(env))
+    end
+    resolved isa SymbolServer.DataTypeStore || return false
+    return isempty(resolved.parameters)
+end
+
 # ── method arities ──────────────────────────────────────────────────────────
 
 "One store method's arity, as plain data (the `func_nargs(::MethodStore)` port)."

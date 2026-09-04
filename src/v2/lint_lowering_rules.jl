@@ -952,50 +952,114 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
     return result
 end
 
-# Whether a definition body is a generic constructor `(::Type{C})(…)` — a
-# callable-object method on a `Type{…}` instance (`where`/return-type
-# wrappers looked through). The walker classifies such items as declaring
-# nothing, so this looks at the body directly.
-function _v2_is_generic_type_constructor(body::BodyTree{V2Kind})
+# The upper bound a generic constructor `(::Type{C})(…) where {C<:Bound}`
+# applies to, as a name (`"Any"` when unbounded), or `nothing` when the body
+# is not such a definition — a callable-object method on a `Type{…}`
+# instance (`where`/return-type wrappers looked through). The walker
+# classifies such items as declaring nothing, so this looks at the body.
+function _v2_generic_type_constructor_bound(body::BodyTree{V2Kind})
     node = body
     while (node.kind == JS2.K"const" || node.kind == JS2.K"global") && _v2_nchildren(node) >= 1
         node = _v2_children(node)[1]
     end
-    (node.kind == JS2.K"function" || node.kind == JS2.K"=") && _v2_nchildren(node) >= 1 || return false
+    (node.kind == JS2.K"function" || node.kind == JS2.K"=") && _v2_nchildren(node) >= 1 || return nothing
     sig = _v2_children(node)[1]
+    bounds = Dict{String,String}()   # typevar → bound name
     while (sig.kind == JS2.K"where" || sig.kind == JS2.K"::") && _v2_nchildren(sig) >= 1
+        if sig.kind == JS2.K"where"
+            for tv in _v2_children(sig)[2:end]
+                if tv.kind == JS2.K"<:" && _v2_nchildren(tv) == 2
+                    v = _v2_leaf_string(_v2_children(tv)[1])
+                    _, b = _v2_qualified_name(_v2_unwrap_to_name(_v2_children(tv)[2]))
+                    (v === nothing || b === nothing) || (bounds[v] = b)
+                else
+                    v = _v2_leaf_string(tv)
+                    v === nothing || (bounds[v] = "Any")
+                end
+            end
+        end
         sig = _v2_children(sig)[1]
     end
-    (sig.kind == JS2.K"call" && _v2_nchildren(sig) >= 1) || return false
+    (sig.kind == JS2.K"call" && _v2_nchildren(sig) >= 1) || return nothing
     callee = _v2_children(sig)[1]
-    (callee.kind == JS2.K"::" && _v2_nchildren(callee) >= 1) || return false
+    (callee.kind == JS2.K"::" && _v2_nchildren(callee) >= 1) || return nothing
     t = _v2_children(callee)[end]
-    return t.kind == JS2.K"curly" && _v2_nchildren(t) >= 1 &&
-           _v2_leaf_string(_v2_children(t)[1]) == "Type"
+    (t.kind == JS2.K"curly" && _v2_nchildren(t) == 2 &&
+        _v2_leaf_string(_v2_children(t)[1]) == "Type") || return nothing
+    tv = _v2_leaf_string(_v2_children(t)[2])
+    tv === nothing && return "Any"                    # `(::Type{<:Foo})` shapes: be conservative
+    return get(bounds, tv, "Any")
 end
 
-"Whether any item spliced into `root`'s tree is a generic `(::Type{C})(…)` constructor."
-Salsa.@derived function derived_v2_root_has_generic_type_constructor(rt, root)
+"The bounds of every generic `(::Type{C})(…)` constructor spliced into `root`'s tree."
+Salsa.@derived function derived_v2_root_generic_constructor_bounds(rt, root)
+    bounds = Set{String}()
     tree = derived_v2_module_tree(rt, root)
     for uri in sort!(collect(keys(tree.file_modules)); by=string)
         for row in derived_v2_file_skeleton(rt, uri).items
             (row.kind === :function || row.kind === :assignment) || continue
             body = derived_v2_item_body(rt, V2ItemRef(uri, row.id))
             body === nothing && continue
-            _v2_is_generic_type_constructor(body) && return true
+            b = _v2_generic_type_constructor_bound(body)
+            b === nothing || push!(bounds, b)
         end
     end
-    return false
+    return bounds
 end
 
-# The store's arities for an external callee that is a FUNCTION. A callee
-# that is a type (`Point2f(x, y)`, `Int(x)`) is a constructor call: the
-# store lists a type's own constructor methods, never the generic
-# `(::Type{T})(…)` families its supertypes and aliases provide
-# (StaticArrays' `Point2f(x, y)` in SciMLBase's Makie extension), so the
-# view is partial by construction — decline.
+# The declared supertype name of a `struct`/`abstract type` body, or `nothing`.
+function _v2_declared_supertype(body::BodyTree{V2Kind})
+    node = body
+    while (node.kind == JS2.K"const" || node.kind == JS2.K"global") && _v2_nchildren(node) >= 1
+        node = _v2_children(node)[1]
+    end
+    head = if node.kind == JS2.K"struct" && _v2_nchildren(node) >= 2
+        _v2_children(node)[2]
+    elseif (node.kind == JS2.K"abstract" || node.kind == JS2.K"primitive") && _v2_nchildren(node) >= 1
+        _v2_children(node)[1]
+    else
+        return nothing
+    end
+    (head.kind == JS2.K"<:" && _v2_nchildren(head) == 2) || return nothing
+    _, sup = _v2_qualified_name(_v2_unwrap_to_name(_v2_children(head)[2]))
+    return sup
+end
+
+# Whether a generic `(::Type{C})(…) where {C<:Bound}` constructor in the
+# root applies to the workspace type `name` declared at `path`: the bound is
+# `Any`, or the type's declared supertype chain (through the workspace's own
+# abstract types) reaches it.
+function _v2_generic_constructor_covers(rt, root, path::Vector{String}, name::String)
+    bounds = derived_v2_root_generic_constructor_bounds(rt, root)
+    isempty(bounds) && return false
+    "Any" in bounds && return true
+    current = name
+    cur_path = path
+    for _ in 1:8
+        ref = get(derived_v2_module_declared(rt, root, cur_path), current, nothing)
+        ref === nothing && return true          # unknown ancestry: decline
+        body = derived_v2_item_body(rt, ref)
+        body === nothing && return true
+        sup = _v2_declared_supertype(body)
+        sup === nothing && return false         # `<: Any`: no bound but "Any" applies
+        sup in bounds && return true
+        current = sup
+        # The supertype is looked up in the same module (the common case);
+        # anything else is unknown ancestry.
+    end
+    return true
+end
+
+# The store's arities for an external callee. A callee that is a type is a
+# constructor call: the store lists a plain type's own constructor methods
+# (`DomainError()` with no arguments IS a real mismatch), but never the
+# generic `(::Type{T})(…)` families a parametric type or an alias inherits
+# (StaticArrays' `Point2f(x, y)` in SciMLBase's Makie extension) — those
+# decline.
 function _v2_external_function_arities(rt, root, mod::Vector{String}, name::String)
-    derived_v2_external_module_member_kind(rt, root, mod, name) === :datatype && return nothing
+    if derived_v2_external_module_member_kind(rt, root, mod, name) === :datatype
+        derived_v2_external_ctor_arity_reliable(rt, root, mod, name) || return nothing
+    end
     return derived_v2_external_method_arities(rt, root, mod, name)
 end
 
@@ -1227,8 +1291,12 @@ function _v2_callee_arities(rt, root, path::Vector{String},
             # Base/Core name is checked against the store.
             bare = derived_v2_module_is_bare(rt, root, path)
             insorted(name, derived_v2_implicit_scope_names(rt, root, bare)) || return nothing
-            ext = _v2_external_function_arities(rt, root, ["Base"], name)
-            ext === nothing && (ext = _v2_external_function_arities(rt, root, ["Core"], name))
+            # Core is consulted only when Base LACKS the name: a Base member
+            # that declines (`Vector`, a parametric alias) must not fall
+            # through to Core's re-export of it, whose constructor
+            # `FunctionStore` hides the parameters.
+            owner = derived_v2_external_module_member_kind(rt, root, ["Base"], name) in (:absent, :missing_store) ? ["Core"] : ["Base"]
+            ext = _v2_external_function_arities(rt, root, owner, name)
             (ext === nothing || isempty(ext)) && return nothing
             return (_v2_lift_store_arities(ext), false)
         end
@@ -1239,7 +1307,7 @@ function _v2_callee_arities(rt, root, path::Vector{String},
             # Transducers' executors): every subtype gains that method, and
             # which types are subtypes is not known here — decline.
             _v2_is_datatype_kind(face.kind) &&
-                derived_v2_root_has_generic_type_constructor(rt, root) && return nothing
+                _v2_generic_constructor_covers(rt, root, face.origin_module, name) && return nothing
             ws = derived_v2_method_arities(rt, root, face.origin_module, name)
             ws === nothing && return nothing
             return (ws, true)

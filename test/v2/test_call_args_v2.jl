@@ -295,27 +295,41 @@ end
     @test !isempty(ca_msgs("f(x) = 1\ng(a) = f(a, 2)\n"))
 
     # A generic constructor `(::Type{C})(...) where {C<:Abstract}` gives every
-    # subtype that arity (BangBang, Transducers): constructor calls decline.
+    # subtype that arity (BangBang, Transducers): constructor calls of those
+    # subtypes decline — a type outside the bound keeps its check
+    # (FilePathsBase's `FileBuffer(fp; …)` real bug).
     src2 = """
     abstract type AbstractCollector end
     struct UnsafeCollector <: AbstractCollector
         data
         n
     end
+    struct Other
+        data
+        n
+    end
     (::Type{C})(data::AbstractVector) where {C<:AbstractCollector} = C(data, 0)
     make() = UnsafeCollector([1, 2])
+    make2() = Other([1, 2])
     """
-    @test isempty(ca_msgs(src2))
+    @test length(ca_msgs(src2)) == 1
+    @test isempty(ca_msgs(replace(src2, "make2() = Other([1, 2])\n" => "")))
+    # An unbounded generic constructor covers every type.
+    src4 = "struct Other\n    data\n    n\nend\n(::Type{C})(data::AbstractVector) where {C} = C(data, 0)\nmake2() = Other([1, 2])\n"
+    @test isempty(ca_msgs(src4))
     # Without the generic constructor the 1-argument call is a real mismatch.
     src3 = "struct UnsafeCollector\n    data\n    n\nend\nmake() = UnsafeCollector([1, 2])\n"
     @test length(ca_msgs(src3)) == 1
 end
 
-@testitem "call args: constructor calls of external types decline" setup=[CallArgsWS] begin
-    # The store lists a type's own constructors, never the generic
-    # `(::Type{T})(…)` families (SciMLBase's Makie ext calls `Point2f(x, y)`).
-    @test isempty(ca_msgs("g() = Int(1, 2)\n"))
+@testitem "call args: external constructors are checked only for plain types" setup=[CallArgsWS] begin
+    # A plain (non-parametric) type's constructor set is in the store:
+    # `DomainError()` with no arguments is the Distributions real bug.
+    @test !isempty(ca_msgs("g() = DomainError()\n"))
+    # A parametric type or an alias inherits `(::Type{T})(…)` families the
+    # store never lists (SciMLBase's Makie ext calls `Point2f(x, y)`): decline.
     @test isempty(ca_msgs("g() = Base.Dict(1, 2, 3)\n"))
+    @test isempty(ca_msgs("g() = Vector(1, 2, 3)\n"))
     # A function keeps its arity check.
     @test !isempty(ca_msgs("g() = sin(1, 2, 3)\n"))
 end
