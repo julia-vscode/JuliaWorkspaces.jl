@@ -311,6 +311,15 @@ end
     @test length(ca_msgs(src3)) == 1
 end
 
+@testitem "call args: constructor calls of external types decline" setup=[CallArgsWS] begin
+    # The store lists a type's own constructors, never the generic
+    # `(::Type{T})(…)` families (SciMLBase's Makie ext calls `Point2f(x, y)`).
+    @test isempty(ca_msgs("g() = Int(1, 2)\n"))
+    @test isempty(ca_msgs("g() = Base.Dict(1, 2, 3)\n"))
+    # A function keeps its arity check.
+    @test !isempty(ca_msgs("g() = sin(1, 2, 3)\n"))
+end
+
 @testitem "call args: methods defined in the package's own extensions are visible" setup=[CallArgsWS] begin
     # A stub in src/ whose methods live in an extension (DelayDiffEq's
     # `_sde_alg_cache`, Flux's `_reactant_trainstep_withgradient!`): the

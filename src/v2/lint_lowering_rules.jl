@@ -988,6 +988,17 @@ Salsa.@derived function derived_v2_root_has_generic_type_constructor(rt, root)
     return false
 end
 
+# The store's arities for an external callee that is a FUNCTION. A callee
+# that is a type (`Point2f(x, y)`, `Int(x)`) is a constructor call: the
+# store lists a type's own constructor methods, never the generic
+# `(::Type{T})(…)` families its supertypes and aliases provide
+# (StaticArrays' `Point2f(x, y)` in SciMLBase's Makie extension), so the
+# view is partial by construction — decline.
+function _v2_external_function_arities(rt, root, mod::Vector{String}, name::String)
+    derived_v2_external_module_member_kind(rt, root, mod, name) === :datatype && return nothing
+    return derived_v2_external_method_arities(rt, root, mod, name)
+end
+
 # ── incorrect_call_args / function_has_no_methods ───────────────────────────
 #
 # The arity half of v1's method-call check — deliberately arity-ONLY: v1's own
@@ -1216,8 +1227,8 @@ function _v2_callee_arities(rt, root, path::Vector{String},
             # Base/Core name is checked against the store.
             bare = derived_v2_module_is_bare(rt, root, path)
             insorted(name, derived_v2_implicit_scope_names(rt, root, bare)) || return nothing
-            ext = derived_v2_external_method_arities(rt, root, ["Base"], name)
-            ext === nothing && (ext = derived_v2_external_method_arities(rt, root, ["Core"], name))
+            ext = _v2_external_function_arities(rt, root, ["Base"], name)
+            ext === nothing && (ext = _v2_external_function_arities(rt, root, ["Core"], name))
             (ext === nothing || isempty(ext)) && return nothing
             return (_v2_lift_store_arities(ext), false)
         end
@@ -1241,7 +1252,7 @@ function _v2_callee_arities(rt, root, path::Vector{String},
                 any(s -> s.alias == name && s.name != name, ri.symbols) && return nothing
                 ri.alias == name && return nothing
             end
-            ext = derived_v2_external_method_arities(rt, root, face.origin_module, name)
+            ext = _v2_external_function_arities(rt, root, face.origin_module, name)
             (ext === nothing || isempty(ext)) && return nothing
             return (_v2_lift_store_arities(ext), false)
         end
@@ -1258,7 +1269,7 @@ function _v2_callee_arities(rt, root, path::Vector{String},
         # implicitly-visible name — resolve the written path against the store.
         bare = derived_v2_module_is_bare(rt, root, path)
         insorted(qual[1], derived_v2_implicit_scope_names(rt, root, bare)) || return nothing
-        ext = derived_v2_external_method_arities(rt, root, qual, name)
+        ext = _v2_external_function_arities(rt, root, qual, name)
         (ext === nothing || isempty(ext)) && return nothing
         return (_v2_lift_store_arities(ext), false)
     end
@@ -1274,7 +1285,7 @@ function _v2_callee_arities(rt, root, path::Vector{String},
         ws === nothing && return nothing
         return (ws, true)
     elseif mt.sort === :external
-        ext = derived_v2_external_method_arities(rt, root, vcat(mt.path, qual[2:end]), name)
+        ext = _v2_external_function_arities(rt, root, vcat(mt.path, qual[2:end]), name)
         (ext === nothing || isempty(ext)) && return nothing
         return (_v2_lift_store_arities(ext), false)
     end
