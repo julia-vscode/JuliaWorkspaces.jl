@@ -218,6 +218,23 @@ end
     # A colon-list using is exact and never blinds.
     jw = mr_workspace("module Inner\n@generate_api x\nexport foo\nfoo() = 1\nend\nusing .Inner: foo\ng() = bar_from_inner()\n")
     @test [d.message for d in mr_diags(jw)] == ["Missing reference: bar_from_inner"]
+    # A runtime `@eval` inside Inner's function bodies blinds Inner itself
+    # (it may define names there) but not its export list: the module that
+    # `using`s it still judges its own names (PlotsBase's backend loops vs
+    # its `Annotations` submodule).
+    jw = mr_workspace("""
+    module Inner
+    export foo
+    foo() = 1
+    function make()
+        @eval bar() = 2
+    end
+    use() = undefined_in_inner()
+    end
+    using .Inner
+    g() = bar_from_inner()
+    """)
+    @test [d.message for d in mr_diags(jw)] == ["Missing reference: bar_from_inner"]
 end
 
 @testitem "missing_reference: @reexport is modeled only in its using/import shapes" setup=[MissRefV2WS] begin

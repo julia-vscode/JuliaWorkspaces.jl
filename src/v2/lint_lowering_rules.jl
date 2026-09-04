@@ -778,8 +778,12 @@ function _v2_uses_blind_module(rt, root, path)
     return false
 end
 
+# Blind for the purpose of `using M`: M's EXPORT list may be incomplete. A
+# top-level opaque macrocall or a computed include can add exports; a runtime
+# `@eval` inside a function body cannot (PlotsBase's backend loops blind
+# PlotsBase itself, not the `Annotations` submodule that `using`s it).
 _v2_module_is_blind(rt, root, path) =
-    derived_v2_module_has_opaque_macrocall(rt, root, path) ||
+    derived_v2_module_has_toplevel_opaque_macrocall(rt, root, path) ||
     derived_v2_module_has_computed_include(rt, root, path)
 
 # The item-level existence-guard gate: a body that mentions `isdefined`,

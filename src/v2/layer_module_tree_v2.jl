@@ -580,13 +580,25 @@ only macros that genuinely resist analysis — expansion failed, unavailable,
 or still pending — keep the module blind.
 """
 Salsa.@derived function derived_v2_module_has_opaque_macrocall(rt, root, path)
+    derived_v2_module_has_toplevel_opaque_macrocall(rt, root, path) && return true
+    # `@eval`/`eval` inside item bodies defines names the walk cannot see —
+    # the same unmodelled-effects class as an opaque top-level macrocall.
+    return _v2_module_has_body_marker(rt, root, path, :opaque_eval)
+end
+
+"""
+Whether the module at `path` contains a TOP-LEVEL opaque macrocall — the
+part of `derived_v2_module_has_opaque_macrocall` that can leave the module's
+`export` list incomplete (a `@reexport` computed at expansion time). A
+runtime `@eval` inside a function body defines names, but `using M` brings
+only what `M` exports, so it does not blind the modules that `using` it.
+"""
+Salsa.@derived function derived_v2_module_has_toplevel_opaque_macrocall(rt, root, path)
     tree = derived_v2_module_tree(rt, root)
     for (uri, p) in tree.file_modules
         for om in derived_v2_file_inventory_expanded(rt, uri).opaque_macros
             vcat(p, om.parent_module) == path && return true
         end
     end
-    # `@eval`/`eval` inside item bodies defines names the walk cannot see —
-    # the same unmodelled-effects class as an opaque top-level macrocall.
-    return _v2_module_has_body_marker(rt, root, path, :opaque_eval)
+    return false
 end

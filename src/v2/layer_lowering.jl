@@ -634,5 +634,14 @@ Salsa.@derived function derived_item_lowering(rt, ref::V2ItemRef)
     # Position-free by construction: `derived_item_expansions` is keyed on
     # content hashes only, and returns the empty dict (with zero extra Salsa
     # edges) unless `input_macro_expansion` is on.
-    return _lower_item(body, derived_item_expansions(rt, ref))
+    expansions = derived_item_expansions(rt, ref)
+    low = _lower_item(body, expansions)
+    # An expansion the lowering cannot digest (RecipesBase's `apply_recipe`
+    # rewrite of a `@recipe function`) is as good as no expansion: the item
+    # lowers from its source, exactly as it would had the expansion failed —
+    # otherwise a SUCCESSFUL expansion would silence every finding in the
+    # item, including source-shape rules (`x != nothing` inside StatsPlots'
+    # recipes) the failed-expansion fallback reports.
+    (low.status !== :ok && !isempty(expansions)) && return _lower_item(body)
+    return low
 end

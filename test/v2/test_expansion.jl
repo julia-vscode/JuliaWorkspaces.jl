@@ -61,6 +61,40 @@
     const EXP_OPT_IN = "[rules]\nanalysis_boundary = \"warning\"\n"
 end
 
+@testitem "expansion: an expansion the lowering cannot digest falls back to the source" setup=[ExpansionWS] begin
+    # StatsPlots' `@recipe function f(...)  group != nothing … end`: the DSL
+    # expands cleanly to an `apply_recipe` method the lowering rejects. The
+    # macrocall row is the carrier of the source-shape findings inside the
+    # recipe, so it must still lower from its source — as a failed expansion
+    # does — or a SUCCESSFUL expansion silences them.
+    src = "@recipe function f(x)\n    x != nothing\nend\n"
+    jw, uri = exp_make_jw(src)
+    row = only(filter(r -> r.kind === :opaque_macrocall, JW.derived_v2_file_skeleton(jw.runtime, uri).items))
+    ref = JW.V2ItemRef(uri, row.id)
+    row_nc(jw) = count(f -> f.rule_id === :nothing_comparison, JW.derived_item_semantic_findings(jw.runtime, ref))
+    file_nc(jw) = count(f -> f.rule_id === :nothing_comparison, JW.derived_semantic_lint_findings(jw.runtime, uri))
+    key = exp_key_for(jw, uri, 1)
+    # Pending: the source fallback reports it.
+    @test row_nc(jw) == 1
+    n_file = file_nc(jw)
+    @test n_file >= 1
+    # A digestible expansion keeps it (the walk is over the source body).
+    settle!(jw, key => (status=:ok, text="function f(x)\n    x != nothing\nend"))
+    @test JW.derived_item_lowering(jw.runtime, ref).status === :ok
+    @test row_nc(jw) == 1
+    @test file_nc(jw) == n_file
+    # An expansion the lowering rejects (`break` outside a loop): the item
+    # lowers from its source instead of losing every finding.
+    settle!(jw, key => (status=:ok, text="function f(x)\n    x != nothing\n    break\nend"))
+    @test JW.derived_item_lowering(jw.runtime, ref).status === :ok
+    @test row_nc(jw) == 1
+    @test file_nc(jw) == n_file
+    # Failed expansion: the fallback, as before.
+    settle!(jw, key => (status=:failed, text="boom"))
+    @test row_nc(jw) == 1
+    @test file_nc(jw) == n_file
+end
+
 @testitem "expansion: harvest finds opaque macrocalls with content keys" setup=[ExpansionWS] begin
     jw, uri = exp_make_jw("""
     function f(x)
