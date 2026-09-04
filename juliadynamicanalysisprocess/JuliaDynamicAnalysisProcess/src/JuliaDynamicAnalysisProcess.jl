@@ -199,7 +199,20 @@ function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id:
                 # `getfield` here cannot see them yet.
                 real = Base.invokelatest(getfield, m, Symbol(ctx_module[1]))
                 for seg in ctx_module[2:end]
-                    real = Base.invokelatest(getfield, real, Symbol(seg))
+                    nxt = try
+                        Base.invokelatest(getfield, real, Symbol(seg))
+                    catch err
+                        err isa InterruptException && rethrow()
+                        nothing
+                    end
+                    # A package extension is not a field of its parent:
+                    # `get_extension` finds it once parent and triggers are
+                    # loaded (the host sends `[Parent, ParentBarExt]`).
+                    if !(nxt isa Module) && real isa Module
+                        nxt = Base.invokelatest(Base.get_extension, real, Symbol(seg))
+                    end
+                    nxt isa Module || error("no module `$seg` under $(real)")
+                    real = nxt
                 end
                 real isa Module && return (real, m)
             catch err

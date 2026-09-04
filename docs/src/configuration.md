@@ -392,6 +392,23 @@ gets one diagnostic naming the rules it suppresses; rewrite it — a literal
 `@eval`, an unconditional import — and the full diagnostic set comes back for
 that module.
 
+Environments are boundaries too. An `ext/` file whose weak-dependency
+triggers resolve in no reachable environment, and any file whose owning
+environment could not be resolved at all (a failed test-environment or
+scratch-project resolution — see the `environment_errors` diagnostic on the
+project file), has its `unresolved_import` findings reported as
+`analysis_boundary` notices instead: the imports were checked against a
+fallback environment, which says nothing about the code.
+
+Which environment a file is checked against follows how Julia would load it:
+package code (`src/`, `ext/`, `deps/`) against the package's own project (an
+extension against a project that also holds its triggers), test files against
+the test environment, a folder with its own `Project.toml` against that
+project, and every other file — scripts under `perf/`, `benchmark/`,
+`examples/`, a `docs/` without a project — against the active project, with
+the standard libraries visible as they are on Julia's default load path.
+Only package code has to declare a standard library it imports.
+
 ### Rules and code actions
 
 A quick fix is withdrawn when the rule it fixes is turned off: with no

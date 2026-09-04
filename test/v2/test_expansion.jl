@@ -664,3 +664,69 @@ end
     @test !exp_blind(jw, uri)
     @test "gen_match" in JW.derived_v2_module_exports(jw.runtime, uri, String[])
 end
+
+@testitem "expansion env: extension files and workspace members route to the child that has their code" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: derived_package, ResolveExtensionEnvironmentKey, WatchEnvironmentKey,
+        set_input_extension_environments!
+    using JuliaWorkspaces.URIs2: uri2filepath
+    project = "name = \"MyPkg\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9a5\"\nversion = \"1.0.0\"\n\n[weakdeps]\nBar = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\n\n[extensions]\nMyPkgBarExt = \"Bar\"\n"
+    manifest_with_bar = "julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n\n[[deps.Bar]]\ngit-tree-sha1 = \"0123456789abcdef0123456789abcdef01234567\"\nuuid = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\nversion = \"1.0.0\"\n"
+    manifest_bare = "julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n"
+    ext_src = "module MyPkgBarExt\nusing MyPkg, Bar\nf(x) = @bar_macro x\nend\n"
+    function build(manifest)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///pkg/Project.toml"), SourceText(project, "toml")))
+        add_file!(jw, TextFile(URI("file:///pkg/Manifest.toml"), SourceText(manifest, "toml")))
+        add_file!(jw, TextFile(URI("file:///pkg/src/MyPkg.jl"), SourceText("module MyPkg end\n", "julia")))
+        add_file!(jw, TextFile(URI("file:///pkg/ext/MyPkgBarExt.jl"), SourceText(ext_src, "julia")))
+        JW.set_v2_enabled!(jw, true)
+        JW.set_macro_expansion!(jw, true)
+        return jw
+    end
+    ext = URI("file:///pkg/ext/MyPkgBarExt.jl")
+
+    # The package's own manifest covers the trigger: the package's watch child
+    # serves the extension, in the extension's real module.
+    jw = build(manifest_with_bar)
+    env = JW.derived_v2_expansion_env(jw.runtime, ext)
+    @test env.key == WatchEnvironmentKey(uri2filepath(URI("file:///pkg")), JW.derived_project(jw.runtime, URI("file:///pkg")).content_hash)
+    ctx = JW.derived_v2_expansion_context(jw.runtime, ext)
+    @test ctx.modpath == ["MyPkg", "MyPkgBarExt"]
+    # (The scratch-module imports are the file's TOP-LEVEL statements plus
+    # the parent; the extension's own `using Bar` sits inside its module and
+    # is served by the real module the child resolves via get_extension.)
+    @test "using MyPkg" in ctx.imports
+    @test only(r for r in JW.derived_required_macro_expansions(jw.runtime) if r.file == ext).ctx_module == ["MyPkg", "MyPkgBarExt"]
+
+    # No environment covers the trigger: nothing to expand in until the
+    # extension-environment child delivers, then that child serves it.
+    jw = build(manifest_bare)
+    @test JW.derived_v2_expansion_env(jw.runtime, ext) === nothing
+    @test !any(r -> r.file == ext, JW.derived_required_macro_expansions(jw.runtime))
+    pkg = derived_package(jw.runtime, URI("file:///pkg"))
+    key = ResolveExtensionEnvironmentKey(uri2filepath(URI("file:///pkg")), pkg.content_hash)
+    set_input_extension_environments!(jw.runtime, Dict(key => URI("file:///scratch/ext-env-MyPkg")))
+    env = JW.derived_v2_expansion_env(jw.runtime, ext)
+    @test env.key == key
+    @test env.env_hash == pkg.content_hash
+    # A src/ file keeps the package's own child.
+    @test JW.derived_v2_expansion_env(jw.runtime, URI("file:///pkg/src/MyPkg.jl")).key isa WatchEnvironmentKey
+
+    # A workspace member's files expand in the ROOT's child (the only one a
+    # workspace has).
+    root_project = "name = \"Root\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n\n[workspace]\nprojects = [\"lib/Sub\"]\n"
+    root_manifest = "julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n\n[[deps.Root]]\npath = \".\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n\n[[deps.Sub]]\npath = \"lib/Sub\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c2\"\nversion = \"0.1.0\"\n"
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///mono/Project.toml"), SourceText(root_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///mono/Manifest.toml"), SourceText(root_manifest, "toml")))
+    add_file!(jw, TextFile(URI("file:///mono/src/Root.jl"), SourceText("module Root end\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///mono/lib/Sub/Project.toml"), SourceText("name = \"Sub\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c2\"\nversion = \"0.1.0\"\n", "toml")))
+    member_file = URI("file:///mono/lib/Sub/src/Sub.jl")
+    add_file!(jw, TextFile(member_file, SourceText("module Sub\nf(x) = @sub_macro x\nend\n", "julia")))
+    JW.set_v2_enabled!(jw, true)
+    JW.set_macro_expansion!(jw, true)
+    root_hash = JW.derived_project(jw.runtime, URI("file:///mono")).content_hash
+    env = JW.derived_v2_expansion_env(jw.runtime, member_file)
+    @test env.key == WatchEnvironmentKey(uri2filepath(URI("file:///mono")), root_hash)
+    @test env.env_hash == root_hash
+end

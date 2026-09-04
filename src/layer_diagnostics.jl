@@ -388,7 +388,13 @@ Salsa.@derived function derived_diagnostics(rt, uri)
     # Silent by default; the opt-in `:analysis_boundary` rule reports it at
     # the import site (the boundaries convention). Computed lazily so files
     # without semantic findings never take these edges.
+    # The same doctrine for a file whose owning environment work item failed
+    # terminally (a test-environment child that crashed, an unresolvable
+    # scratch env): the imports are then checked against a fallback
+    # environment, which says nothing about the code. Every unresolved import
+    # in such a file is a boundary notice, not a defect.
     ext_blind_triggers = nothing
+    env_failed = nothing
     emit_semantic_finding!(f::LintFinding) = begin
         if f.rule_id === :unresolved_import
             if ext_blind_triggers === nothing
@@ -398,6 +404,13 @@ Salsa.@derived function derived_diagnostics(rt, uri)
             if trigger_idx !== nothing
                 emit!(f.range, :analysis_boundary,
                     "The extension trigger `$(ext_blind_triggers[trigger_idx])` is not resolved in any reachable environment; analysis of this extension is degraded.",
+                    nothing, f.source)
+                return nothing
+            end
+            env_failed === nothing && (env_failed = derived_file_env_failed(rt, uri))
+            if env_failed
+                emit!(f.range, :analysis_boundary,
+                    "The environment of this file could not be resolved (see the environment_errors diagnostic on its project file), so this import is checked against a fallback environment and not reported.",
                     nothing, f.source)
                 return nothing
             end

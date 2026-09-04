@@ -208,3 +208,29 @@ end
     src2 = "import ChainRulesCore: rrule\nrrule(::typeof(Base.sum), x) = (x, identity)\n"
     @test length(sr_diags(src2, :type_piracy)) == 1
 end
+
+@testitem "sig rules: a string macro in type position is a type" setup=[SigRulesWS] begin
+    # `MIME"text/html"` (PlutoUI ×61 in the corpus) expands to a type.
+    src = "struct Slider end\nBase.show(io::IO, m::MIME\"text/html\", s::Slider) = nothing\n"
+    @test isempty(sr_diags(src, :invalid_type_declaration))
+    @test !isempty(sr_diags("f(x::1) = x\n", :invalid_type_declaration))
+end
+
+@testitem "sig rules: the parent package's names are owned inside an extension" setup=[SigRulesWS] begin
+    project = "name = \"SrPkg\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9e1\"\nversion = \"1.0.0\"\n\n[weakdeps]\nBar = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\n\n[extensions]\nSrPkgBarExt = \"Bar\"\n"
+    # `Thing` arrives through the parent's exports, `chunk` through a colon
+    # import — both the parent's, both owned here.
+    ext_src = "module SrPkgBarExt\nusing SrPkg\nusing SrPkg: chunk\nimport Base: show, sum\nshow(io::IO, x::Thing) = nothing\nsum(::typeof(chunk), x::Vector{Int}) = 1\nsum(x::Vector{Int}, y::Vector{Int}) = 2\nend\n"
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///srx/Project.toml"), SourceText(project, "toml")))
+    add_file!(jw, TextFile(URI("file:///srx/src/SrPkg.jl"), SourceText("module SrPkg\nexport Thing\nstruct Thing end\nchunk(x) = x\nend\n", "julia")))
+    ext = URI("file:///srx/ext/SrPkgBarExt.jl")
+    add_file!(jw, TextFile(ext, SourceText(ext_src, "julia")))
+    set_v2_enabled!(jw, true)
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)   # the ext-env item would gate otherwise
+    ds = filter(d -> d.code === :type_piracy, get_diagnostic(jw, ext))
+    # `Thing` and `typeof(chunk)` are the parent's: owned. The all-Base
+    # signature is the one piracy.
+    @test length(ds) == 1
+    @test ext_src[first(only(ds).range):last(only(ds).range)-1] == "sum(x::Vector{Int}, y::Vector{Int}) = 2"
+end

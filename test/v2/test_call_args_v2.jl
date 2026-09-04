@@ -310,3 +310,27 @@ end
     src3 = "struct UnsafeCollector\n    data\n    n\nend\nmake() = UnsafeCollector([1, 2])\n"
     @test length(ca_msgs(src3)) == 1
 end
+
+@testitem "call args: methods defined in the package's own extensions are visible" setup=[CallArgsWS] begin
+    # A stub in src/ whose methods live in an extension (DelayDiffEq's
+    # `_sde_alg_cache`, Flux's `_reactant_trainstep_withgradient!`): the
+    # package's method view is partial, so calls to it decline.
+    project = "name = \"CaPkg\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d1\"\nversion = \"1.0.0\"\n\n[weakdeps]\nBar = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\n\n[extensions]\nCaPkgBarExt = \"Bar\"\n"
+    src = "module CaPkg\nfunction stub end\nuse() = stub(1, 2)\nend\n"
+    ext = "module CaPkgBarExt\nusing CaPkg\nCaPkg.stub(x, y) = x + y\nend\n"
+    function build(; with_ext)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///cax/Project.toml"), SourceText(project, "toml")))
+        add_file!(jw, TextFile(URI("file:///cax/src/CaPkg.jl"), SourceText(src, "julia")))
+        with_ext && add_file!(jw, TextFile(URI("file:///cax/ext/CaPkgBarExt.jl"), SourceText(ext, "julia")))
+        set_v2_enabled!(jw, true)
+        JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+        return jw
+    end
+    entry = URI("file:///cax/src/CaPkg.jl")
+    jw = build(with_ext=true)
+    @test JuliaWorkspaces.derived_v2_package_extension_roots(jw.runtime, URI("file:///cax")) == [URI("file:///cax/ext/CaPkgBarExt.jl")]
+    @test isempty(ca_diags(jw; uri=entry))
+    # Without the extension the zero-method stub is a real finding.
+    @test length(ca_diags(build(with_ext=false); uri=entry)) == 1
+end

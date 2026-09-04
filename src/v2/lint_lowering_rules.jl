@@ -310,8 +310,27 @@ end
 function _v2_unresolved_import_name(rt, root, path::Vector{String}, ri::V2ResolvedImport)
     t = ri.target
     if t.sort === :external
+        # A standard library is always loadable where `@stdlib` is on the
+        # load path (scripts, test files); only package code must declare it.
+        # Its store may not be indexed for this project: unknown ⇒ silent.
+        (t.path[1] in derived_stdlib_names(rt) && derived_file_stdlibs_visible(rt, root)) &&
+            return nothing
+        # `import A.B.c` (whole-path import, no colon list) binds the LAST
+        # segment, which may be any member of `A.B` — a function, a constant
+        # (`import QuadGK.quadgk`) — not only a module. `using A.B` keeps the
+        # module-only walk.
+        if ri.kind === :import && isempty(ri.symbols) && length(t.path) >= 2
+            missing_mod = derived_v2_external_first_missing_segment(rt, root, t.path[1:end-1])
+            missing_mod === nothing || return missing_mod
+            mk = derived_v2_external_module_member_kind(rt, root, t.path[1:end-1], t.path[end])
+            return mk === :absent ? t.path[end] : nothing
+        end
         return derived_v2_external_first_missing_segment(rt, root, t.path)
     elseif t.sort === :unresolved
+        # `Main` is the REPL/script namespace: what a `using ..Main: x` from a
+        # test helper included into it finds there is not knowable here.
+        first_seg = findfirst(s -> s != ".", t.path)
+        first_seg !== nothing && t.path[first_seg] == "Main" && return nothing
         re = _v2_reattempt_unresolved(rt, root, path, ri, Set{URI}())
         if re === nothing
             # Locate the first stuck segment for the message, the same way the
@@ -847,6 +866,10 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
     # `@reexport` computes `export …` at expansion time): the same blindness,
     # one `using` away.
     _v2_uses_blind_module(rt, root, path) && return result
+    # An extension file whose triggers resolve in no reachable environment:
+    # `using Trigger` brought in names the store does not have — blind (the
+    # import itself is the opt-in boundary notice).
+    isempty(derived_extension_blind_triggers(rt, ref.file)) || return result
 
     visible = derived_v2_module_visible_names_idfree(rt, root, path)
     implicit = derived_v2_implicit_scope_names(rt, root, derived_v2_module_is_bare(rt, root, path))
@@ -1056,14 +1079,49 @@ end
 # The partial-method names of the file's package ENTRY root (`src/<Pkg>.jl`):
 # every qualified extension and import-then-extend written anywhere in the
 # package's static include tree, visible from any other root of the package.
+"""
+    derived_v2_package_extension_roots(rt, pkg_folder) -> Vector{URI}
+
+The entry files of the package's declared `[extensions]` that exist in the
+workspace (`ext/<Name>.jl` or `ext/<Name>/<Name>.jl`) — roots of their own
+whose definitions extend the package's functions.
+"""
+Salsa.@derived function derived_v2_package_extension_roots(rt, pkg_folder)
+    pkg = derived_package(rt, pkg_folder)
+    pkg === nothing && return URI[]
+    pf = derived_project_file(rt, pkg.project_file_uri)
+    (pf === nothing || isempty(pf.extensions)) && return URI[]
+    base = uri2filepath(pkg_folder)
+    base === nothing && return URI[]
+    roots = URI[]
+    for name in sort!(collect(keys(pf.extensions)))
+        for cand in (joinpath(base, "ext", "$(name).jl"), joinpath(base, "ext", name, "$(name).jl"))
+            u = filepath2uri(cand)
+            if derived_has_file(rt, u)
+                push!(roots, u)
+                break
+            end
+        end
+    end
+    return roots
+end
+
+# The package's partial-method names across ALL of its roots: the entry root
+# plus every extension entry. A stub in `src/` whose methods live in an
+# extension (`Parent.f(x, y) = …` in `ext/ParentBarExt.jl`) is partial from
+# the package's point of view — a call to it anywhere in the package declines.
 Salsa.@derived function _derived_v2_package_partial_method_names(rt, uri)
     pkg_folder = derived_package_for_file(rt, uri)
     pkg_folder === nothing && return Set{String}()
     pkg = derived_package(rt, pkg_folder)
     pkg === nothing && return Set{String}()
+    result = Set{String}()
     entry = filepath2uri(joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl"))
-    derived_has_file(rt, entry) || return Set{String}()
-    return derived_v2_partial_method_names(rt, entry)
+    derived_has_file(rt, entry) && union!(result, derived_v2_partial_method_names(rt, entry))
+    for ext_root in derived_v2_package_extension_roots(rt, pkg_folder)
+        union!(result, derived_v2_partial_method_names(rt, ext_root))
+    end
+    return result
 end
 
 # The store's canonical function name behind an unqualified external callee
@@ -1433,6 +1491,12 @@ function _v2_type_provenance(rt, root, path::Vector{String},
         end
         (face.origin === :declared || face.origin === :using_tree) &&
             return (:workspace, face.kind)
+        # Inside an extension, the parent package's names are the
+        # extension's own (`using Parent` brings them): a method on a parent
+        # type is not piracy, a parent type in an annotation is a type.
+        if _v2_face_from_extension_parent(rt, root, face)
+            return (:workspace, face.kind)
+        end
         if face.kind === :external_symbol
             for ri in derived_v2_module_imports(rt, root, path)
                 any(s -> s.alias == name && s.name != name, ri.symbols) &&
@@ -1581,6 +1645,9 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
                 msg="A non-DataType has been used in a type declaration statement."))
             return
         end
+        # A string macro in type position (`m::MIME"text/html"`) produces a
+        # type at expansion time: unknown here, accept (PlutoUI ×61).
+        t.kind == JS2.K"macrocall" && return
         q, n = _v2_qualified_name(t)
         n === nothing && return
         (isempty(q) && n in wnames) && return
@@ -1708,8 +1775,18 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
     return result
 end
 
+# The parent package's name when `root` is an extension entry (or a file of
+# an extension), else `nothing`.
+Salsa.@derived function _v2_extension_parent_name(rt, root)
+    ext = derived_extension_for_file(rt, root)
+    ext === nothing && return nothing
+    pkg = derived_package(rt, ext.package_folder)
+    return pkg === nothing ? nothing : pkg.name
+end
+
 # Whether a declared argument type is `typeof(f)` (or `Type{typeof(f)}`) for
-# a name declared in the module at `path` — an owned singleton type.
+# a name declared in the module at `path` — or, inside an extension, one the
+# parent package declares — an owned singleton type.
 function _v2_typeof_owned_function(rt, root, path, t::BodyTree{V2Kind})
     node = t
     if node.kind == JS2.K"curly" && _v2_nchildren(node) == 2 &&
@@ -1721,7 +1798,20 @@ function _v2_typeof_owned_function(rt, root, path, t::BodyTree{V2Kind})
     (length(cs) == 2 && _v2_leaf_string(cs[1]) == "typeof") || return false
     q, n = _v2_qualified_name(_v2_unwrap_to_name(cs[2]))
     (n === nothing || !isempty(q)) && return false
-    return haskey(derived_v2_module_names(rt, root, path), n)
+    haskey(derived_v2_module_names(rt, root, path), n) && return true
+    face = get(derived_v2_module_visible_names_idfree(rt, root, path), n, nothing)
+    return face !== nothing && _v2_face_from_extension_parent(rt, root, face)
+end
+
+# Whether a visible name reached an extension's module from its parent
+# package — through `using Parent` (exports) or `using Parent: x` /
+# `import Parent: x` (a workspace-package member binding).
+function _v2_face_from_extension_parent(rt, root, face)
+    parent = _v2_extension_parent_name(rt, root)
+    parent === nothing && return false
+    (face.origin === :using_workspace_package || face.origin === :import_binding) || return false
+    face.kind === :external_symbol && return false
+    return !isempty(face.origin_module) && face.origin_module[1] == parent
 end
 
 # ── the shape rules: pointless_boolean / const_if_condition / literal_use ───

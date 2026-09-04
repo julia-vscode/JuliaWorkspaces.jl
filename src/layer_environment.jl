@@ -295,6 +295,24 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         ext_project_uri !== nothing && return ext_project_uri
     end
 
+    # A non-package env folder (Project.toml, no manifest, no name/uuid) that is
+    # deeper than any enclosing project/package folder owns its files once its
+    # resolved scratch copy is ready — even under `test/` (`test/qa/Project.toml`
+    # is the environment those files are run with, not the merged test env).
+    # The package's `test/` folder itself is the exception: its merged test
+    # env also devs the package, so that keeps precedence (handled below).
+    # While resolution is still pending, fall through to the test-env and
+    # package logic — `derived_file_env_ready` suppresses env-dependent
+    # diagnostics for these files in the meantime.
+    env_folder_uri = _deepest_nonpackage_env_for_file(rt, uri)
+    if env_folder_uri !== nothing && _covering_test_env_key(rt, env_folder_uri) === nothing
+        env = derived_nonpackage_env(rt, env_folder_uri)
+        if env !== nothing
+            resolved = derived_ready_resolved_environment(rt, env_folder_uri, env.content_hash)
+            resolved !== nothing && return resolved
+        end
+    end
+
     if package_folder_uri !== nothing
         pkg = derived_package(rt, package_folder_uri)
         if pkg !== nothing && _file_needs_test_env(rt, uri2filepath(package_folder_uri), uri)
@@ -315,12 +333,8 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         end
     end
 
-    # A non-package env folder (Project.toml, no manifest, no name/uuid) that is
-    # deeper than any enclosing project/package folder owns its files once its
-    # resolved scratch copy is ready. While resolution is still pending, fall
-    # through to the enclosing package/project logic — `derived_file_env_ready`
-    # suppresses env-dependent diagnostics for these files in the meantime.
-    env_folder_uri = _deepest_nonpackage_env_for_file(rt, uri)
+    # The package's own `test/` env folder (covered by the test-env item):
+    # its resolved copy is the fallback once the test-env item has failed.
     if env_folder_uri !== nothing
         env = derived_nonpackage_env(rt, env_folder_uri)
         if env !== nothing
@@ -341,6 +355,17 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
         if project_is_more_specific
             return project_folder_uri
         end
+    end
+
+    # A file inside a package folder that is neither package code (`src/`,
+    # `ext/`, `deps/`) nor a test file — `perf/`, `benchmark/`, `examples/`,
+    # `docs/` without a Project.toml — is a script with no environment of its
+    # own. Julia runs it with the default load path, so it is checked against
+    # the active project (JW's fallback), exactly like a file outside any
+    # package; stdlibs are visible to it regardless (`@stdlib` is always on
+    # the default load path — see `derived_file_stdlibs_visible`).
+    if package_folder_uri !== nothing && _is_package_script_file(rt, package_folder_uri, uri)
+        return active_project
     end
 
     if package_folder_uri!==nothing
@@ -435,11 +460,15 @@ fabricated for it under that same folder). Only for a deved package does the
 active project provide it.
 """
 function _test_environment_key(rt, package_folder_uri, pkg)
-    project_for_test = if package_folder_uri in derived_project_folders(rt) ||
-            !_is_package_deved_in_workspace(rt, package_folder_uri)
+    project_for_test = if package_folder_uri in derived_project_folders(rt)
         package_folder_uri
     else
-        input_active_project(rt)
+        # A package deved by a workspace project (a `lib/<Pkg>` of a monorepo
+        # whose root manifest carries `path = "lib/<Pkg>"`) runs its tests in
+        # that project: materialize the test environment there. The active
+        # project is only the fallback for a package nothing devs.
+        deving = derived_deving_project(rt, package_folder_uri)
+        deving === nothing ? package_folder_uri : deving
     end
     project_for_test === nothing && return nothing
 
@@ -449,6 +478,109 @@ function _test_environment_key(rt, package_folder_uri, pkg)
         pkg.name,
         project === nothing ? UInt64(0) : project.content_hash,
     )
+end
+
+# Package folders whose files are loaded as PACKAGE code (with the package's
+# own environment): `src/` and `ext/` by Julia's loader, `deps/build.jl` by
+# `Pkg.build` (which activates the package project).
+const _PACKAGE_CODE_FOLDERS = ("src", "ext", "deps")
+
+"""
+    _is_package_script_file(rt, package_folder_uri, uri) -> Bool
+
+Whether `uri`, which lies under the package folder, is a script rather than
+package or test code: its first path segment below the package is none of
+`src`/`ext`/`deps`, and it is not a test file (`_file_needs_test_env`).
+"""
+function _is_package_script_file(rt, package_folder_uri, uri)
+    package_path = uri2filepath(package_folder_uri)
+    file_path = uri2filepath(uri)
+    (package_path === nothing || file_path === nothing) && return false
+    parts = splitpath(file_path)
+    depth = length(splitpath(package_path))
+    length(parts) > depth + 1 || return false          # a file directly in the package folder
+    lowercase(parts[depth + 1]) in _PACKAGE_CODE_FOLDERS && return false
+    return !_file_needs_test_env(rt, package_path, uri)
+end
+
+"The names of the running Julia's standard libraries (`Pkg.Types.stdlibs()`)."
+Salsa.@derived function derived_stdlib_names(rt)
+    names = Set{String}()
+    for (_, info) in Pkg.Types.stdlibs()
+        push!(names, String(info isa Tuple ? info[1] : info.name))
+    end
+    return names
+end
+
+"""
+    derived_file_stdlibs_visible(rt, uri) -> Bool
+
+Whether a `using`/`import` of a standard library in this file resolves
+regardless of the file's project: true for everything Julia runs with
+`@stdlib` on the load path — scripts, files outside any package, and test
+files (`Pkg.test` runs with `["@", "@stdlib"]`). False only for package code
+(`src/`, `ext/`, `deps/`), which must declare its stdlib dependencies.
+"""
+Salsa.@derived function derived_file_stdlibs_visible(rt, uri)
+    package_folder_uri = derived_package_for_file(rt, uri)
+    package_folder_uri === nothing && return true
+    package_path = uri2filepath(package_folder_uri)
+    package_path === nothing && return true
+    _file_needs_test_env(rt, package_path, uri) && return true
+    return _is_package_script_file(rt, package_folder_uri, uri)
+end
+
+"""
+    derived_file_env_failed(rt, uri) -> Bool
+
+Whether the work item that would own this file's environment failed
+terminally, so the environment the file is analyzed against is a fallback
+(the enclosing package's, or none): the watch item of its effective project,
+the extension-environment item of an `ext/` file, the resolve item of a
+deeper non-package env folder, the test-environment item of a test file, or
+the standalone-project item of a manifest-less package. Consumers treat
+env-dependent findings in such a file as an analysis boundary rather than a
+defect (the diagnostics join transforms `unresolved_import`).
+"""
+Salsa.@derived function derived_file_env_failed(rt, uri)
+    failed = input_failed_dynamic_keys(rt)
+    isempty(failed) && return false
+
+    project_uri = derived_project_uri_for_root(rt, uri)
+    if project_uri !== nothing
+        watch_uri, watch_hash = _watch_target_for_project(rt, project_uri)
+        watch_path = uri2filepath(watch_uri)
+        watch_path !== nothing && WatchEnvironmentKey(watch_path, watch_hash) in failed && return true
+    end
+
+    ext = derived_extension_for_file(rt, uri)
+    if ext !== nothing &&
+            derived_extension_project_uri(rt, ext.package_folder, ext.ext_name) === nothing
+        ext_pkg = derived_package(rt, ext.package_folder)
+        ext_pkg !== nothing && _extension_environment_key(rt, ext.package_folder, ext_pkg) in failed &&
+            return true
+    end
+
+    env_folder_uri = _deepest_nonpackage_env_for_file(rt, uri)
+    if env_folder_uri !== nothing
+        env = derived_nonpackage_env(rt, env_folder_uri)
+        if env !== nothing &&
+                derived_ready_resolved_environment(rt, env_folder_uri, env.content_hash) === nothing
+            ResolveEnvironmentKey(uri2filepath(env_folder_uri), env.content_hash) in failed && return true
+        end
+    end
+
+    package_folder_uri = derived_package_for_file(rt, uri)
+    package_folder_uri === nothing && return false
+    pkg = derived_package(rt, package_folder_uri)
+    pkg === nothing && return false
+    package_path = uri2filepath(package_folder_uri)
+    if _file_needs_test_env(rt, package_path, uri)
+        test_env_key = _test_environment_key(rt, package_folder_uri, pkg)
+        test_env_key !== nothing && derived_ready_test_environment(rt, test_env_key) === nothing &&
+            test_env_key in failed && return true
+    end
+    return CreateStandaloneProjectKey(package_path, pkg.content_hash) in failed
 end
 
 """

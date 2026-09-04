@@ -76,16 +76,18 @@ end
     # The same shape through a MISSING store: the ORIGIN statement carries the
     # diagnosis; the relative re-import resolved to Parent's lexical binding
     # and stays silent (v1's resolves-to-a-binding rule).
+    # (A non-stdlib name: stdlibs are always resolvable in a projectless
+    # file, where `@stdlib` is on the load path.)
     jw = ui_workspace("""
     module Parent
-    using Printf
+    using NotAPkgP
     module Child
-    using ..Printf
+    using ..NotAPkgP
     end
     end
     """)
     d = only(ui_diags(jw))
-    @test occursin("`Printf`", d.message)
+    @test occursin("`NotAPkgP`", d.message)
 
     # A comma-list statement reports each unresolved path separately.
     jw = ui_workspace("import NotAPackageA, NotAPackageB\n")
@@ -127,4 +129,19 @@ end
     # (unused_binding) emits either way.
     jw = pkg_workspace(ready=true)
     @test !isempty(ui_diags(jw; uri=src_uri))
+end
+
+@testitem "v2 unresolved_import: Main, whole-path member imports" setup=[UnresolvedImpWS] begin
+    # `using ..Main: x` from a helper included into Main: what Main holds is
+    # not knowable here.
+    jw = ui_workspace("module P\nusing ..Main: fdm\nend\n")
+    @test isempty(ui_diags(jw))
+    # `import A.b` binds the last segment, which may be any member of `A`.
+    jw = ui_workspace("import Base.sum\nimport Base.Iterators.flatten\n")
+    @test isempty(ui_diags(jw))
+    jw = ui_workspace("import Base.NoSuchMember_xyz\n")
+    @test occursin("`NoSuchMember_xyz`", only(ui_diags(jw)).message)
+    # A missing MODULE segment before the member still names that segment.
+    jw = ui_workspace("import Base.NoSuchSub_xyz.member\n")
+    @test occursin("`NoSuchSub_xyz`", only(ui_diags(jw)).message)
 end

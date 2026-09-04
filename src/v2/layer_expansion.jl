@@ -156,6 +156,12 @@ Salsa.@derived function derived_v2_expansion_context(rt, uri)
             # `macroexpand` fail and settle `:failed`, which is exactly the
             # scratch-fallback behavior it replaces.
             isempty(modpath) && (modpath = [pkg.name])
+            # An extension file's module is not a submodule of the parent by
+            # name — `Base.get_extension(Parent, :ParentBarExt)` finds it
+            # once parent and triggers are loaded (the child falls back to
+            # that when `getfield` misses).
+            ext = derived_extension_for_file(rt, uri)
+            ext === nothing || (modpath = [pkg.name, ext.ext_name])
         end
     end
 
@@ -173,15 +179,37 @@ end
 covers files with a real project environment; everything else keeps the
 identifier fallback.
 """
+# The watch item serving a project's environment, as an expansion env: a
+# synthesized workspace member routes to the root's item (the only child a
+# workspace has), everything else to its own.
+function _v2_watch_expansion_env(rt, project_uri)
+    watch_uri, watch_hash = _watch_target_for_project(rt, project_uri)
+    derived_project(rt, watch_uri) === nothing && return nothing
+    watch_path = uri2filepath(watch_uri)
+    watch_path === nothing && return nothing
+    return (key=WatchEnvironmentKey(watch_path, watch_hash), env_hash=watch_hash)
+end
+
 Salsa.@derived function derived_v2_expansion_env(rt, uri)
+    # An extension file expands where its triggers are loaded: the project
+    # that covers them, or the resolved extension environment (whose child
+    # `Pkg.develop`ed the parent and installed the weakdeps). Neither yet ⇒
+    # no expansion for the file — never the parent's own environment, where
+    # `@non_differentiable` & co. cannot resolve.
+    ext = derived_extension_for_file(rt, uri)
+    if ext !== nothing
+        ext_project = derived_extension_project_uri(rt, ext.package_folder, ext.ext_name)
+        ext_project === nothing && return nothing
+        pkg = derived_package(rt, ext.package_folder)
+        pkg === nothing && return nothing
+        ext_key = _extension_environment_key(rt, ext.package_folder, pkg)
+        derived_ready_extension_environment(rt, ext_key) == ext_project &&
+            return (key=ext_key, env_hash=pkg.content_hash)
+        return _v2_watch_expansion_env(rt, ext_project)
+    end
     project_uri = derived_project_for_file(rt, uri)
     if project_uri !== nothing
-        project = derived_project(rt, project_uri)
-        project === nothing && return nothing
-        project_path = uri2filepath(project_uri)
-        project_path === nothing && return nothing
-        return (key=WatchEnvironmentKey(project_path, project.content_hash),
-                env_hash=project.content_hash)
+        return _v2_watch_expansion_env(rt, project_uri)
     end
     # M1b: a manifest-less package checkout (plain git clone) has no project in
     # `derived_project_for_file`'s sense, but the dynamic tier already
@@ -195,7 +223,6 @@ Salsa.@derived function derived_v2_expansion_env(rt, uri)
     pkg_uri = derived_package_for_file(rt, uri)
     pkg_uri === nothing && return nothing
     pkg_uri in derived_project_folders(rt) && return nothing
-    _is_package_deved_in_workspace(rt, pkg_uri) && return nothing
     pkg = derived_package(rt, pkg_uri)
     pkg === nothing && return nothing
     pkg_path = uri2filepath(pkg_uri)
@@ -205,6 +232,10 @@ Salsa.@derived function derived_v2_expansion_env(rt, uri)
     # method — reaching `refresh_queue` would MethodError the reactor):
     # deferred, expansion stays off for them.
     _file_needs_test_env(rt, pkg_path, uri) && return nothing
+    # A package deved by a workspace project (a monorepo's `lib/<Pkg>`) is
+    # loaded in that project: its watch child serves the expansions.
+    deving = derived_deving_project(rt, pkg_uri)
+    deving === nothing || return _v2_watch_expansion_env(rt, deving)
     return (key=CreateStandaloneProjectKey(pkg_path, pkg.content_hash),
             env_hash=pkg.content_hash)
 end
