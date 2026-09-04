@@ -125,6 +125,51 @@ end
     @test isempty(ef_ui(jw, tst))
 end
 
+@testitem "unresolved_import: declared-but-unindexed deps and test-local modules" setup=[EnvFallbackWS] begin
+    # A dependency the project declares whose store is not indexed (a stale
+    # manifest, an indexer failure) is an environment gap: a boundary notice
+    # (opt-in), never an unresolved_import.
+    for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\n")
+        jw = JuliaWorkspace()
+        config === nothing ||
+            add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText(config, "toml")))
+        add_file!(jw, TextFile(URI("file:///ef/Project.toml"), SourceText(EF_PROJECT * "\n[deps]\nNoSuchStore = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9f9\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///ef/Manifest.toml"), SourceText(EF_MANIFEST * "\n[[deps.NoSuchStore]]\ngit-tree-sha1 = \"0123456789abcdef0123456789abcdef01234567\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9f9\"\nversion = \"1.0.0\"\n", "toml")))
+        entry = URI("file:///ef/src/EfPkg.jl")
+        add_file!(jw, TextFile(entry, SourceText("module EfPkg\nusing NoSuchStore\nend\n", "julia")))
+        JW.set_v2_enabled!(jw, true)
+        set_input_env_ready!(jw.runtime, true)
+        diags = get_diagnostic(jw, entry)
+        @test !any(d -> d.code === :unresolved_import, diags)
+        notices = filter(d -> d.code === :analysis_boundary, diags)
+        if config === nothing
+            @test isempty(notices)
+        else
+            @test occursin("declared dependency", only(notices).message)
+        end
+    end
+
+    # A nested package's own [deps] count as declared even when the deving
+    # root's manifest does not carry them yet.
+    jw = ef_workspace()
+    JW.update_file!(jw, TextFile(URI("file:///ef/Manifest.toml"), SourceText(EF_MANIFEST * "\n[[deps.Sub]]\npath = \"lib/Sub\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c2\"\nversion = \"0.1.0\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///ef/lib/Sub/Project.toml"), SourceText(
+        "name = \"Sub\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c2\"\nversion = \"0.1.0\"\n\n[deps]\nMLStyle = \"d8e11817-5142-5d16-987a-aa16d4a15b5f\"\n", "toml")))
+    sub_entry = URI("file:///ef/lib/Sub/src/Sub.jl")
+    add_file!(jw, TextFile(sub_entry, SourceText("module Sub\nusing MLStyle\nusing NotDeclared_xyz\nend\n", "julia")))
+    set_input_env_ready!(jw.runtime, true)
+    @test ef_ui(jw, sub_entry) == ["Failed to resolve `NotDeclared_xyz`. Missing-reference checks are disabled in this scope and all nested scopes."]
+
+    # `using TestSetup` in a test file, where test/testsetup.jl declares the
+    # module and runtests.jl includes it into Main first.
+    jw = ef_workspace()
+    set_input_env_ready!(jw.runtime, true)
+    add_file!(jw, TextFile(URI("file:///ef/test/testsetup.jl"), SourceText("module TestSetup\nend\n", "julia")))
+    ad = URI("file:///ef/test/ad/linsolve.jl")
+    add_file!(jw, TextFile(ad, SourceText("using TestSetup\nusing NotDeclared_xyz\n", "julia")))
+    @test ef_ui(jw, ad) == ["Failed to resolve `NotDeclared_xyz`. Missing-reference checks are disabled in this scope and all nested scopes."]
+end
+
 @testitem "unresolved_import: a terminally failed environment is a boundary, not a defect" setup=[EnvFallbackWS] begin
     for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\n")
         jw = ef_workspace(; config)

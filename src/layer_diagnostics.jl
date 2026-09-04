@@ -414,6 +414,18 @@ Salsa.@derived function derived_diagnostics(rt, uri)
                     nothing, f.source)
                 return nothing
             end
+            # A dependency the project DECLARES whose symbols are not indexed
+            # (a stale manifest — `project_file_warnings` reports that on the
+            # project file — or a package the indexer could not load) is an
+            # environment gap, not a code defect.
+            if occursin("is a declared dependency but its symbols could not be indexed", f.message)
+                emit!(f.range, :analysis_boundary,
+                    replace(f.message, " Missing-reference checks are disabled in this scope and all nested scopes." => "",
+                            " Anything imported through this statement is assumed to exist and will not be checked." => "") *
+                    " Analysis of what it provides is degraded.",
+                    nothing, f.source)
+                return nothing
+            end
         end
         emit_finding!(f)
     end

@@ -361,6 +361,42 @@ function _v2_unresolved_import_name(rt, root, path::Vector{String}, ri::V2Resolv
     return nothing   # :tree and :workspace_package targets resolve
 end
 
+# The names a file's environment declares as dependencies: the env project's
+# own, plus — for a nested package whose environment is the project deving
+# it (a monorepo's `lib/<Pkg>` against the root manifest) — the package's
+# own `[deps]`, which a stale root manifest may not carry yet.
+Salsa.@derived function derived_v2_declared_dep_names(rt, root, uri)
+    deps = Set{String}(derived_v2_env_project_deps(rt, root))
+    pkg_folder = derived_package_for_file(rt, uri)
+    if pkg_folder !== nothing
+        pkg = derived_package(rt, pkg_folder)
+        if pkg !== nothing
+            pf = derived_project_file(rt, pkg.project_file_uri)
+            pf === nothing || union!(deps, keys(pf.deps))
+        end
+    end
+    return deps
+end
+
+# `module X` declarations in the package's test files (any file under
+# `<pkg>/test/`): test suites define helper modules in files they `include`
+# into Main and then `using X` them by bare name.
+Salsa.@derived function derived_v2_test_local_module_names(rt, uri)
+    names = Set{String}()
+    pkg_folder = derived_package_for_file(rt, uri)
+    pkg_folder === nothing && return names
+    prefix = lowercase(joinpath(uri2filepath(pkg_folder), "test")) * Base.Filesystem.path_separator
+    for f in derived_v2_all_julia_files(rt)
+        fp = uri2filepath(f)
+        fp === nothing && continue
+        startswith(lowercase(fp), prefix) || continue
+        for m in derived_v2_file_skeleton(rt, f).modules
+            push!(names, m.name)
+        end
+    end
+    return names
+end
+
 Salsa.@derived function derived_v2_unresolved_import_findings(rt, uri)
     result = ModuleTreeFinding[]
     skel = derived_v2_file_skeleton(rt, uri)
@@ -399,7 +435,12 @@ Salsa.@derived function derived_v2_unresolved_import_findings(rt, uri)
 
             name = _v2_unresolved_import_name(rt, root, path, ri)
             name === nothing && continue
-            deps === nothing && (deps = derived_v2_env_project_deps(rt, root))
+            # A module the package's own test files define (`module TestSetup`
+            # in test/testsetup.jl, `include`d into Main before `using
+            # TestSetup`) is not a package to resolve.
+            derived_file_stdlibs_visible(rt, uri) && name in derived_v2_test_local_module_names(rt, uri) &&
+                continue
+            deps === nothing && (deps = derived_v2_declared_dep_names(rt, root, uri))
             cause = name in deps ?
                 "`$name` is a declared dependency but its symbols could not be indexed." :
                 "Failed to resolve `$name`."

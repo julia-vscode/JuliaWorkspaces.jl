@@ -152,7 +152,14 @@ function _reconcile_expansions!(jw::JuliaWorkspace)
 
     # Prune bookkeeping for envs that left the workspace (env edits re-key
     # everything under a new env_hash, so stale entries only cost memory).
+    # Every hash an expansion env can carry must count as live while its child
+    # can still serve batches — otherwise a settled `:failed` outcome is
+    # pruned here, re-required, re-settled, … and a one-shot settle loop never
+    # ends (the borrowed-test-env routing bug of round 4). Required work items
+    # plus resolved extension environments (whose item may have left the
+    # required set once its scratch project exists).
     live_env_hashes = Set{UInt64}(k.content_hash for k in derived_required_dynamic_projects(jw.runtime))
+    union!(live_env_hashes, (k.content_hash for k in keys(input_extension_environments(jw.runtime))))
     if any(k -> !(k.env_hash in live_env_hashes), keys(input_macro_expansions(jw.runtime)))
         set_input_macro_expansions!(jw.runtime,
             filter(p -> p.first.env_hash in live_env_hashes, input_macro_expansions(jw.runtime)))

@@ -145,4 +145,22 @@ end
     set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}([key]))
     @test derived_file_env_ready(jw.runtime, ext_file)
     @test derived_extension_blind_triggers(jw.runtime, ext_file) == ["Bar"]
+
+    # A resolved extension environment whose manifest lacks a trigger (the
+    # child could not install it) still owns the file, but that trigger is
+    # blind; one that carries it is not.
+    set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}())
+    degraded = URI("file:///scratch/ext-env-Foo-degraded")
+    add_file!(jw, TextFile(URI("file:///scratch/ext-env-Foo-degraded/Project.toml"), SourceText("[deps]\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///scratch/ext-env-Foo-degraded/Manifest.toml"), SourceText(
+        "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc\"\n", "toml")))
+    set_input_extension_environments!(jw.runtime, Dict(key => degraded))
+    @test derived_project_uri_for_root(jw.runtime, ext_file) == degraded
+    @test derived_extension_blind_triggers(jw.runtime, ext_file) == ["Bar"]
+    covered = URI("file:///scratch/ext-env-Foo-covered")
+    add_file!(jw, TextFile(URI("file:///scratch/ext-env-Foo-covered/Project.toml"), SourceText("[deps]\nBar = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///scratch/ext-env-Foo-covered/Manifest.toml"), SourceText(
+        "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc\"\n\n[[deps.Bar]]\ngit-tree-sha1 = \"0123456789abcdef0123456789abcdef01234567\"\nuuid = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\nversion = \"1.0.0\"\n", "toml")))
+    set_input_extension_environments!(jw.runtime, Dict(key => covered))
+    @test isempty(derived_extension_blind_triggers(jw.runtime, ext_file))
 end

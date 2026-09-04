@@ -176,6 +176,13 @@ notices (silent by default).
 Salsa.@derived function derived_extension_blind_triggers(rt, uri)
     ext = derived_extension_for_file(rt, uri)
     ext === nothing && return String[]
-    derived_extension_project_uri(rt, ext.package_folder, ext.ext_name) === nothing || return String[]
-    return sort(ext.triggers)
+    project_uri = derived_extension_project_uri(rt, ext.package_folder, ext.ext_name)
+    project_uri === nothing && return sort(ext.triggers)
+    # A resolved extension environment whose child could not install every
+    # trigger (a resolver or download failure degrades to whatever it got) is
+    # still the best environment for the file — but the triggers its manifest
+    # lacks are blind, not unresolved imports.
+    project = derived_project(rt, project_uri)
+    project === nothing && return String[]   # no readable manifest: trust the environment
+    return sort(filter(t -> !_project_covers_triggers(project, (t,)), ext.triggers))
 end

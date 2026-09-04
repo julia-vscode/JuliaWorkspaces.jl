@@ -185,6 +185,12 @@ identifier fallback.
 function _v2_watch_expansion_env(rt, project_uri)
     watch_uri, watch_hash = _watch_target_for_project(rt, project_uri)
     derived_project(rt, watch_uri) === nothing && return nothing
+    # Only a WORKSPACE project folder has a watch child (the required set's
+    # first arm). A borrowed environment that is a scratch project — the
+    # merged test env an extension's triggers happen to be covered by — is
+    # served by a test-env child the expansion path cannot use: no expansion
+    # rather than a key nobody serves.
+    watch_uri in derived_project_folders(rt) || return nothing
     watch_path = uri2filepath(watch_uri)
     watch_path === nothing && return nothing
     return (key=WatchEnvironmentKey(watch_path, watch_hash), env_hash=watch_hash)
