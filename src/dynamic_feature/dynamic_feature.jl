@@ -34,6 +34,10 @@ mutable struct DynamicJuliaProcess
     cancellation_source::CancellationTokens.CancellationTokenSource
     fsm::FSM{DynamicProcessPhase}
     task::Union{Nothing,Task}
+    # Expansion context ids this child has already built (see
+    # `_expansion_batch_timeout!`): the first batch for a context pays for
+    # loading the context's packages, later ones do not.
+    expansion_contexts_seen::Set{String}
 
     function DynamicJuliaProcess(key::DJPKey, project_path::String, package::Union{Nothing,String}, kind::Symbol)
         return new(
@@ -45,7 +49,8 @@ mutable struct DynamicJuliaProcess
             nothing,
             CancellationTokens.CancellationTokenSource(),
             dynamic_process_fsm("$(kind):$(project_path)"),
-            nothing
+            nothing,
+            Set{String}()
         )
     end
 end
@@ -515,6 +520,27 @@ answer means a macro is hanging — and the batch failing (child killed, entries
 negative-cached) is the intended containment for that.
 """
 const DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS = 60
+
+"""
+    FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS
+
+The budget for the FIRST batch a child answers for a given expansion context.
+Building the context loads the packages its imports name — a workspace
+member the child has to `require` by identity, possibly precompiling it
+(PlotsBase: ~1 min) — so the tight per-batch budget would time out on the
+load, kill the child and negative-cache every entry of the batch (1,484 of
+the Plots monorepo's 1,888 sites). Loading is a one-time cost per child and
+context; the later batches keep `DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS`.
+"""
+const FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS = 300
+
+# The timeout for the next batch of context `ctx_id` on `djp`, recording that
+# the child has now been asked to build that context.
+function _expansion_batch_timeout!(djp::DynamicJuliaProcess, ctx_id::AbstractString)
+    ctx_id in djp.expansion_contexts_seen && return DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS
+    push!(djp.expansion_contexts_seen, String(ctx_id))
+    return FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS
+end
 
 # Identity of one package's symbol cache on disc.
 const PkgCacheKey = @NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}
@@ -1848,9 +1874,10 @@ function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
     batch = popfirst!(q)
     push!(df.expansion_inflight, key)
     transition!(djp.fsm, DynamicProcessIndexing; reason="macro expansion batch")
+    timeout_seconds = _expansion_batch_timeout!(djp, batch.ctx_id)
     @async try
         outcomes = expand_macros(djp, batch.ctx_id, batch.imports, batch.ctx_module,
-                                 batch.entries, DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS)
+                                 batch.entries, timeout_seconds)
         put!(df.in_channel, ExpansionBatchDoneMsg(key, outcomes))
     catch err
         @info "Macro expansion batch failed" key exception=(err, catch_backtrace())
