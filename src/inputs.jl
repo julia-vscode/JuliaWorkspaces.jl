@@ -87,6 +87,10 @@ Salsa.@declare_input input_standalone_projects(rt)::Dict{CreateStandaloneProject
 # resolve key to the resulting scratch project URI.
 Salsa.@declare_input input_resolved_environments(rt)::Dict{ResolveEnvironmentKey,URI}
 
+# Resolved extension environments (package + weakdep triggers), mapping each
+# key to the resulting scratch project URI.
+Salsa.@declare_input input_extension_environments(rt)::Dict{ResolveExtensionEnvironmentKey,URI}
+
 # Work items that failed terminally. Their artifacts (a test/standalone project
 # URI) will never appear, so readiness gates treat these keys as settled and
 # proceed best-effort with whatever symbol caches exist.

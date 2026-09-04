@@ -9,10 +9,16 @@ using PrecompileTools: @setup_workload, @compile_workload
     project_dir = mktempdir()
 
     mkpath(joinpath(project_dir, "src"))
+    mkpath(joinpath(project_dir, "ext"))
     mkpath(joinpath(project_dir, "test"))
     mkpath(joinpath(project_dir, "scripts"))
     mkpath(joinpath(project_dir, "runicsub"))
 
+    # `[weakdeps]`/`[extensions]` and `[workspace]` route the workload through
+    # the full-fidelity project-file parse, the workspace member synthesis and
+    # the extension env selection (StyledStrings is resolved by the manifest
+    # below, so the borrowing fast path covers the extension — no child
+    # process is needed).
     write(joinpath(project_dir, "Project.toml"), """
     name = "PrecompileWorkload"
     uuid = "8f2b0cb1-56a1-4b0f-9a37-9c2f7b1d2c40"
@@ -22,6 +28,28 @@ using PrecompileTools: @setup_workload, @compile_workload
     Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
     Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
     Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+    [weakdeps]
+    StyledStrings = "f489334b-da3d-4c2e-b8f0-e476e12c162b"
+
+    [extensions]
+    PrecompileWorkloadStyledExt = "StyledStrings"
+
+    [workspace]
+    projects = ["test"]
+    """)
+
+    write(joinpath(project_dir, "test", "Project.toml"), """
+    [deps]
+    Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+    """)
+
+    write(joinpath(project_dir, "ext", "PrecompileWorkloadStyledExt.jl"), """
+    module PrecompileWorkloadStyledExt
+
+    using StyledStrings
+
+    end
     """)
 
     # A manifest routes environment resolution through the same (much larger)

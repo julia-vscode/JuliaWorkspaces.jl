@@ -160,6 +160,19 @@ function resolve_environment(djp::DynamicJuliaProcess, store_path::String, proje
     )
 end
 
+function resolve_extension_environment(djp::DynamicJuliaProcess, store_path::String, project_dir::String, timeout_seconds::Int=0)
+    _send_djp_request(
+        djp,
+        timeout_seconds,
+        JuliaDynamicAnalysisProtocol.resolve_extension_environment_request_type,
+        JuliaDynamicAnalysisProtocol.ResolveExtensionEnvironmentParams(
+            djp.project_path,
+            store_path,
+            project_dir
+        )
+    )
+end
+
 # The wire form of an `ExpansionKey`: opaque to the child, unique within a batch.
 _expansion_key_string(k::ExpansionKey) =
     string(k.env_hash, base=16) * "-" * string(k.ctx_hash, base=16) * "-" * string(k.mac_hash, base=16)
@@ -222,6 +235,7 @@ _key_path(key::WatchEnvironmentKey) = key.project_path
 _key_path(key::WatchTestEnvironmentKey) = key.project_path
 _key_path(key::CreateStandaloneProjectKey) = key.package_path
 _key_path(key::ResolveEnvironmentKey) = key.env_path
+_key_path(key::ResolveExtensionEnvironmentKey) = key.package_path
 
 _kind_rank(::WatchEnvironmentKey) = 0
 _kind_rank(::CreateStandaloneProjectKey) = 1
@@ -229,6 +243,9 @@ _kind_rank(::CreateStandaloneProjectKey) = 1
 # ordering already resolves a parent package before its nested docs/ env.
 _kind_rank(::ResolveEnvironmentKey) = 1
 _kind_rank(::WatchTestEnvironmentKey) = 2
+# After the test env: the main and test environments serve many more files
+# than the ext/ folder does.
+_kind_rank(::ResolveExtensionEnvironmentKey) = 3
 
 function _launch_priority(key::DJPKey)
     depth = count(c -> c == '/' || c == '\\', normpath(_key_path(key)))
@@ -663,7 +680,8 @@ function _standalone_dir_components(df::DynamicFeature, key::Union{ScratchProjec
     # package's test env carries the same path as its main env, so it needs
     # its own tag to get a distinct dir.
     tag = key isa ResolveEnvironmentKey ? "env-" :
-        key isa WatchTestEnvironmentKey ? "test-env-" : ""
+        key isa WatchTestEnvironmentKey ? "test-env-" :
+        key isa ResolveExtensionEnvironmentKey ? "ext-env-" : ""
     prefix = string(tag, name, "-", path_hash, "-")
     dir = joinpath(parent, string(prefix, string(key.content_hash, base=16, pad=16)))
     return (parent, prefix, dir)
@@ -719,6 +737,7 @@ _progress_key(phase::String, key::WatchEnvironmentKey) = string(phase, ":", key.
 _progress_key(phase::String, key::WatchTestEnvironmentKey) = string(phase, ":", key.project_path, ":", key.package_name)
 _progress_key(phase::String, key::CreateStandaloneProjectKey) = string(phase, ":", key.package_path)
 _progress_key(phase::String, key::ResolveEnvironmentKey) = string(phase, ":", key.env_path)
+_progress_key(phase::String, key::ResolveExtensionEnvironmentKey) = string(phase, ":ext:", key.package_path)
 
 const MissingPackage = @NamedTuple{name::String, uuid::UUID, version::String, git_tree_sha1::Union{String,Nothing}}
 
@@ -1020,6 +1039,8 @@ function _failure_subject(key::DJPKey)
         return "the environment at $(key.project_path)"
     elseif key isa ResolveEnvironmentKey
         return "the environment at $(key.env_path) (no manifest; a resolved copy is created for analysis)"
+    elseif key isa ResolveExtensionEnvironmentKey
+        return "the extension environment of the package at $(key.package_path) (weakdep triggers are resolved for analysis)"
     else
         return "a standalone project for the package at $(key.package_path)"
     end
@@ -1193,6 +1214,8 @@ function _djp_reason_target(df::DynamicFeature, key::DJPKey)
         ("materializing the '$(key.package_name)' test environment (only a child can produce it)", key.project_path)
     elseif key isa ResolveEnvironmentKey
         ("resolving an environment without a manifest (only a child can produce it)", key.env_path)
+    elseif key isa ResolveExtensionEnvironmentKey
+        ("resolving an extension environment (weakdep triggers; only a child can produce it)", key.package_path)
     else
         ("creating a standalone project (only a child can produce it)", key.package_path)
     end
@@ -1205,6 +1228,8 @@ function _launch_now!(df::DynamicFeature, key::DJPKey)
         DynamicJuliaProcess(key, key.project_path, key.package_name, :watch_test_environment)
     elseif key isa ResolveEnvironmentKey
         DynamicJuliaProcess(key, key.env_path, nothing, :resolve_environment)
+    elseif key isa ResolveExtensionEnvironmentKey
+        DynamicJuliaProcess(key, key.package_path, nothing, :resolve_extension_environment)
     else
         DynamicJuliaProcess(key, key.package_path, nothing, :create_standalone_project)
     end
@@ -1436,6 +1461,8 @@ _scratch_ready_result(key::CreateStandaloneProjectKey, dir::String) =
     StandaloneProjectReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash)
 _scratch_ready_result(key::ResolveEnvironmentKey, dir::String) =
     ResolvedEnvironmentReadyResult(filepath2uri(key.env_path), filepath2uri(dir), key.content_hash)
+_scratch_ready_result(key::ResolveExtensionEnvironmentKey, dir::String) =
+    ExtensionEnvironmentReadyResult(filepath2uri(key.package_path), filepath2uri(dir), key.content_hash)
 # Plain watched environments can also complete through the refresh path (the
 # expansion-driven child revival below); their ready result is idempotent.
 _scratch_ready_result(key::WatchEnvironmentKey, dir::String) =
@@ -1535,6 +1562,8 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
             create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
         elseif key isa ResolveEnvironmentKey
             resolve_environment(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
+        elseif key isa ResolveExtensionEnvironmentKey
+            resolve_extension_environment(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
         elseif key isa WatchTestEnvironmentKey
             # Persist the materialized test env: TestEnv activates a
             # child-local temp dir, so the child copies the result into this

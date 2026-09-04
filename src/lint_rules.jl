@@ -217,6 +217,20 @@ const LINT_RULES = LintRule[
         severity_minimal = :error, severity_default = :error, severity_strict = :error),
     LintRule(id = :toml_syntax_errors, tier = TierProject,
         severity_minimal = :error, severity_default = :error, severity_strict = :error),
+    # Structure in a Project.toml that Pkg itself rejects (a malformed uuid, an
+    # extension trigger that is not a declared weakdep, a `[sources]` entry
+    # with neither url nor path): same class of breakage as syntax errors.
+    LintRule(id = :project_file_errors, tier = TierProject,
+        severity_minimal = :error, severity_default = :error, severity_strict = :error),
+    # Inconsistencies Pkg tolerates until the section is actually used (a
+    # target dep missing from `[extras]`, a stale manifest, a dangling
+    # `[sources]`/`[workspace]` path).
+    LintRule(id = :project_file_warnings, tier = TierProject,
+        severity_default = :warning, severity_strict = :warning),
+    # Manifests are machine-written, so a shape we cannot interpret is as
+    # likely our blind spot as the project's fault — informational by default.
+    LintRule(id = :manifest_errors, tier = TierProject,
+        severity_default = :information, severity_strict = :warning),
     LintRule(id = :config_errors, tier = TierProject,
         severity_minimal = :error, severity_default = :error, severity_strict = :error),
     # A structural problem with the project's own configuration, not a style

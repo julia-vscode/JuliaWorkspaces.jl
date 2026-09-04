@@ -113,8 +113,11 @@ From the bottom up:
 | `layer_toml_tree.jl` | TOML files: the `TomlSyntax` parse products (table plus diagnostics at real ranges) and the TOML item walk (skeleton, bodies, maps), the v2 pattern applied to TOML. |
 | `layer_includes.jl` | The `include(...)` graph and its roots. |
 | `layer_static_lint.jl` | Semantic analysis via StaticLint's `semantic_pass`. |
-| `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`. |
-| `layer_environment.jl` | Resolving which project/environment a file belongs to and building its `ExternalEnv`. |
+| `layer_project_files.jl` | Full-fidelity `Project.toml`/`Manifest.toml` parse products (`JuliaProjectFile`, `JuliaManifestFile`) with position-free problem records for every malformed or inconsistent section (located via the TOML item walk at the diagnostics last mile). |
+| `layer_workspaces.jl` | `[workspace]` discovery: which folder is a member of which workspace, resolved upward to the outermost root the way Pkg does it. |
+| `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`, built on the parse products; a manifest-less workspace member synthesizes a project against the root's manifest ([deps] closure), and `[sources]` path entries surface as deved packages. |
+| `layer_extensions.jl` | Package extensions: mapping `ext/` files to their `[extensions]` entry and finding an environment containing their `[weakdeps]` triggers (an existing covering manifest, else a resolved extension environment from a child process). |
+| `layer_environment.jl` | Resolving which project/environment a file belongs to and building its `ExternalEnv`. A workspace needs one watch item at its root — members (a `test/` project included) gate on and resolve through it. |
 | `layer_testitems.jl` | `@testitem` / test-setup detection. |
 | `layer_diagnostics.jl` | Aggregating syntax, lint, test, and TOML diagnostics, gated by configuration (see [Configuration](configuration.md)). |
 | `layer_hover.jl`, `layer_completions.jl`, `layer_references.jl`, `layer_signatures.jl`, `layer_symbols.jl`, `layer_navigation.jl`, `layer_actions.jl`, `layer_formatting.jl`, `layer_misc.jl` | LSP-feature query layers. |

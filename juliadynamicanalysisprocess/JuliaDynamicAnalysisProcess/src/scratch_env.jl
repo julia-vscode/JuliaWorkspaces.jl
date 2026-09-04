@@ -294,9 +294,11 @@ The caller is expected to `Pkg.activate` the result and `Pkg.instantiate` it,
 which resolves a manifest into `project_dir`; the environment at `env_path` is
 only ever read.
 
-Note: an environment that is a `[workspace]` member normally resolves against
-the workspace root's manifest; the copy resolves standalone instead, which may
-pick different versions. That is acceptable for symbol indexing.
+Note: a `[workspace]` member no longer reaches this path at all — the host
+models it as a synthesized project against the root's manifest and the root's
+watch item covers it (layer_workspaces.jl / layer_projects.jl). A resolve item
+is only ever scheduled for genuinely standalone environments, so the copy
+resolving standalone is exact, not an approximation.
 """
 function write_resolved_env_project(env_path::String, project_dir::String)
     mkpath(project_dir)
@@ -330,6 +332,40 @@ function write_resolved_env_project(env_path::String, project_dir::String)
     for section in (:workspace, :apps)
         hasfield(Pkg.Types.Project, section) && empty!(getfield(project, section))
     end
+
+    Pkg.Types.write_project(project, joinpath(project_dir, "Project.toml"))
+    return
+end
+
+"""
+    write_extension_env_project(package_path, project_dir) -> Nothing
+
+Write a nameless wrapper project into `project_dir` whose `[deps]` are the
+`[weakdeps]` of the package at `package_path`, with their `[compat]` bounds
+(and the `julia` bound) carried over. The caller then `Pkg.develop`s the
+package itself into the activated result, so the resolved environment contains
+the package plus every extension trigger — the environment a package extension
+is analyzed against. The package's folder is only ever read.
+"""
+function write_extension_env_project(package_path::String, project_dir::String)
+    mkpath(project_dir)
+
+    if !CAN_MIRROR_ENV || !hasfield(Pkg.Types.Project, :weakdeps)
+        # No `[weakdeps]` on this Julia, so extensions cannot exist here; the
+        # deved package alone is the whole environment.
+        write(joinpath(project_dir, "Project.toml"), "")
+        return
+    end
+
+    src_env = Pkg.Types.EnvCache(Pkg.Types.projectfile_path(package_path))
+    src = src_env.project
+
+    project = Pkg.Types.Project()
+    merge!(project.deps, src.weakdeps)
+    for name in keys(src.weakdeps)
+        haskey(src.compat, name) && (project.compat[name] = src.compat[name])
+    end
+    haskey(src.compat, "julia") && (project.compat["julia"] = src.compat["julia"])
 
     Pkg.Types.write_project(project, joinpath(project_dir, "Project.toml"))
     return

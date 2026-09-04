@@ -35,11 +35,20 @@ end
     content_hash::UInt64
 end
 
-const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey, ResolveEnvironmentKey}
+# One per package (covering all of its extensions): a scratch project holding
+# the package's `[weakdeps]` plus the package itself, resolved and indexed so
+# `ext/` files get an environment containing their triggers. Scheduled only
+# when no existing manifest (own, workspace root, test) covers the triggers.
+@auto_hash_equals struct ResolveExtensionEnvironmentKey
+    package_path::String
+    content_hash::UInt64
+end
+
+const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey, ResolveEnvironmentKey, ResolveExtensionEnvironmentKey}
 
 # Keys whose work item is "materialize a project into a persistent scratch dir"
 # — they share the dir-prep / fast-lane / background-refresh machinery.
-const ScratchProjectKey = Union{CreateStandaloneProjectKey, ResolveEnvironmentKey}
+const ScratchProjectKey = Union{CreateStandaloneProjectKey, ResolveEnvironmentKey, ResolveExtensionEnvironmentKey}
 
 """
     DJPIdentity
@@ -62,10 +71,12 @@ _djp_identity(k::WatchEnvironmentKey)        = (kind=:watch_environment,        
 _djp_identity(k::WatchTestEnvironmentKey)    = (kind=:watch_test_environment,    path=k.project_path, package=k.package_name)
 _djp_identity(k::CreateStandaloneProjectKey) = (kind=:create_standalone_project, path=k.package_path, package="")
 _djp_identity(k::ResolveEnvironmentKey)      = (kind=:resolve_environment,       path=k.env_path,     package="")
+_djp_identity(k::ResolveExtensionEnvironmentKey) = (kind=:resolve_extension_environment, path=k.package_path, package="")
 
 # The folder a key's failure diagnostics should be attached to.
 _key_folder_path(k::CreateStandaloneProjectKey) = k.package_path
 _key_folder_path(k::ResolveEnvironmentKey)      = k.env_path
+_key_folder_path(k::ResolveExtensionEnvironmentKey) = k.package_path
 _key_folder_path(k::DJPKey)                     = k.project_path
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -306,6 +317,13 @@ end
 """A resolved project for a manifest-less non-package environment is ready."""
 struct ResolvedEnvironmentReadyResult <: DynamicResultMessage
     env_folder_uri::URI
+    project_uri::URI
+    content_hash::UInt64
+end
+
+"""A resolved extension environment (package + weakdep triggers) is ready."""
+struct ExtensionEnvironmentReadyResult <: DynamicResultMessage
+    package_folder_uri::URI
     project_uri::URI
     content_hash::UInt64
 end

@@ -134,6 +134,32 @@ function resolve_environment_request(params::JuliaDynamicAnalysisProtocol.Resolv
     end
 end
 
+function resolve_extension_environment_request(params::JuliaDynamicAnalysisProtocol.ResolveExtensionEnvironmentParams, state::JuliaDynamicAnalysisProcessState, token)
+    write_extension_env_project(params.packagePath, params.projectDir)
+    Pkg.activate(params.projectDir)
+
+    try
+        # `develop` makes the package itself (and through it, the extensions'
+        # parent module) part of the environment; `instantiate` installs the
+        # weakdep triggers so SymbolServer can load them. A failed resolve
+        # degrades to whatever symbol caches exist rather than blocking the
+        # environment forever.
+        Pkg.develop(path=params.packagePath)
+        Pkg.instantiate()
+    catch err
+        @warn "Failed to resolve extension environment" params.packagePath exception=(err, catch_backtrace())
+    end
+
+    try
+        SymbolServer.get_store(params.storePath, progress_reporter(state))
+
+        return dirname(Base.active_project())
+    catch err
+        err isa InterruptException && rethrow()
+        _index_failure(err, catch_backtrace(), "extension environment for package at $(params.packagePath)")
+    end
+end
+
 # ── Macro expansion ─────────────────────────────────────────────────────────
 
 # Bounds ctx-module memory. Dropping the whole cache on overflow is deliberate:
@@ -239,6 +265,7 @@ JSONRPC.@message_dispatcher dispatch_msg begin
     JuliaDynamicAnalysisProtocol.index_project_request_type => index_project_request
     JuliaDynamicAnalysisProtocol.create_standalone_project_request_type => create_standalone_project_request
     JuliaDynamicAnalysisProtocol.resolve_environment_request_type => resolve_environment_request
+    JuliaDynamicAnalysisProtocol.resolve_extension_environment_request_type => resolve_extension_environment_request
     JuliaDynamicAnalysisProtocol.expand_macros_request_type => expand_macros_request
 end
 

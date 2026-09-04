@@ -127,6 +127,12 @@ end
         :config_errors => :error,
         :shadowed_config => :information,
         :environment_errors => :information,
+        # Project/manifest file validation (Pkg feature support): structure Pkg
+        # rejects is an error; tolerated inconsistencies warn; manifest shapes
+        # we cannot interpret stay informational (machine-written files).
+        :project_file_errors => :error,
+        :project_file_warnings => :warning,
+        :manifest_errors => :information,
         # Syntactic rules added with the rule registry; off outside `strict`.
         :nan_comparison => :off,
         :duplicate_branch_condition => :off,
@@ -154,6 +160,7 @@ end
                 :lowering_errors => :error,
                 :testitem_errors => :error,
                 :toml_syntax_errors => :error,
+                :project_file_errors => :error,
                 :config_errors => :error,
                 :include_errors => :warning,
                 :const_decl => :warning,

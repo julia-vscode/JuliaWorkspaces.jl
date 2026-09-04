@@ -95,6 +95,31 @@ Salsa.@derived function derived_project_requires_indexing(rt, project_uri, conte
 end
 
 """
+    _watch_target_for_project(rt, project_uri) -> (uri, content_hash)
+
+The `(project_uri, content_hash)` pair whose `WatchEnvironmentKey` covers the
+environment of `project_uri`: the project's own folder normally, the workspace
+root's folder and hash for a synthesized member project (a member has no watch
+item of its own — the root's covers it, and its hash folds every member's
+Project.toml).
+
+Single source of truth for that identity: the required set (which schedules
+the item via the root's `derived_project`), the readiness gates and every
+other consumer must derive the same pair, or a recorded result is looked up
+under a key nobody ever produced.
+"""
+function _watch_target_for_project(rt, project_uri)
+    project = derived_project(rt, project_uri)
+    project === nothing && return (project_uri, UInt64(0))
+    if _is_synthesized_member(project, project_uri)
+        root_uri = filepath2uri(dirname(uri2filepath(project.manifest_file_uri)))
+        root_project = derived_project(rt, root_uri)
+        root_project === nothing || return (root_uri, root_project.content_hash)
+    end
+    return (project_uri, project.content_hash)
+end
+
+"""
     derived_test_environment_pending(rt, key::WatchTestEnvironmentKey) -> Bool
 
 Whether the test-environment work item `key` is scheduled and can still produce
@@ -259,9 +284,29 @@ Salsa.@derived function derived_project_uri_for_root(rt, uri)
     # environment: it holds the package's own deps, the `[extras]`/test-target
     # deps (or test/Project.toml when present), and the package itself — which
     # a resolved copy of a bare test/Project.toml need not contain.
+    # An extension file gets an environment containing its weakdep triggers:
+    # an existing covering project or the resolved extension environment. When
+    # neither exists (yet), fall through to the package logic below —
+    # `derived_file_env_ready` gates while the ext-env item can still arrive,
+    # and terminally missing triggers become an analysis boundary.
+    ext = derived_extension_for_file(rt, uri)
+    if ext !== nothing
+        ext_project_uri = derived_extension_project_uri(rt, ext.package_folder, ext.ext_name)
+        ext_project_uri !== nothing && return ext_project_uri
+    end
+
     if package_folder_uri !== nothing
         pkg = derived_package(rt, package_folder_uri)
         if pkg !== nothing && _file_needs_test_env(rt, uri2filepath(package_folder_uri), uri)
+            # When `test/` is a workspace member its own (synthesized) project
+            # IS the test environment — available immediately, no DJP result
+            # to wait for. This must run before the merged-test-env branch: no
+            # test-env item is scheduled for this shape, so waiting on one
+            # would fall through to the package's main env and flash
+            # missing-reference false positives for test-only deps.
+            test_member = _test_member_project_folder(rt, package_folder_uri)
+            test_member !== nothing && return test_member
+
             test_env_key = _test_environment_key(rt, package_folder_uri, pkg)
             if test_env_key !== nothing
                 test_project_uri = derived_ready_test_environment(rt, test_env_key)
@@ -354,6 +399,27 @@ _is_package_deved_in_workspace(rt, package_folder_uri) =
     derived_deving_project(rt, package_folder_uri) !== nothing
 
 """
+    _test_member_project_folder(rt, package_folder_uri) -> Union{Nothing,URI}
+
+The package's `test/` folder when it is a synthesized `[workspace]` member —
+the folder whose project then IS the test environment (test deps and the
+package itself resolve through the root's shared manifest, no merged test-env
+work item needed) — or `nothing` for every other test-folder shape.
+
+Single source of truth for this shape: the required set (which skips the
+test-env item for it), `derived_project_uri_for_root` (which routes test
+files to it) and `derived_file_env_ready` must agree, or test files gate on
+an item nobody schedules.
+"""
+function _test_member_project_folder(rt, package_folder_uri)
+    test_folder_uri = filepath2uri(joinpath(uri2filepath(package_folder_uri), "test"))
+    project = derived_project(rt, test_folder_uri)
+    project === nothing && return nothing
+    _is_synthesized_member(project, test_folder_uri) || return nothing
+    return test_folder_uri
+end
+
+"""
     _test_environment_key(rt, package_folder_uri, pkg) -> Union{Nothing,WatchTestEnvironmentKey}
 
 The identity of the test-environment work item for the package `pkg` at
@@ -409,13 +475,14 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
     input_env_ready(rt) && return true
 
     # Determine the file's effective project URI and require its env to be
-    # settled.
+    # settled. For a synthesized workspace member the watch item lives at the
+    # root — gate on that (`_watch_target_for_project` is the single source of
+    # truth for the translation).
     project_uri = derived_project_uri_for_root(rt, uri)
     if project_uri !== nothing
-        project = derived_project(rt, project_uri)
-        project_hash = project === nothing ? UInt64(0) : project.content_hash
-        if !derived_project_environment_ready(rt, project_uri, project_hash) &&
-                derived_project_requires_indexing(rt, project_uri, project_hash)
+        watch_uri, watch_hash = _watch_target_for_project(rt, project_uri)
+        if !derived_project_environment_ready(rt, watch_uri, watch_hash) &&
+                derived_project_requires_indexing(rt, watch_uri, watch_hash)
             return false
         end
     end
@@ -431,6 +498,18 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
                 derived_ready_resolved_environment(rt, env_folder_uri, env.content_hash) === nothing
             key = ResolveEnvironmentKey(uri2filepath(env_folder_uri), env.content_hash)
             derived_resolve_environment_pending(rt, key) && return false
+        end
+    end
+
+    # An extension file with no covering environment: gate while the
+    # extension-environment work item can still arrive.
+    ext = derived_extension_for_file(rt, uri)
+    if ext !== nothing &&
+            derived_extension_project_uri(rt, ext.package_folder, ext.ext_name) === nothing
+        ext_pkg = derived_package(rt, ext.package_folder)
+        if ext_pkg !== nothing
+            ext_key = _extension_environment_key(rt, ext.package_folder, ext_pkg)
+            derived_extension_environment_pending(rt, ext_key) && return false
         end
     end
 
@@ -511,10 +590,13 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
 
     required = Set{DJPKey}()
 
-    # Every project folder needs a :watch_environment DJP
+    # Every project folder needs a :watch_environment DJP — except a
+    # synthesized workspace member, whose environment the root's watch item
+    # covers (this is where a workspace shrinks to a single DJP).
     for project_uri in derived_project_folders(rt)
         project = derived_project(rt, project_uri)
         project === nothing && continue
+        _is_synthesized_member(project, project_uri) && continue
         push!(required, WatchEnvironmentKey(
             uri2filepath(project_uri),
             project.content_hash,
@@ -569,10 +651,42 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
         pkg = derived_package(rt, package_uri)
         pkg === nothing && continue
 
+        # A `test/` that is a workspace member resolves against the root's
+        # shared manifest — the root's watch item covers it, no merged
+        # test-env item needed (`_test_member_project_folder` is the single
+        # source of truth for this shape, shared with the env selection).
+        _test_member_project_folder(rt, package_uri) === nothing || continue
+
         test_env_key = _test_environment_key(rt, package_uri, pkg)
         test_env_key === nothing && continue
 
         push!(required, test_env_key)
+    end
+
+    # Extension environments: a package declaring `[extensions]` whose entry
+    # files are present needs one when NO existing manifest (its own, the
+    # deving project's, the workspace root's, the test member's, the merged
+    # test env's) resolves some extension's triggers — the borrowing fast path
+    # in `derived_extension_project_uri` handles every covered shape without a
+    # child.
+    for package_uri in derived_package_folders(rt)
+        pkg = derived_package(rt, package_uri)
+        pkg === nothing && continue
+        pf = derived_project_file(rt, pkg.project_file_uri)
+        (pf === nothing || isempty(pf.extensions)) && continue
+
+        package_folder = uri2filepath(package_uri)
+        candidates = _extension_candidate_projects(rt, package_uri)
+        needs_ext_env = any(pf.extensions) do (ext_name, triggers)
+            _extension_entry_exists(rt, package_folder, ext_name) || return false
+            return !any(candidates) do candidate
+                project = derived_project(rt, candidate)
+                project !== nothing && _project_covers_triggers(project, triggers)
+            end
+        end
+        needs_ext_env || continue
+
+        push!(required, _extension_environment_key(rt, package_uri, pkg))
     end
 
     return required

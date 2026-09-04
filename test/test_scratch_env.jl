@@ -46,6 +46,60 @@
     @test _snapshot(dir) == before
 end
 
+@testitem "scratch env: the extension env wrapper carries weakdeps and their compat" begin
+    include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
+    import Pkg
+
+    uuid = "aaaaaaaa-9999-aaaa-bbbb-cccccccccccc"
+    dir = mktempdir()
+    mkpath(joinpath(dir, "src"))
+    write(joinpath(dir, "Project.toml"), """
+    name = "HasExt"
+    uuid = "$uuid"
+    version = "0.1.0"
+
+    [deps]
+    Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+
+    [weakdeps]
+    Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+    [extensions]
+    HasExtPrintfExt = "Printf"
+
+    [compat]
+    julia = "1.6"
+    Printf = "1"
+    Dates = "1"
+    """)
+    write(joinpath(dir, "src", "HasExt.jl"), "module HasExt end\n")
+    before = _snapshot(dir)
+
+    project_dir = mktempdir()
+    write_extension_env_project(dir, project_dir)
+
+    project = Pkg.Types.read_project(joinpath(project_dir, "Project.toml"))
+
+    if hasfield(Pkg.Types.Project, :weakdeps)
+        # The wrapper's deps are the WEAKDEPS (the triggers to resolve); the
+        # package itself and its regular deps arrive later via `Pkg.develop`.
+        @test project.deps == Dict("Printf" => Base.UUID("de0858da-6303-5e67-8744-51eddeeeb8d7"))
+        # Trigger and julia compat carry over; the regular dep's does not (it
+        # is not part of this wrapper's dep set).
+        @test haskey(project.compat, "Printf")
+        @test haskey(project.compat, "julia")
+        @test !haskey(project.compat, "Dates")
+        # Nameless, like every scratch wrapper.
+        @test project.name === nothing
+        @test project.uuid === nothing
+    else
+        @test isempty(project.deps)
+    end
+
+    # The package folder is only ever read.
+    @test _snapshot(dir) == before
+end
+
 @testitem "scratch env: an existing manifest is carried over with absolute paths" begin
     include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
     import Pkg

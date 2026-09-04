@@ -27,6 +27,12 @@ end
     projectDir::String
 end
 
+@dict_readable struct ResolveExtensionEnvironmentParams <: JSONRPC.Outbound
+    packagePath::String
+    storePath::String
+    projectDir::String
+end
+
 @dict_readable struct IndexProgressParams <: JSONRPC.Outbound
     message::String
     percentage::Union{Int,Missing}
@@ -70,6 +76,7 @@ end
 const index_project_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/indexProject", IndexProjectParams, String)
 const create_standalone_project_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/createStandaloneProject", CreateStandaloneProjectParams, String)
 const resolve_environment_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/resolveEnvironment", ResolveEnvironmentParams, String)
+const resolve_extension_environment_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/resolveExtensionEnvironment", ResolveExtensionEnvironmentParams, String)
 const expand_macros_request_type = JSONRPC.RequestType("juliadynamicanalysisprocess/expandMacros", ExpandMacrosParams, ExpandMacrosResult)
 # const testserver_activate_env_request_type = JSONRPC.RequestType("activateEnv", ActivateEnvParams, Nothing)
 # const configure_testrun_request_type = JSONRPC.RequestType("testserver/ConfigureTestRun", ConfigureTestRunRequestParams, Nothing)
