@@ -1029,6 +1029,15 @@ end
 # root applies to the workspace type `name` declared at `path`: the bound is
 # `Any`, or the type's declared supertype chain (through the workspace's own
 # abstract types) reaches it.
+# Whether `name` in module `path` names something the workspace does not
+# declare: a `using`ed external face, or an implicit Base/Core name.
+function _v2_name_is_external(rt, root, path::Vector{String}, name::String)
+    face = get(derived_v2_module_visible_names_idfree(rt, root, path), name, nothing)
+    face === nothing || return face.origin === :using_external
+    bare = derived_v2_module_is_bare(rt, root, path)
+    return insorted(name, derived_v2_implicit_scope_names(rt, root, bare))
+end
+
 function _v2_generic_constructor_covers(rt, root, path::Vector{String}, name::String)
     bounds = derived_v2_root_generic_constructor_bounds(rt, root)
     isempty(bounds) && return false
@@ -1037,7 +1046,17 @@ function _v2_generic_constructor_covers(rt, root, path::Vector{String}, name::St
     cur_path = path
     for _ in 1:8
         ref = get(derived_v2_module_declared(rt, root, cur_path), current, nothing)
-        ref === nothing && return true          # unknown ancestry: decline
+        if ref === nothing
+            # Not declared here. An implicit Base/Core name or a `using`ed
+            # external type (`FileBuffer <: IO`) continues its ancestry
+            # OUTSIDE the workspace, where a workspace-declared bound can never
+            # appear: only a bound that is itself external (`T<:IO`) could
+            # still cover it, and that declines. Anything else is unknown
+            # ancestry: decline.
+            _v2_name_is_external(rt, root, cur_path, current) || return true
+            declared_here = derived_v2_module_declared(rt, root, cur_path)
+            return any(b -> get(declared_here, b, nothing) === nothing, bounds)
+        end
         body = derived_v2_item_body(rt, ref)
         body === nothing && return true
         sup = _v2_declared_supertype(body)

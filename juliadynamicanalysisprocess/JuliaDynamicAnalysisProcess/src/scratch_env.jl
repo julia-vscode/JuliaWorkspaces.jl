@@ -60,7 +60,21 @@ function _package_source_path(src_env, manifest, package_name::String)
         end
     end
 
+    # A workspace root's manifest may dev a package none of the root's own
+    # `[deps]` name (a member's dependency — Plots' `StatsPlots`): by name.
+    entry = _manifest_entry_by_name(manifest, package_name)
+    if entry !== nothing && entry.path !== nothing
+        return entry.path
+    end
+
     error("Cannot locate the source of package $package_name in the environment at $(dirname(src_env.project_file)).")
+end
+
+function _manifest_entry_by_name(manifest, package_name::String)
+    for (_, entry) in manifest.deps
+        entry.name == package_name && return entry
+    end
+    return nothing
 end
 
 # A manifest whose recorded project hash disagrees with the project makes
@@ -106,6 +120,14 @@ function materialize_scratch_env(project_path::String, package_name::String)
     env_dir = mktempdir()
 
     project = deepcopy(src_env.project)
+
+    # A package the manifest devs without the project naming it in `[deps]`
+    # must be declared by the wrapper, or its `[sources]` pin is rejected and
+    # TestEnv cannot activate it.
+    if !haskey(project.deps, package_name)
+        entry = _manifest_entry_by_name(manifest, package_name)
+        entry === nothing || (project.deps[package_name] = entry.uuid)
+    end
 
     @static if VERSION >= v"1.11"
         # `[sources]` paths are project-relative, so they need the same treatment

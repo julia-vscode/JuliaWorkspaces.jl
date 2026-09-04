@@ -320,6 +320,15 @@ end
     # Without the generic constructor the 1-argument call is a real mismatch.
     src3 = "struct UnsafeCollector\n    data\n    n\nend\nmake() = UnsafeCollector([1, 2])\n"
     @test length(ca_msgs(src3)) == 1
+    # A type whose supertype is external (`FileBuffer <: IO`) cannot be under a
+    # workspace-declared bound: FilePathsBase's `FileBuffer(fp; writable=true)`
+    # real bug keeps its keyword check ...
+    src5 = "abstract type AbstractPath end\nstruct FileBuffer <: IO\n    fp\nend\n" *
+           "(::Type{T})(str::AbstractString) where {T<:AbstractPath} = parse(T, str)\n" *
+           "make() = FileBuffer(\"x\"; writable=true)\n"
+    @test length(ca_msgs(src5)) == 1
+    # ... while an external bound (`T<:IO`) may well cover it: decline.
+    @test isempty(ca_msgs(replace(src5, "T<:AbstractPath" => "T<:IO")))
 end
 
 @testitem "call args: external constructors are checked only for plain types" setup=[CallArgsWS] begin
