@@ -372,7 +372,18 @@ Salsa.@derived function derived_v2_declared_dep_names(rt, root, uri)
         pkg = derived_package(rt, pkg_folder)
         if pkg !== nothing
             pf = derived_project_file(rt, pkg.project_file_uri)
-            pf === nothing || union!(deps, keys(pf.deps))
+            if pf !== nothing
+                union!(deps, keys(pf.deps))
+                # Test files draw on `[extras]` / `[targets] test`; a merged
+                # test environment whose materialization only partly
+                # succeeded lacks some of them — declared, not unknown.
+                if _file_needs_test_env(rt, uri2filepath(pkg_folder), uri)
+                    union!(deps, keys(pf.extras))
+                    for names in values(pf.targets)
+                        union!(deps, names)
+                    end
+                end
+            end
         end
     end
     return deps

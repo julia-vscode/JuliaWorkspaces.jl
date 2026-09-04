@@ -160,6 +160,15 @@ end
     set_input_env_ready!(jw.runtime, true)
     @test ef_ui(jw, sub_entry) == ["Failed to resolve `NotDeclared_xyz`. Missing-reference checks are disabled in this scope and all nested scopes."]
 
+    # A test file's `[extras]` / `[targets] test` deps are declared: missing
+    # from a partially materialized test environment ⇒ boundary, not unknown.
+    jw = ef_workspace()
+    JW.update_file!(jw, TextFile(URI("file:///ef/Project.toml"), SourceText(EF_PROJECT * "\n[extras]\nTestDep_xyz = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9f8\"\n\n[targets]\ntest = [\"TestDep_xyz\"]\n", "toml")))
+    set_input_env_ready!(jw.runtime, true)
+    tst = URI("file:///ef/test/runtests.jl")
+    add_file!(jw, TextFile(tst, SourceText("using TestDep_xyz\nusing NotDeclared_xyz\n", "julia")))
+    @test ef_ui(jw, tst) == ["Failed to resolve `NotDeclared_xyz`. Missing-reference checks are disabled in this scope and all nested scopes."]
+
     # `using TestSetup` in a test file, where test/testsetup.jl declares the
     # module and runtests.jl includes it into Main first.
     jw = ef_workspace()
