@@ -197,3 +197,14 @@ end
     end
     """, :type_piracy))
 end
+
+@testitem "sig rules: typeof(own function) is an owned type" setup=[SigRulesWS] begin
+    # The ChainRulesCore idiom: `rrule(::typeof(f), x)` for a function `f`
+    # this module defines extends an imported function on a singleton type
+    # the module owns (MLUtils).
+    src = "import ChainRulesCore: rrule\nchunk(x) = x\nrrule(::typeof(chunk), x) = (x, identity)\nrrule(::Type{typeof(chunk)}, x) = (x, identity)\n"
+    @test isempty(sr_diags(src, :type_piracy))
+    # …but `typeof` of an external function is still piracy.
+    src2 = "import ChainRulesCore: rrule\nrrule(::typeof(Base.sum), x) = (x, identity)\n"
+    @test length(sr_diags(src2, :type_piracy)) == 1
+end

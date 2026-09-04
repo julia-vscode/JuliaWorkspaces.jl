@@ -439,8 +439,15 @@ Salsa.@derived function derived_v2_module_const_decl_findings(rt, root, path)
     function usable_item(ref::V2ItemRef)
         ref.file in cond_files && return false
         for r in skel_of(ref.file).items
+            # Declarations harvested from a macro EXPANSION (the opaque row)
+            # are visible names, not statements the source spells: a macro
+            # re-emitting a `const` the file already has (ArrayLayouts'
+            # `@layoutmul`), or a guarded `const` inside its expansion
+            # (Blink's `@init`), is the macro author's business — never a
+            # conflict to report here.
             r.id == ref.id &&
-                return r.interpretable && !r.under_macrocall && !r.conditional
+                return r.interpretable && !r.under_macrocall && !r.conditional &&
+                       r.kind !== :opaque_macrocall
         end
         return false   # not an item row (a module event): representative-only
     end
@@ -674,13 +681,35 @@ end
 function _v2_has_unexpanded_unknown_macro(bt::BodyTree{V2Kind}, expansions, qdepth::Int)
     if qdepth == 0 && _is_opaque_macrocall(bt)
         mc = bt.kind == JS2.K"do" ? bt.children[1] : bt
-        name = _v2_macrocall_name(mc)
-        !_v2_macro_name_effects_known(name) && !haskey(expansions, bt.hash) && return true
+        _v2_macrocall_effects_unknown(mc) && !haskey(expansions, bt.hash) && return true
     end
     bt.children === nothing && return false
     cd = _quote_depth(bt.kind, qdepth)
     return any(c -> _v2_has_unexpanded_unknown_macro(c, expansions, cd), bt.children)
 end
+
+# Whether the module at `path` has a whole-module `using` of a tree or
+# workspace-package module whose own names are incomplete (opaque macrocall,
+# eval marker, computed include). One level only: blindness is a property of
+# the used module, and this checks it directly rather than through its own
+# imports, so there is no recursion through `using` cycles.
+function _v2_uses_blind_module(rt, root, path)
+    for ri in derived_v2_module_imports(rt, root, path)
+        (ri.kind === :using && isempty(ri.symbols)) || continue
+        if ri.target.sort === :tree
+            _v2_module_is_blind(rt, root, ri.target.path) && return true
+        elseif ri.target.sort === :workspace_package
+            entry = get(derived_v2_workspace_package_roots(rt), ri.target.path[1], nothing)
+            entry === nothing && continue
+            _v2_module_is_blind(rt, entry, ri.target.path) && return true
+        end
+    end
+    return false
+end
+
+_v2_module_is_blind(rt, root, path) =
+    derived_v2_module_has_opaque_macrocall(rt, root, path) ||
+    derived_v2_module_has_computed_include(rt, root, path)
 
 # The item-level existence-guard gate: a body that mentions `isdefined`,
 # `@isdefined`, or `VERSION` anywhere is skipped whole (v1 exempts only the
@@ -813,6 +842,11 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
     # A `using`/`import` inside a try/if body may bring any name — this rule's
     # blindness only (imports add no methods to already-visible names).
     derived_v2_module_has_guarded_import(rt, root, path) && return result
+    # A whole-module `using` of a workspace module that is itself blind
+    # brings in an export list the walk cannot complete (MLStyle's own
+    # `@reexport` computes `export …` at expansion time): the same blindness,
+    # one `using` away.
+    _v2_uses_blind_module(rt, root, path) && return result
 
     visible = derived_v2_module_visible_names_idfree(rt, root, path)
     implicit = derived_v2_implicit_scope_names(rt, root, derived_v2_module_is_bare(rt, root, path))
@@ -841,6 +875,42 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
         end
     end
     return result
+end
+
+# Whether a definition body is a generic constructor `(::Type{C})(…)` — a
+# callable-object method on a `Type{…}` instance (`where`/return-type
+# wrappers looked through). The walker classifies such items as declaring
+# nothing, so this looks at the body directly.
+function _v2_is_generic_type_constructor(body::BodyTree{V2Kind})
+    node = body
+    while (node.kind == JS2.K"const" || node.kind == JS2.K"global") && _v2_nchildren(node) >= 1
+        node = _v2_children(node)[1]
+    end
+    (node.kind == JS2.K"function" || node.kind == JS2.K"=") && _v2_nchildren(node) >= 1 || return false
+    sig = _v2_children(node)[1]
+    while (sig.kind == JS2.K"where" || sig.kind == JS2.K"::") && _v2_nchildren(sig) >= 1
+        sig = _v2_children(sig)[1]
+    end
+    (sig.kind == JS2.K"call" && _v2_nchildren(sig) >= 1) || return false
+    callee = _v2_children(sig)[1]
+    (callee.kind == JS2.K"::" && _v2_nchildren(callee) >= 1) || return false
+    t = _v2_children(callee)[end]
+    return t.kind == JS2.K"curly" && _v2_nchildren(t) >= 1 &&
+           _v2_leaf_string(_v2_children(t)[1]) == "Type"
+end
+
+"Whether any item spliced into `root`'s tree is a generic `(::Type{C})(…)` constructor."
+Salsa.@derived function derived_v2_root_has_generic_type_constructor(rt, root)
+    tree = derived_v2_module_tree(rt, root)
+    for uri in sort!(collect(keys(tree.file_modules)); by=string)
+        for row in derived_v2_file_skeleton(rt, uri).items
+            (row.kind === :function || row.kind === :assignment) || continue
+            body = derived_v2_item_body(rt, V2ItemRef(uri, row.id))
+            body === nothing && continue
+            _v2_is_generic_type_constructor(body) && return true
+        end
+    end
+    return false
 end
 
 # ── incorrect_call_args / function_has_no_methods ───────────────────────────
@@ -1043,6 +1113,12 @@ function _v2_callee_arities(rt, root, path::Vector{String},
         end
         if face.origin === :declared || face.origin === :using_tree
             face.kind in _V2_METHOD_ITEM_KINDS || return nothing
+            # A constructor call while the root defines a generic constructor
+            # `(::Type{C})(…) where {C<:Abstract}` (BangBang's collectors,
+            # Transducers' executors): every subtype gains that method, and
+            # which types are subtypes is not known here — decline.
+            _v2_is_datatype_kind(face.kind) &&
+                derived_v2_root_has_generic_type_constructor(rt, root) && return nothing
             ws = derived_v2_method_arities(rt, root, face.origin_module, name)
             ws === nothing && return nothing
             return (ws, true)
@@ -1178,6 +1254,11 @@ Salsa.@derived function derived_item_call_args_findings(rt, ref::V2ItemRef)
     derived_v2_module_unresolved_wildcard_using(rt, root, path) && return result
     derived_v2_module_has_computed_include(rt, root, path) && return result
     derived_v2_module_has_opaque_macrocall(rt, root, path) && return result
+    # An item inside an `if VERSION < …`/`@static if` branch calls into the
+    # Julia (or platform) it targets, whose method tables this environment
+    # need not have (MatrixFactorizations' `checknonsingular(info, ::RowMaximum)`
+    # under `if VERSION < v"1.11-"`): decline.
+    skel.items[idx].conditional && return result
 
     binding_of = Dict{Int32,LoweredBinding}(b.id => b for b in low.bindings)
     uses_at = Dict{Int32,Vector{Int32}}()
@@ -1610,6 +1691,10 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
         (arg.kind == JS2.K"..." && _v2_nchildren(arg) >= 1) && (arg = _v2_children(arg)[1])
         t = _v2_arg_decl_type(arg)
         t === nothing && continue
+        # `rrule(::typeof(f), …)` for a function `f` this module declares:
+        # `typeof(f)` is a singleton type the module owns (the ChainRulesCore
+        # idiom) — not piracy.
+        _v2_typeof_owned_function(rt, root, path, t) && return result
         names = _v2_type_expr_names!(Tuple{Vector{String},String}[], t)
         for (q, n) in names
             (isempty(q) && n in wnames) && return result   # typevar-typed: owned
@@ -1621,6 +1706,22 @@ Salsa.@derived function derived_item_sig_rule_findings(rt, ref::V2ItemRef)
     push!(result, (addr=Int32(1), rule_id=:type_piracy,
         msg="An imported function has been extended without using module defined typed arguments."))
     return result
+end
+
+# Whether a declared argument type is `typeof(f)` (or `Type{typeof(f)}`) for
+# a name declared in the module at `path` — an owned singleton type.
+function _v2_typeof_owned_function(rt, root, path, t::BodyTree{V2Kind})
+    node = t
+    if node.kind == JS2.K"curly" && _v2_nchildren(node) == 2 &&
+       _v2_leaf_string(_v2_children(node)[1]) == "Type"
+        node = _v2_children(node)[2]
+    end
+    node.kind == JS2.K"call" || return false
+    cs = _v2_children(node)
+    (length(cs) == 2 && _v2_leaf_string(cs[1]) == "typeof") || return false
+    q, n = _v2_qualified_name(_v2_unwrap_to_name(cs[2]))
+    (n === nothing || !isempty(q)) && return false
+    return haskey(derived_v2_module_names(rt, root, path), n)
 end
 
 # ── the shape rules: pointless_boolean / const_if_condition / literal_use ───
@@ -1887,7 +1988,7 @@ function _v2_is_unmodelled_macro_body(body::BodyTree{V2Kind})
     name === nothing && return false
     name == "@enum" && return false
     name in V2_ISOLATED_SCOPE_MACROS && return false
-    return !_v2_macro_name_effects_known(name)
+    return _v2_macrocall_effects_unknown(body)
 end
 
 # The notice for an opaque top-level macrocall that did NOT clear through

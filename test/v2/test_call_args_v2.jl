@@ -286,3 +286,27 @@ end
     @test isempty(ca_diags(jw; uri=test_uri))
     @test isempty(ca_diags(jw; uri=orphan))
 end
+
+@testitem "call args: conditional items and generic Type{C} constructors decline" setup=[CallArgsWS] begin
+    # A call inside a version-gated branch targets another Julia's method
+    # table (MatrixFactorizations under `if VERSION < v"1.11-"`).
+    src = "f(x) = 1\nif VERSION < v\"1.11-\"\n    g(a) = f(a, 2)\nend\n"
+    @test isempty(ca_msgs(src))
+    @test !isempty(ca_msgs("f(x) = 1\ng(a) = f(a, 2)\n"))
+
+    # A generic constructor `(::Type{C})(...) where {C<:Abstract}` gives every
+    # subtype that arity (BangBang, Transducers): constructor calls decline.
+    src2 = """
+    abstract type AbstractCollector end
+    struct UnsafeCollector <: AbstractCollector
+        data
+        n
+    end
+    (::Type{C})(data::AbstractVector) where {C<:AbstractCollector} = C(data, 0)
+    make() = UnsafeCollector([1, 2])
+    """
+    @test isempty(ca_msgs(src2))
+    # Without the generic constructor the 1-argument call is a real mismatch.
+    src3 = "struct UnsafeCollector\n    data\n    n\nend\nmake() = UnsafeCollector([1, 2])\n"
+    @test length(ca_msgs(src3)) == 1
+end

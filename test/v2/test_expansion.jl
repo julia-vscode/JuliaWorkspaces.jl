@@ -483,6 +483,24 @@ end
     @test isempty(unused(jw, uri))                                    # failed
     settle!(jw, key => (status=:ok, text="Base.cmd_gen(((\"ffmpeg\",), (\"-v\",), (verbose_level,), (\"-i\",), (basename(pattern),), (\"-loop\",), (loop,), (fn,)))"))
     @test isempty(unused(jw, uri))                                    # ok
+    # String macros interpolate too: Bonito's `js"…$(x)…"`, LaTeXStrings'
+    # `L"%$x"`, and `$name` inside a triple-quoted string macro (WGLMakie).
+    # `raw"$x"` does not, but a phantom read is the silent direction.
+    jw3, uri3 = exp_make_jw("""
+    function w(session, scene_ser, uuid, x, unused_here)
+        err = "nope"
+        a = js\"\"\"
+            const s = \$(scene_ser);
+            console.log(\$uuid, \$(string(err)));
+        \"\"\"
+        b = L"%\$x"
+        c = raw"\$unused_here"
+        return (a, b, c, session)
+    end
+    """)
+    set_input_env_ready!(jw3.runtime, true)
+    @test isempty(unused(jw3, uri3))
+    @test !any(d -> d.code === :missing_reference, get_diagnostic(jw3, uri3))
     # A genuinely unused local next to the cmd still reports, in every state.
     jw2, uri2 = exp_make_jw("function h(fn)\n    dead = 1\n    run(`open \$fn`)\nend\n")
     set_input_env_ready!(jw2.runtime, true)
@@ -594,4 +612,55 @@ end
     @test isempty(get_diagnostic(jw, uri))
     JW.set_macro_expansion!(jw, false)
     @test isempty(get_diagnostic(jw, uri))
+end
+
+@testitem "expansion decls: a harvested const alias survives a source-level constructor" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    # MathOptInterface: `MOI.Utilities.@model(Model, ...)` expands to
+    # `const Model{T} = GenericModel{T,...}` while the source spells
+    # `function Model(; kw...)`. Both declarations survive: the alias makes
+    # `x::Model` a type annotation, and the pair is no const_decl conflict.
+    src = "@model Model\nfunction Model(; kw...)\n    Model{Float64}()\nend\nread!(io, model::Model) = model\n"
+    jw, uri = exp_make_jw(src)
+    set_input_env_ready!(jw.runtime, true)
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="const Model{T} = Base.Dict{T,Int}"))
+    @test !exp_blind(jw, uri)
+    events = JW.derived_v2_module_decl_events(jw.runtime, uri, String[])
+    @test Set(e[2] for e in events if e[1] == "Model") == Set([:const, :function])
+    diags = get_diagnostic(jw, uri)
+    @test !any(d -> d.code === :invalid_type_declaration, diags)
+    @test !any(d -> d.code === :const_decl, diags)
+
+    # A macro re-emitting a const the file already has (ArrayLayouts'
+    # `@layoutmul`) is not a const_decl conflict either.
+    jw2, uri2 = exp_make_jw("const Qs = Union{Int,Float64}\n@layoutmul Qs\nlast(x::Qs) = x\n")
+    set_input_env_ready!(jw2.runtime, true)
+    settle!(jw2, exp_key_for(jw2, uri2, 1) => (status=:ok, text="const Qs = Union{Int,Float64}\nfoo(x::Qs) = x"))
+    @test !exp_blind(jw2, uri2)
+    @test !any(d -> d.code === :const_decl, get_diagnostic(jw2, uri2))
+end
+
+@testitem "expansion decls: a bare-module @reexport clears through its expansion" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: set_input_env_ready!, get_diagnostic
+    # MLStyle: `@reexport MatchImpl` expands to `using .MatchImpl; export
+    # gen_match, …`; harvested, the submodule that does `using MLStyle` sees
+    # the re-exported name.
+    jw, uri = exp_make_jw("""
+    module MatchImpl
+    export gen_match
+    gen_match() = 1
+    end
+    @reexport MatchImpl
+    module AST
+    using ..MyPkgRoot
+    g() = gen_match()
+    end
+    """)
+    set_input_env_ready!(jw.runtime, true)
+    @test exp_blind(jw, uri)
+    mr(jw, uri) = [d.message for d in get_diagnostic(jw, uri) if d.code === :missing_reference]
+    @test isempty(mr(jw, uri))   # blind root: silent
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok, text="begin\n    using .MatchImpl\n    export gen_match\nend"))
+    @test !exp_blind(jw, uri)
+    @test "gen_match" in JW.derived_v2_module_exports(jw.runtime, uri, String[])
 end

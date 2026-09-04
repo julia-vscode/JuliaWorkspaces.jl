@@ -1148,6 +1148,56 @@ function _v2_extract_eval_loop(bt::BodyTree)
     return out
 end
 
+"""
+    _v2_reexport_shape_known(argkinds, blockkinds) -> Bool
+
+`@reexport` is "handled" (see `V2_HANDLED_MACROS`) only in the shapes
+Reexport.jl documents and the walk models — `@reexport using X` / `import X`,
+`@reexport module M … end`, or a `begin … end` of such statements — because
+the walk sees the wrapped statements as ordinary rows. Any other argument
+(`@reexport MatchImpl`: MLStyle's own same-named macro, which computes an
+`export` list at expansion time) has effects the walk cannot model: opaque,
+so the DJP expansion can supply them. `argkinds` are the macro arguments'
+node kinds; `blockkinds(i)` returns the `i`-th argument's child kinds.
+"""
+function _v2_reexport_shape_known(argkinds, blockkinds)
+    isempty(argkinds) && return false
+    for (i, k) in enumerate(argkinds)
+        if k == JS2.K"using" || k == JS2.K"import" || k == JS2.K"module"
+            continue
+        elseif k == JS2.K"block"
+            all(ck -> ck == JS2.K"using" || ck == JS2.K"import", blockkinds(i)) || return false
+        else
+            return false
+        end
+    end
+    return true
+end
+
+# `_v2_reexport_shape_known` over raw syntax nodes (the walker) and over a
+# `BodyTree` macrocall (the lowering-side gates).
+function _v2_reexport_node_shape_known(args)
+    kinds = [JS2.kind(a) for a in args]
+    blockkinds(i) = (cs = JS2.children(args[i]); cs === nothing ? JS2.Kind[] : [JS2.kind(c) for c in cs])
+    return _v2_reexport_shape_known(kinds, blockkinds)
+end
+
+function _v2_reexport_body_shape_known(bt::BodyTree{V2Kind})
+    args = _v2_macro_args(bt)
+    kinds = [a.kind for a in args]
+    blockkinds(i) = [c.kind for c in _v2_children(args[i])]
+    return _v2_reexport_shape_known(kinds, blockkinds)
+end
+
+# The lowering-side twin of the walker's opaque-row decision: whether a
+# macrocall BodyTree names a macro whose effects the walk cannot model.
+function _v2_macrocall_effects_unknown(bt::BodyTree{V2Kind})
+    name = _v2_macrocall_name(bt)
+    _v2_macro_name_effects_known(name) || return true
+    name == "@reexport" && return !_v2_reexport_body_shape_known(bt)
+    return false
+end
+
 # Whether a parse subtree contains a `$` interpolation anywhere. Deliberately
 # depth-blind: even `$` nested under an inner `quote` reaches evaluation when
 # `@eval` runs the whole form, so any occurrence makes the definition opaque.
@@ -1189,7 +1239,8 @@ function _v2_walk_macrocall!(state::_V2WalkState, node, parent_module::Vector{St
     # a name the walk cannot know — so it gets an opaque row too (uninterpolated
     # `@eval f(x) = 1` keeps its inner definition as an ordinary modeled item).
     if !_v2_macro_name_effects_known(name) ||
-       (name == "@eval" && any(_v2_contains_interp, cs[2:end]))
+       (name == "@eval" && any(_v2_contains_interp, cs[2:end])) ||
+       (name == "@reexport" && !_v2_reexport_node_shape_known(cs[min(3, length(cs) + 1):end]))
         ranges = UnitRange{Int}[]
         bt = _build_body_tree_v2!(ranges, node)
         order, id = _v2_mint_ids!(state.alloc, _v2_statement_id_key(bt, parent_module))
@@ -1787,7 +1838,15 @@ Salsa.@derived function derived_v2_file_inventory_expanded(rt, uri)
     items = copy(base.items)
     imports = base.imports
     exports = base.exports
-    declared = Set{String}(it.name for it in base.items if isempty(it.qualifier))
+    # Names the walker already enumerated from INSIDE macrocall arguments
+    # (`@mymacro struct S … end` yields `S`): an expansion restating such a
+    # definition must not read as a redeclaration. Only those — a name the
+    # SOURCE declares elsewhere (MathOptInterface's `function Model(; kw…)`
+    # next to `@model(Model, …)`, whose expansion emits `const Model{T} = …`)
+    # keeps both declarations, exactly as the source-level alias-plus-
+    # constructor idiom does.
+    under = derived_v2_under_macrocall_ids(rt, uri)
+    declared = Set{String}(it.name for it in base.items if isempty(it.qualifier) && it.id in under)
     cleared = Set{Int64}()
     for row in skel.items
         row.kind === :opaque_macrocall || continue
@@ -1795,9 +1854,6 @@ Salsa.@derived function derived_v2_file_inventory_expanded(rt, uri)
         h === nothing && continue
         push!(cleared, row.id)
         for d in h.decls
-            # The macrocall's ARGUMENTS were walked into ordinary items already
-            # (`@mymacro struct S … end` enumerates `S`); the expansion restating
-            # such a definition must not read as a redeclaration.
             (isempty(d.qualifier) && d.name in declared) && continue
             push!(items, V2InventoryItem(row.order, row.id, d.name, d.qualifier,
                                          d.kind, d.field_names, row.parent_module))

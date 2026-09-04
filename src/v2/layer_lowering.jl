@@ -215,35 +215,94 @@ function _collect_macrocall_identifiers!(kids::Vector{JS2.SyntaxTree}, bt::BodyT
     return nothing
 end
 
-# A cmd literal keeps its `$x` / `$(expr)` interpolations INSIDE a raw
-# `CmdString` (the EST spells `` `ffmpeg -v $level` `` as `@cmd "ffmpeg -v
-# $level"`), so the identifier walk above never sees them. Synthesize their
-# reads at address 0 from Base's own shell parser (no evaluation): otherwise
-# `level` reads as an unused binding while the expansion is pending or
-# failed, and the finding vanishes once the DJP splices `Base.cmd_gen(…)` —
-# the appear-then-vanish the pending-state contract forbids. Address 0 keeps
-# the reads out of missing_reference (a use the source does not spell).
-function _collect_cmd_interpolation_reads!(kids::Vector{JS2.SyntaxTree}, bt::BodyTree{V2Kind})
+# A cmd literal or a string macro keeps its `$x` / `$(expr)` interpolations
+# INSIDE a raw string (the EST spells `` `ffmpeg -v $level` `` as `@cmd
+# "ffmpeg -v $level"`, and Bonito's `js"…$(obs)…"` / LaTeXStrings' `L"%$x"`
+# as `@js_str "…"` / `@L_str "…"`), so the identifier walk above never sees
+# them. Synthesize their reads at address 0 — Base's own shell parser for
+# cmds, a `$`-scan for string macros, no evaluation: otherwise `level` reads
+# as an unused binding while the expansion is pending or failed, and the
+# finding vanishes once the DJP splices the expansion — the appear-then-
+# vanish the pending-state contract forbids. Address 0 keeps the reads out
+# of missing_reference (a use the source does not spell). A string macro
+# that does NOT interpolate (`raw"$x"`) merely gains a phantom read, which
+# is the silent direction.
+function _collect_string_macro_reads!(kids::Vector{JS2.SyntaxTree}, bt::BodyTree{V2Kind})
     cs = bt.children
     (cs === nothing || isempty(cs)) && return nothing
-    _macro_name_string(cs[1]) == "cmd" || return nothing
+    name = _macro_name_string(cs[1])
+    name === nothing && return nothing
+    is_cmd = name == "cmd"
+    (is_cmd || endswith(name, "_str") || endswith(name, "_cmd")) || return nothing
+    names = Symbol[]
     for c in cs
-        (c.kind == JS2.K"CmdString" && c.val isa AbstractString) || continue
+        ((c.kind == JS2.K"CmdString" || c.kind == JS2.K"String") && c.val isa AbstractString) || continue
         occursin('$', c.val) || continue
-        ex = try
-            Base.shell_parse(String(c.val))[1]
-        catch err
-            err isa InterruptException && rethrow()
-            continue
-        end
-        names = Symbol[]
-        _collect_expr_symbols!(names, ex)
-        for s in unique!(names)
-            _is_writeonly_name(s) && continue
-            push!(kids, JS2.SyntaxTree(JS2.K"Identifier", nothing, String(s), LineNumberNode(0, :body), nothing))
+        if is_cmd
+            ex = try
+                Base.shell_parse(String(c.val))[1]
+            catch err
+                err isa InterruptException && rethrow()
+                continue
+            end
+            _collect_expr_symbols!(names, ex)
+        else
+            _collect_dollar_interpolations!(names, String(c.val))
         end
     end
+    for s in unique!(names)
+        _is_writeonly_name(s) && continue
+        push!(kids, JS2.SyntaxTree(JS2.K"Identifier", nothing, String(s), LineNumberNode(0, :body), nothing))
+    end
     return nothing
+end
+
+# `$name` and `$(expr)` occurrences in a raw string, as the symbols they
+# mention (`$(expr)` parsed with `Meta.parse`, never evaluated). `$1`, `$"`
+# and a trailing `$` (regex anchors, substitution back-references) yield
+# nothing.
+function _collect_dollar_interpolations!(names::Vector{Symbol}, s::String)
+    i = firstindex(s)
+    n = lastindex(s)
+    while i <= n
+        c = s[i]
+        i = nextind(s, i)
+        c == '$' || continue
+        i > n && break
+        d = s[i]
+        if d == '('
+            depth = 0
+            j = i
+            stop = nothing
+            while j <= n
+                cj = s[j]
+                cj == '(' && (depth += 1)
+                if cj == ')'
+                    depth -= 1
+                    depth == 0 && (stop = j; break)
+                end
+                j = nextind(s, j)
+            end
+            stop === nothing && break
+            inner = s[nextind(s, i):prevind(s, stop)]
+            ex = try
+                Meta.parse(inner)
+            catch err
+                err isa InterruptException && rethrow()
+                nothing
+            end
+            ex === nothing || _collect_expr_symbols!(names, ex)
+            i = nextind(s, stop)
+        elseif Base.is_id_start_char(d)
+            j = i
+            while j <= n && Base.is_id_char(s[j])
+                j = nextind(s, j)
+            end
+            push!(names, Symbol(s[i:prevind(s, j)]))
+            i = j
+        end
+    end
+    return names
 end
 
 function _collect_expr_symbols!(out::Vector{Symbol}, ex)
@@ -345,7 +404,7 @@ function _materialize(bt::BodyTree{V2Kind}, addr::Base.RefValue{Int}, qdepth::In
             for c in bt.children
                 _collect_macrocall_identifiers!(kids, c, addr)
             end
-            _collect_cmd_interpolation_reads!(kids, bt)
+            _collect_string_macro_reads!(kids, bt)
         end
         # The union guard (design doc: DJP-side macro expansion): when the DJP
         # delivered an expansion for this macrocall, splice it at address 0 as

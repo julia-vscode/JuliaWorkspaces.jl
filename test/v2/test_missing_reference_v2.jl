@@ -198,3 +198,38 @@ end
     @test !isempty(filter(d -> d.code === :analysis_boundary && occursin("conditional", d.message),
                           JuliaWorkspaces.get_diagnostic(jw, MR_URI)))
 end
+
+@testitem "missing_reference: a whole-module using of a blind module blinds this one" setup=[MissRefV2WS] begin
+    # MLStyle: `using MLStyle` inside a submodule, where MLStyle's own
+    # `@reexport` computes its `export` list at expansion time — the used
+    # module's exports are incomplete, so names here cannot be judged.
+    jw = mr_workspace("""
+    module Inner
+    @generate_api names_go_here
+    export foo
+    end
+    using .Inner
+    g() = bar_from_inner()
+    """)
+    @test isempty(mr_diags(jw))
+    # The same shape with a fully modeled Inner reports the typo.
+    jw = mr_workspace("module Inner\nexport foo\nfoo() = 1\nend\nusing .Inner\ng() = bar_from_inner()\n")
+    @test [d.message for d in mr_diags(jw)] == ["Missing reference: bar_from_inner"]
+    # A colon-list using is exact and never blinds.
+    jw = mr_workspace("module Inner\n@generate_api x\nexport foo\nfoo() = 1\nend\nusing .Inner: foo\ng() = bar_from_inner()\n")
+    @test [d.message for d in mr_diags(jw)] == ["Missing reference: bar_from_inner"]
+end
+
+@testitem "missing_reference: @reexport is modeled only in its using/import shapes" setup=[MissRefV2WS] begin
+    # `@reexport using X` is walked as the import it wraps: no blindness, a
+    # typo next to it still reports.
+    jw = mr_workspace("module M\n@reexport using Base.Iterators\nf() = undefined_xyz\nend\n")
+    @test [d.message for d in mr_diags(jw)] == ["Missing reference: undefined_xyz"]
+    jw = mr_workspace("module M\n@reexport begin\n    using Base.Iterators\n    import Base.Threads\nend\nf() = undefined_xyz\nend\n")
+    @test [d.message for d in mr_diags(jw)] == ["Missing reference: undefined_xyz"]
+    # A bare-module argument (MLStyle's own same-named macro, computing its
+    # export list at expansion time) is an unmodelled effect: opaque, blind.
+    jw = mr_workspace("module M\nmodule Impl\nexport gen_match\ngen_match() = 1\nend\n@reexport Impl\nf() = undefined_xyz\nend\n")
+    @test isempty(mr_diags(jw))
+    @test JW.derived_v2_module_has_opaque_macrocall(jw.runtime, MR_URI, ["M"])
+end
