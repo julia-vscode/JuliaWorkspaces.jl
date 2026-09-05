@@ -135,6 +135,16 @@ end
     # Genuinely-unused names under a filter are still reported, once each.
     jw = ll_workspace("f(d) = [1 for (n, c) in d if true]\n")
     @test length(ll_codes(jw, :unused_binding)) == 2
+    # A filtered generator whose body IS the variable (StructArrays'
+    # `(x for x in xs if true)`): the body closure lowers to the identity, so
+    # no read survives — the variable is used all the same.
+    for src in ("f(d) = (x for x in d if true)\n", "f(d) = [x for x in d if true]\n",
+                "f(d) = collect((x for x in d if x > 0))\n")
+        jw = ll_workspace(src)
+        @test isempty(ll_codes(jw, :unused_binding)) && isempty(ll_codes(jw, :unused_function_argument))
+    end
+    jw = ll_workspace("f(d) = (y for x in d if true)\n")
+    @test !isempty(ll_codes(jw, :unused_binding)) || !isempty(ll_codes(jw, :unused_function_argument))
 end
 
 @testitem "lowering lint: annotation macros are structurally transparent" setup=[LoweringLintWS] begin

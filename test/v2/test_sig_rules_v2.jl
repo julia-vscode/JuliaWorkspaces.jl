@@ -218,6 +218,9 @@ end
     # the module owns (MLUtils).
     src = "import ChainRulesCore: rrule\nchunk(x) = x\nrrule(::typeof(chunk), x) = (x, identity)\nrrule(::Type{typeof(chunk)}, x) = (x, identity)\n"
     @test isempty(sr_diags(src, :type_piracy))
+    # …also nested in a parameter: `Vector{typeof(chunk)}` is a type this
+    # module has a stake in (Mooncake's `CoDual{typeof(f)}` rules).
+    @test isempty(sr_diags("import ChainRulesCore: rrule\nchunk(x) = x\nrrule(::Vector{typeof(chunk)}, x) = (x, identity)\n", :type_piracy))
     # …but `typeof` of an external function is still piracy.
     src2 = "import ChainRulesCore: rrule\nrrule(::typeof(Base.sum), x) = (x, identity)\n"
     @test length(sr_diags(src2, :type_piracy)) == 1
@@ -234,7 +237,7 @@ end
     project = "name = \"SrPkg\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9e1\"\nversion = \"1.0.0\"\n\n[weakdeps]\nBar = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\n\n[extensions]\nSrPkgBarExt = \"Bar\"\n"
     # `Thing` arrives through the parent's exports, `chunk` through a colon
     # import — both the parent's, both owned here.
-    ext_src = "module SrPkgBarExt\nusing SrPkg\nusing SrPkg: chunk\nimport Base: show, sum\nshow(io::IO, x::Thing) = nothing\nsum(::typeof(chunk), x::Vector{Int}) = 1\nsum(x::Vector{Int}, y::Vector{Int}) = 2\nend\n"
+    ext_src = "module SrPkgBarExt\nusing SrPkg\nusing SrPkg: chunk\nimport Base: show, sum\nshow(io::IO, x::Thing) = nothing\nsum(::typeof(chunk), x::Vector{Int}) = 1\nsum(x::Vector{Int}, y::Vector{Int}) = 2\nsum(::Vector{typeof(SrPkg.chunk)}, x::Vector{Int}) = 3\nend\n"
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(URI("file:///srx/Project.toml"), SourceText(project, "toml")))
     add_file!(jw, TextFile(URI("file:///srx/src/SrPkg.jl"), SourceText("module SrPkg\nexport Thing\nstruct Thing end\nchunk(x) = x\nend\n", "julia")))

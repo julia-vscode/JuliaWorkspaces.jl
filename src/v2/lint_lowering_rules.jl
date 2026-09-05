@@ -142,12 +142,20 @@ Salsa.@derived function derived_item_semantic_findings(rt, ref::V2ItemRef)
         (d != Int32(0) && u.addr != d) && push!(used_addrs, d)
     end
 
+    # `(x for x in d if c)`: the body IS the iteration variable, and the
+    # filtered form desugars that body closure to the identity — no read of
+    # `x` at any address survives lowering, yet `x` is plainly used.
+    identity_vars = Set{Int32}()
+    ibody = derived_item_lowering_body(rt, ref)
+    ibody === nothing || _v2_identity_generator_vars!(identity_vars, ibody, Ref(0), String[])
+
     emitted = Set{Int32}()
     for b in low.bindings
         b.is_internal && continue
         b.is_read && continue
         b.addr == Int32(0) && continue
         b.addr in used_addrs && continue
+        b.addr in identity_vars && continue
         b.addr in emitted && continue
         # `_`-prefixed names are the intentionally-unused convention.
         (isempty(b.name) || startswith(b.name, "_")) && continue
@@ -209,6 +217,37 @@ _v2_ident_val(bt::BodyTree{V2Kind}) =
 # `==`/`!=` calls with a bare `nothing` operand, at the OPERATOR's address
 # (v1 sets its error on the operator). Quoted code is data — no findings
 # inside, but `$` restores evaluated depth.
+# The addresses of iteration variables that are the body of their own
+# generator (`(x for x in d if c)`, also `x` under a nested `for x in …, y in
+# …` of that generator). Same preorder addressing as the lowering's bindings.
+function _v2_identity_generator_vars!(out::Set{Int32}, bt::BodyTree{V2Kind},
+                                      addr::Base.RefValue{Int}, active::Vector{String})
+    myaddr = (addr[] += 1)
+    cs = bt.children
+    if cs === nothing
+        return nothing
+    end
+    if (bt.kind == JS2.K"=" || bt.kind == JS2.K"in") && length(cs) == 2 && !isempty(active)
+        v = _v2_ident_val(cs[1])
+        if v !== nothing && v in active
+            push!(out, Int32(myaddr + 1))   # the LHS identifier is the next node
+        end
+    end
+    if bt.kind == JS2.K"generator" && !isempty(cs)
+        v = _v2_ident_val(cs[1])
+        _v2_identity_generator_vars!(out, cs[1], addr, active)
+        inner = v === nothing ? active : vcat(active, [v])
+        for c in cs[2:end]
+            _v2_identity_generator_vars!(out, c, addr, inner)
+        end
+        return nothing
+    end
+    for c in cs
+        _v2_identity_generator_vars!(out, c, addr, active)
+    end
+    return nothing
+end
+
 function _v2_nothing_comparisons!(out::Vector{SemanticFinding}, bt::BodyTree{V2Kind},
                                   addr::Base.RefValue{Int}, qdepth::Int)
     myaddr = (addr[] += 1)
@@ -1981,15 +2020,24 @@ end
 # parent package declares — an owned singleton type.
 function _v2_typeof_owned_function(rt, root, path, t::BodyTree{V2Kind})
     node = t
-    if node.kind == JS2.K"curly" && _v2_nchildren(node) == 2 &&
-       _v2_leaf_string(_v2_children(node)[1]) == "Type"
-        node = _v2_children(node)[2]
+    if node.kind == JS2.K"curly" && _v2_nchildren(node) >= 2
+        cs = _v2_children(node)
+        # `Type{typeof(f)}`, and any parametric type carrying an owned
+        # singleton somewhere in its parameters (Mooncake's
+        # `rrule!!(::CoDual{typeof(DiffEqBase.promote_f)}, …)` in an
+        # extension): a module-owned type is part of the signature.
+        return any(c -> _v2_typeof_owned_function(rt, root, path, c), cs[2:end])
     end
     node.kind == JS2.K"call" || return false
     cs = _v2_children(node)
     (length(cs) == 2 && _v2_leaf_string(cs[1]) == "typeof") || return false
     q, n = _v2_qualified_name(_v2_unwrap_to_name(cs[2]))
-    (n === nothing || !isempty(q)) && return false
+    n === nothing && return false
+    if !isempty(q)
+        # `typeof(Parent.f)` inside Parent's extension: the parent's own.
+        parent = _v2_extension_parent_name(rt, root)
+        return parent !== nothing && q == [parent]
+    end
     haskey(derived_v2_module_names(rt, root, path), n) && return true
     face = get(derived_v2_module_visible_names_idfree(rt, root, path), n, nothing)
     return face !== nothing && _v2_face_from_extension_parent(rt, root, face)
