@@ -180,6 +180,24 @@ end
     @test _snapshot(child) == before_child
 end
 
+@testitem "child: an expansion prints without line nodes so the host can parse it" begin
+    # Base's logging macros leave a LineNumberNode first in an `if` condition;
+    # `string` prints it as `if #= … =#, try`, which does not parse back.
+    mod = Module(:ExpansionTextUnderTest)
+    Base.include(mod, normpath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "expansion_text.jl")))
+    ex = Meta.parse("function f(x)\n    @warn \"careful\" x\n    x\nend")
+    expanded = Base.invokelatest(mod._expand_fully, mod, ex)
+    text = string(expanded)
+    @test !occursin("#=", text)
+    parsed = Meta.parse(text)
+    @test parsed isa Expr && !(parsed.head in (:error, :incomplete))
+    # A `toplevel` result is flattened into a block of expanded statements.
+    Core.eval(mod, :(macro two() Expr(:toplevel, :(a() = 1), :(b() = 2)) end))
+    flat = Base.invokelatest(mod._expand_fully, mod, Meta.parse("@two"))
+    @test flat isa Expr && flat.head === :block && length(flat.args) == 2
+end
+
 @testitem "child: a workspace member loads by identity from the root project" begin
     # `using Member` from a `[workspace]` root fails (`[deps]` does not name
     # the member) although the manifest locates it — the expansion context
