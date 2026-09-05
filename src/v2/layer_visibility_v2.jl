@@ -512,9 +512,22 @@ function _v2_visible_names_impl_body(rt, root, path::Vector{String}, visited::Se
     for ri in derived_v2_module_imports(rt, root, path)
         ri.target.sort === :unresolved || continue
         target = _v2_reattempt_unresolved(rt, root, path, ri, visited)
-        target === nothing && continue
-
-        if !isempty(ri.symbols)
+        if target === nothing
+            # Nothing resolves the statement's target (a declared dependency
+            # whose symbols are not indexed, a relative path through such a
+            # binding — PlotsBase's `import ..Colors: Colorant`). Julia still
+            # binds the LISTED names lexically, so a colon-list statement
+            # declares them here as `:unknown`: a use of `Colorant` in the
+            # module is never a missing reference. A wildcard form binds
+            # nothing knowable (its module is blind through
+            # `derived_v2_module_unresolved_wildcard_using`).
+            isempty(ri.symbols) && continue
+            segs = String[s for s in ri.target.path if s != "."]
+            entries = [(sym.alias !== nothing ? sym.alias : sym.name,
+                        V2VisibleName(:unknown, :import_binding, nothing, segs), nothing)
+                       for sym in ri.symbols]
+            tier = 2
+        elseif !isempty(ri.symbols)
             entries = _v2_explicit_symbol_bring_ins(rt, root, target, ri.symbols, visited)
             tier = 2   # colon-lists are import_binding-tier regardless of kind
         else

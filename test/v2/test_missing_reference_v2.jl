@@ -86,6 +86,15 @@ end
     # A top-level opaque macrocall may define anything.
     jw = mr_workspace("module M\n@some_dsl begin end\nf() = undefined_xyz\nend\n")
     @test isempty(mr_diags(jw))
+
+    # A colon-list import whose target resolves nowhere (an unindexed
+    # dependency, PlotsBase's `import ..Colors: Colorant`) still binds the
+    # listed names — Julia binds them lexically — without blinding the
+    # module for anything else.
+    jw = mr_workspace("module M\nimport NotAPackage: thing\nf() = thing\ng() = other_undef\nend\n")
+    @test [d.message for d in mr_diags(jw)] == ["Missing reference: other_undef"]
+    jw = mr_workspace("module M\nmodule Inner\nimport ..Nope: thing as t\nf() = t\ng() = other_undef\nend\nend\n")
+    @test [d.message for d in mr_diags(jw)] == ["Missing reference: other_undef"]
 end
 
 @testitem "v2 missing_reference: synthetic-read suppression intervals" setup=[MissRefV2WS] begin
