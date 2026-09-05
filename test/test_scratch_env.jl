@@ -293,6 +293,43 @@ end
     end
 end
 
+@testitem "scratch env: a test-only extra pinned by [sources] resolves" begin
+    include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
+    import Pkg
+
+    # The OrdinaryDiffEq monorepo: `DiffEqDevTools = {path = "lib/…"}` under
+    # `[sources]`, named only in `[extras]`/`[targets]` — in no manifest.
+    root = mktempdir()
+    child_uuid = "aaaaaaaa-9999-0000-1111-555555555555"
+    child = _write_package(joinpath(root, "Child"), "Child", child_uuid)
+
+    parent = mkpath(joinpath(root, "Parent"))
+    write(joinpath(parent, "Project.toml"), """
+        name = "Parent"
+        uuid = "aaaaaaaa-9999-0000-1111-666666666666"
+        version = "0.1.0"
+
+        [sources]
+        Child = {path = "../Child"}
+
+        [extras]
+        Child = "$child_uuid"
+
+        [targets]
+        test = ["Child"]
+        """)
+    write(joinpath(parent, "Manifest.toml"), "manifest_format = \"2.0\"\n")
+
+    @static if VERSION >= v"1.11"
+        env_dir = materialize_scratch_env(parent, "Child")
+        # The pin lives in the wrapper's `[sources]` (the manifest is written
+        # by `instantiate` later); the wrapper declares the extra as a dep.
+        wrapper = Pkg.Types.read_project(joinpath(env_dir, "Project.toml"))
+        @test realpath(wrapper.sources["Child"]["path"]) == realpath(child)
+        @test wrapper.deps["Child"] == Base.UUID(child_uuid)
+    end
+end
+
 @testitem "scratch env: dangling compat for a test-only extra is pruned" begin
     include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
     import Pkg

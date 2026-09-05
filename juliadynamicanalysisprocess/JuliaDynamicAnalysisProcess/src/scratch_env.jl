@@ -67,7 +67,27 @@ function _package_source_path(src_env, manifest, package_name::String)
         return entry.path
     end
 
+    # A test-only extra pinned by `[sources]` (the OrdinaryDiffEq monorepo's
+    # `DiffEqDevTools = {path = "lib/DiffEqDevTools"}` under `[extras]`): in
+    # no manifest at all, its path is the project's.
+    src = _sources_path(src_env, package_name)
+    src === nothing || return src
+
     error("Cannot locate the source of package $package_name in the environment at $(dirname(src_env.project_file)).")
+end
+
+# The `[sources]` path of `package_name` in the source project, absolute, or
+# `nothing`.
+function _sources_path(src_env, package_name::String)
+    @static if VERSION >= v"1.11"
+        sources = src_env.project.sources
+        entry = get(sources, package_name, nothing)
+        (entry isa AbstractDict && haskey(entry, "path")) || return nothing
+        p = String(entry["path"])
+        return isabspath(p) ? p : normpath(joinpath(dirname(src_env.project_file), p))
+    else
+        return nothing
+    end
 end
 
 function _manifest_entry_by_name(manifest, package_name::String)
@@ -126,7 +146,13 @@ function materialize_scratch_env(project_path::String, package_name::String)
     # TestEnv cannot activate it.
     if !haskey(project.deps, package_name)
         entry = _manifest_entry_by_name(manifest, package_name)
-        entry === nothing || (project.deps[package_name] = entry.uuid)
+        if entry !== nothing
+            project.deps[package_name] = entry.uuid
+        elseif haskey(project.extras, package_name)
+            # A test-only extra pinned by `[sources]`: declared by its
+            # `[extras]` uuid.
+            project.deps[package_name] = project.extras[package_name]
+        end
     end
 
     @static if VERSION >= v"1.11"
