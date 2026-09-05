@@ -18,6 +18,28 @@ function _expand_fully(mod::Module, expr)
     if expanded isa Expr && expanded.head === :toplevel
         expanded = Expr(:block, (macroexpand(mod, a; recursive=true) for a in expanded.args)...)
     end
+    expanded = _surface_form(expanded)
     expanded isa Expr && Base.remove_linenums!(expanded)
     return expanded
+end
+
+# Expression heads macros emit in LOWERED form, which `string` can only print
+# as `$(Expr(…))` splices — unparseable, so the host treats the whole
+# expansion as unmodelled. Rewritten to the surface form that means the same
+# to a linter: `Expr(:isdefined, x)` (Base's logging macros) is `@isdefined x`;
+# the inert markers `inbounds`/`boundscheck`/`meta`/`loopinfo`/GC-preserve and
+# alias scopes declare nothing and vanish (`boundscheck` is `true`).
+const _INERT_HEADS = (:inbounds, :meta, :loopinfo, :gc_preserve_begin, :gc_preserve_end,
+                      :aliasscope, :popaliasscope)
+
+function _surface_form(ex)
+    ex isa Expr || return ex
+    if ex.head === :isdefined && length(ex.args) == 1
+        return Expr(:macrocall, Symbol("@isdefined"), nothing, _surface_form(ex.args[1]))
+    elseif ex.head === :boundscheck
+        return true
+    elseif ex.head in _INERT_HEADS
+        return nothing
+    end
+    return Expr(ex.head, (_surface_form(a) for a in ex.args)...)
 end
