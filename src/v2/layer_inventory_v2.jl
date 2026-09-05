@@ -967,14 +967,28 @@ function _v2_walk_one!(state::_V2WalkState, node, parent_module::Vector{String},
     cs = JS2.children(node)
     cs === nothing && return _v2_emit_plain!(state, node, parent_module, interpretable)
 
-    if k == JS2.K"block"
-        # Bare `begin…end` and `if`-branch bodies introduce no scope.
+    if k == JS2.K"block" || k == JS2.K"toplevel"
+        # Bare `begin…end` and `if`-branch bodies introduce no scope; a
+        # `;`-terminated top-level statement (`const x = gensym("…");`) is a
+        # `toplevel` node wrapping the statement.
         for c in cs
             _v2_walk_one!(state, c, parent_module, interpretable)
         end
         return
+    elseif k == JS2.K"parens" && length(cs) == 1
+        return _v2_walk_one!(state, cs[1], parent_module, interpretable)
     elseif k == JS2.K"if" || k == JS2.K"elseif"
         return _v2_walk_if_chain!(state, node, parent_module, interpretable)
+    elseif (k == JS2.K"||" || k == JS2.K"&&") && any(_v2_is_declaration_node, cs)
+        # `isdefined(Main, :UTF8Str) || (const UTF8Str = String)` (Format):
+        # a declaration under a short-circuit operator at the top level is a
+        # conditional declaration, exactly like one in an `if` branch.
+        state.in_if += 1
+        for c in cs
+            _v2_walk_one!(state, c, parent_module, interpretable)
+        end
+        state.in_if -= 1
+        return
     elseif k == JS2.K"macrocall"
         return _v2_walk_macrocall!(state, node, parent_module, interpretable)
     end
@@ -1012,6 +1026,19 @@ end
 
 _v2_emit_plain!(state, node, parent_module, interpretable) =
     (_v2_emit!(state, node, parent_module, interpretable); nothing)
+
+# Whether a top-level node declares something: a definition keyword, an
+# import, or an assignment to a (typed) identifier — looking through parens.
+function _v2_is_declaration_node(node)
+    JS2.is_leaf(node) && return false
+    k = JS2.kind(node)
+    cs = JS2.children(node)
+    cs === nothing && return false
+    (k == JS2.K"parens" && length(cs) == 1) && return _v2_is_declaration_node(cs[1])
+    k in (JS2.K"const", JS2.K"global", JS2.K"function", JS2.K"macro", JS2.K"struct",
+          JS2.K"abstract", JS2.K"primitive", JS2.K"module", JS2.K"using", JS2.K"import") && return true
+    return k == JS2.K"=" && length(cs) == 2 && _v2_is_assignment_target(cs[1])
+end
 
 function _v2_is_assignment_target(node)
     JS2.is_leaf(node) && return JS2.kind(node) == JS2.K"Identifier"
@@ -1625,6 +1652,11 @@ function _v2_classify(bt::BodyTree, kind_override::Union{Nothing,Symbol}=nothing
         else
             n = _v2_leaf_string(inner)
             n !== nothing && push!(out, V2Decl(n, String[], something(kind_override, :assignment), String[]))
+        end
+        # `width = height = 500` (GR's examples): a chained assignment
+        # declares every target, not only the outermost.
+        if length(cs) >= 2 && cs[2].kind == JS2.K"=" && inner.kind != JS2.K"call"
+            append!(out, _v2_classify(cs[2], kind_override))
         end
 
     elseif k == JS2.K"macrocall"

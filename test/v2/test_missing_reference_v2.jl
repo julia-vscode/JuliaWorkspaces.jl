@@ -95,6 +95,11 @@ end
     @test [d.message for d in mr_diags(jw)] == ["Missing reference: other_undef"]
     jw = mr_workspace("module M\nmodule Inner\nimport ..Nope: thing as t\nf() = t\ng() = other_undef\nend\nend\n")
     @test [d.message for d in mr_diags(jw)] == ["Missing reference: other_undef"]
+
+    # Declarations the walker used to step over: a chained assignment's inner
+    # target, a conditional const under `||`, a `;`-terminated const.
+    jw = mr_workspace("w = h = 500\nisdefined(Main, :U) || (const U = String)\nconst k = 1;\nf(x::U) = (h, k, x)\n")
+    @test isempty(mr_diags(jw))
 end
 
 @testitem "v2 missing_reference: synthetic-read suppression intervals" setup=[MissRefV2WS] begin

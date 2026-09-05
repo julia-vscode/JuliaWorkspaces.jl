@@ -267,6 +267,20 @@ end
     @test only(inv.items).id == only(inv.includes).id
 end
 
+@testitem "v2 inventory: top-level statements the walker used to step over" setup=[InvV2WS] begin
+    # A `;`-terminated statement is a `toplevel` node around the statement
+    # (Match's `const unusable_variable = gensym("…");`).
+    @test iv_kinds(iv_inv("const x = gensym(\"a\");\nf() = 2\n")) |> Set == Set([("x", :const), ("f", :function)])
+    # A declaration under `||`/`&&` is a conditional declaration (Format's
+    # `isdefined(Main, :UTF8Str) || (const UTF8Str = String)`).
+    inv = iv_inv("isdefined(Main, :U) || (const U = String)\n")
+    @test ("U", :const) in iv_kinds(inv)
+    # A chained assignment declares every target (GR's `width = height = 500`).
+    @test Set(iv_kinds(iv_inv("w = h = 500\n"))) == Set([("w", :assignment), ("h", :assignment)])
+    # An ordinary short-circuit statement stays one item.
+    @test iv_kinds(iv_inv("a && b()\n")) == []
+end
+
 @testitem "v2 inventory: a computed include has no literal path" setup=[InvV2WS] begin
     # A genuinely computed path — a variable in the mix — stays unresolvable.
     inv = iv_inv("include(joinpath(dir, \"x.jl\"))\n")
