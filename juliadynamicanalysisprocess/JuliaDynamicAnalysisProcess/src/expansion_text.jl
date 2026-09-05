@@ -33,6 +33,11 @@ const _INERT_HEADS = (:inbounds, :meta, :loopinfo, :gc_preserve_begin, :gc_prese
                       :aliasscope, :popaliasscope)
 
 function _surface_form(ex)
+    # `QuoteNode(x)` prints as a `$(QuoteNode(…))` splice — Test's `@test`
+    # carries the original expression that way — but means the quoted
+    # value, which `:(x)` spells parseably (interpolation inside is not a
+    # concern for a linter).
+    ex isa QuoteNode && return Expr(:quote, _surface_form(ex.value))
     ex isa Expr || return ex
     if ex.head === :isdefined && length(ex.args) == 1
         return Expr(:macrocall, Symbol("@isdefined"), nothing, _surface_form(ex.args[1]))

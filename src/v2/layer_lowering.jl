@@ -71,7 +71,12 @@ Result of running the (macro-free) lowering analysis passes over one item.
     findings::Vector{LoweringFinding}
     bindings::Vector{LoweredBinding}
     uses::Vector{BindingUse}
+    # True when the item had expansions the lowering could not digest and
+    # lowered from its SOURCE instead: the macro arguments were read as plain
+    # code, so whatever the expansion would have bound is unknown here.
+    fallback::Bool
 end
+ItemLowering(status::Symbol, findings, bindings, uses) = ItemLowering(status, findings, bindings, uses, false)
 
 # `JS2`/`JL2`/`V2Kind` are defined in packagedef.jl, before this file is
 # included/macro-expanded (the `JS2.K"..."` string macros below need `JS2`
@@ -642,6 +647,9 @@ Salsa.@derived function derived_item_lowering(rt, ref::V2ItemRef)
     # otherwise a SUCCESSFUL expansion would silence every finding in the
     # item, including source-shape rules (`x != nothing` inside StatsPlots'
     # recipes) the failed-expansion fallback reports.
-    (low.status !== :ok && !isempty(expansions)) && return _lower_item(body)
+    if low.status !== :ok && !isempty(expansions)
+        low = _lower_item(body)
+        return ItemLowering(low.status, low.findings, low.bindings, low.uses, true)
+    end
     return low
 end

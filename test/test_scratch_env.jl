@@ -200,6 +200,12 @@ end
     inb = string(Base.invokelatest(mod._expand_fully, mod, Meta.parse("g(a) = @inbounds a[1]")))
     @test !occursin("\$(Expr", inb)
     @test Meta.parse(inb) isa Expr
+    # `@test`'s expansion carries `QuoteNode`s of the original expression:
+    # printed as quotes, so the whole expansion parses (and lowers).
+    Core.eval(mod, :(using Test))
+    t = string(Base.invokelatest(mod._expand_fully, mod, Meta.parse("h(T) = @test T == 1")))
+    @test !occursin("QuoteNode", t)
+    @test Meta.parse(t) isa Expr
     # A `toplevel` result is flattened into a block of expanded statements.
     Core.eval(mod, :(macro two() Expr(:toplevel, :(a() = 1), :(b() = 2)) end))
     flat = Base.invokelatest(mod._expand_fully, mod, Meta.parse("@two"))

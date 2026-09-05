@@ -697,7 +697,12 @@ Salsa.@derived function derived_item_soft_scope_findings(rt, ref::V2ItemRef)
     seeds = sort!(collect(seed_set))
 
     catch_vars = _v2_collect_catch_vars!(Set{String}(), body)
-    for (addr, name) in _lower_item_soft_scope(body, derived_item_expansions(rt, ref), seeds)
+    # An expansion the lowering could not digest (see `derived_item_lowering`)
+    # is as good as none here too: a test file's `for f in …; v = f(X); @test
+    # … end` (ForwardDiff) keeps its soft-scope finding.
+    low = derived_item_lowering(rt, ref)
+    expansions = (low !== nothing && low.fallback) ? _EMPTY_EXPANSIONS : derived_item_expansions(rt, ref)
+    for (addr, name) in _lower_item_soft_scope(body, expansions, seeds)
         name in catch_vars && continue
         push!(result, (addr=addr, rule_id=:soft_scope_ambiguity,
             msg="Assignment to `$name` in soft scope is ambiguous because a global " *
@@ -928,6 +933,11 @@ Salsa.@derived function derived_item_missing_reference_findings(rt, ref::V2ItemR
     # then reads (MacroTools' `@capture(ex, f_(args__))` idiom) — the
     # identifier fallback cannot know, so the item is silent.
     _v2_has_unexpanded_unknown_macro(body, derived_item_expansions(rt, ref), 0) && return result
+    # The same blindness when the expansion arrived but the lowering could
+    # not digest it and fell back to the source: `@capture(ex, f_ where
+    # {params1__})` expanded to the assignments of `f` and `params1` the
+    # lowering never saw (MacroTools' own source).
+    low.fallback && return result
 
     root = derived_v2_best_root_for_uri(rt, ref.file)
     root === nothing && return result

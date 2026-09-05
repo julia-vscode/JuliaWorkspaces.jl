@@ -61,6 +61,36 @@
     const EXP_OPT_IN = "[rules]\nanalysis_boundary = \"warning\"\n"
 end
 
+@testitem "expansion: the source fallback blinds missing_reference and keeps soft-scope findings" setup=[ExpansionWS] begin
+    # MacroTools' `if @capture(ex, f_ where {params1__}) … f …`: the
+    # expansion binds `f`, but when the lowering cannot digest it and falls
+    # back to the source, the reads of `f` are not missing references.
+    src = "function g(ex)\n    if @cap(ex, f_)\n        f\n    end\nend\n"
+    jw, uri = exp_make_jw(src)
+    ref = exp_first_ref(jw, uri)
+    key = exp_key_for_site(jw, uri, 1)
+    mr(jw) = count(f -> f.rule_id === :missing_reference, JW.derived_item_missing_reference_findings(jw.runtime, ref))
+    settle!(jw, key => (status=:ok, text="(f = 1; break; true)"))   # indigestible: `break` outside a loop
+    @test JW.derived_item_lowering(jw.runtime, ref).fallback
+    @test mr(jw) == 0
+    settle!(jw, key => (status=:ok, text="(f = 1; true)"))          # digestible: `f` is bound
+    @test !JW.derived_item_lowering(jw.runtime, ref).fallback
+    @test mr(jw) == 0
+
+    # ForwardDiff's `v = f(x)` at the top level then `for f in fs; v = f(X);
+    # @test v … end`: an indigestible expansion of the `@test` must not lose
+    # the soft-scope finding.
+    src2 = "v = 1\nfor f in fs\n    v = f(2)\n    @chk v\nend\n"
+    jw2, uri2 = exp_make_jw(src2)
+    rows = JW.derived_v2_file_skeleton(jw2.runtime, uri2).items
+    loop = JW.V2ItemRef(uri2, rows[end].id)
+    key2 = first(JW.derived_v2_item_expansion_sites(jw2.runtime, loop))
+    env2 = JW.derived_v2_expansion_env(jw2.runtime, uri2); ctx2 = JW.derived_v2_item_expansion_context(jw2.runtime, loop)
+    settle!(jw2, JW.ExpansionKey((env2.env_hash, ctx2.ctx_hash, key2.mac_hash)) => (status=:ok, text="(1 = v)"))   # indigestible: an invalid assignment target
+    @test JW.derived_item_lowering(jw2.runtime, loop).fallback
+    @test count(f -> f.rule_id === :soft_scope_ambiguity, JW.derived_item_soft_scope_findings(jw2.runtime, loop)) == 1
+end
+
 @testitem "expansion: a site inside an in-file module expands in that module" setup=[ExpansionWS] begin
     # PlotsBase's `Commons.jl` declares `module Commons` with its own macro
     # and uses it inside: the child must expand in `PlotsBase.Commons`, not
