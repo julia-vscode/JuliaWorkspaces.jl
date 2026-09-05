@@ -369,6 +369,12 @@ Salsa.@derived function derived_v2_method_arities_index(rt, root)
     tree = derived_v2_module_tree(rt, root)
     modpaths = Set{Vector{String}}(n.path for n in tree.modules)
     result = Dict{Tuple{Vector{String},String},Vector{MethodArity}}()
+    # Names declared as callables by an item whose methods are not statically
+    # enumerable — an `@eval` loop (`for T in …; @eval f(::Type{$T}) = …`,
+    # UnsafeAtomics' `asbits`) — have an UNKNOWN arity set, never an empty
+    # one: they leave the funnel, so callers decline instead of claiming
+    # "no methods" from a `function f end` stub the loop completes.
+    unknown = Set{Tuple{Vector{String},String}}()
 
     _v2_walk_spliced_items!(rt, root, String[], Set{URI}([root])) do F, item, loc
         item.kind in _V2_METHOD_ITEM_KINDS || return
@@ -376,10 +382,28 @@ Salsa.@derived function derived_v2_method_arities_index(rt, root)
             _v2_resolve_extension_qualifier(modpaths, loc, item.qualifier)
         (resolved === nothing || !(resolved in modpaths)) && return
         entry = get!(() -> MethodArity[], result, (resolved, item.name))
-        a = derived_v2_item_arity(rt, V2ItemRef(F, item.id))
-        a !== nothing && push!(entry, a)
+        ref = V2ItemRef(F, item.id)
+        a = derived_v2_item_arity(rt, ref)
+        if a !== nothing
+            push!(entry, a)
+        elseif !_v2_is_bare_function_stub(derived_v2_item_body(rt, ref))
+            push!(unknown, (resolved, item.name))
+        end
+    end
+    for k in unknown
+        delete!(result, k)
     end
     return result
+end
+
+# `function f end`: the one method-less declaration whose method set IS
+# known (empty). Everything else without a statically known signature is an
+# unknown method set.
+function _v2_is_bare_function_stub(body)
+    body === nothing && return false
+    body.kind == JS2.K"function" || return false
+    cs = _v2_children(body)
+    return length(cs) == 1 && _v2_leaf_string(cs[1]) !== nothing
 end
 
 """

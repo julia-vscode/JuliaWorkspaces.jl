@@ -331,6 +331,16 @@ end
     @test isempty(ca_msgs(replace(src5, "T<:AbstractPath" => "T<:IO")))
 end
 
+@testitem "call args: a stub completed by an @eval loop has an unknown method set" setup=[CallArgsWS] begin
+    # UnsafeAtomics: `function asbits end` plus `for T in …; @eval
+    # asbits(::Type{$T}) = …; end` — the loop's methods are not enumerable,
+    # so the name is neither "no methods" nor arity-checked.
+    src = "function asbits end\nfor (T, B) in ((Int, UInt), (Float64, UInt64))\n    @eval asbits(::Type{\$T}) = \$B\nend\ng() = asbits(Int, 2)\n"
+    @test isempty(ca_msgs(src))
+    # A bare stub with no other declaration keeps the "no methods" signal.
+    @test only(ca_msgs("function h end\ng() = h(1)\n")) == "Called function has no methods."
+end
+
 @testitem "call args: external constructors are checked only for plain types" setup=[CallArgsWS] begin
     # A plain (non-parametric) type's constructor set is in the store:
     # `DomainError()` with no arguments is the Distributions real bug.
