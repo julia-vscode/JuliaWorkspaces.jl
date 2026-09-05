@@ -49,6 +49,44 @@ end
     @test isempty(ui_diags(jw))
 end
 
+@testitem "v2 unresolved_import: imports the resolver cannot see through still bind" setup=[UnresolvedImpWS] begin
+    using JuliaWorkspaces: get_diagnostic
+    codes(jw, code) = [d.message for d in get_diagnostic(jw, UI_URI) if d.code === code]
+    # `Core.Compiler` is never in the symbol cache but always loadable
+    # (IRTools): opaque, not unresolved; the listed names bind.
+    jw = ui_workspace("import Core.Compiler: IRCode, CFG\nf(x::IRCode, y::CFG) = (x, y)\n")
+    @test isempty(ui_diags(jw))
+    @test isempty(codes(jw, :missing_reference))
+    @test isempty(codes(jw, :invalid_type_declaration))
+    # `import ..Cookie` from a submodule, where the parent has `Cookie` as a
+    # type through `using .Cookies: Cookie` (HTTP), and `import
+    # ..try_with_timeout`, a function an earlier include of the parent
+    # defined (ConcurrentUtilities): whole-path imports of non-module
+    # bindings resolve and carry the parent's face.
+    jw = ui_workspace("""
+    module P
+    module Cookies
+    struct Cookie
+        v
+    end
+    end
+    using .Cookies: Cookie
+    try_with_timeout(f) = f()
+    module Handlers
+    import ..Cookie
+    import ..try_with_timeout
+    handle(c::Cookie) = try_with_timeout(() -> c)
+    end
+    end
+    """)
+    @test isempty(ui_diags(jw))
+    @test isempty(codes(jw, :missing_reference))
+    @test isempty(codes(jw, :invalid_type_declaration))
+    # A genuinely missing binding still reports.
+    jw = ui_workspace("module P\nmodule Q\nimport ..nope\nend\nend\n")
+    @test length(ui_diags(jw)) == 1
+end
+
 @testitem "v2 unresolved_import: unresolved relative imports" setup=[UnresolvedImpWS] begin
     # A relative import that lands nowhere.
     jw = ui_workspace("module P\nusing ..Nowhere\nend\n")

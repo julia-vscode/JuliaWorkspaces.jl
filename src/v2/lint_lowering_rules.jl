@@ -307,9 +307,16 @@ end
 # resolves. Mirrors the visibility layer's own resolution rules exactly —
 # including the pass-2 re-attempt — so this rule can never contradict what
 # visibility actually bound.
+# `Core.Compiler` (also `Core.IR`, `Base.Compiler`): a module the symbol
+# cache never indexes, yet always loadable — an import from it is opaque,
+# not unresolved (IRTools' `import Core.Compiler: IRCode, CFG`).
+_v2_is_compiler_module_path(p::Vector{String}) =
+    length(p) >= 2 && ((p[1] == "Core" && p[2] in ("Compiler", "IR")) || (p[1] == "Base" && p[2] == "Compiler"))
+
 function _v2_unresolved_import_name(rt, root, path::Vector{String}, ri::V2ResolvedImport)
     t = ri.target
     if t.sort === :external
+        _v2_is_compiler_module_path(t.path) && return nothing
         # A standard library is always loadable where `@stdlib` is on the
         # load path (scripts, test files); only package code must declare it.
         # Its store may not be indexed for this project: unknown ⇒ silent.
@@ -344,12 +351,18 @@ function _v2_unresolved_import_name(rt, root, path::Vector{String}, ri::V2Resolv
             k = _v2_deepest_tree_prefix(rt, root, anchor, segs)
             k >= length(segs) && return nothing   # the full path IS tree-resolvable
             cand = segs[k + 1]
+            names1, modtargets = _v2_visible_names_pass1(rt, root, vcat(anchor, segs[1:k]), Set{URI}())
+            # `import ..Cookie`: a whole-path import whose last segment names
+            # a NON-module binding of the anchor (a type `using .Cookies:
+            # Cookie` brought in, a function an earlier include defined) —
+            # Julia binds it, so the statement resolves.
+            (ri.kind === :import && isempty(ri.symbols) && k + 1 == length(segs) && haskey(names1, cand)) &&
+                return nothing
             # v1's resolves-to-a-binding rule: when the stuck segment names a
             # ledgered EXTERNAL binding (`using AutoHashEquals` in the parent,
             # `using ..AutoHashEquals` here), the relative statement resolved
             # lexically — the ORIGIN statement already carries the missing-store
             # diagnosis, and repeating it at every relative re-import is noise.
-            _, modtargets = _v2_visible_names_pass1(rt, root, vcat(anchor, segs[1:k]), Set{URI}())
             mt = get(modtargets, cand, nothing)
             (mt !== nothing && mt.sort === :external) && return nothing
             return cand

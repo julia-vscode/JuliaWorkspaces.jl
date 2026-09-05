@@ -6,11 +6,12 @@
 #       nodes; v2 deliberately has none.
 #   :macro_declared — v1's macro-declared-names machinery (Salsa.@declare_input
 #       et al.); not ported to v2.
-#   :unresolved_colon_binding — a colon-list import whose target resolves
-#       nowhere (`import SymbolServer: get_store` with no environment): v1
-#       binds nothing and blinds the scope for missing references instead;
-#       v2 binds the listed names lexically as `:unknown`, as Julia does, so
-#       the module stays checkable for everything else.
+#   :unresolved_import_binding — an import whose target the resolver cannot
+#       see through (`import SymbolServer: get_store` with no environment,
+#       `import ..JSONRPC` through the parent's external binding): v1 binds
+#       nothing and blinds the scope for missing references instead; v2 binds
+#       the listed / last names lexically (the anchor's face, else
+#       `:unknown`), as Julia does, so the module stays checkable.
 #
 # A third class, :external_names, existed while the layer was tree-only
 # (Milestone B). With the env seam restored, external faces converged EXACTLY
@@ -24,7 +25,7 @@
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
     using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
 
-    const EXPECTED_CLASSES = Set([:testitem_nodes, :macro_declared, :unresolved_colon_binding])
+    const EXPECTED_CLASSES = Set([:testitem_nodes, :macro_declared, :unresolved_import_binding])
 
     root_dir = pkgdir(JuliaWorkspaces)
     jw = JuliaWorkspace()
@@ -93,8 +94,8 @@
             end
             for (name, face2) in f2
                 haskey(f1, name) && continue
-                if face2.kind === :unknown && face2.origin === :import_binding
-                    push!(saw, :unresolved_colon_binding)
+                if face2.origin === :import_binding
+                    push!(saw, :unresolved_import_binding)
                     continue
                 end
                 push!(problems, "$(root) $(path): v2-only `$name` $(face2)")

@@ -373,6 +373,24 @@ function _v2_reattempt_unresolved(rt, root, path::Vector{String}, ri::V2Resolved
     return _v2_extend_target(rt, root, modtargets[cand_name], rest, visited)
 end
 
+# The anchor module's own pass-1 face for the last segment of an
+# `:unresolved` whole-path import (`import ..Cookie` from a submodule, whose
+# parent has `Cookie` through `using .Cookies: Cookie`), or `nothing`. Only
+# when every earlier segment resolved as tree modules and the last is the
+# one that did not: the same walk as `_v2_reattempt_unresolved`, for a
+# non-module binding.
+function _v2_unresolved_anchor_face(rt, root, path::Vector{String}, ri::V2ResolvedImport, visited::Set{URI})
+    split = _v2_unresolved_anchor_and_segs(rt, root, path, ri.target.path)
+    split === nothing && return nothing
+    anchor, segs = split
+    k = _v2_deepest_tree_prefix(rt, root, anchor, segs)
+    k + 1 == length(segs) || return nothing
+    stuck_at = vcat(anchor, segs[1:k])
+    v2_module_node(derived_v2_module_tree(rt, root), stuck_at) === nothing && return nothing
+    names1, _ = _v2_visible_names_pass1(rt, root, stuck_at, visited)
+    return get(names1, segs[end], nothing)
+end
+
 # ── pass 1 + pass 2 assembly ────────────────────────────────────────────────
 
 # One lockstep write to pass 1's two dicts. A non-module binding overwriting a
@@ -521,11 +539,25 @@ function _v2_visible_names_impl_body(rt, root, path::Vector{String}, visited::Se
             # module is never a missing reference. A wildcard form binds
             # nothing knowable (its module is blind through
             # `derived_v2_module_unresolved_wildcard_using`).
-            isempty(ri.symbols) && continue
             segs = String[s for s in ri.target.path if s != "."]
-            entries = [(sym.alias !== nothing ? sym.alias : sym.name,
-                        V2VisibleName(:unknown, :import_binding, nothing, segs), nothing)
-                       for sym in ri.symbols]
+            if !isempty(ri.symbols)
+                entries = [(sym.alias !== nothing ? sym.alias : sym.name,
+                            V2VisibleName(:unknown, :import_binding, nothing, segs), nothing)
+                           for sym in ri.symbols]
+            elseif ri.kind === :import && !isempty(segs)
+                # `import ..Cookie`: the last segment (or its alias) is bound
+                # lexically — with the anchor's own face for it when the
+                # anchor has one (the type `using .Cookies: Cookie` brought
+                # in, the function an earlier include defined), else
+                # `:unknown`.
+                bound = ri.alias !== nothing ? ri.alias : segs[end]
+                face = _v2_unresolved_anchor_face(rt, root, path, ri, visited)
+                vn = face === nothing ? V2VisibleName(:unknown, :import_binding, nothing, segs) :
+                                        V2VisibleName(face.kind, :import_binding, face.item, face.origin_module)
+                entries = [(bound, vn, nothing)]
+            else
+                continue   # a wildcard `using` of nothing knowable binds nothing
+            end
             tier = 2
         elseif !isempty(ri.symbols)
             entries = _v2_explicit_symbol_bring_ins(rt, root, target, ri.symbols, visited)
