@@ -24,6 +24,14 @@ end
 # nested `ModuleStore`s per segment). Returns the final `ModuleStore`, or
 # `nothing` if any segment is missing or not itself a module — a missing
 # external module "contributes nothing", never an error.
+# A member the cache recorded as a REFERENCE rather than inline — CUDA's
+# `CUSPARSE` is `VarRef(cuSPARSE)`, the submodule being another package of
+# the environment — resolves through the environment, as v1's lookup does.
+function _v2_follow_store_ref(x, env)
+    x isa SymbolServer.VarRef || return x
+    return StaticLint.maybe_lookup(x, env)
+end
+
 function _v2_resolve_external_store(rt, root, path::Vector{String})
     isempty(path) && return nothing
     env = _v2_resolve_env(rt, root)
@@ -31,7 +39,7 @@ function _v2_resolve_external_store(rt, root, path::Vector{String})
     store = env.symbols[Symbol(path[1])]
     for seg in path[2:end]
         haskey(store, Symbol(seg)) || return nothing
-        nxt = store[Symbol(seg)]
+        nxt = _v2_follow_store_ref(store[Symbol(seg)], env)
         nxt isa SymbolServer.ModuleStore || return nothing
         store = nxt
     end
@@ -248,8 +256,10 @@ Salsa.@derived function derived_v2_external_first_missing_segment(rt, root::URI,
     haskey(env.symbols, Symbol(path[1])) || return path[1]
     store = env.symbols[Symbol(path[1])]
     for seg in path[2:end]
-        (haskey(store, Symbol(seg)) && store[Symbol(seg)] isa SymbolServer.ModuleStore) || return seg
-        store = store[Symbol(seg)]
+        haskey(store, Symbol(seg)) || return seg
+        nxt = _v2_follow_store_ref(store[Symbol(seg)], env)
+        nxt isa SymbolServer.ModuleStore || return seg
+        store = nxt
     end
     return nothing
 end

@@ -1326,6 +1326,57 @@ end
     @test !any(d -> occursin("could not be indexed", d.message) && occursin("Inner", d.message), diags)
 end
 
+@testitem "unresolved import: a submodule the cache records as a reference to another package resolves" begin
+    using JuliaWorkspaces.URIs2: URI
+    using JuliaWorkspaces.SymbolServer: Package, ModuleStore, VarRef, FunctionStore, MethodStore
+
+    # CUDA's cache holds `CUSPARSE => VarRef(cuSPARSE)`: the submodule is
+    # another package of the environment. `using CUDA.CUSPARSE` must follow
+    # the reference instead of reporting `CUSPARSE` unresolved.
+    cuda_uuid = Base.UUID("33333333-3333-3333-3333-333333333333")
+    sparse_uuid = Base.UUID("44444444-4444-4444-4444-444444444444")
+    cuda_tree = "3333333333333333333333333333333333333333"
+    sparse_tree = "4444444444444444444444444444444444444444"
+    sparse_ms = ModuleStore(VarRef(nothing, :CuSparse), Dict{Symbol,Any}(), "", true, [:spmv], Symbol[])
+    sparse_ms.vals[:spmv] = FunctionStore(VarRef(VarRef(nothing, :CuSparse), :spmv), MethodStore[], "", VarRef(VarRef(nothing, :CuSparse), :spmv), true)
+    cuda_ms = ModuleStore(VarRef(nothing, :Cuda), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+    cuda_ms.vals[:Sparse] = VarRef(nothing, :CuSparse)
+
+    project = """
+    [deps]
+    Cuda = "33333333-3333-3333-3333-333333333333"
+    """
+    manifest = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [[deps.Cuda]]
+    deps = ["CuSparse"]
+    uuid = "33333333-3333-3333-3333-333333333333"
+    git-tree-sha1 = "$cuda_tree"
+    version = "1.0.0"
+
+    [[deps.CuSparse]]
+    uuid = "44444444-4444-4444-4444-444444444444"
+    git-tree-sha1 = "$sparse_tree"
+    version = "1.0.0"
+    """
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///gpu/Project.toml"), SourceText(project, "toml")))
+    add_file!(jw, TextFile(URI("file:///gpu/Manifest.toml"), SourceText(manifest, "toml")))
+    fileuri = URI("file:///gpu/gputests.jl")
+    add_file!(jw, TextFile(fileuri, SourceText("using Cuda.Sparse\nusing Cuda.Sparse: spmv\nf() = spmv()\n", "julia")))
+    JuliaWorkspaces.set_v2_enabled!(jw, true)
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+    JuliaWorkspaces.set_input_package_metadata!(jw.runtime, :Cuda, cuda_uuid, v"1.0.0", cuda_tree, Package("Cuda", cuda_ms, cuda_uuid, nothing))
+    JuliaWorkspaces.set_input_package_metadata!(jw.runtime, :CuSparse, sparse_uuid, v"1.0.0", sparse_tree, Package("CuSparse", sparse_ms, sparse_uuid, nothing))
+
+    diags = get_diagnostic(jw, fileuri)
+    @test !any(d -> d.code === :unresolved_import, diags)
+    @test !any(d -> d.code === :missing_reference, diags)
+end
+
 @testitem "unresolved import: as-aliased imports are flagged" begin
     using JuliaWorkspaces.URIs2: URI
 
