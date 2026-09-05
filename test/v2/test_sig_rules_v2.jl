@@ -69,6 +69,20 @@ end
     @test only(sr_diags("f(x::1) = x\n", :invalid_type_declaration)).message == msg
     # A workspace function used as a type.
     @test !isempty(sr_diags("g() = 1\nf(x::g) = x\n", :invalid_type_declaration))
+    # A struct declared inside a top-level assignment's `begin` block (a
+    # Pluto cell, PlutoUI's `local result = begin … struct Slider … end`) is a
+    # module-level type: its later constructor method must not make `::Slider`
+    # a "non-DataType", and assignments inside such a block are globals.
+    src = "begin\n    local result = begin\n        struct Slider{T}\n            v::T\n        end\n        Slider(; v=1) = Slider(v)\n    end\nend\n" *
+          "r2 = begin\n    a2 = 5\n    struct S3 end\n    S3\nend\n" *
+          "f(s::Slider, t::S3) = (s, t, a2)\n"
+    @test isempty(sr_diags(src, :invalid_type_declaration))
+    @test isempty(sr_diags(src, :missing_reference))
+    names = JW.derived_v2_module_names(sr_workspace(src).runtime, SR_URI, String[])
+    @test names["Slider"] === :struct
+    @test names["S3"] === :struct
+    @test haskey(names, "a2")
+    @test !haskey(names, "result")   # `local` at the top level binds no global
     # An external non-datatype (Base function; the seam's `:datatype` widening
     # is what keeps `Int` silent).
     @test !isempty(sr_diags("f(x::sin) = x\n", :invalid_type_declaration))

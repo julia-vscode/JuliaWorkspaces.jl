@@ -979,6 +979,21 @@ function _v2_walk_one!(state::_V2WalkState, node, parent_module::Vector{String},
         return _v2_walk_macrocall!(state, node, parent_module, interpretable)
     end
 
+    # `result = begin … struct S … end … end` at the top level (a Pluto cell:
+    # PlutoUI's `local result = begin … end`): a `begin` block scopes nothing,
+    # so every definition and assignment inside it is a module-level
+    # statement of its own — `S` is a type, `a = 1` a global. Enumerate them
+    # as items; the assignment itself stays as a non-interpretable item so
+    # its body is not analyzed a second time.
+    rhs = _v2_assignment_block_rhs(node)
+    if rhs !== nothing
+        _v2_emit!(state, node, parent_module, false)
+        for c in JS2.children(rhs)
+            _v2_walk_one!(state, c, parent_module, interpretable)
+        end
+        return
+    end
+
     _v2_emit!(state, node, parent_module, interpretable)
     if k == JS2.K"module" && length(cs) >= 3
         name = JS2.is_leaf(cs[2]) ? _v2_node_string(cs[2]) : nothing
@@ -997,6 +1012,34 @@ end
 
 _v2_emit_plain!(state, node, parent_module, interpretable) =
     (_v2_emit!(state, node, parent_module, interpretable); nothing)
+
+function _v2_is_assignment_target(node)
+    JS2.is_leaf(node) && return JS2.kind(node) == JS2.K"Identifier"
+    JS2.kind(node) == JS2.K"::" || return false
+    cs = JS2.children(node)
+    return cs !== nothing && length(cs) == 2 && JS2.is_leaf(cs[1]) && JS2.kind(cs[1]) == JS2.K"Identifier"
+end
+
+# The `begin … end` block a top-level assignment (`x = begin … end`, also
+# under `local`/`global`/`const`) takes as its value, else `nothing`.
+function _v2_assignment_block_rhs(node)
+    JS2.is_leaf(node) && return nothing
+    k = JS2.kind(node)
+    cs = JS2.children(node)
+    cs === nothing && return nothing
+    if (k == JS2.K"local" || k == JS2.K"global" || k == JS2.K"const") && length(cs) == 1
+        return _v2_assignment_block_rhs(cs[1])
+    end
+    k == JS2.K"=" || return nothing
+    length(cs) == 2 || return nothing
+    # A plain or typed identifier on the left: `f(x) = begin … end` is a
+    # short-form method whose body is that block, not a top-level statement
+    # list.
+    _v2_is_assignment_target(cs[1]) || return nothing
+    rhs = cs[2]
+    (!JS2.is_leaf(rhs) && JS2.kind(rhs) == JS2.K"block" && JS2.children(rhs) !== nothing) || return nothing
+    return rhs
+end
 
 # A ternary `c ? a : b` also parses as `K"if"`, and checking whether the second
 # child is a `K"block"` is NOT a reliable discriminator — `c ? begin … end : g()`
