@@ -104,6 +104,12 @@ end
     @test JW.derived_file_stdlibs_visible(jw.runtime, URI("file:///ef/test/runtests.jl"))
     @test !JW.derived_file_stdlibs_visible(jw.runtime, URI("file:///ef/src/EfPkg.jl"))
     @test !JW.derived_file_stdlibs_visible(jw.runtime, build)
+
+    # Project-less, the script is still linted (against the stdlib-only
+    # environment): a StaticLint rule such as `index_from_length` reports.
+    JW.update_file!(jw, TextFile(perf, SourceText(
+        "function f(v)\n    s = 0\n    for i = 1:length(v)\n        s += v[i]\n    end\n    s\nend\n", "julia")))
+    @test any(d -> d.code === :index_from_length, get_diagnostic(jw, perf))
 end
 
 @testitem "unresolved_import: stdlibs resolve wherever @stdlib is on the load path" setup=[EnvFallbackWS] begin
