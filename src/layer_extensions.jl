@@ -183,6 +183,13 @@ Salsa.@derived function derived_extension_blind_triggers(rt, uri)
     # still the best environment for the file — but the triggers its manifest
     # lacks are blind, not unresolved imports.
     project = derived_project(rt, project_uri)
-    project === nothing && return String[]   # no readable manifest: trust the environment
+    if project === nothing
+        # A project file without a manifest: the child wrote the project but
+        # its `instantiate` failed (Zygote's `Atom` trigger) — nothing was
+        # installed, every trigger is blind. No readable project at all:
+        # trust the environment.
+        toml = derived_project_toml_files(rt, project_uri)
+        return (toml.project_file !== nothing && toml.manifest_file === nothing) ? sort(ext.triggers) : String[]
+    end
     return sort(filter(t -> !_project_covers_triggers(project, (t,)), ext.triggers))
 end

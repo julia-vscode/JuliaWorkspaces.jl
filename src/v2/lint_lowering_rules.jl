@@ -380,6 +380,18 @@ end
 # own `[deps]`, which a stale root manifest may not carry yet.
 Salsa.@derived function derived_v2_declared_dep_names(rt, root, uri)
     deps = Set{String}(derived_v2_env_project_deps(rt, root))
+    # The environment's `project_deps` lists only the packages whose stores
+    # loaded, so the Project.toml of the file's OWN environment (a `docs/`
+    # or `perf/` project with a manifest of its own) is the declaration that
+    # makes an unindexed dependency a boundary rather than a typo.
+    project_uri = derived_project_uri_for_root(rt, root)
+    if project_uri !== nothing
+        project = derived_project(rt, project_uri)
+        if project !== nothing
+            env_pf = derived_project_file(rt, project.project_file_uri)
+            env_pf === nothing || union!(deps, keys(env_pf.deps))
+        end
+    end
     pkg_folder = derived_package_for_file(rt, uri)
     if pkg_folder !== nothing
         pkg = derived_package(rt, pkg_folder)
@@ -387,6 +399,9 @@ Salsa.@derived function derived_v2_declared_dep_names(rt, root, uri)
             pf = derived_project_file(rt, pkg.project_file_uri)
             if pf !== nothing
                 union!(deps, keys(pf.deps))
+                # An extension file's triggers are its `[weakdeps]`: declared,
+                # even when the extension environment could not index one.
+                derived_extension_for_file(rt, uri) === nothing || union!(deps, keys(pf.weakdeps))
                 # Test files draw on `[extras]` / `[targets] test`; a merged
                 # test environment whose materialization only partly
                 # succeeded lacks some of them — declared, not unknown.

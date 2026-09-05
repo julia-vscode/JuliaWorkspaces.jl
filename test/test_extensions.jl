@@ -163,4 +163,16 @@ end
         "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc\"\n\n[[deps.Bar]]\ngit-tree-sha1 = \"0123456789abcdef0123456789abcdef01234567\"\nuuid = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\nversion = \"1.0.0\"\n", "toml")))
     set_input_extension_environments!(jw.runtime, Dict(key => covered))
     @test isempty(derived_extension_blind_triggers(jw.runtime, ext_file))
+    # Covered, yet the trigger's store is not indexed: the trigger is a
+    # declared dependency of the extension (a `[weakdeps]` entry), so
+    # `using Bar` is a boundary, never an unresolved import.
+    JuliaWorkspaces.set_v2_enabled!(jw, true)
+    @test !any(d -> d.code === :unresolved_import, JuliaWorkspaces.get_diagnostic(jw, ext_file))
+
+    # A project file with NO manifest: the child's `instantiate` failed after
+    # writing the project — nothing installed, every trigger blind.
+    bare = URI("file:///scratch/ext-env-Foo-bare")
+    add_file!(jw, TextFile(URI("file:///scratch/ext-env-Foo-bare/Project.toml"), SourceText("[deps]\nBar = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\n", "toml")))
+    set_input_extension_environments!(jw.runtime, Dict(key => bare))
+    @test derived_extension_blind_triggers(jw.runtime, ext_file) == ["Bar"]
 end

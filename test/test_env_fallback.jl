@@ -185,6 +185,33 @@ end
     @test ef_ui(jw, ad) == ["Failed to resolve `NotDeclared_xyz`. Missing-reference checks are disabled in this scope and all nested scopes."]
 end
 
+@testitem "unresolved_import: a docs project's own declared deps are declared" setup=[EnvFallbackWS] begin
+    # `docs/` with a Project.toml AND a Manifest.toml is the environment of
+    # `docs/make.jl`; a dependency it declares whose store is not indexed
+    # (FilePathsBase's Documenter) is a boundary, not an unresolved import.
+    for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\n")
+        jw = ef_workspace()
+        config === nothing ||
+            add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText(config, "toml")))
+        add_file!(jw, TextFile(URI("file:///ef/docs/Project.toml"), SourceText(
+            "[deps]\nNoSuchStore = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9f9\"\n", "toml")))
+        add_file!(jw, TextFile(URI("file:///ef/docs/Manifest.toml"), SourceText(
+            EF_MANIFEST * "\n[[deps.NoSuchStore]]\ngit-tree-sha1 = \"0123456789abcdef0123456789abcdef01234567\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9f9\"\nversion = \"1.0.0\"\n", "toml")))
+        make = URI("file:///ef/docs/make.jl")
+        add_file!(jw, TextFile(make, SourceText("using NoSuchStore\n", "julia")))
+        set_input_env_ready!(jw.runtime, true)
+        @test derived_project_uri_for_root(jw.runtime, make) == URI("file:///ef/docs")
+        diags = get_diagnostic(jw, make)
+        @test !any(d -> d.code === :unresolved_import, diags)
+        notices = filter(d -> d.code === :analysis_boundary, diags)
+        if config === nothing
+            @test isempty(notices)
+        else
+            @test length(notices) == 1 && occursin("declared dependency", notices[1].message)
+        end
+    end
+end
+
 @testitem "unresolved_import: a terminally failed environment is a boundary, not a defect" setup=[EnvFallbackWS] begin
     for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\n")
         jw = ef_workspace(; config)
