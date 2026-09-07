@@ -180,6 +180,28 @@ end
     @test _snapshot(child) == before_child
 end
 
+@testitem "child: the scratch fallback sees the real module's unexported macros" begin
+    mod = Module(:ExpansionTextUnderTest2)
+    Base.include(mod, normpath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "expansion_text.jl")))
+    # A package whose unexported macro refuses to run where its type exists
+    # (IrrationalConstants' `@irrational`): the real module fails, the scratch
+    # module — given the macro — succeeds.
+    real = Module(:RealPkg)
+    Core.eval(real, :(macro defconst(name)
+        isdefined(__module__, name) && error("already defined")
+        :(const $(esc(name)) = 1)
+    end))
+    Core.eval(real, :(const twoπ = 1))
+    scratch = Module(:Scratch)
+    @test !isdefined(scratch, Symbol("@defconst"))
+    Base.invokelatest(mod._bind_real_macros!, scratch, real)
+    @test isdefined(scratch, Symbol("@defconst"))
+    @test_throws Exception Base.invokelatest(mod._expand_fully, real, Meta.parse("@defconst twoπ"))
+    ex = Base.invokelatest(mod._expand_fully, scratch, Meta.parse("@defconst twoπ"))
+    @test occursin("const twoπ = 1", string(ex))
+end
+
 @testitem "child: an expansion prints without line nodes so the host can parse it" begin
     # Base's logging macros leave a LineNumberNode first in an `if` condition;
     # `string` prints it as `if #= … =#, try`, which does not parse back.

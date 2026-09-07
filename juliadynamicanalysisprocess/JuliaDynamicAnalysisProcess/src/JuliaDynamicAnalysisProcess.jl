@@ -235,7 +235,10 @@ function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id:
                     nxt isa Module || error("no module `$seg` under $(real)")
                     real = nxt
                 end
-                real isa Module && return (real, m)
+                if real isa Module
+                    _bind_real_macros!(m, real)
+                    return (real, m)
+                end
             catch err
                 err isa InterruptException && rethrow()
             end

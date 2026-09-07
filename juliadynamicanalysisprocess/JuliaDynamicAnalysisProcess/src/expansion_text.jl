@@ -13,6 +13,27 @@
 # of an `if`, printing `if #= logging.jl:386 =#, try …` (PlotsBase's
 # `@attributes function … @maxlog_warn … end`). The host reads positions
 # from the user's source, never from the expansion text.
+# The scratch fallback module sees only what the imports export; a package's
+# own UNEXPORTED macros (IrrationalConstants' `@irrational`) are visible in
+# the real module only — and an expansion that fails there (the macro
+# refuses to redefine a type the loaded package already has) then fails in
+# the fallback for want of the macro. Bind every macro of the real module
+# into the scratch module, so the fallback expands with `__module__` = the
+# scratch module, where nothing is defined yet.
+function _bind_real_macros!(scratch::Module, real::Module)
+    for n in names(real; all = true, imported = false)
+        s = String(n)
+        (startswith(s, "@") && isdefined(real, n)) || continue
+        isdefined(scratch, n) && continue
+        try
+            Core.eval(scratch, Expr(:const, Expr(:(=), n, GlobalRef(real, n))))
+        catch err
+            err isa InterruptException && rethrow()
+        end
+    end
+    return scratch
+end
+
 function _expand_fully(mod::Module, expr)
     expanded = macroexpand(mod, expr; recursive=true)
     if expanded isa Expr && expanded.head === :toplevel
