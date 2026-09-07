@@ -64,8 +64,12 @@ from [`V2_EFFECT_FREE_MACROS`](@ref) because the two answer different questions
 — "defines nothing" versus "defines something we already handle" — and only
 their union makes a macrocall safe to walk transparently.
 """
+# `@irrational` is deliberately absent: nothing models what it declares, and
+# the packages that use the name define their own (IrrationalConstants'
+# declares a TYPE per constant) — as an opaque macrocall it is expanded by
+# the child and its declarations harvested.
 const V2_HANDLED_MACROS = Set{String}([
-    "@deprecate", "@deprecate_binding", "@eval", "@irrational", "@enum",
+    "@deprecate", "@deprecate_binding", "@eval", "@enum",
     "@goto", "@label", "@NamedTuple", "@reexport", "@nospecialize",
     "@testitem", "@testmodule", "@testsnippet",
     "@variables", "@parameters", "@constants",

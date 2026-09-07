@@ -91,6 +91,21 @@ end
     @test count(f -> f.rule_id === :soft_scope_ambiguity, JW.derived_item_soft_scope_findings(jw2.runtime, loop)) == 1
 end
 
+@testitem "expansion: @irrational is an opaque macrocall whose expansion declares the constant and its type" setup=[ExpansionWS] begin
+    # IrrationalConstants' own `@irrational twoπ 2 * big(π)` defines `struct
+    # Twoπ` and `const twoπ`; nothing static models it, so it must be
+    # expanded, not walked as a statement that declares nothing.
+    jw, uri = exp_make_jw("@irrational twoπ 2 * big(π)\nBase.sin(::Twoπ) = 0.0\n")
+    rows = filter(r -> r.kind === :opaque_macrocall, JW.derived_v2_file_skeleton(jw.runtime, uri).items)
+    @test length(rows) == 1
+    @test exp_blind(jw, uri)
+    settle!(jw, exp_key_for(jw, uri, 1) => (status=:ok,
+        text="struct Twoπ <: AbstractIrrational end\nconst twoπ = Twoπ()\nBase.Float64(::Twoπ) = 6.283185307179586"))
+    @test !exp_blind(jw, uri)
+    @test exp_names(jw, uri)["Twoπ"] === :struct
+    @test exp_names(jw, uri)["twoπ"] === :const
+end
+
 @testitem "expansion: a site inside an in-file module expands in that module" setup=[ExpansionWS] begin
     # PlotsBase's `Commons.jl` declares `module Commons` with its own macro
     # and uses it inside: the child must expand in `PlotsBase.Commons`, not
