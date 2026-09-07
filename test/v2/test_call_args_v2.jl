@@ -339,6 +339,10 @@ end
     @test isempty(ca_msgs(src))
     # A bare stub with no other declaration keeps the "no methods" signal.
     @test only(ca_msgs("function h end\ng() = h(1)\n")) == "Called function has no methods."
+    # A loop the static extraction cannot enumerate (computed names next to
+    # the `@eval`) still completes the stub: unknown, not "no methods".
+    src2 = "function asbits end\nfor T in [UInt8, UInt16]\n    B = Symbol(\"Bits\", 8 * sizeof(T))\n    @eval begin\n        asbits(::Type{\$T}) = \$B\n    end\nend\ng() = asbits(UInt8)\n"
+    @test isempty(ca_msgs(src2))
 end
 
 @testitem "call args: external constructors are checked only for plain types" setup=[CallArgsWS] begin

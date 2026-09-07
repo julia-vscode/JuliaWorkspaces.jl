@@ -76,6 +76,21 @@ function _package_source_path(src_env, manifest, package_name::String)
     error("Cannot locate the source of package $package_name in the environment at $(dirname(src_env.project_file)).")
 end
 
+# `Pkg.resolve` the active environment when its project declares a
+# dependency the manifest lacks; a no-op otherwise (resolving a consistent
+# manifest could still rewrite it).
+function _resolve_missing_deps!()
+    env = try
+        Pkg.Types.EnvCache()
+    catch err
+        err isa InterruptException && rethrow()
+        return false
+    end
+    any(uuid -> !haskey(env.manifest, uuid), values(env.project.deps)) || return false
+    Pkg.resolve(; io = devnull)
+    return true
+end
+
 # The `[sources]` path of `package_name` in the source project, absolute, or
 # `nothing`.
 function _sources_path(src_env, package_name::String)

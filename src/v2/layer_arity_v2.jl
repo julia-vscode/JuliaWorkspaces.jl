@@ -393,6 +393,14 @@ Salsa.@derived function derived_v2_method_arities_index(rt, root)
     for k in unknown
         delete!(result, k)
     end
+    # A module with an `@eval` the static extraction could not enumerate
+    # (UnsafeAtomics' `for T in …; B = Symbol(…); @eval asbits(::Type{$T}) =
+    # $B … end`) may add methods to any stub it holds: an EMPTY set there is
+    # unknown, never "no methods".
+    for (k, arities) in collect(result)
+        isempty(arities) || continue
+        _v2_module_has_body_marker(rt, root, k[1], :opaque_eval) && delete!(result, k)
+    end
     return result
 end
 
