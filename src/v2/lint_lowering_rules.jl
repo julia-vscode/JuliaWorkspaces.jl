@@ -354,6 +354,12 @@ _v2_is_compiler_module_path(p::Vector{String}) =
 
 function _v2_unresolved_import_name(rt, root, path::Vector{String}, ri::V2ResolvedImport)
     t = ri.target
+    # `Main` is the REPL/script namespace: what `using Main.TestUtilities`
+    # (Documenter's tests, after `include("TestUtilities.jl")`) or a `using
+    # ..Main: x` from a test helper finds there is not knowable here,
+    # whatever the resolver made of the path.
+    first_seg = findfirst(s -> s != ".", t.path)
+    first_seg !== nothing && t.path[first_seg] == "Main" && return nothing
     if t.sort === :external
         _v2_is_compiler_module_path(t.path) && return nothing
         # A standard library is always loadable where `@stdlib` is on the
@@ -373,10 +379,6 @@ function _v2_unresolved_import_name(rt, root, path::Vector{String}, ri::V2Resolv
         end
         return derived_v2_external_first_missing_segment(rt, root, t.path)
     elseif t.sort === :unresolved
-        # `Main` is the REPL/script namespace: what a `using ..Main: x` from a
-        # test helper included into it finds there is not knowable here.
-        first_seg = findfirst(s -> s != ".", t.path)
-        first_seg !== nothing && t.path[first_seg] == "Main" && return nothing
         re = _v2_reattempt_unresolved(rt, root, path, ri, Set{URI}())
         if re === nothing
             # Locate the first stuck segment for the message, the same way the

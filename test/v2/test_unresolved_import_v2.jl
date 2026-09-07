@@ -85,6 +85,10 @@ end
     # A genuinely missing binding still reports.
     jw = ui_workspace("module P\nmodule Q\nimport ..nope\nend\nend\n")
     @test length(ui_diags(jw)) == 1
+    # `Main.X` spelled absolutely (Documenter's tests: `include(
+    # "TestUtilities.jl"); using Main.TestUtilities`) is as opaque as `..Main`.
+    jw = ui_workspace("include(\"TestUtilities.jl\"); using Main.TestUtilities\nf() = TestUtilities.x\n")
+    @test isempty(ui_diags(jw))
 end
 
 @testitem "v2 unresolved_import: unresolved relative imports" setup=[UnresolvedImpWS] begin
