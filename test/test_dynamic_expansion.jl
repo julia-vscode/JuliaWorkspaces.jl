@@ -127,7 +127,8 @@ end
 
 @testitem "Dynamic expansion: the live-children cap evicts LRU idle children and eviction re-arms revival" begin
     using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ExpansionBatchMsg, ReconcileMsg,
-        ProcessIndexedMsg, ExpansionBatchFailedMsg, SetMaxAliveDjpsMsg, MacroExpansionsResult,
+        ProcessIndexedMsg, ExpansionBatchFailedMsg, ExpansionBatchDoneMsg, SetMaxAliveDjpsMsg,
+        MacroExpansionsResult, ExpansionOutcomeEntry,
         WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry, handle!
 
     launches = DJPKey[]
@@ -159,24 +160,46 @@ end
     drain_out!(df)
 
     # A batch for the evicted `a` revives it (the eviction cleared the
-    # once-only guard); the launch itself evicts nothing.
+    # once-only guard); the revive needs room under the cap, so the idle `b`
+    # is evicted to admit it.
     handle!(df, batch(a, UInt64(3)))
     @test length(launches) == 3 && launches[end] == a
     @test a in df.refreshing && haskey(df.procs, a)
-    @test haskey(df.procs, b)
+    @test !haskey(df.procs, b) && b in df.done
     @test !isready(df.out_channel)   # nothing settled as failed
     # The revived child settles; its batch is still queued (the fake child
-    # never reaches Done), so it is not idle and `b` alone is within the cap.
+    # never reaches Done).
     handle!(df, ProcessIndexedMsg(a, "/ws/a"))
     drain_out!(df)
-    @test haskey(df.procs, a) && haskey(df.procs, b)
+    @test haskey(df.procs, a)
+
+    # A batch for `b` wants a revive, but the only settled child (`a`) holds
+    # queued batches: a waiting child is never sacrificed for another's
+    # revive, so `b` waits in the refresh queue …
+    handle!(df, batch(b, UInt64(4)))
+    @test b in df.refresh_queue && !(b in df.refreshing)
+    @test length(launches) == 3
+    # … until `a` is idle: its batch served (stand in for the child), the
+    # completion admits `b` by evicting `a`.
+    empty!(df.expansion_queue[a]); push!(df.expansion_inflight, a)
+    handle!(df, ExpansionBatchDoneMsg(a, ExpansionOutcomeEntry[]))
+    drain_out!(df)
+    @test length(launches) == 4 && launches[end] == b
+    @test b in df.refreshing && !haskey(df.procs, a)
+    handle!(df, ProcessIndexedMsg(b, "/ws/b"))
+    drain_out!(df)
 
     # Raising the cap (here: lifting it) relaunches nothing; lowering it
     # evicts the least recently used idle child first.
     handle!(df, SetMaxAliveDjpsMsg(0))
     @test df.max_alive_djps[] == 0
-    # (Stand in for the child having served `a`'s batch.)
-    empty!(df.expansion_queue[a])
+    handle!(df, batch(a, UInt64(5)))          # revives a, no room needed
+    @test length(launches) == 5
+    handle!(df, ProcessIndexedMsg(a, "/ws/a"))
+    drain_out!(df)
+    @test haskey(df.procs, a) && haskey(df.procs, b)
+    # (Stand in for the children having served their batches.)
+    empty!(df.expansion_queue[a]); empty!(df.expansion_queue[b])
     df.procs[a].last_active = 1.0
     df.procs[b].last_active = 2.0
     handle!(df, SetMaxAliveDjpsMsg(1))
@@ -192,16 +215,45 @@ end
 
     # Contrast: a child lost to a failed batch (crash path) keeps the guard —
     # its next batch settles `:failed` instead of relaunching a doomed child.
-    handle!(df, batch(b, UInt64(5)))
+    handle!(df, batch(b, UInt64(6)))
     @test haskey(df.procs, b)
     push!(df.expansion_revive_attempted, b)   # as `_drain_expansion_queue!` records once it revived
-    handle!(df, ExpansionBatchFailedMsg(b, ExpansionKey[ExpansionKey((UInt64(1), UInt64(2), UInt64(5)))], ErrorException("boom")))
+    handle!(df, ExpansionBatchFailedMsg(b, ExpansionKey[ExpansionKey((UInt64(1), UInt64(2), UInt64(6)))], ErrorException("boom")))
     drain_out!(df)
     @test !haskey(df.procs, b)
-    handle!(df, batch(b, UInt64(6)))
+    handle!(df, batch(b, UInt64(7)))
     msg = take!(df.out_channel)
     @test msg isa MacroExpansionsResult && msg.entries[1].status === :failed
     @test length(launches) == n
+end
+
+@testitem "Dynamic expansion: a child holding only queued batches yields to the cap and is revived later" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ExpansionBatchMsg, ReconcileMsg,
+        ProcessIndexedMsg, WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_alive_djps=1,
+        launcher=(df, djp) -> push!(launches, djp.key))
+    a = WatchTestEnvironmentKey("/ws/a", "A", UInt64(1))
+    b = WatchTestEnvironmentKey("/ws/b", "B", UInt64(2))
+    batch(key, mac) = ExpansionBatchMsg(key, "c1", String[], String[], ExpansionEntry[(key=ExpansionKey((UInt64(1), UInt64(2), mac)), text="@m x")])
+
+    handle!(df, ReconcileMsg(Set{DJPKey}([a, b])))
+    handle!(df, ProcessIndexedMsg(a, "/ws/a"))
+    # `a` has a batch queued (the fake child never serves it) when `b`
+    # settles: an idle child would go first, but there is none, so the
+    # waiting `a` is evicted — its batch stays queued and a revive for it is
+    # queued behind the admission gate (`b` is not idle either: its own batch
+    # arrives now).
+    handle!(df, batch(a, UInt64(3)))
+    handle!(df, batch(b, UInt64(4)))
+    handle!(df, ProcessIndexedMsg(b, "/ws/b"))
+    @test !haskey(df.procs, a) && haskey(df.procs, b)
+    @test length(df.expansion_queue[a]) == 1
+    @test a in df.refresh_queue
+    @test length(launches) == 2
+    while isready(df.out_channel); take!(df.out_channel); end
+    @test !isready(df.out_channel)   # nothing settled as failed
 end
 
 @testitem "Dynamic expansion: a resolved non-package environment's child is torn down after indexing" begin

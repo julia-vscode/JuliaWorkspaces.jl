@@ -225,8 +225,8 @@ Its behavior is controlled by [`DynamicMode`](@ref):
   and to serve macro expansion batches for the files of their environment (a
   package's test-environment child serves its test files; a resolved
   non-package environment's child serves nothing and is torn down after
-  indexing). The number of settled idle children kept alive is bounded by
-  `max_alive_djps` (`set_max_alive_djps!`): beyond it they are evicted
+  indexing). The number of settled children kept alive is bounded by
+  `max_alive_djps` (`set_max_alive_djps!`): beyond it idle ones are evicted
   least-recently-used first and relaunched on demand (good for a language
   server).
 

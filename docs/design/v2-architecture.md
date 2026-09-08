@@ -490,9 +490,9 @@ child; a manifest-less package's file → its standalone scratch project's
 child. A key the reactor failed terminally falls back to the enclosing
 package's own environment. A resolved non-package environment's child
 (`ResolveEnvironmentKey`) serves no file and is torn down after indexing;
-the settled idle children kept alive are bounded by `max_alive_djps` (LRU
-eviction; a batch for an evicted key relaunches it through the refresh
-path). The moving parts:
+the settled children kept alive are bounded by `max_alive_djps` (LRU
+eviction of idle ones; a batch for an evicted key relaunches it through the
+refresh path once there is room). The moving parts:
 
 - **Content-addressed cache** (`ExpansionKey = (env_hash, ctx_hash, mac_hash)`):
   the env's Project/Manifest content hash, a module-context hash over the

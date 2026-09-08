@@ -16,8 +16,8 @@ feature* that indexes package environments and resolves symbol information.
   expansion batches for the files of their environment (a test-environment
   child serves the package's test files; a resolved non-package environment's
   child serves nothing and is torn down after indexing). The number of
-  settled idle children kept alive is bounded by `max_alive_djps`
-  ([`set_max_alive_djps!`](@ref)): beyond it they are evicted
+  settled children kept alive is bounded by `max_alive_djps`
+  ([`set_max_alive_djps!`](@ref)): beyond it idle ones are evicted
   least-recently-used first and relaunched on demand. Use this for
   long-running hosts such as a language server.
 
@@ -536,9 +536,9 @@ const DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS = 60
 """
     DEFAULT_MAX_ALIVE_DJPS
 
-Default bound on the number of settled, idle dynamic child processes kept
-alive under `DynamicPersistent` (`<= 0`: unlimited); working children come on
-top. Idle children beyond it are evicted least-recently-used first and
+Default bound on the number of settled dynamic child processes kept alive
+under `DynamicPersistent` (`<= 0`: unlimited); children still indexing come
+on top. Idle children beyond it are evicted least-recently-used first and
 relaunched on demand; see [`set_max_alive_djps!`](@ref).
 """
 const DEFAULT_MAX_ALIVE_DJPS = 8
@@ -624,9 +624,8 @@ struct DynamicFeature
     # Maximum number of concurrently *working* child processes (<= 0: unlimited).
     max_concurrent_djps::Int
     # ── Live-children cap ──
-    # Maximum number of settled, IDLE child processes kept alive (<= 0:
-    # unlimited): `_enforce_alive_cap!` evicts beyond it least-recently-used
-    # first; working children come on top. A `Ref` because hosts change it at
+    # Maximum number of SETTLED child processes kept alive (<= 0: unlimited):
+    # see "The live-children cap" below. A `Ref` because hosts change it at
     # runtime (`SetMaxAliveDjpsMsg`); reactor-owned like everything else here.
     max_alive_djps::Base.RefValue{Int}
     # ── Failure bounds ──
@@ -1324,49 +1323,79 @@ function _settle_child!(df::DynamicFeature, key::DJPKey, djp::Union{Nothing,Dyna
     return
 end
 
-# Whether a live child is settled and idle — evictable by the cap without
-# losing work: its item completed (`done`), it holds no launch slot, is not
-# refreshing, and has no expansion batch in flight or queued. The FSM state is
+# ─── The live-children cap ───────────────────────────────────────────────────
+#
+# `max_alive_djps` bounds the SETTLED children — alive and past their index
+# request, i.e. the ones kept to serve expansion batches. Children still
+# launching or refreshing come on top (at most `max_concurrent_djps` of them),
+# so the live total is bounded by the sum. Two mechanisms keep the bound:
+# eviction (`_enforce_alive_cap!`) when a settling child pushes the count
+# over, and admission (`_admit_settled_child!`) before a refresh or revive
+# launch adds a settled child — the launch waits in `refresh_queue` until an
+# idle child can go. A child serving a batch is never killed; one that only
+# holds QUEUED batches may be: its batches stay queued and a revive for it is
+# queued in turn, so nothing is lost, only deferred. The FSM state is
 # deliberately not consulted (the fake launcher of the reactor tests never
 # drives it).
-function _is_idle_child(df::DynamicFeature, key::DJPKey)
-    key in df.done || return false
-    (key in df.launching || key in df.refreshing || key in df.expansion_inflight) && return false
-    q = get(df.expansion_queue, key, nothing)
-    return q === nothing || isempty(q)
+
+_is_settled_child(df::DynamicFeature, key::DJPKey) =
+    key in df.done && !(key in df.launching) && !(key in df.refreshing)
+_settled_child_count(df::DynamicFeature) = count(k -> _is_settled_child(df, k), keys(df.procs))
+_has_queued_batches(df::DynamicFeature, key::DJPKey) =
+    (q = get(df.expansion_queue, key, nothing); q !== nothing && !isempty(q))
+
+# Kill one evictable child: an idle one with nothing queued, least recently
+# used first; failing that (unless `idle_only`), the least recently used one
+# whose batches are merely queued. An evicted key stays in `done` (reconcile
+# must not re-dispatch its item; batches for it still queue) and becomes
+# revivable again: `_drain_expansion_queue!` relaunches it through the refresh
+# path when a batch wants it. Its exit arrives as a `ProcessTerminatedMsg` for
+# a key no longer in `procs`, which is ignored — no failure budget is charged.
+function _evict_one_child!(df::DynamicFeature; idle_only::Bool)
+    victim = nothing
+    victim_busy = true
+    for (key, djp) in df.procs
+        (_is_settled_child(df, key) && !(key in df.expansion_inflight)) || continue
+        busy = _has_queued_batches(df, key)
+        idle_only && busy && continue
+        if victim === nothing || (victim_busy && !busy) ||
+           (victim_busy == busy && djp.last_active < victim[2].last_active)
+            victim = (key, djp)
+            victim_busy = busy
+        end
+    end
+    victim === nothing && return false
+    key, djp = victim
+    @info "Evicting $(victim_busy ? "waiting" : "idle") child process for $(_short_path(_key_path(key))): settled children exceed max_alive_djps=$(df.max_alive_djps[]); it is relaunched on demand"
+    try kill(djp) catch; end
+    delete!(df.procs, key)
+    delete!(df.expansion_revive_attempted, key)
+    # Its queued batches now wait for a revive, which the admission gate lets
+    # through once there is room.
+    victim_busy && _drain_expansion_queue!(df, key)
+    return true
 end
 
-# Kill settled, idle children least-recently-used first until at most
-# `max_alive_djps` of them are kept warm. Only IDLE children count: working
-# ones (launching, refreshing, serving a batch) are neither counted nor
-# touched, so a transient launch — a background refresh of a scratch project,
-# a first-time index — never evicts a child that still has batches coming,
-# and the live total is bounded by the cap plus `max_concurrent_djps`. An
-# evicted key stays in `done` (reconcile must not re-dispatch its item;
-# batches for it still queue) and becomes revivable again:
-# `_drain_expansion_queue!` relaunches it through the refresh path when a
-# batch wants it. Its exit arrives as a `ProcessTerminatedMsg` for a key no
-# longer in `procs`, which is ignored — no failure budget is charged.
+# Evict until at most `max_alive_djps` settled children remain (or nothing
+# evictable is left: every settled child is serving a batch).
 function _enforce_alive_cap!(df::DynamicFeature)
     cap = df.max_alive_djps[]
     cap <= 0 && return
-    while true
-        idle = 0
-        victim = nothing
-        for (key, djp) in df.procs
-            _is_idle_child(df, key) || continue
-            idle += 1
-            if victim === nothing || djp.last_active < victim[2].last_active
-                victim = (key, djp)
-            end
-        end
-        (idle <= cap || victim === nothing) && return
-        key, djp = victim
-        @info "Evicting idle child process for $(_short_path(_key_path(key))): $(idle) idle children exceed max_alive_djps=$(cap); it is relaunched on demand"
-        try kill(djp) catch; end
-        delete!(df.procs, key)
-        delete!(df.expansion_revive_attempted, key)
+    while _settled_child_count(df) > cap
+        _evict_one_child!(df; idle_only=true) || _evict_one_child!(df; idle_only=false) || return
     end
+    return
+end
+
+# Whether one more settled child may be added (a refresh or revive launch):
+# under the cap, or an idle child with nothing queued can make room. A child
+# with queued batches is never sacrificed for another one's revive — that
+# would ping-pong.
+function _admit_settled_child!(df::DynamicFeature)
+    cap = df.max_alive_djps[]
+    cap <= 0 && return true
+    _settled_child_count(df) < cap && return true
+    return _evict_one_child!(df; idle_only=true)
 end
 
 # Launch `key` if a slot is free, otherwise queue it.
@@ -1410,6 +1439,10 @@ function _drain_launch_queue!(df::DynamicFeature)
             end
         end
         key = df.refresh_queue[best]
+        # A refreshed or revived child of a serving kind becomes a settled
+        # child: it needs room under the live-children cap, else it waits here
+        # until one is evicted (a child torn down after indexing needs none).
+        _serves_after_indexing(key) && !_admit_settled_child!(df) && break
         deleteat!(df.refresh_queue, best)
         push!(df.refreshing, key)
         _report_progress(df, _progress_key("refresh", key), "Refreshing environment...", 0)
@@ -1757,6 +1790,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         _free_slot!(df, key)
         _drain_expansion_queue!(df, key)
         _enforce_alive_cap!(df)
+        _drain_launch_queue!(df)   # room for a waiting revive, if one was made
         return false
     end
 
@@ -1799,6 +1833,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     # The settled persistent child can now serve queued expansion batches.
     _drain_expansion_queue!(df, key)
     _enforce_alive_cap!(df)
+    _drain_launch_queue!(df)   # room for a waiting revive, if one was made
     return false
 end
 
@@ -2022,6 +2057,8 @@ function handle!(df::DynamicFeature, msg::ExpansionBatchDoneMsg)
     isready(df.update_channel) || try put!(df.update_channel, :data_available) catch; end
     _drain_expansion_queue!(df, msg.env_key)
     _enforce_alive_cap!(df)
+    # The child may be idle now: a revive waiting for room can take its place.
+    _drain_launch_queue!(df)
     return false
 end
 
@@ -2041,6 +2078,7 @@ function handle!(df::DynamicFeature, msg::ExpansionBatchFailedMsg)
     end
     _settle_expansions_failed!(df, msg.entry_keys)
     _drain_expansion_queue!(df, key)   # settles the rest of the queue via the dead-child path
+    _drain_launch_queue!(df)   # the forfeited child's room can admit a waiting revive
     return false
 end
 
@@ -2050,6 +2088,7 @@ function handle!(df::DynamicFeature, msg::SetMaxAliveDjpsMsg)
     @info "Live child process cap set to $(msg.n <= 0 ? "unlimited" : string(msg.n))"
     df.max_alive_djps[] = msg.n
     _enforce_alive_cap!(df)
+    _drain_launch_queue!(df)   # a raised cap admits waiting revives
     return false
 end
 
