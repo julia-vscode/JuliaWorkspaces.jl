@@ -179,6 +179,15 @@ reactor task owns `failed_projects`/`failure_attempts`. See
 struct ResetFailuresMsg <: DynamicReactorMessage end
 
 """
+Change the bound on live child processes (`<= 0`: unlimited) and evict down to
+it at once. Queued because the reactor task owns `max_alive_djps` and `procs`.
+See [`set_max_alive_djps!`](@ref).
+"""
+struct SetMaxAliveDjpsMsg <: DynamicReactorMessage
+    n::Int
+end
+
+"""
 Reconcile the set of running/required dynamic processes.
 
 Carries the full set of [`DJPKey`](@ref)s the workspace currently needs (as

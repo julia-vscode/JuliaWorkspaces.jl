@@ -74,6 +74,7 @@ is_ready
 wait_until_ready
 get_update_channel
 retry_failed_dynamic_projects!
+set_max_alive_djps!
 ```
 
 ## Language features

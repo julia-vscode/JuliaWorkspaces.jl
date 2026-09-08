@@ -322,15 +322,111 @@ end
     # The harvest picks the site up through the standalone env.
     @test !isempty(JW.derived_required_macro_expansions(jw.runtime))
 
-    # Test files' env is the TEST child, which the expansion revive path
-    # cannot serve — deferred, expansion stays off for them.
+    # A test file whose test environment is NOT scheduled (no `test/runtests.jl`
+    # on disc for this in-memory fixture) has only the package's own
+    # environment: the standalone child.
     test_uri = URI("file:///nm/test/runtests.jl")
     add_file!(jw, TextFile(test_uri, SourceText("g() = @somemacro 1\n", "julia")))
-    @test JW.derived_v2_expansion_env(jw.runtime, test_uri) === nothing
+    @test JW.derived_v2_expansion_env(jw.runtime, test_uri).key isa JW.CreateStandaloneProjectKey
 
     # A manifest-bearing package keeps the watch-env route.
     jw2, uri2 = exp_make_jw("f(x) = @somemacro x\n")
     @test JW.derived_v2_expansion_env(jw2.runtime, uri2).key isa JW.WatchEnvironmentKey
+end
+
+@testitem "expansion env: test files expand in the package's test-environment child" setup=[ExpansionWS] begin
+    # Test-only dependencies (`SafeTestsets`, Aqua, …) and their macros resolve
+    # only in the merged test environment, so a test file's batches go to the
+    # test-env child — for a manifest-less package and a manifest-bearing one
+    # alike. The test-env work item is only scheduled for a package with a real
+    # `test/runtests.jl` on disc, so this fixture is written to disc.
+    using JuliaWorkspaces: WatchTestEnvironmentKey, CreateStandaloneProjectKey, WatchEnvironmentKey,
+        set_input_failed_dynamic_keys!, set_input_resolve_workspace_environments!, DJPKey
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
+
+    function make_pkg(name; manifest::Bool)
+        dir = uri2filepath(filepath2uri(mktempdir()))  # drive-letter casing round-trip (Windows)
+        mkpath(joinpath(dir, "src")); mkpath(joinpath(dir, "test"))
+        files = [
+            joinpath(dir, "Project.toml") => ("name = \"$name\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d1\"\nversion = \"1.0.0\"\n", "toml"),
+            joinpath(dir, "src", "$name.jl") => ("module $name\nf(x) = @pkgmacro x\nend\n", "julia"),
+            # (`@safetestset` itself is walker-modeled; an unknown macro makes the site.)
+            joinpath(dir, "test", "runtests.jl") => ("using Test\nusing SafeTestsets\n@check_all_methods $name\n", "julia"),
+        ]
+        manifest && push!(files, joinpath(dir, "Manifest.toml") =>
+            ("julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n", "toml"))
+        jw = JuliaWorkspace()
+        for (path, (content, lang)) in files
+            write(path, content)
+            add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+        end
+        JW.set_v2_enabled!(jw, true)
+        JW.set_macro_expansion!(jw, true)
+        return jw, dir
+    end
+
+    # Manifest-less: the package's own key has a zero content hash, so the
+    # env hash must come from the name and path.
+    jw, dir = make_pkg("Bare"; manifest=false)
+    test_uri = filepath2uri(joinpath(dir, "test", "runtests.jl"))
+    src_uri = filepath2uri(joinpath(dir, "src", "Bare.jl"))
+    key = WatchTestEnvironmentKey(dir, "Bare", UInt64(0))
+    env = JW.derived_v2_expansion_env(jw.runtime, test_uri)
+    @test env.key == key
+    @test env.env_hash != 0
+    # The host prunes settled outcomes whose env_hash no live child carries:
+    # the test env's hash must count as live, or its outcomes are pruned,
+    # re-required and re-settled forever (a one-shot lint never returns).
+    @test env.env_hash in JW.derived_v2_live_expansion_env_hashes(jw.runtime)
+    @test JW.derived_v2_expansion_env(jw.runtime, src_uri).env_hash in JW.derived_v2_live_expansion_env_hashes(jw.runtime)
+    @test JW.derived_v2_expansion_env(jw.runtime, src_uri).key isa CreateStandaloneProjectKey
+    # The site expands in a scratch module built from the file's own imports
+    # (a test file runs in `Main`, never inside the package module).
+    req = only(r for r in JW.derived_required_macro_expansions(jw.runtime) if r.file == test_uri)
+    @test req.env_key == key
+    @test isempty(req.ctx_module)
+    @test "using Test" in req.imports && "using SafeTestsets" in req.imports && "using Bare" in req.imports
+    # The src/ file keeps the package-root-module assumption.
+    @test only(r for r in JW.derived_required_macro_expansions(jw.runtime) if r.file == src_uri).ctx_module == ["Bare"]
+    # A terminally failed test-env item: the package's own environment is the fallback.
+    set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}([key]))
+    @test JW.derived_v2_expansion_env(jw.runtime, test_uri).key isa CreateStandaloneProjectKey
+    set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}())
+    @test JW.derived_v2_expansion_env(jw.runtime, test_uri).key == key
+    # No test environments are fabricated without workspace-environment resolution.
+    set_input_resolve_workspace_environments!(jw.runtime, false)
+    @test JW.derived_v2_expansion_env(jw.runtime, test_uri) === nothing
+
+    # Manifest-bearing: the test key carries the package project's hash; the
+    # src/ file keeps the watch child.
+    jw, dir = make_pkg("Full"; manifest=true)
+    test_uri = filepath2uri(joinpath(dir, "test", "runtests.jl"))
+    proj_hash = JW.derived_project(jw.runtime, filepath2uri(dir)).content_hash
+    key = WatchTestEnvironmentKey(dir, "Full", proj_hash)
+    env = JW.derived_v2_expansion_env(jw.runtime, test_uri)
+    @test env.key == key
+    @test env.env_hash != proj_hash
+    @test JW.derived_v2_expansion_env(jw.runtime, filepath2uri(joinpath(dir, "src", "Full.jl"))).key ==
+        WatchEnvironmentKey(dir, proj_hash)
+end
+
+@testitem "expansion env: a test/ folder that is a workspace member expands in the root's child" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: WatchEnvironmentKey
+    using JuliaWorkspaces.URIs2: uri2filepath
+    root_project = "name = \"Root\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n\n[workspace]\nprojects = [\"test\"]\n"
+    root_manifest = "julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n\n[[deps.Root]]\npath = \".\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n"
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsm/Project.toml"), SourceText(root_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsm/Manifest.toml"), SourceText(root_manifest, "toml")))
+    add_file!(jw, TextFile(URI("file:///wsm/src/Root.jl"), SourceText("module Root end\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///wsm/test/Project.toml"), SourceText("[deps]\nTest = \"8dfed614-e22c-5e08-85e1-65c5234f0b40\"\n", "toml")))
+    test_uri = URI("file:///wsm/test/runtests.jl")
+    add_file!(jw, TextFile(test_uri, SourceText("using Test\n@testset \"x\" begin end\n", "julia")))
+    JW.set_v2_enabled!(jw, true)
+    JW.set_macro_expansion!(jw, true)
+    root_hash = JW.derived_project(jw.runtime, URI("file:///wsm")).content_hash
+    env = JW.derived_v2_expansion_env(jw.runtime, test_uri)
+    @test env.key == WatchEnvironmentKey(uri2filepath(URI("file:///wsm")), root_hash)
 end
 
 @testitem "expansion ctx: module path travels and re-keys the context" setup=[ExpansionWS] begin
@@ -816,6 +912,23 @@ end
     @test env.env_hash == pkg.content_hash
     # A src/ file keeps the package's own child.
     @test JW.derived_v2_expansion_env(jw.runtime, URI("file:///pkg/src/MyPkg.jl")).key isa WatchEnvironmentKey
+
+    # The package's merged test environment covers the trigger (test deps
+    # routinely include it): that scratch project is served by the test-env
+    # child, so the extension expands there.
+    using JuliaWorkspaces: set_input_ready_test_environments!, WatchTestEnvironmentKey
+    jw = build(manifest_bare)
+    scratch = URI("file:///scratch/test-env-MyPkg")
+    add_file!(jw, TextFile(URI("file:///scratch/test-env-MyPkg/Project.toml"), SourceText(
+        "[deps]\nBar = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\nMyPkg = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9a5\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///scratch/test-env-MyPkg/Manifest.toml"), SourceText(manifest_with_bar, "toml")))
+    test_key = JW._test_environment_key(jw.runtime, URI("file:///pkg"), derived_package(jw.runtime, URI("file:///pkg")))
+    @test test_key isa WatchTestEnvironmentKey
+    @test JW.derived_v2_expansion_env(jw.runtime, ext) === nothing
+    set_input_ready_test_environments!(jw.runtime, Dict(test_key => scratch))
+    @test JW.derived_extension_project_uri(jw.runtime, URI("file:///pkg"), "MyPkgBarExt") == scratch
+    env = JW.derived_v2_expansion_env(jw.runtime, ext)
+    @test env.key == test_key
 
     # A workspace member's files expand in the ROOT's child (the only one a
     # workspace has).

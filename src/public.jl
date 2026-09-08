@@ -33,6 +33,7 @@ export JuliaWorkspace,
     is_ready,
     wait_until_ready,
     retry_failed_dynamic_projects!,
+    set_max_alive_djps!,
     get_update_channel,
     get_legacy_cst,
     get_roots_for_uri,
@@ -155,11 +156,10 @@ function _reconcile_expansions!(jw::JuliaWorkspace)
     # Every hash an expansion env can carry must count as live while its child
     # can still serve batches — otherwise a settled `:failed` outcome is
     # pruned here, re-required, re-settled, … and a one-shot settle loop never
-    # ends (the borrowed-test-env routing bug of round 4). Required work items
-    # plus resolved extension environments (whose item may have left the
-    # required set once its scratch project exists).
-    live_env_hashes = Set{UInt64}(k.content_hash for k in derived_required_dynamic_projects(jw.runtime))
-    union!(live_env_hashes, (k.content_hash for k in keys(input_extension_environments(jw.runtime))))
+    # ends (the borrowed-test-env routing bug of round 4, and again the
+    # test-env hash of round 5). `derived_v2_live_expansion_env_hashes` derives
+    # the hashes exactly as the routing does — never recompute them here.
+    live_env_hashes = derived_v2_live_expansion_env_hashes(jw.runtime)
     if any(k -> !(k.env_hash in live_env_hashes), keys(input_macro_expansions(jw.runtime)))
         set_input_macro_expansions!(jw.runtime,
             filter(p -> p.first.env_hash in live_env_hashes, input_macro_expansions(jw.runtime)))
@@ -820,6 +820,35 @@ function get_test_env(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     derived_testenv(jw.runtime, uri)
+end
+
+"""
+    set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
+
+Bound the number of dynamic child processes alive at once to `n` (`n <= 0`:
+unlimited), effective immediately: settled, idle children beyond the bound are
+killed least-recently-used first, and any of them is relaunched on demand when
+a macro expansion batch next needs its environment. Working children are never
+killed, so the count can exceed the bound while all of them are busy. Raising
+the bound relaunches nothing.
+
+Under `DynamicPersistent` every environment — a project's, a package's merged
+test environment, a standalone or extension scratch project — keeps its child
+alive to serve expansions, so a monorepo of many packages would otherwise hold
+one Julia process per package indefinitely. Hosts should wire this to a user
+setting (the constructor's `max_alive_djps` sets the initial value).
+
+No-op when the workspace has no dynamic feature.
+"""
+function set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
+    @debug "set_max_alive_djps!" n=n
+
+    df = jw.dynamic_feature
+    df === nothing && return
+
+    # `max_alive_djps`/`procs` are owned by the reactor task.
+    put!(df.in_channel, SetMaxAliveDjpsMsg(n))
+    return
 end
 
 """

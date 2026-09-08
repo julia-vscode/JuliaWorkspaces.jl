@@ -478,7 +478,19 @@ is what makes it backdate across position-only edits.
 process never invokes a macro: opaque macrocalls are expanded by the
 **persistent env child** — the DJP process that indexed the environment and
 therefore already has its packages loaded — via the `expandMacros` batch
-request, and spliced back into materialization. The moving parts:
+request, and spliced back into materialization. Which child serves a file is
+`derived_v2_expansion_env`'s decision, in step with the environment
+`derived_project_for_file` assigns it: an extension file → the project
+covering its triggers or the extension environment; a **test file** (under
+`test/`, or bearing `@testitem`s) → the package's **merged test environment
+child**, the only one where test-only dependencies and their macros
+(`@safetestset`, Aqua's) resolve — unless `test/` is a workspace member, whose
+files the root's child serves; a file with a project → that project's watch
+child; a manifest-less package's file → its standalone scratch project's
+child. A key the reactor failed terminally falls back to the enclosing
+package's own environment. Live children are bounded by `max_alive_djps`
+(LRU eviction of idle settled children; a batch for an evicted key relaunches
+it through the refresh path). The moving parts:
 
 - **Content-addressed cache** (`ExpansionKey = (env_hash, ctx_hash, mac_hash)`):
   the env's Project/Manifest content hash, a module-context hash over the

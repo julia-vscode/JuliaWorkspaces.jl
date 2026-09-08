@@ -84,6 +84,127 @@ end
     @test state(fsm) == DynamicProcessDone
 end
 
+@testitem "Dynamic expansion: a test-environment key is revived for an expansion batch" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ExpansionBatchMsg, ReconcileMsg,
+        ProcessIndexedMsg, TestEnvironmentReadyResult, MacroExpansionsResult,
+        WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> push!(launches, djp.key))
+    k = WatchTestEnvironmentKey("/ws/P", "P", UInt64(1))
+    dir = "/scratch/test-env-P"
+
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+    handle!(df, ProcessIndexedMsg(k, dir))
+    ready = take!(df.out_channel)
+    @test ready isa TestEnvironmentReadyResult
+    @test ready.package == "P"
+    @test length(launches) == 1
+    @test k in df.done && haskey(df.procs, k)
+
+    # The child is gone (evicted by the cap, say): the first batch for the
+    # key relaunches it through the refresh path — the same revival a
+    # cache-hit environment gets.
+    delete!(df.procs, k)
+    ek = ExpansionKey((UInt64(1), UInt64(2), UInt64(3)))
+    handle!(df, ExpansionBatchMsg(k, "c1", ["using Test", "using P"], String[], ExpansionEntry[(key=ek, text="@safetestset \"x\" begin end")]))
+    @test length(launches) == 2
+    @test k in df.refreshing
+    @test length(df.expansion_queue[k]) == 1
+    @test !isready(df.out_channel)
+
+    # The revived child re-materializes the test env: the ready result is
+    # re-emitted (idempotent for the host), the batch stays queued for the
+    # child to settle (the fake child never reaches Done), nothing failed.
+    handle!(df, ProcessIndexedMsg(k, dir))
+    again = take!(df.out_channel)
+    @test again isa TestEnvironmentReadyResult
+    @test again.test_project_uri == ready.test_project_uri
+    @test !(k in df.refreshing)
+    @test length(df.expansion_queue[k]) == 1
+    @test !isready(df.out_channel)
+end
+
+@testitem "Dynamic expansion: the live-children cap evicts LRU idle children and eviction re-arms revival" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ExpansionBatchMsg, ReconcileMsg,
+        ProcessIndexedMsg, ExpansionBatchFailedMsg, SetMaxAliveDjpsMsg, MacroExpansionsResult,
+        WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_alive_djps=1,
+        launcher=(df, djp) -> push!(launches, djp.key))
+    # Test-env keys: their work message launches synchronously (a watch-env
+    # key's goes through an async prep first, which these handler-level tests
+    # do not run); the cap itself is kind-agnostic.
+    a = WatchTestEnvironmentKey("/ws/a", "A", UInt64(1))
+    b = WatchTestEnvironmentKey("/ws/b", "B", UInt64(2))
+    batch(key, mac) = ExpansionBatchMsg(key, "c1", String[], String[], ExpansionEntry[(key=ExpansionKey((UInt64(1), UInt64(2), mac)), text="@m x")])
+    drain_out!(df) = (while isready(df.out_channel); take!(df.out_channel); end)
+
+    handle!(df, ReconcileMsg(Set{DJPKey}([a, b])))
+    @test length(launches) == 2
+    # Both children are launching: over the cap, but neither is idle.
+    @test haskey(df.procs, a) && haskey(df.procs, b)
+
+    # `a` settles while `b` still works: `a` is the only idle child, and two
+    # live children exceed a cap of one — it is evicted, its item stays done.
+    handle!(df, ProcessIndexedMsg(a, "/ws/a"))
+    @test !haskey(df.procs, a)
+    @test a in df.done
+    @test haskey(df.procs, b)
+    handle!(df, ProcessIndexedMsg(b, "/ws/b"))
+    @test haskey(df.procs, b)
+    drain_out!(df)
+
+    # A batch for the evicted `a` revives it (the eviction cleared the
+    # once-only guard), and that launch evicts the idle `b` to make room.
+    handle!(df, batch(a, UInt64(3)))
+    @test length(launches) == 3 && launches[end] == a
+    @test a in df.refreshing && haskey(df.procs, a)
+    @test !haskey(df.procs, b) && b in df.done
+    @test !(b in df.expansion_revive_attempted)
+    @test !isready(df.out_channel)   # nothing settled as failed
+    handle!(df, ProcessIndexedMsg(a, "/ws/a"))
+    drain_out!(df)
+    @test haskey(df.procs, a)
+
+    # Raising the cap (here: lifting it) relaunches nothing; lowering it
+    # evicts the least recently used idle child first.
+    handle!(df, SetMaxAliveDjpsMsg(0))
+    @test df.max_alive_djps[] == 0
+    handle!(df, batch(b, UInt64(4)))          # revives b
+    handle!(df, ProcessIndexedMsg(b, "/ws/b"))
+    drain_out!(df)
+    @test haskey(df.procs, a) && haskey(df.procs, b)
+    # (The fake children never settle, so their batches are still queued;
+    # stand in for the children having served them.)
+    empty!(df.expansion_queue[a]); empty!(df.expansion_queue[b])
+    df.procs[a].last_active = 1.0
+    df.procs[b].last_active = 2.0
+    handle!(df, SetMaxAliveDjpsMsg(1))
+    @test !haskey(df.procs, a) && haskey(df.procs, b)
+    @test a in df.done
+
+    # A later reconcile with the same required set does not re-spawn an
+    # evicted key: its work is done.
+    n = length(launches)
+    handle!(df, ReconcileMsg(Set{DJPKey}([a, b])))
+    @test length(launches) == n
+
+    # Contrast: a child lost to a failed batch (crash path) keeps the guard —
+    # its next batch settles `:failed` instead of relaunching a doomed child.
+    handle!(df, batch(b, UInt64(5)))
+    @test haskey(df.procs, b)
+    push!(df.expansion_revive_attempted, b)   # as `_drain_expansion_queue!` records once it revived
+    handle!(df, ExpansionBatchFailedMsg(b, ExpansionKey[ExpansionKey((UInt64(1), UInt64(2), UInt64(5)))], ErrorException("boom")))
+    drain_out!(df)
+    @test !haskey(df.procs, b)
+    handle!(df, batch(b, UInt64(6)))
+    msg = take!(df.out_channel)
+    @test msg isa MacroExpansionsResult && msg.entries[1].status === :failed
+    @test length(launches) == n
+end
+
 # The live end-to-end slice: real child process, real indexing, real
 # macroexpand. Spawns a Julia child and takes ~30s warm, so it only runs when
 # explicitly requested via JW_E2E_DYNAMIC=1.

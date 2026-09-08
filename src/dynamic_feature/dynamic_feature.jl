@@ -12,8 +12,12 @@ feature* that indexes package environments and resolves symbol information.
   test environments (populating the on-disc symbol cache), but they are torn
   down once indexing completes. Use this for one-shot tools such as CI runs.
 - `DynamicPersistent`: Like `DynamicIndexingOnly`, but the child processes are
-  kept alive so the workspace can react to ongoing changes. Use this for
-  long-running hosts such as a language server.
+  kept alive so the workspace can react to ongoing changes and serve macro
+  expansion batches for the files of their environment (a test-environment
+  child serves the package's test files). The number of live children is
+  bounded by `max_alive_djps` ([`set_max_alive_djps!`](@ref)): idle settled
+  children beyond it are evicted least-recently-used first and relaunched on
+  demand. Use this for long-running hosts such as a language server.
 
 See also [`is_ready`](@ref), [`wait_until_ready`](@ref).
 """
@@ -38,6 +42,9 @@ mutable struct DynamicJuliaProcess
     # `_expansion_batch_timeout!`): the first batch for a context pays for
     # loading the context's packages, later ones do not.
     expansion_contexts_seen::Set{String}
+    # `time()` of the last launch, index completion, or expansion batch on this
+    # child: the LRU order `_enforce_alive_cap!` evicts idle children in.
+    last_active::Float64
 
     function DynamicJuliaProcess(key::DJPKey, project_path::String, package::Union{Nothing,String}, kind::Symbol)
         return new(
@@ -50,10 +57,13 @@ mutable struct DynamicJuliaProcess
             CancellationTokens.CancellationTokenSource(),
             dynamic_process_fsm("$(kind):$(project_path)"),
             nothing,
-            Set{String}()
+            Set{String}(),
+            time(),
         )
     end
 end
+
+_touch!(djp::DynamicJuliaProcess) = (djp.last_active = time(); djp)
 
 # Thrown when a child does not answer an index request within its deadline. A
 # distinct type so the failure handler can say "timed out" rather than reporting
@@ -522,6 +532,16 @@ negative-cached) is the intended containment for that.
 const DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS = 60
 
 """
+    DEFAULT_MAX_ALIVE_DJPS
+
+Default bound on the number of live dynamic child processes under
+`DynamicPersistent` (`<= 0`: unlimited). Settled children beyond it are
+evicted least-recently-used first and relaunched on demand; see
+[`set_max_alive_djps!`](@ref).
+"""
+const DEFAULT_MAX_ALIVE_DJPS = 8
+
+"""
     FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS
 
 The budget for the FIRST batch a child answers for a given expansion context.
@@ -601,6 +621,12 @@ struct DynamicFeature
     # ── Launch concurrency cap ──
     # Maximum number of concurrently *working* child processes (<= 0: unlimited).
     max_concurrent_djps::Int
+    # ── Live-children cap ──
+    # Maximum number of child processes alive at once (<= 0: unlimited), the
+    # persistent ones included: `_enforce_alive_cap!` evicts settled, idle
+    # children least-recently-used first. A `Ref` because hosts change it at
+    # runtime (`SetMaxAliveDjpsMsg`); reactor-owned like everything else here.
+    max_alive_djps::Base.RefValue{Int}
     # ── Failure bounds ──
     # Terminal failures tolerated per identity before further items for it are
     # short-circuited without launching a child (<= 0: unlimited). The default
@@ -633,8 +659,10 @@ struct DynamicFeature
     expansion_inflight::Set{DJPKey}
     # Env keys we already revived a child for (see `_drain_expansion_queue!`):
     # a cache-hit environment completes without ever launching one, so the
-    # first batch launches it through the refresh machinery — at most once, so
-    # a crashing child cannot loop. Pruned with the key on reconcile.
+    # first batch launches it through the refresh machinery — at most once
+    # per life, so a crashing child cannot loop. A deliberate eviction by the
+    # live-children cap clears the key again (the child was fine; it will be
+    # wanted back). Pruned with the key on reconcile.
     expansion_revive_attempted::Set{DJPKey}
     # HOST-owned (unlike everything above, which the reactor task owns): the
     # expansion keys `_reconcile_expansions!` has already sent, so a key is
@@ -644,7 +672,8 @@ struct DynamicFeature
     function DynamicFeature(djp_mode::DynamicMode, store_path::String;
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
             progress_callback::Union{Nothing,Function}=nothing,
-            max_concurrent_djps::Int=4, launcher::Function=_launch_process!,
+            max_concurrent_djps::Int=4, max_alive_djps::Int=DEFAULT_MAX_ALIVE_DJPS,
+            launcher::Function=_launch_process!,
             max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS,
             djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
         return new(
@@ -671,6 +700,7 @@ struct DynamicFeature
             Dict{DJPKey,Int}(),
             dynamic_controller_fsm("dynamic_controller"),
             max_concurrent_djps,
+            Ref(max_alive_djps),
             max_failure_attempts,
             djp_request_timeout_seconds,
             Vector{DJPKey}(),
@@ -1264,6 +1294,50 @@ function _launch_now!(df::DynamicFeature, key::DJPKey)
     reason, target = _djp_reason_target(df, key)
     @info "Spawning indexing child process for $(_short_path(target)): $(reason)"
     df.launcher(df, djp)
+    # A new child makes room for itself: the live-children cap evicts an idle
+    # settled one rather than refusing the launch (this launch IS the work).
+    _enforce_alive_cap!(df)
+    return
+end
+
+# Whether a live child is settled and idle — evictable by the cap without
+# losing work: its item completed (`done`), it holds no launch slot, is not
+# refreshing, and has no expansion batch in flight or queued. The FSM state is
+# deliberately not consulted (the fake launcher of the reactor tests never
+# drives it).
+function _is_idle_child(df::DynamicFeature, key::DJPKey)
+    key in df.done || return false
+    (key in df.launching || key in df.refreshing || key in df.expansion_inflight) && return false
+    q = get(df.expansion_queue, key, nothing)
+    return q === nothing || isempty(q)
+end
+
+# Kill settled, idle children least-recently-used first until at most
+# `max_alive_djps` are alive. Working children (launching, refreshing, serving
+# a batch) are never touched, so the count can legitimately exceed the cap
+# while all of them are busy. An evicted key stays in `done` (reconcile must
+# not re-dispatch its item; batches for it still queue) and becomes revivable
+# again: `_drain_expansion_queue!` relaunches it through the refresh path when
+# a batch wants it. Its exit arrives as a `ProcessTerminatedMsg` for a key no
+# longer in `procs`, which is ignored — no failure budget is charged.
+function _enforce_alive_cap!(df::DynamicFeature)
+    cap = df.max_alive_djps[]
+    cap <= 0 && return
+    while length(df.procs) > cap
+        victim = nothing
+        for (key, djp) in df.procs
+            _is_idle_child(df, key) || continue
+            if victim === nothing || djp.last_active < victim[2].last_active
+                victim = (key, djp)
+            end
+        end
+        victim === nothing && return   # only working children left
+        key, djp = victim
+        @info "Evicting idle child process for $(_short_path(_key_path(key))): $(length(df.procs)) live children exceed max_alive_djps=$(cap); it is relaunched on demand"
+        try kill(djp) catch; end
+        delete!(df.procs, key)
+        delete!(df.expansion_revive_attempted, key)
+    end
     return
 end
 
@@ -1493,6 +1567,11 @@ _scratch_ready_result(key::ResolveExtensionEnvironmentKey, dir::String) =
 # expansion-driven child revival below); their ready result is idempotent.
 _scratch_ready_result(key::WatchEnvironmentKey, dir::String) =
     EnvironmentReadyResult(key.project_path, key.content_hash)
+# So can a test environment: a revived test-env child re-materializes the
+# merged test project into the same persistent dir (`dir`), and the host's
+# handler is idempotent.
+_scratch_ready_result(key::WatchTestEnvironmentKey, dir::String) =
+    TestEnvironmentReadyResult(filepath2uri(key.project_path), key.package_name, filepath2uri(dir), key.content_hash)
 
 function handle!(df::DynamicFeature, msg::CreateStandaloneProjectMsg)
     key = msg.key
@@ -1648,10 +1727,13 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
         if df.djp_mode == DynamicIndexingOnly && djp !== nothing
             kill(djp)
             delete!(df.procs, key)
+        elseif djp !== nothing
+            _touch!(djp)
         end
         _report_progress(df, _progress_key("refresh", key), "Done", 100)
         _free_slot!(df, key)
         _drain_expansion_queue!(df, key)
+        _enforce_alive_cap!(df)
         return false
     end
 
@@ -1679,13 +1761,15 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
 
     # Mark the work complete. Under DynamicIndexingOnly the child process is no
     # longer needed, so it is torn down; under DynamicPersistent (and the
-    # default) the process is kept alive in `df.procs` and only the reconcile
-    # path may later kill it.
+    # default) the process is kept alive in `df.procs` to serve expansion
+    # batches, until the reconcile path or the live-children cap kills it.
     push!(df.done, key)
     _clear_failure_budget!(df, key)
     if df.djp_mode == DynamicIndexingOnly && djp !== nothing
         kill(djp)
         delete!(df.procs, key)
+    elseif djp !== nothing
+        _touch!(djp)
     end
 
     # Decrement pending_count before freeing the slot: the free-slot drain
@@ -1695,6 +1779,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     _free_slot!(df, key)
     # The settled persistent child can now serve queued expansion batches.
     _drain_expansion_queue!(df, key)
+    _enforce_alive_cap!(df)
     return false
 end
 
@@ -1873,6 +1958,7 @@ function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
 
     batch = popfirst!(q)
     push!(df.expansion_inflight, key)
+    _touch!(djp)
     transition!(djp.fsm, DynamicProcessIndexing; reason="macro expansion batch")
     timeout_seconds = _expansion_batch_timeout!(djp, batch.ctx_id)
     @async try
@@ -1908,12 +1994,15 @@ end
 function handle!(df::DynamicFeature, msg::ExpansionBatchDoneMsg)
     delete!(df.expansion_inflight, msg.env_key)
     djp = get(df.procs, msg.env_key, nothing)
-    if djp !== nothing && state(djp.fsm) == DynamicProcessIndexing
-        transition!(djp.fsm, DynamicProcessDone; reason="macro expansion batch done")
+    if djp !== nothing
+        _touch!(djp)
+        state(djp.fsm) == DynamicProcessIndexing &&
+            transition!(djp.fsm, DynamicProcessDone; reason="macro expansion batch done")
     end
     put!(df.out_channel, MacroExpansionsResult(msg.results))
     isready(df.update_channel) || try put!(df.update_channel, :data_available) catch; end
     _drain_expansion_queue!(df, msg.env_key)
+    _enforce_alive_cap!(df)
     return false
 end
 
@@ -1937,6 +2026,13 @@ function handle!(df::DynamicFeature, msg::ExpansionBatchFailedMsg)
 end
 
 # ─── Controller messages ────────────────────────────────────────────────────
+
+function handle!(df::DynamicFeature, msg::SetMaxAliveDjpsMsg)
+    @info "Live child process cap set to $(msg.n <= 0 ? "unlimited" : string(msg.n))"
+    df.max_alive_djps[] = msg.n
+    _enforce_alive_cap!(df)
+    return false
+end
 
 function handle!(df::DynamicFeature, ::ResetFailuresMsg)
     @info "Clearing dynamic failure bookkeeping" n_keys=length(df.failed_projects) n_projects=length(df.failure_attempts)

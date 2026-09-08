@@ -185,7 +185,13 @@ function _v2_expansion_context_for(rt, uri, inner::Vector{String})
             # The in-file module path follows; a leading segment that IS the
             # assumed root (the entry file's own `module MyPkg … end`) is not
             # repeated.
-            isempty(file_path) && (modpath = vcat([pkg.name], _v2_strip_leading(inner, pkg.name)))
+            # A TEST file is its own root and runs in `Main`: its sites expand
+            # in the scratch module built from its own imports (`using Test`,
+            # `using SafeTestsets`, …) plus the `using <Pkg>` line above —
+            # never inside the package module.
+            pkg_path = uri2filepath(pkg_uri)
+            is_test = pkg_path !== nothing && _file_needs_test_env(rt, pkg_path, uri)
+            isempty(file_path) && !is_test && (modpath = vcat([pkg.name], _v2_strip_leading(inner, pkg.name)))
             # An extension file's module is not a submodule of the parent by
             # name — `Base.get_extension(Parent, :ParentBarExt)` finds it
             # once parent and triggers are loaded (the child falls back to
@@ -217,14 +223,62 @@ function _v2_watch_expansion_env(rt, project_uri)
     watch_uri, watch_hash = _watch_target_for_project(rt, project_uri)
     derived_project(rt, watch_uri) === nothing && return nothing
     # Only a WORKSPACE project folder has a watch child (the required set's
-    # first arm). A borrowed environment that is a scratch project — the
-    # merged test env an extension's triggers happen to be covered by — is
-    # served by a test-env child the expansion path cannot use: no expansion
-    # rather than a key nobody serves.
+    # first arm). A scratch project (a resolved copy of a manifest-less env)
+    # has no key of this kind: no expansion rather than a key nobody serves.
+    # (An extension's borrowed merged test env is caught by the caller.)
     watch_uri in derived_project_folders(rt) || return nothing
     watch_path = uri2filepath(watch_uri)
     watch_path === nothing && return nothing
     return (key=WatchEnvironmentKey(watch_path, watch_hash), env_hash=watch_hash)
+end
+
+# The env content hash of a test-env key. Not the key's own `content_hash`: a
+# deved lib's test key carries the deving ROOT's hash (shared by every lib of
+# a monorepo) and a bare package's is `0`, so the name and path must go in.
+_v2_test_env_hash(key::WatchTestEnvironmentKey) =
+    hash(key.project_path, hash(key.package_name, key.content_hash % UInt)) % UInt64
+
+# The `env_hash` an expansion env built on `key` carries — the single source of
+# truth shared by the routing below and the host's pruning of settled outcomes
+# (`_reconcile_expansions!`): a settled outcome whose env_hash the host does
+# not recognize as live is pruned, re-required and re-settled forever.
+_v2_expansion_env_hash(key::WatchTestEnvironmentKey) = _v2_test_env_hash(key)
+_v2_expansion_env_hash(key::DJPKey) = key.content_hash
+
+"""
+    derived_v2_live_expansion_env_hashes(rt) -> Set{UInt64}
+
+Every `env_hash` a settled expansion outcome may carry while some child can
+still serve batches under it: the required work items' hashes (as the routing
+derives them) plus the resolved extension environments' (whose item may have
+left the required set once its scratch project exists).
+"""
+Salsa.@derived function derived_v2_live_expansion_env_hashes(rt)
+    live = Set{UInt64}(_v2_expansion_env_hash(k) for k in derived_required_dynamic_projects(rt))
+    union!(live, (k.content_hash for k in keys(input_extension_environments(rt))))
+    return live
+end
+
+# The test-env child serving `uri`'s expansion batches when `uri` is a test
+# file whose merged test environment the required set schedules, else
+# `nothing`. A `test/` folder that is a workspace member needs no merged env:
+# its files route to the root's watch child, which holds the shared manifest.
+function _v2_test_expansion_env(rt, uri)
+    input_resolve_workspace_environments(rt) || return nothing
+    pkg_uri = derived_package_for_file(rt, uri)
+    pkg_uri === nothing && return nothing
+    pkg = derived_package(rt, pkg_uri)
+    pkg === nothing && return nothing
+    pkg_path = uri2filepath(pkg_uri)
+    pkg_path === nothing && return nothing
+    _file_needs_test_env(rt, pkg_path, uri) || return nothing
+    test_member = _test_member_project_folder(rt, pkg_uri)
+    test_member === nothing || return _v2_watch_expansion_env(rt, test_member)
+    isfile(joinpath(pkg_path, "test", "runtests.jl")) || return nothing
+    key = _test_environment_key(rt, pkg_uri, pkg)
+    key === nothing && return nothing
+    key in input_failed_dynamic_keys(rt) && return nothing
+    return (key=key, env_hash=_v2_expansion_env_hash(key))
 end
 
 Salsa.@derived function derived_v2_expansion_env(rt, uri)
@@ -242,8 +296,23 @@ Salsa.@derived function derived_v2_expansion_env(rt, uri)
         ext_key = _extension_environment_key(rt, ext.package_folder, pkg)
         derived_ready_extension_environment(rt, ext_key) == ext_project &&
             return (key=ext_key, env_hash=pkg.content_hash)
+        # The covering project may be the package's own merged test env (test
+        # deps routinely include the triggers): that scratch project is served
+        # by the test-env child.
+        test_key = _test_environment_key(rt, ext.package_folder, pkg)
+        test_key !== nothing && derived_ready_test_environment(rt, test_key) == ext_project &&
+            return (key=test_key, env_hash=_v2_expansion_env_hash(test_key))
         return _v2_watch_expansion_env(rt, ext_project)
     end
+    # A TEST file (under the package's `test/`, or bearing `@testitem`s)
+    # expands in the merged test environment — the only one where test-only
+    # dependencies (`SafeTestsets`, Aqua, …) and their macros resolve — i.e.
+    # in the test-env child. The conditions mirror the test-env arm of
+    # `derived_required_dynamic_projects`, so the key is one the reactor
+    # serves; a key it failed terminally falls through to the package's own
+    # environment below, like `derived_project_for_file`'s fallback.
+    test_env = _v2_test_expansion_env(rt, uri)
+    test_env === nothing || return test_env
     project_uri = derived_project_for_file(rt, uri)
     if project_uri !== nothing
         return _v2_watch_expansion_env(rt, project_uri)
@@ -264,11 +333,6 @@ Salsa.@derived function derived_v2_expansion_env(rt, uri)
     pkg === nothing && return nothing
     pkg_path = uri2filepath(pkg_uri)
     pkg_path === nothing && return nothing
-    # Test files' environment is the TEST child, which the expansion revive
-    # path cannot serve (`_scratch_ready_result` has no WatchTestEnvironmentKey
-    # method — reaching `refresh_queue` would MethodError the reactor):
-    # deferred, expansion stays off for them.
-    _file_needs_test_env(rt, pkg_path, uri) && return nothing
     # A package deved by a workspace project (a monorepo's `lib/<Pkg>`) is
     # loaded in that project: its watch child serves the expansions.
     deving = derived_deving_project(rt, pkg_uri)

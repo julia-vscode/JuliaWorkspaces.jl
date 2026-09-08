@@ -222,7 +222,11 @@ Its behavior is controlled by [`DynamicMode`](@ref):
 - `DynamicIndexingOnly` — spawn child processes to index environments, then tear
   them down (good for CI / one-shot tooling).
 - `DynamicPersistent` — keep child processes alive to react to ongoing changes
-  (good for a language server).
+  and to serve macro expansion batches for the files of their environment (a
+  package's test-environment child serves its test files). The number of live
+  children is bounded by `max_alive_djps` (`set_max_alive_djps!`): idle settled
+  children beyond it are evicted least-recently-used first and relaunched on
+  demand (good for a language server).
 
 When enabled, the feature spawns out-of-process `DynamicJuliaProcess` children
 and talks to them over JSONRPC, driven by a small finite-state machine
