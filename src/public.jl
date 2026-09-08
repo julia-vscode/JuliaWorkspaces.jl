@@ -825,12 +825,13 @@ end
 """
     set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
 
-Bound the number of dynamic child processes alive at once to `n` (`n <= 0`:
-unlimited), effective immediately: settled, idle children beyond the bound are
-killed least-recently-used first, and any of them is relaunched on demand when
-a macro expansion batch next needs its environment. Working children are never
-killed, so the count can exceed the bound while all of them are busy. Raising
-the bound relaunches nothing.
+Bound the number of settled, idle dynamic child processes kept alive to `n`
+(`n <= 0`: unlimited), effective immediately: idle children beyond the bound
+are killed least-recently-used first, and any of them is relaunched on demand
+when a macro expansion batch next needs its environment. Working children
+(indexing, refreshing, serving a batch) are neither counted nor killed, so
+the live total is at most `n` plus `max_concurrent_djps`. Raising the bound
+relaunches nothing.
 
 Under `DynamicPersistent` every environment — a project's, a package's merged
 test environment, a standalone or extension scratch project — keeps its child

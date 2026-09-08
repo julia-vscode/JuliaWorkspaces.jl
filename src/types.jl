@@ -556,10 +556,11 @@ Create an empty workspace. To build one directly from folders on disc, use
   0–100 range); a report with `percentage >= 100` ends that operation's bar.
 - `max_concurrent_djps::Int`: Maximum number of concurrently working dynamic
   child processes (`0` disables the limit). Defaults to 4.
-- `max_alive_djps::Int`: Maximum number of dynamic child processes alive at
-  once under `DynamicPersistent`, the settled ones that serve macro expansion
-  included (`0` disables the limit). Idle children beyond it are evicted
-  least-recently-used first and relaunched on demand. Defaults to
+- `max_alive_djps::Int`: Maximum number of settled, idle dynamic child
+  processes kept alive under `DynamicPersistent` to serve macro expansion
+  (`0` disables the limit; working children come on top). Idle children
+  beyond it are evicted least-recently-used first and relaunched on demand.
+  Defaults to
   [`DEFAULT_MAX_ALIVE_DJPS`](@ref); changeable at runtime with
   [`set_max_alive_djps!`](@ref).
 - `max_failure_attempts::Int`: How many terminal failures a project may

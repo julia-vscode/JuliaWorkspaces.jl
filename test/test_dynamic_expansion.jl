@@ -143,47 +143,46 @@ end
 
     handle!(df, ReconcileMsg(Set{DJPKey}([a, b])))
     @test length(launches) == 2
-    # Both children are launching: over the cap, but neither is idle.
+    # Both children are launching: neither is idle, nothing to evict.
     @test haskey(df.procs, a) && haskey(df.procs, b)
 
-    # `a` settles while `b` still works: `a` is the only idle child, and two
-    # live children exceed a cap of one — it is evicted, its item stays done.
+    # `a` settles while `b` still works: one idle child is within a cap of
+    # one — working children are never counted against it.
     handle!(df, ProcessIndexedMsg(a, "/ws/a"))
+    @test haskey(df.procs, a) && haskey(df.procs, b)
+    # `b` settles too: two idle children exceed the cap, the least recently
+    # active (`a`) is evicted, its item stays done.
+    handle!(df, ProcessIndexedMsg(b, "/ws/b"))
     @test !haskey(df.procs, a)
     @test a in df.done
-    @test haskey(df.procs, b)
-    handle!(df, ProcessIndexedMsg(b, "/ws/b"))
     @test haskey(df.procs, b)
     drain_out!(df)
 
     # A batch for the evicted `a` revives it (the eviction cleared the
-    # once-only guard), and that launch evicts the idle `b` to make room.
+    # once-only guard); the launch itself evicts nothing.
     handle!(df, batch(a, UInt64(3)))
     @test length(launches) == 3 && launches[end] == a
     @test a in df.refreshing && haskey(df.procs, a)
-    @test !haskey(df.procs, b) && b in df.done
-    @test !(b in df.expansion_revive_attempted)
+    @test haskey(df.procs, b)
     @test !isready(df.out_channel)   # nothing settled as failed
+    # The revived child settles; its batch is still queued (the fake child
+    # never reaches Done), so it is not idle and `b` alone is within the cap.
     handle!(df, ProcessIndexedMsg(a, "/ws/a"))
     drain_out!(df)
-    @test haskey(df.procs, a)
+    @test haskey(df.procs, a) && haskey(df.procs, b)
 
     # Raising the cap (here: lifting it) relaunches nothing; lowering it
     # evicts the least recently used idle child first.
     handle!(df, SetMaxAliveDjpsMsg(0))
     @test df.max_alive_djps[] == 0
-    handle!(df, batch(b, UInt64(4)))          # revives b
-    handle!(df, ProcessIndexedMsg(b, "/ws/b"))
-    drain_out!(df)
-    @test haskey(df.procs, a) && haskey(df.procs, b)
-    # (The fake children never settle, so their batches are still queued;
-    # stand in for the children having served them.)
-    empty!(df.expansion_queue[a]); empty!(df.expansion_queue[b])
+    # (Stand in for the child having served `a`'s batch.)
+    empty!(df.expansion_queue[a])
     df.procs[a].last_active = 1.0
     df.procs[b].last_active = 2.0
     handle!(df, SetMaxAliveDjpsMsg(1))
     @test !haskey(df.procs, a) && haskey(df.procs, b)
     @test a in df.done
+    @test !(a in df.expansion_revive_attempted)
 
     # A later reconcile with the same required set does not re-spawn an
     # evicted key: its work is done.
@@ -203,6 +202,35 @@ end
     msg = take!(df.out_channel)
     @test msg isa MacroExpansionsResult && msg.entries[1].status === :failed
     @test length(launches) == n
+end
+
+@testitem "Dynamic expansion: a resolved non-package environment's child is torn down after indexing" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, StandaloneProjectPrepDoneMsg,
+        ProcessIndexedMsg, ResolvedEnvironmentReadyResult, StandaloneProjectReadyResult,
+        ResolveEnvironmentKey, CreateStandaloneProjectKey, DJPKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> push!(launches, djp.key))
+    env = ResolveEnvironmentKey("/ws/P/docs", UInt64(1))
+    standalone = CreateStandaloneProjectKey("/ws/Q", UInt64(2))
+    for key in (env, standalone)
+        Threads.atomic_add!(df.pending_count, 1)
+        push!(df.inflight, key)
+        handle!(df, StandaloneProjectPrepDoneMsg(key, false))   # no usable dir: launch
+    end
+    @test length(launches) == 2
+
+    # Nothing routes an expansion to a resolved env's child: it is killed once
+    # its scratch project is indexed, even under DynamicPersistent, and its
+    # item stays done.
+    handle!(df, ProcessIndexedMsg(env, "/scratch/env-docs"))
+    @test take!(df.out_channel) isa ResolvedEnvironmentReadyResult
+    @test !haskey(df.procs, env)
+    @test env in df.done
+    # A standalone project's child serves its package's files: kept.
+    handle!(df, ProcessIndexedMsg(standalone, "/scratch/Q"))
+    @test take!(df.out_channel) isa StandaloneProjectReadyResult
+    @test haskey(df.procs, standalone)
 end
 
 # The live end-to-end slice: real child process, real indexing, real

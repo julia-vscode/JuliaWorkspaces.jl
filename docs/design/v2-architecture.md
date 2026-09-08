@@ -488,9 +488,11 @@ child**, the only one where test-only dependencies and their macros
 files the root's child serves; a file with a project → that project's watch
 child; a manifest-less package's file → its standalone scratch project's
 child. A key the reactor failed terminally falls back to the enclosing
-package's own environment. Live children are bounded by `max_alive_djps`
-(LRU eviction of idle settled children; a batch for an evicted key relaunches
-it through the refresh path). The moving parts:
+package's own environment. A resolved non-package environment's child
+(`ResolveEnvironmentKey`) serves no file and is torn down after indexing;
+the settled idle children kept alive are bounded by `max_alive_djps` (LRU
+eviction; a batch for an evicted key relaunches it through the refresh
+path). The moving parts:
 
 - **Content-addressed cache** (`ExpansionKey = (env_hash, ctx_hash, mac_hash)`):
   the env's Project/Manifest content hash, a module-context hash over the

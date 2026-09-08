@@ -14,10 +14,12 @@ feature* that indexes package environments and resolves symbol information.
 - `DynamicPersistent`: Like `DynamicIndexingOnly`, but the child processes are
   kept alive so the workspace can react to ongoing changes and serve macro
   expansion batches for the files of their environment (a test-environment
-  child serves the package's test files). The number of live children is
-  bounded by `max_alive_djps` ([`set_max_alive_djps!`](@ref)): idle settled
-  children beyond it are evicted least-recently-used first and relaunched on
-  demand. Use this for long-running hosts such as a language server.
+  child serves the package's test files; a resolved non-package environment's
+  child serves nothing and is torn down after indexing). The number of
+  settled idle children kept alive is bounded by `max_alive_djps`
+  ([`set_max_alive_djps!`](@ref)): beyond it they are evicted
+  least-recently-used first and relaunched on demand. Use this for
+  long-running hosts such as a language server.
 
 See also [`is_ready`](@ref), [`wait_until_ready`](@ref).
 """
@@ -534,10 +536,10 @@ const DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS = 60
 """
     DEFAULT_MAX_ALIVE_DJPS
 
-Default bound on the number of live dynamic child processes under
-`DynamicPersistent` (`<= 0`: unlimited). Settled children beyond it are
-evicted least-recently-used first and relaunched on demand; see
-[`set_max_alive_djps!`](@ref).
+Default bound on the number of settled, idle dynamic child processes kept
+alive under `DynamicPersistent` (`<= 0`: unlimited); working children come on
+top. Idle children beyond it are evicted least-recently-used first and
+relaunched on demand; see [`set_max_alive_djps!`](@ref).
 """
 const DEFAULT_MAX_ALIVE_DJPS = 8
 
@@ -622,9 +624,9 @@ struct DynamicFeature
     # Maximum number of concurrently *working* child processes (<= 0: unlimited).
     max_concurrent_djps::Int
     # ── Live-children cap ──
-    # Maximum number of child processes alive at once (<= 0: unlimited), the
-    # persistent ones included: `_enforce_alive_cap!` evicts settled, idle
-    # children least-recently-used first. A `Ref` because hosts change it at
+    # Maximum number of settled, IDLE child processes kept alive (<= 0:
+    # unlimited): `_enforce_alive_cap!` evicts beyond it least-recently-used
+    # first; working children come on top. A `Ref` because hosts change it at
     # runtime (`SetMaxAliveDjpsMsg`); reactor-owned like everything else here.
     max_alive_djps::Base.RefValue{Int}
     # ── Failure bounds ──
@@ -1294,9 +1296,31 @@ function _launch_now!(df::DynamicFeature, key::DJPKey)
     reason, target = _djp_reason_target(df, key)
     @info "Spawning indexing child process for $(_short_path(target)): $(reason)"
     df.launcher(df, djp)
-    # A new child makes room for itself: the live-children cap evicts an idle
-    # settled one rather than refusing the launch (this launch IS the work).
-    _enforce_alive_cap!(df)
+    return
+end
+
+# Whether a settled child has a role after its index request: the environment
+# children (project, test, standalone, extension) serve macro expansion
+# batches for the files of their environment. A resolved non-package
+# environment's child serves nothing — `derived_v2_expansion_env` never routes
+# a file to a `ResolveEnvironmentKey` (its scratch project is not a project
+# folder) — so it is torn down once its scratch project is indexed, under any
+# mode: a monorepo's dozens of `docs/`, `test/qa`, `test/gpu` environments
+# would otherwise hold (and, via the cap, churn) that many idle processes.
+_serves_after_indexing(::ResolveEnvironmentKey) = false
+_serves_after_indexing(::DJPKey) = true
+
+# Tear the settled child of `key` down when nothing will use it again (see
+# `_serves_after_indexing`), or when the mode keeps no children at all; touch
+# it otherwise so the LRU order sees the completion.
+function _settle_child!(df::DynamicFeature, key::DJPKey, djp::Union{Nothing,DynamicJuliaProcess})
+    djp === nothing && return
+    if df.djp_mode == DynamicIndexingOnly || !_serves_after_indexing(key)
+        kill(djp)
+        delete!(df.procs, key)
+    else
+        _touch!(djp)
+    end
     return
 end
 
@@ -1313,32 +1337,36 @@ function _is_idle_child(df::DynamicFeature, key::DJPKey)
 end
 
 # Kill settled, idle children least-recently-used first until at most
-# `max_alive_djps` are alive. Working children (launching, refreshing, serving
-# a batch) are never touched, so the count can legitimately exceed the cap
-# while all of them are busy. An evicted key stays in `done` (reconcile must
-# not re-dispatch its item; batches for it still queue) and becomes revivable
-# again: `_drain_expansion_queue!` relaunches it through the refresh path when
-# a batch wants it. Its exit arrives as a `ProcessTerminatedMsg` for a key no
+# `max_alive_djps` of them are kept warm. Only IDLE children count: working
+# ones (launching, refreshing, serving a batch) are neither counted nor
+# touched, so a transient launch — a background refresh of a scratch project,
+# a first-time index — never evicts a child that still has batches coming,
+# and the live total is bounded by the cap plus `max_concurrent_djps`. An
+# evicted key stays in `done` (reconcile must not re-dispatch its item;
+# batches for it still queue) and becomes revivable again:
+# `_drain_expansion_queue!` relaunches it through the refresh path when a
+# batch wants it. Its exit arrives as a `ProcessTerminatedMsg` for a key no
 # longer in `procs`, which is ignored — no failure budget is charged.
 function _enforce_alive_cap!(df::DynamicFeature)
     cap = df.max_alive_djps[]
     cap <= 0 && return
-    while length(df.procs) > cap
+    while true
+        idle = 0
         victim = nothing
         for (key, djp) in df.procs
             _is_idle_child(df, key) || continue
+            idle += 1
             if victim === nothing || djp.last_active < victim[2].last_active
                 victim = (key, djp)
             end
         end
-        victim === nothing && return   # only working children left
+        (idle <= cap || victim === nothing) && return
         key, djp = victim
-        @info "Evicting idle child process for $(_short_path(_key_path(key))): $(length(df.procs)) live children exceed max_alive_djps=$(cap); it is relaunched on demand"
+        @info "Evicting idle child process for $(_short_path(_key_path(key))): $(idle) idle children exceed max_alive_djps=$(cap); it is relaunched on demand"
         try kill(djp) catch; end
         delete!(df.procs, key)
         delete!(df.expansion_revive_attempted, key)
     end
-    return
 end
 
 # Launch `key` if a slot is free, otherwise queue it.
@@ -1724,12 +1752,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
             transition!(djp.fsm, DynamicProcessDone; reason="refreshed")
         end
         put!(df.out_channel, _scratch_ready_result(key, msg.result_dir))
-        if df.djp_mode == DynamicIndexingOnly && djp !== nothing
-            kill(djp)
-            delete!(df.procs, key)
-        elseif djp !== nothing
-            _touch!(djp)
-        end
+        _settle_child!(df, key, djp)
         _report_progress(df, _progress_key("refresh", key), "Done", 100)
         _free_slot!(df, key)
         _drain_expansion_queue!(df, key)
@@ -1760,17 +1783,13 @@ function handle!(df::DynamicFeature, msg::ProcessIndexedMsg)
     end
 
     # Mark the work complete. Under DynamicIndexingOnly the child process is no
-    # longer needed, so it is torn down; under DynamicPersistent (and the
-    # default) the process is kept alive in `df.procs` to serve expansion
-    # batches, until the reconcile path or the live-children cap kills it.
+    # longer needed, so it is torn down — as is, under any mode, a child of a
+    # kind that serves nothing after indexing; otherwise the process is kept
+    # alive in `df.procs` to serve expansion batches, until the reconcile path
+    # or the live-children cap kills it.
     push!(df.done, key)
     _clear_failure_budget!(df, key)
-    if df.djp_mode == DynamicIndexingOnly && djp !== nothing
-        kill(djp)
-        delete!(df.procs, key)
-    elseif djp !== nothing
-        _touch!(djp)
-    end
+    _settle_child!(df, key, djp)
 
     # Decrement pending_count before freeing the slot: the free-slot drain
     # reads pending_count to decide whether a queued refresh may launch, so it

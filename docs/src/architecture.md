@@ -223,10 +223,12 @@ Its behavior is controlled by [`DynamicMode`](@ref):
   them down (good for CI / one-shot tooling).
 - `DynamicPersistent` — keep child processes alive to react to ongoing changes
   and to serve macro expansion batches for the files of their environment (a
-  package's test-environment child serves its test files). The number of live
-  children is bounded by `max_alive_djps` (`set_max_alive_djps!`): idle settled
-  children beyond it are evicted least-recently-used first and relaunched on
-  demand (good for a language server).
+  package's test-environment child serves its test files; a resolved
+  non-package environment's child serves nothing and is torn down after
+  indexing). The number of settled idle children kept alive is bounded by
+  `max_alive_djps` (`set_max_alive_djps!`): beyond it they are evicted
+  least-recently-used first and relaunched on demand (good for a language
+  server).
 
 When enabled, the feature spawns out-of-process `DynamicJuliaProcess` children
 and talks to them over JSONRPC, driven by a small finite-state machine
