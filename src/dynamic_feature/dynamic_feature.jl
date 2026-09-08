@@ -1431,10 +1431,15 @@ function _drain_launch_queue!(df::DynamicFeature)
     # launched, and prep-in-flight work items, so the completion of the last
     # first-time item -- including a fast-lane serve itself -- is what
     # releases refreshes to run.
+    # Within the refresh queue, a revive (a key with expansion batches waiting
+    # on it) beats a plain background refresh: the former unblocks work, the
+    # latter merely picks up changes — and a monorepo's dozens of scratch-env
+    # refreshes would otherwise hold both launch slots for an hour.
+    refresh_rank(k) = (_has_queued_batches(df, k) ? 0 : 1, _launch_priority(k))
     while _has_free_slot(df) && df.pending_count[] <= 0 && isempty(df.launch_queue) && !isempty(df.refresh_queue)
         best = 1
         for i in 2:length(df.refresh_queue)
-            if _launch_priority(df.refresh_queue[i]) < _launch_priority(df.refresh_queue[best])
+            if refresh_rank(df.refresh_queue[i]) < refresh_rank(df.refresh_queue[best])
                 best = i
             end
         end

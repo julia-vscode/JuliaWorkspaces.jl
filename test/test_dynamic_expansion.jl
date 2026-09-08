@@ -256,6 +256,26 @@ end
     @test !isready(df.out_channel)   # nothing settled as failed
 end
 
+@testitem "Dynamic expansion: a revive outranks a plain background refresh" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ExpansionBatchMsg, _drain_launch_queue!,
+        CreateStandaloneProjectKey, WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_concurrent_djps=1,
+        launcher=(df, djp) -> push!(launches, djp.key))
+    # The plain refresh is shallower (would win on launch priority alone);
+    # the revive carries a batch waiting on it.
+    plain = CreateStandaloneProjectKey("/ws/P", UInt64(1))
+    revive = WatchTestEnvironmentKey("/ws/P/lib/Q", "Q", UInt64(2))
+    push!(df.done, plain); push!(df.done, revive)
+    push!(df.refresh_queue, plain); push!(df.refresh_queue, revive)
+    df.expansion_queue[revive] = [ExpansionBatchMsg(revive, "c1", String[], String[],
+        ExpansionEntry[(key=ExpansionKey((UInt64(1), UInt64(2), UInt64(3))), text="@m x")])]
+    _drain_launch_queue!(df)
+    @test launches == [revive]
+    @test df.refresh_queue == [plain]
+end
+
 @testitem "Dynamic expansion: a resolved non-package environment's child is torn down after indexing" begin
     using JuliaWorkspaces: DynamicFeature, DynamicPersistent, StandaloneProjectPrepDoneMsg,
         ProcessIndexedMsg, ResolvedEnvironmentReadyResult, StandaloneProjectReadyResult,
