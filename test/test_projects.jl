@@ -374,3 +374,57 @@ end
 
     @test derived_project(jw2.runtime, other_uri) === nothing
 end
+
+@testitem "Workspace member borrows the root manifest" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_env,
+        derived_project_folders, derived_project_for_file
+    using JuliaWorkspaces.URIs2: URI
+
+    uuid = "11111111-1111-1111-1111-111111111111"
+
+    # A Pkg workspace: the root project lists the package as a member and carries the only
+    # Manifest, the package in turn lists its own `test` sub-project, and neither the package
+    # nor the `test` folder has a Manifest of its own.
+    root_project = "[workspace]\nprojects = [\"MyPackage\"]\n"
+    root_manifest = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+
+    [[deps.MyPackage]]
+    path = "MyPackage"
+    uuid = "$uuid"
+    version = "0.1.0"
+    """
+    package_project = """
+    name = "MyPackage"
+    uuid = "$uuid"
+    version = "0.1.0"
+
+    [workspace]
+    projects = ["test"]
+    """
+    test_project = "[deps]\nMyPackage = \"$uuid\"\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/Project.toml"), SourceText(root_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/Manifest.toml"), SourceText(root_manifest, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/MyPackage/Project.toml"), SourceText(package_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/MyPackage/test/Project.toml"), SourceText(test_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/MyPackage/test/runtests.jl"), SourceText("@testitem \"x\" begin\nend\n", "julia")))
+
+    # Both members count as environments even though only the root has a Manifest.
+    projects = derived_project_folders(jw.runtime)
+    @test URI("file:///ws/MyPackage") in projects
+    @test URI("file:///ws/MyPackage/test") in projects
+
+    # A test file inside the `test` sub-project resolves to that sub-project, not the root:
+    # the root project does not depend on the package, so the root cannot run its tests.
+    test_file = URI("file:///ws/MyPackage/test/runtests.jl")
+    @test derived_project_for_file(jw.runtime, test_file) == URI("file:///ws/MyPackage/test")
+
+    env = get_test_env(jw, test_file)
+    @test env.package_name == "MyPackage"
+    @test env.package_uri == URI("file:///ws/MyPackage")
+    @test env.project_uri == URI("file:///ws/MyPackage/test")
+end
+
