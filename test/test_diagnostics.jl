@@ -2561,3 +2561,89 @@ end
     @test Set(k for k in required if k isa WatchTestEnvironmentKey) ==
         Set(key_of(dir) for dir in (own_dir, bare_dir, deved_dir))
 end
+
+# ──────────────────────────────────────────────────────────────────────
+# Undefined exports (Aqua.jl `test_undefined_exports` parity): an
+# `export`/`public` of a name that is defined nowhere is a missing reference.
+# ──────────────────────────────────────────────────────────────────────
+
+@testitem "missing_reference covers undefined exports and publics" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UndefExports"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee1234"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+
+    function export_diags(source)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///ue/Project.toml"), SourceText(project_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///ue/Manifest.toml"), SourceText(manifest_toml, "toml")))
+        uri = URI("file:///ue/src/UndefExports.jl")
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+        return get_diagnostic(jw, uri), source
+    end
+
+    # Aqua's PkgWithUndefinedExports fixture: `export undefined_name`.
+    diags, source = export_diags("""
+    module UndefExports
+
+    export undefined_name
+
+    end
+    """)
+    ds = filter(d -> d.code === :missing_reference, diags)
+    @test length(ds) == 1
+    @test source[first(ds[1].range):last(ds[1].range)-1] == "undefined_name"
+
+    # `public` of an undefined name is flagged the same way.
+    diags, source = export_diags("""
+    module UndefExports
+
+    public undefined_name
+
+    end
+    """)
+    ds = filter(d -> d.code === :missing_reference, diags)
+    @test length(ds) == 1
+    @test source[first(ds[1].range):last(ds[1].range)-1] == "undefined_name"
+
+    # Exports of defined names (including from a submodule) are fine.
+    diags, _ = export_diags("""
+    module UndefExports
+
+    f() = 1
+    export f
+
+    module Sub
+    g() = 1
+    export g
+    end
+
+    end
+    """)
+    @test !any(d -> d.code === :missing_reference, diags)
+
+    # An undefined export in a submodule is caught too.
+    diags, source = export_diags("""
+    module UndefExports
+
+    module Sub
+    export missing_in_sub
+    end
+
+    end
+    """)
+    ds = filter(d -> d.code === :missing_reference, diags)
+    @test length(ds) == 1
+    @test source[first(ds[1].range):last(ds[1].range)-1] == "missing_in_sub"
+end

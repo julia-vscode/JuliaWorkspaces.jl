@@ -180,6 +180,7 @@ include("string_concat_style.jl")
 include("bare_using.jl")
 include("debug_statement.jl")
 include("async_task.jl")
+include("unbound_type_parameter.jl")
 
 # A concrete tuple: `Tuple{SyntaxCheck{typeof(f1)}, SyntaxCheck{typeof(f2)}, …}`.
 const SYNTAX_CHECKS = (
@@ -189,6 +190,7 @@ const SYNTAX_CHECKS = (
     BARE_USING_CHECK,
     DEBUG_STATEMENT_CHECK,
     ASYNC_TASK_CHECK,
+    UNBOUND_TYPE_PARAMETER_CHECK,
 )
 
 const SYNTAX_CHECK_RULE_IDS = Set{Symbol}(c.rule_id for c in SYNTAX_CHECKS)

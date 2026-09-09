@@ -191,6 +191,11 @@ const LINT_RULES = LintRule[
         severity_default = :off, severity_strict = :warning),
     LintRule(id = :async_task, tier = TierSyntax,
         severity_default = :off, severity_strict = :warning),
+    # Aqua.jl's `test_unbound_args`, statically: a method `where` parameter no
+    # argument type binds, so it is undefined when the method runs (e.g.
+    # `f(::T...) where T` called with zero arguments).
+    LintRule(id = :unbound_type_parameter, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
 
     # ── Rules backed by analyses other than StaticLint ───────────────────────
     # Shapes JuliaLowering rejects (v2 lowering producer, behind the lowering
@@ -253,6 +258,30 @@ const LINT_RULES = LintRule[
     LintRule(id = :analysis_boundary, tier = TierWorkspace,
         severity_minimal = :off, severity_default = :off, severity_strict = :warning,
         codes = [StaticLint.ComputedInclude, StaticLint.RuntimeInclude]),
+
+    # ── Package-quality rules (ported from Aqua.jl) ──────────────────────────
+    # Like the syntactic rules, these ship `:off` outside `strict` so an
+    # upgrade never switches them on for existing projects.
+    # Aqua's `test_deps_compat`: a package should have a `[compat]` entry for
+    # `julia` and for every `[deps]`/`[extras]`/`[weakdeps]` entry, stdlibs
+    # included. Options gate the julia/extras/weakdeps checks and exempt
+    # named dependencies.
+    LintRule(id = :missing_compat, tier = TierProject,
+        severity_default = :off, severity_strict = :warning,
+        option_keys = [:check_julia, :check_extras, :check_weakdeps, :ignore]),
+    # The static face of Aqua's `test_stale_deps`: a `[deps]` entry no
+    # `using`/`import` in the package's source (src/ or extensions) references.
+    # Aqua accepts transitively-loaded deps at run time; a static check cannot,
+    # so such deps go on the `ignore` option.
+    LintRule(id = :unused_dependency, tier = TierWorkspace,
+        severity_default = :off, severity_strict = :warning,
+        option_keys = [:ignore]),
+    # Aqua's `test_undocumented_names`, statically: an exported/`public` name a
+    # workspace package declares without a docstring, or a submodule without a
+    # module docstring (the root module falls back to the README). Re-exported
+    # names are skipped — their docstrings live upstream.
+    LintRule(id = :undocumented_public_name, tier = TierWorkspace,
+        severity_default = :off, severity_strict = :warning),
 ]
 
 const LINT_RULES_BY_ID = Dict{Symbol,LintRule}(r.id => r for r in LINT_RULES)

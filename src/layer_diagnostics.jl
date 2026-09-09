@@ -102,6 +102,23 @@ function _validate_lint_rules!(res::Vector{Diagnostic}, table, into::Dict{Symbol
                 delete!(options, :scope)
             end
         end
+        if rule.id === :missing_compat
+            for bool_key in (:check_julia, :check_extras, :check_weakdeps)
+                if haskey(options, bool_key) && !(options[bool_key] isa Bool)
+                    push!(res, config_diagnostic(
+                        "Invalid `$bool_key` for rule `$k`, expected a boolean."))
+                    delete!(options, bool_key)
+                end
+            end
+        end
+        if rule.id in (:missing_compat, :unused_dependency) && haskey(options, :ignore)
+            ig = options[:ignore]
+            if !(ig isa Vector) || !all(x -> x isa AbstractString, ig)
+                push!(res, config_diagnostic(
+                    "Invalid `ignore` for rule `$k`, expected an array of dependency names."))
+                delete!(options, :ignore)
+            end
+        end
 
         into[rule.id] = (severity, options)
     end
@@ -517,6 +534,14 @@ Salsa.@derived function derived_diagnostics(rt, uri)
                 enabled(rule) && emit!(d.range, rule, d.message, d.uri, d.source)
             end
         end
+
+        # Undocumented public names of the workspace packages this file's
+        # statements belong to (Aqua parity; layer_undocumented_names.jl).
+        if enabled(:undocumented_public_name)
+            for (range, message) in collect_undocumented_public_findings(rt, uri)
+                emit!(range, :undocumented_public_name, message, nothing, "JuliaWorkspaces.jl")
+            end
+        end
     end
 
     # Config/TOML diagnostics are filesystem-file only.
@@ -538,6 +563,32 @@ Salsa.@derived function derived_diagnostics(rt, uri)
                 derived_project_semantic_problems(rt, uri),
             ))
                 emit!(_toml_range_for_key_path(rt, uri, p.key_path, p.at), p.code, p.message, nothing, "JuliaWorkspaces.jl")
+            end
+        end
+
+        # Package-quality findings on the project file (Aqua.jl parity). The
+        # producers are config-independent; the rule options filter here. A
+        # `missing_compat` finding's section is its key path's first segment.
+        if is_path_project_file(uri2filepath(uri)) && enabled(:missing_compat)
+            check_julia = rule_option(lint_config, :missing_compat, :check_julia, true)
+            check_extras = rule_option(lint_config, :missing_compat, :check_extras, true)
+            check_weakdeps = rule_option(lint_config, :missing_compat, :check_weakdeps, true)
+            ignore = rule_option(lint_config, :missing_compat, :ignore, String[])
+            for p in derived_missing_compat_problems(rt, uri)
+                section = p.key_path[1]
+                section == "compat" && !check_julia && continue
+                section == "extras" && !check_extras && continue
+                section == "weakdeps" && !check_weakdeps && continue
+                length(p.key_path) >= 2 && p.key_path[2] in ignore && continue
+                emit!(_toml_range_for_key_path(rt, uri, p.key_path, p.at), :missing_compat, p.message, nothing, "JuliaWorkspaces.jl")
+            end
+        end
+
+        if is_path_project_file(uri2filepath(uri)) && enabled(:unused_dependency)
+            ignore = rule_option(lint_config, :unused_dependency, :ignore, String[])
+            for p in derived_unused_dependency_problems(rt, uri)
+                length(p.key_path) >= 2 && p.key_path[2] in ignore && continue
+                emit!(_toml_range_for_key_path(rt, uri, p.key_path, p.at), :unused_dependency, p.message, nothing, "JuliaWorkspaces.jl")
             end
         end
 
