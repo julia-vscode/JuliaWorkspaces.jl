@@ -220,7 +220,7 @@ function _scope_admits(chains::Vector{ConfigChain}, path::AbstractString, is_dir
 end
 
 """
-    collect_workspace_paths(root; scope=nothing, file_limit=nothing)
+    collect_workspace_paths(root; scope=nothing, file_limit=nothing, ignore_io_errors=false)
         -> Union{Vector{String},Nothing}
 
 Every workspace-relevant file under the local directory `root`: Julia sources,
@@ -241,8 +241,12 @@ files themselves in order to agree with this walk.
 When `file_limit` is set and more than that many Julia files are selected,
 returns `nothing` — the tree is deemed too large to load. Callers passing a
 `file_limit` must handle that.
+
+With `ignore_io_errors`, directories and entries that cannot be read or statted
+during the walk are skipped. Non-regular entries are always skipped, even when
+their names look like files this workspace would otherwise read.
 """
-function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit::Union{Nothing,Int}=nothing)
+function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit::Union{Nothing,Int}=nothing, ignore_io_errors=false)
     kinds = _normalize_scope(scope)
     predicates = Any[SCOPE_CONFIG_PREDICATES[k] for k in kinds]
 
@@ -261,30 +265,43 @@ function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit
 
         entries = try
             readdir(dir, join=true)
-        catch
-            continue
+        catch err
+            if ignore_io_errors && is_walkdir_error(err)
+                continue
+            else
+                rethrow(err)
+            end
         end
 
-        # Stat once per entry: both the config scan and the dispatch below need
-        # to know whether an entry is a directory.
-        stated = Tuple{String,Bool}[]
+        # Classify once per entry: both the config scan and the dispatch below
+        # need to know whether an entry is a directory or a regular file.
+        stated = Tuple{String,Bool,Bool}[]
         for filepath in entries
-            is_dir = try
-                !islink(filepath) && isdir(filepath)
+            is_dir, is_file = try
+                st = lstat(filepath)
+                if islink(st)
+                    false, isfile(stat(filepath))
+                else
+                    isdir(st), isfile(st)
+                end
             catch err
                 # Foreign/broken reparse points (e.g. WSL-created symlinks) make
                 # lstat throw on Julia 1.11+; skip entries we cannot stat.
-                is_walkdir_error(err) || rethrow()
-                continue
+                if ignore_io_errors && is_walkdir_error(err)
+                    continue
+                else
+                    rethrow(err)
+                end
             end
-            push!(stated, (filepath, is_dir))
+            (is_dir || is_file) || continue
+            push!(stated, (filepath, is_dir, is_file))
         end
 
         # A config file governs the directory it lives in, so fold it into the
         # chain before deciding anything about this directory's entries.
         for (i, pred) in enumerate(predicates)
-            for (filepath, is_dir) in stated
-                (is_dir || !pred(filepath)) && continue
+            for (filepath, is_dir, is_file) in stated
+                (is_dir || !is_file || !pred(filepath)) && continue
                 filter = _read_path_filter(filepath)
                 filter === nothing && break
                 chains = copy(chains)   # shared with the queued sibling directories
@@ -293,23 +310,23 @@ function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit
             end
         end
 
-        for (filepath, is_dir) in stated
+        for (filepath, is_dir, is_file) in stated
             if is_dir
                 basename(filepath) ∈ SKIPPED_DIRNAMES && continue
                 _scope_admits(chains, filepath, true) || continue
                 push!(remaining_dirs, (filepath, chains))
-            elseif is_path_julia_file(filepath)
+            elseif is_file && is_path_julia_file(filepath)
                 _scope_admits(chains, filepath, false) || continue
                 julia_file_count += 1
                 if file_limit !== nothing && julia_file_count > file_limit
                     return nothing
                 end
                 push!(result, filepath)
-            elseif is_path_project_file(filepath) ||
+            elseif is_file && (is_path_project_file(filepath) ||
                         is_path_manifest_file(filepath) ||
-                        is_path_toolconfig_file(filepath)
+                        is_path_toolconfig_file(filepath))
                 push!(result, filepath)
-            elseif is_path_markdown_file(filepath) || is_path_juliamarkdown_file(filepath)
+            elseif is_file && (is_path_markdown_file(filepath) || is_path_juliamarkdown_file(filepath))
                 _scope_admits(chains, filepath, false) || continue
                 push!(result, filepath)
             end
@@ -354,7 +371,7 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_lim
 
     # Collect paths first so an over-limit tree aborts before any content is
     # read; contents are read afterwards with per-file yields.
-    candidate_paths = collect_workspace_paths(path; scope=scope, file_limit=file_limit)
+    candidate_paths = collect_workspace_paths(path; scope=scope, file_limit=file_limit, ignore_io_errors=ignore_io_errors)
     candidate_paths === nothing && return nothing
 
     for filepath in candidate_paths
