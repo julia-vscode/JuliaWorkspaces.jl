@@ -44,10 +44,22 @@ Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
     @debug "derived_julia_legacy_syntax_tree" uri=uri
 
     tf = derived_text_file_content(rt, uri)
+    if tf === nothing || !_is_julia_uri(rt, uri)
+        return CSTParser.parse("", true)
+    end
 
     content = tf.content.content
 
-    cst = CSTParser.parse(content, true)
+    cst = try
+        CSTParser.parse(content, true)
+    catch err
+        if err isa CSTParser.CSTInfiniteLoop
+            @debug "CSTParser failed to parse a Julia file" uri=uri exception=(err, catch_backtrace())
+            CSTParser.parse("", true)
+        else
+            rethrow()
+        end
+    end
 
     return cst
 end

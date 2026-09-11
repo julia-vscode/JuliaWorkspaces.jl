@@ -332,6 +332,7 @@ mutable struct Toplevel{RT} <: TraverseState
     # so the re-entry this flag guards against cannot happen there.
     simulate_testitem_runtime::Bool
     flags::Int
+    resolve_depth::Int
     meta_dict::Dict{UInt64,Meta}
     runtime::RT
     rebound::ReboundBindings
@@ -340,7 +341,7 @@ end
 getpath(state::Toplevel) = URIs2.uri2filepath(state.uri)
 
 Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, meta_dict, runtime) =
-    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, nothing, true, true, 0, meta_dict, runtime, ReboundBindings())
+    Toplevel(uri, included_files, all_included_files, scope, in_modified_expr, modified_exprs, delayed, resolveonly, env, workspace_packages, nothing, true, true, 0, 0, meta_dict, runtime, ReboundBindings())
 
 function process_EXPR(x::EXPR, state::Toplevel)
     resolve_import(x, state)
@@ -378,13 +379,14 @@ mutable struct Delayed <: TraverseState
     env::ExternalEnv
     workspace_packages::Dict{String,Any}
     flags::Int
+    resolve_depth::Int
     meta_dict::Dict{UInt64,Meta}
     urefs::Vector{EXPR} # refs that failed to resolve
     deferred_unused::Vector{Tuple{Binding,Scope}} # unused checks pending parent-scope completion
     rebound::ReboundBindings
 end
 
-Delayed(scope, env, workspace_packages, meta_dict, flags=0) = Delayed(scope, env, workspace_packages, flags, meta_dict, EXPR[], Tuple{Binding,Scope}[], ReboundBindings())
+Delayed(scope, env, workspace_packages, meta_dict, flags=0) = Delayed(scope, env, workspace_packages, flags, 0, meta_dict, EXPR[], Tuple{Binding,Scope}[], ReboundBindings())
 
 # Note the binding a plain assignment displaces and the one it installs, so both
 # can be settled together once the phase has seen every assignment. Types are not
@@ -429,8 +431,10 @@ mutable struct ResolveOnly <: TraverseState
     scope::Scope
     env::ExternalEnv
     workspace_packages::Dict{String,Any}
+    resolve_depth::Int
     meta_dict::Dict{UInt64,Meta}
 end
+ResolveOnly(scope, env, workspace_packages, meta_dict) = ResolveOnly(scope, env, workspace_packages, 0, meta_dict)
 
 function process_EXPR(x::EXPR, state::ResolveOnly)
     meta_dict = state.meta_dict
@@ -499,7 +503,7 @@ function semantic_pass(uri, cst, env, meta_dict, rt, modified_expr = nothing; wo
     root_modules = Dict{Symbol,Any}(m => env.symbols[m] for m in IMPLICIT_SCOPE_MODULES)
     module_context !== nothing && (root_modules[:__tree__] = module_context)
     setscope!(cst, Scope(nothing, cst, Dict(), root_modules, nothing), meta_dict)
-    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, self_package_name, module_context === nothing, simulate_testitem_runtime, 0, meta_dict, rt, ReboundBindings())
+    state = Toplevel(uri, [uri], Set([uri]), scopeof(cst, meta_dict), modified_expr === nothing, modified_expr, EXPR[], EXPR[], env, workspace_packages, self_package_name, module_context === nothing, simulate_testitem_runtime, 0, 0, meta_dict, rt, ReboundBindings())
     process_EXPR(cst, state)
     _unify_rebound_types!(state)
     unique!(state.delayed)
@@ -726,6 +730,21 @@ function followinclude(x, state::Toplevel)
     elseif !is_in_fexpr(x, CSTParser.defines_function)
         # MissingFile is likewise reported structurally; nothing to do here.
     end
+end
+
+const MAX_RESOLUTION_DEPTH = 512
+
+function _enter_resolution!(state::TraverseState)
+    hasfield(typeof(state), :resolve_depth) || return true
+    state.resolve_depth >= MAX_RESOLUTION_DEPTH && return false
+    state.resolve_depth += 1
+    return true
+end
+
+function _leave_resolution!(state::TraverseState)
+    hasfield(typeof(state), :resolve_depth) || return
+    state.resolve_depth -= 1
+    return
 end
 
 include("imports.jl")

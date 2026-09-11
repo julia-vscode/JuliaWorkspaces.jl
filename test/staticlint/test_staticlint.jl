@@ -4909,6 +4909,22 @@ end
     @test check_resolved("f() = println(1)") == [true, true]
 end
 
+@testitem "resolve_getfield bails out on cyclic bindings" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    CST = JuliaWorkspaces.CSTParser
+    SS = JuliaWorkspaces.SymbolServer
+
+    x = CST.EXPR(:IDENTIFIER, nothing, nothing, 0, 0, "x", nothing, nothing)
+    b = SL.Binding(x, nothing, nothing, [])
+    b.val = b
+    scope = SL.Scope(nothing, x, Dict{String,SL.Binding}(), Dict{Symbol,Any}(), nothing)
+    env = SL.ExternalEnv(Dict{Symbol,SS.ModuleStore}(), Dict{SS.VarRef,Vector{SS.VarRef}}(), Symbol[])
+    state = SL.ResolveOnly(scope, env, Dict{String,Any}(), Dict{UInt64,SL.Meta}())
+
+    @test !SL.resolve_getfield(x, b, state)
+    @test state.resolve_depth == 0
+end
+
 @testitem "the rule-out check never contradicts real subtyping" setup=[shared_static_lint] begin
     SL = JuliaWorkspaces.StaticLint
 

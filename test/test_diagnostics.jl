@@ -1985,6 +1985,20 @@ end
     @test isempty(diags)
 end
 
+@testitem "legacy CST skips markdown buffers" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI
+
+    uri = URI("file:///note.md")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText("# Title\n\n\\\n]\n", "markdown")))
+
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, uri)
+
+    @test cst isa JuliaWorkspaces.CSTParser.EXPR
+    @test cst.fullspan == 0
+end
+
 @testitem "Untitled buffer uses active project as fallback environment" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, get_diagnostic, TextFile, SourceText,
         set_active_project!, set_input_env_ready!, derived_project_uri_for_root
