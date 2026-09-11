@@ -428,3 +428,64 @@ end
     @test env.project_uri == URI("file:///ws/MyPackage/test")
 end
 
+@testitem "Workspace members share the root's watch item" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, update_file!, TextFile, SourceText,
+        derived_project, derived_required_dynamic_projects, derived_file_env_ready,
+        set_input_ready_project_environments!, WatchEnvironmentKey
+    using JuliaWorkspaces.URIs2: URI, uri2filepath
+
+    uuid = "11111111-1111-1111-1111-111111111111"
+    root_project = "[workspace]\nprojects = [\"MyPackage\"]\n"
+    root_manifest = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+
+    [[deps.MyPackage]]
+    path = "MyPackage"
+    uuid = "$uuid"
+    version = "0.1.0"
+    """
+    package_project = """
+    name = "MyPackage"
+    uuid = "$uuid"
+    version = "0.1.0"
+
+    [workspace]
+    projects = ["test"]
+    """
+    test_project = "[deps]\nMyPackage = \"$uuid\"\n"
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ws/Project.toml"), SourceText(root_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/Manifest.toml"), SourceText(root_manifest, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/MyPackage/Project.toml"), SourceText(package_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/MyPackage/src/MyPackage.jl"), SourceText("module MyPackage end\n", "julia")))
+    add_file!(jw, TextFile(URI("file:///ws/MyPackage/test/Project.toml"), SourceText(test_project, "toml")))
+    add_file!(jw, TextFile(URI("file:///ws/MyPackage/test/runtests.jl"), SourceText("using MyPackage\n", "julia")))
+
+    # One watch item for the whole workspace, at the root: the members borrow
+    # the root's manifest, so their own watch children would only index it a
+    # second time. (The member package's test-environment item is scheduled
+    # from an on-disc test/runtests.jl, which this in-memory fixture has none of.)
+    root = URI("file:///ws")
+    required = derived_required_dynamic_projects(jw.runtime)
+    watch = [k for k in required if k isa WatchEnvironmentKey]
+    @test watch == [WatchEnvironmentKey(uri2filepath(root), derived_project(jw.runtime, root).content_hash)]
+
+    # A member's files gate on the root's item, and on nothing that is never
+    # scheduled.
+    src = URI("file:///ws/MyPackage/src/MyPackage.jl")
+    @test !derived_file_env_ready(jw.runtime, src)
+    set_input_ready_project_environments!(jw.runtime, Set(watch))
+    @test derived_file_env_ready(jw.runtime, src)
+
+    # A member dep change re-keys the root's item (its hash folds every
+    # member's Project.toml, nested members included); an unrelated edit does not.
+    before = derived_project(jw.runtime, root).content_hash
+    update_file!(jw, TextFile(URI("file:///ws/MyPackage/test/runtests.jl"), SourceText("using MyPackage\nx = 1\n", "julia")))
+    @test derived_project(jw.runtime, root).content_hash == before
+    update_file!(jw, TextFile(URI("file:///ws/MyPackage/test/Project.toml"),
+        SourceText(test_project * "Test = \"8dfed614-e22c-5e08-85e1-65c5234f0b40\"\n", "toml")))
+    @test derived_project(jw.runtime, root).content_hash != before
+    @test !derived_file_env_ready(jw.runtime, src)   # the old result no longer covers the new key
+end
