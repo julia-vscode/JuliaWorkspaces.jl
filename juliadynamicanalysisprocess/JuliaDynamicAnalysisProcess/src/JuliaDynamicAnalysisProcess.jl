@@ -43,6 +43,12 @@ function index_project_request(params::JuliaDynamicAnalysisProtocol.IndexProject
             # would create a `Manifest.toml` in the user's folder. Give it a scratch
             # mirror of the environment instead.
             Pkg.activate(materialize_scratch_env(params.projectPath, params.package))
+            # The wrapper may declare a dependency its (copied) manifest never
+            # had — a member or a `[sources]`-pinned extra the root project did
+            # not name (the OrdinaryDiffEq monorepo). `TestEnv.activate` then
+            # refuses ("is a direct dependency, but does not appear in the
+            # manifest"); resolving first records it.
+            _resolve_missing_deps!()
 
             TestEnv.activate(params.package)
         else
