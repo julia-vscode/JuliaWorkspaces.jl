@@ -1,5 +1,7 @@
-# TOML files through TomlSyntax: the parse products every consumer of
-# `derived_toml_syntax_tree` reads, and the TOML item walk (skeleton, bodies,
+# TOML files through TomlSyntax, behind `input_v2_enabled`: the v2 twin of
+# `derived_toml_parse_result` (layer_syntax_trees.jl gates to it, so every
+# consumer of `derived_toml_syntax_tree` reads TomlSyntax's table under the
+# flag and Pkg.TOML's without it), and the TOML item walk (skeleton, bodies,
 # maps) that mirrors src/v2/layer_inventory_v2.jl for Julia files. Lint rules
 # and editor features for TOML files build on the walk; none exist yet.
 #
@@ -18,13 +20,13 @@ _toml_diagnostic(d::TomlSyntax.TomlDiagnostic) =
     Diagnostic(_to_exclusive_end(d.first_byte:d.last_byte), d.level, d.message, nothing, Symbol[], "TomlSyntax.jl")
 
 """
-    derived_toml_parse_result(rt, uri) -> (Dict{String,Any}, Vector{Diagnostic})
+    derived_toml_parse_result_v2(rt, uri) -> (Dict{String,Any}, Vector{Diagnostic})
 
 The table of a TOML file (every intact item, even when the file has errors)
 and its syntax plus semantic diagnostics, at real ranges.
 """
-Salsa.@derived function derived_toml_parse_result(rt, uri)
-    @debug "derived_toml_parse_result" uri=uri
+Salsa.@derived function derived_toml_parse_result_v2(rt, uri)
+    @debug "derived_toml_parse_result_v2" uri=uri
 
     tf = derived_text_file_content(rt, uri)
 
@@ -39,10 +41,6 @@ Salsa.@derived function derived_toml_parse_result(rt, uri)
     sort!(diags; by=d -> first(d.range))
     return table, diags
 end
-
-Salsa.@derived derived_toml_syntax_tree(rt, uri) = derived_toml_parse_result(rt, uri)[1]
-
-Salsa.@derived derived_toml_syntax_diagnostics(rt, uri) = derived_toml_parse_result(rt, uri)[2]
 
 #-------------------------------------------------------------------------------
 # The TOML item walk
