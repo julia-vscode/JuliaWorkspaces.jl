@@ -318,12 +318,14 @@ function _get_workspace_symbols(runtime, query::String)
             _symbol_matches_query(it.name, query) || continue
             entry = get(positions, it.id, nothing)
             entry === nothing && continue
+            range = _offset_range_to_positions_or_nothing(runtime, uri, entry.offset, entry.offset + entry.expr.span)
+            range === nothing && continue
             push!(results, WorkspaceSymbolResult(
                 it.name,
                 _item_symbol_kind(it.kind),
                 uri,
-                _offset_to_position(runtime, uri, entry.offset),
-                _offset_to_position(runtime, uri, entry.offset + entry.expr.span),
+                range.start,
+                range.stop,
             ))
         end
         # Modules live in `inv.modules`, not `inv.items`; the old bindingof walk
@@ -333,12 +335,14 @@ function _get_workspace_symbols(runtime, query::String)
             _symbol_matches_query(m.name, query) || continue
             entry = get(positions, m.id, nothing)
             entry === nothing && continue
+            range = _offset_range_to_positions_or_nothing(runtime, uri, entry.offset, entry.offset + entry.expr.span)
+            range === nothing && continue
             push!(results, WorkspaceSymbolResult(
                 m.name,
                 2, # Module
                 uri,
-                _offset_to_position(runtime, uri, entry.offset),
-                _offset_to_position(runtime, uri, entry.offset + entry.expr.span),
+                range.start,
+                range.stop,
             ))
         end
     end

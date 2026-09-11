@@ -300,6 +300,21 @@ function _offset_to_position(runtime, uri::URI, offset::Int)
     return position_at(st, offset + 1)
 end
 
+# Cross-file reference indexes can briefly retain locations for files that have
+# left the workspace; those stale entries should be skipped, not fail a request.
+function _offset_to_position_or_nothing(runtime, uri::URI, offset::Int)
+    derived_has_file(runtime, uri) || return nothing
+    return _offset_to_position(runtime, uri, offset)
+end
+
+function _offset_range_to_positions_or_nothing(runtime, uri::URI, start_offset::Int, stop_offset::Int)
+    start = _offset_to_position_or_nothing(runtime, uri, start_offset)
+    start === nothing && return nothing
+    stop = _offset_to_position_or_nothing(runtime, uri, stop_offset)
+    stop === nothing && return nothing
+    return (start=start, stop=stop)
+end
+
 """
     struct TextFile
 

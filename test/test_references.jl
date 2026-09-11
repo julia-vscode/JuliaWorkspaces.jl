@@ -850,7 +850,7 @@ end
 @testsnippet RefAggWS begin
     using JuliaWorkspaces
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText,
-        get_references, get_rename_edits, get_highlights
+        get_references, get_rename_edits, get_highlights, remove_file!
     using JuliaWorkspaces.URIs2: URI
 
     const RA_MANIFEST = """
@@ -974,6 +974,24 @@ end
     @test ("file:///RA4/src/b.jl", 1, 7, "hello") in edits
     @test ("file:///RA4/src/b.jl", 2, 7, "hello") in edits
     @test length(edits) == 3
+end
+
+@testitem "References: removed cross-file references are skipped" setup=[RefAggWS] begin
+    A = URI("file:///RAStale/src/a.jl")
+    B = URI("file:///RAStale/src/b.jl")
+    a = "greet(name) = 1\n"
+    b = "caller() = greet(1)\n"
+    jw = refagg_workspace("RAStale", "77777777-1234-1234-1234-123456789abc",
+        "module RAStale\ninclude(\"a.jl\")\ninclude(\"b.jl\")\nend\n",
+        [A => a, B => b])
+
+    idx = findfirst("greet", a).start
+    @test ("file:///RAStale/src/b.jl", 1, 12) in refset(jw, A, idx)
+
+    remove_file!(jw, B)
+
+    @test refset(jw, A, idx) == [("file:///RAStale/src/a.jl", 1, 1)]
+    @test renset(jw, A, idx, "hello") == [("file:///RAStale/src/a.jl", 1, 1, "hello")]
 end
 
 @testitem "References: highlights of a module-level name stay current-file" setup=[RefAggWS] begin

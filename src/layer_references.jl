@@ -474,13 +474,16 @@ const _DEF_METHOD_ITEM_KINDS = (:function, :macro, :struct, :mutable_struct, :ab
 # allowed in a request handler). The range spans the whole defining EXPR,
 # matching the old `get_method`-based rendering.
 function _push_item_definition(ref::ItemRef, results, runtime)
+    derived_has_file(runtime, ref.file) || return
     entry = get(derived_item_positions(runtime, ref.file), ref.id, nothing)
     entry === nothing && return
     o = entry.offset
+    range = _offset_range_to_positions_or_nothing(runtime, ref.file, o, o + entry.expr.span)
+    range === nothing && return
     push!(results, DefinitionResult(
         ref.file,
-        _offset_to_position(runtime, ref.file, o),
-        _offset_to_position(runtime, ref.file, o + entry.expr.span),
+        range.start,
+        range.stop,
     ))
     return
 end
@@ -604,11 +607,15 @@ function _get_references(runtime, uri::URI, offset::Int)
     tgt = _reference_target(runtime, root, uri, x, meta_dict)
     if tgt !== nothing && tgt[1] === :tree
         each_reference(runtime, tgt[2], tgt[3]) do ref, ref_uri, o
-            push!(results, ReferenceResult(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span)))
+            range = _offset_range_to_positions_or_nothing(runtime, ref_uri, o, o + ref.span)
+            range === nothing && return
+            push!(results, ReferenceResult(ref_uri, range.start, range.stop))
         end
     elseif tgt !== nothing && tgt[1] === :local
         _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
-            push!(results, ReferenceResult(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span)))
+            range = _offset_range_to_positions_or_nothing(runtime, ref_uri, o, o + ref.span)
+            range === nothing && return
+            push!(results, ReferenceResult(ref_uri, range.start, range.stop))
         end
     end
 
@@ -664,12 +671,16 @@ function _get_rename_edits(runtime, uri::URI, offset::Int, new_name::String)
             sv = CSTParser.str_value(ref)
             (target_bare === nothing || _bare_macro_name(sv) == target_bare) || return
             text = startswith(sv, "@") ? "@" * bare_name : bare_name
-            push!(results, RenameEdit(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), text))
+            range = _offset_range_to_positions_or_nothing(runtime, ref_uri, o, o + ref.span)
+            range === nothing && return
+            push!(results, RenameEdit(ref_uri, range.start, range.stop, text))
         end
     elseif tgt !== nothing && tgt[1] === :local
         _for_each_ref(x, meta_dict, runtime) do ref, ref_uri, o
             text = startswith(CSTParser.str_value(ref), "@") ? "@" * bare_name : bare_name
-            push!(results, RenameEdit(ref_uri, _offset_to_position(runtime, ref_uri, o), _offset_to_position(runtime, ref_uri, o + ref.span), text))
+            range = _offset_range_to_positions_or_nothing(runtime, ref_uri, o, o + ref.span)
+            range === nothing && return
+            push!(results, RenameEdit(ref_uri, range.start, range.stop, text))
         end
     end
 

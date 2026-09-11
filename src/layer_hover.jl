@@ -810,13 +810,17 @@ _get_hover(b::SymbolServer.SymStore, documentation::String, expr, env, meta_dict
 # the defining item when its position materializes.
 function _workspace_extension_lines!(io::IO, rt, exts, method_count::Int, fallback_sig::String)
     for e in exts
-        method_count += 1
         sig = something(e.signature, fallback_sig)
+        derived_has_file(rt, e.ref.file) || continue
         entry = get(derived_item_positions(rt, e.ref.file), e.ref.id, nothing)
         if entry === nothing
+            method_count += 1
             println(io, "$(method_count). `$(sig)`\n")
         else
-            line = _offset_to_position(rt, e.ref.file, entry.offset).line
+            pos = _offset_to_position_or_nothing(rt, e.ref.file, entry.offset)
+            pos === nothing && continue
+            method_count += 1
+            line = pos.line
             p = uri2filepath(e.ref.file)
             text = string(p === nothing ? string(e.ref.file) : basename(p), ':', line)
             println(io, "$(method_count). `$(sig)` at [$(text)]($(string(e.ref.file, '#', line)))\n")
