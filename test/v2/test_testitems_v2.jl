@@ -1,6 +1,6 @@
 # Unit tests for v2-native test item detection: the walker's `V2TestItem`
 # records (layer_inventory_v2.jl) and the emission join
-# `derived_v2_testitem_details` (layer_testitems.jl).
+# `derived_testitems_v2` (layer_testitems_v2.jl).
 #
 # Most cases run PARITY-style: the same source through the legacy
 # (TestItemDetection) engine and the v2 engine, compared field for field. The

@@ -38,7 +38,6 @@ include("StaticLint/StaticLint.jl")
 
 include("lint_rules.jl")
 include("lint_syntax_rules/engine.jl")
-include("layer_parse_products.jl")
 include("config_common.jl")
 include("lint_emission.jl")
 
@@ -58,6 +57,7 @@ include("layer_environment_v2.jl")
 # guard forbids (see the file header).
 include("layer_v2_env_seam.jl")
 include("layer_testitems.jl")
+include("layer_testitems_v2.jl")
 include("layer_diagnostics.jl")
 include("layer_diagnostics_v2.jl")
 include("layer_hover.jl")
