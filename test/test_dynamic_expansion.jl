@@ -24,7 +24,7 @@ end
     using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ExpansionBatchMsg,
         MacroExpansionsResult, WatchEnvironmentKey, ExpansionKey, ExpansionEntry, handle!
 
-    df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> nothing)
+    df = DynamicFeature(DynamicPersistent, mktempdir(); v2_lifecycle=true, launcher=(df, djp) -> nothing)
     key = WatchEnvironmentKey("/ws/p1", UInt64(1))   # never required, never launched
     ek = ExpansionKey((UInt64(1), UInt64(2), UInt64(3)))
 
@@ -40,7 +40,7 @@ end
         ExpansionBatchMsg, MacroExpansionsResult, ReconcileMsg,
         WatchEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry, handle!
 
-    df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> nothing)
+    df = DynamicFeature(DynamicPersistent, mktempdir(); v2_lifecycle=true, launcher=(df, djp) -> nothing)
     key = WatchEnvironmentKey("/ws/p1", UInt64(1))
 
     # A child exists but is not settled yet (Created): the batch must queue,
@@ -90,7 +90,7 @@ end
         WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry, handle!
 
     launches = DJPKey[]
-    df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> push!(launches, djp.key))
+    df = DynamicFeature(DynamicPersistent, mktempdir(); v2_lifecycle=true, launcher=(df, djp) -> push!(launches, djp.key))
     k = WatchTestEnvironmentKey("/ws/P", "P", UInt64(1))
     dir = "/scratch/test-env-P"
 
@@ -132,7 +132,7 @@ end
         WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry, handle!
 
     launches = DJPKey[]
-    df = DynamicFeature(DynamicPersistent, mktempdir(); max_alive_djps=1,
+    df = DynamicFeature(DynamicPersistent, mktempdir(); v2_lifecycle=true, max_alive_djps=1,
         launcher=(df, djp) -> push!(launches, djp.key))
     # Test-env keys: their work message launches synchronously (a watch-env
     # key's goes through an async prep first, which these handler-level tests
@@ -232,7 +232,7 @@ end
         ProcessIndexedMsg, WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry, handle!
 
     launches = DJPKey[]
-    df = DynamicFeature(DynamicPersistent, mktempdir(); max_alive_djps=1,
+    df = DynamicFeature(DynamicPersistent, mktempdir(); v2_lifecycle=true, max_alive_djps=1,
         launcher=(df, djp) -> push!(launches, djp.key))
     a = WatchTestEnvironmentKey("/ws/a", "A", UInt64(1))
     b = WatchTestEnvironmentKey("/ws/b", "B", UInt64(2))
@@ -261,7 +261,7 @@ end
         CreateStandaloneProjectKey, WatchTestEnvironmentKey, DJPKey, ExpansionKey, ExpansionEntry
 
     launches = DJPKey[]
-    df = DynamicFeature(DynamicPersistent, mktempdir(); max_concurrent_djps=1,
+    df = DynamicFeature(DynamicPersistent, mktempdir(); v2_lifecycle=true, max_concurrent_djps=1,
         launcher=(df, djp) -> push!(launches, djp.key))
     # The plain refresh is shallower (would win on launch priority alone);
     # the revive carries a batch waiting on it.
@@ -282,7 +282,7 @@ end
         ResolveEnvironmentKey, CreateStandaloneProjectKey, DJPKey, handle!
 
     launches = DJPKey[]
-    df = DynamicFeature(DynamicPersistent, mktempdir(); launcher=(df, djp) -> push!(launches, djp.key))
+    df = DynamicFeature(DynamicPersistent, mktempdir(); v2_lifecycle=true, launcher=(df, djp) -> push!(launches, djp.key))
     env = ResolveEnvironmentKey("/ws/P/docs", UInt64(1))
     standalone = CreateStandaloneProjectKey("/ws/Q", UInt64(2))
     for key in (env, standalone)

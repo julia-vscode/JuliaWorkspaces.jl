@@ -553,15 +553,26 @@ rules from StaticLint (same rule ids, severities, and config surface,
 different engine), and the interactive features ported to v2 (the references
 family, workspace/document symbols, module-at-position, document links,
 selection/block ranges, hover, signature help) answer from v2, each falling
-back to the legacy path whenever v2 declines. Default `false`: exactly the
-legacy behavior; the v2 machinery is never demanded. The DJP-side macro
-expansion has its own flag, [`set_macro_expansion!`](@ref).
+back to the legacy path whenever v2 declines. The project/environment
+model (TomlSyntax-parsed project files, `[workspace]`/`[sources]`/extension
+support), the include walker, the diagnostics join and the dynamic child
+lifecycle (the live-children cap, [`set_max_alive_djps!`](@ref)) switch
+with it too — every `_v2` twin in `src/` is reached only through this
+flag. Default `false`: exactly the legacy behavior; the v2 machinery is
+never demanded. The DJP-side macro expansion has its own flag,
+[`set_macro_expansion!`](@ref).
 """
 function set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
     @debug "set_v2_enabled!" enabled=enabled
 
     process_from_dynamic(jw)
     set_input_v2_enabled!(jw.runtime, enabled)
+    # The reactor owns the child lifecycle; tell it before the reconcile the
+    # flag change triggers (channel order), so that reconcile already runs
+    # under the new rules.
+    if jw.dynamic_feature !== nothing
+        put!(jw.dynamic_feature.in_channel, SetV2LifecycleMsg(enabled))
+    end
     _reconcile!(jw)
 end
 
@@ -860,7 +871,9 @@ alive to serve expansions, so a monorepo of many packages would otherwise hold
 one Julia process per package indefinitely. Hosts should wire this to a user
 setting (the constructor's `max_alive_djps` sets the initial value).
 
-No-op when the workspace has no dynamic feature.
+Part of the v2 lifecycle: the bound is only applied while
+[`set_v2_enabled!`](@ref) is on (the value is kept either way). No-op when
+the workspace has no dynamic feature.
 """
 function set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
     @debug "set_max_alive_djps!" n=n

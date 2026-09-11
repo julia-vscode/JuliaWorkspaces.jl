@@ -12,14 +12,16 @@ feature* that indexes package environments and resolves symbol information.
   test environments (populating the on-disc symbol cache), but they are torn
   down once indexing completes. Use this for one-shot tools such as CI runs.
 - `DynamicPersistent`: Like `DynamicIndexingOnly`, but the child processes are
-  kept alive so the workspace can react to ongoing changes and serve macro
-  expansion batches for the files of their environment (a test-environment
-  child serves the package's test files; a resolved non-package environment's
-  child serves nothing and is torn down after indexing). The number of
+  kept alive so the workspace can react to ongoing changes. Under the v2
+  lifecycle ([`set_v2_enabled!`](@ref)) they also serve macro expansion
+  batches for the files of their environment (a test-environment child
+  serves the package's test files; a resolved non-package environment's
+  child serves nothing and is torn down after indexing), and the number of
   settled children kept alive is bounded by `max_alive_djps`
   ([`set_max_alive_djps!`](@ref)): beyond it idle ones are evicted
-  least-recently-used first and relaunched on demand. Use this for
-  long-running hosts such as a language server.
+  least-recently-used first and relaunched on demand. Without the v2
+  lifecycle every settled child stays alive until reconcile kills it. Use
+  this for long-running hosts such as a language server.
 
 See also [`is_ready`](@ref), [`wait_until_ready`](@ref).
 """
@@ -537,9 +539,10 @@ const DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS = 60
     DEFAULT_MAX_ALIVE_DJPS
 
 Default bound on the number of settled dynamic child processes kept alive
-under `DynamicPersistent` (`<= 0`: unlimited); children still indexing come
-on top. Idle children beyond it are evicted least-recently-used first and
-relaunched on demand; see [`set_max_alive_djps!`](@ref).
+under `DynamicPersistent` with the v2 lifecycle (`<= 0`: unlimited);
+children still indexing come on top. Idle children beyond it are evicted
+least-recently-used first and relaunched on demand; see
+[`set_max_alive_djps!`](@ref). Not applied without the v2 lifecycle.
 """
 const DEFAULT_MAX_ALIVE_DJPS = 8
 
@@ -628,6 +631,12 @@ struct DynamicFeature
     # see "The live-children cap" below. A `Ref` because hosts change it at
     # runtime (`SetMaxAliveDjpsMsg`); reactor-owned like everything else here.
     max_alive_djps::Base.RefValue{Int}
+    # Whether the v2 lifecycle rules apply: the live-children cap and the
+    # teardown of children that serve nothing after indexing. Mirrors
+    # `input_v2_enabled` (`set_v2_enabled!` posts `SetV2LifecycleMsg`);
+    # `false` is the v1 lifecycle exactly — every settled child stays alive
+    # under `DynamicPersistent` until reconcile kills it. Reactor-owned.
+    v2_lifecycle::Base.RefValue{Bool}
     # ── Failure bounds ──
     # Terminal failures tolerated per identity before further items for it are
     # short-circuited without launching a child (<= 0: unlimited). The default
@@ -674,6 +683,7 @@ struct DynamicFeature
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
             progress_callback::Union{Nothing,Function}=nothing,
             max_concurrent_djps::Int=4, max_alive_djps::Int=DEFAULT_MAX_ALIVE_DJPS,
+            v2_lifecycle::Bool=false,
             launcher::Function=_launch_process!,
             max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS,
             djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
@@ -702,6 +712,7 @@ struct DynamicFeature
             dynamic_controller_fsm("dynamic_controller"),
             max_concurrent_djps,
             Ref(max_alive_djps),
+            Ref(v2_lifecycle),
             max_failure_attempts,
             djp_request_timeout_seconds,
             Vector{DJPKey}(),
@@ -1305,12 +1316,13 @@ end
 _serves_after_indexing(::ResolveEnvironmentKey) = false
 _serves_after_indexing(::DJPKey) = true
 
-# Tear the settled child of `key` down when nothing will use it again (see
-# `_serves_after_indexing`), or when the mode keeps no children at all; touch
-# it otherwise so the LRU order sees the completion.
+# Tear the settled child of `key` down when the mode keeps no children at
+# all, or — under the v2 lifecycle — when nothing will use it again (see
+# `_serves_after_indexing`); touch it otherwise so the LRU order sees the
+# completion.
 function _settle_child!(df::DynamicFeature, key::DJPKey, djp::Union{Nothing,DynamicJuliaProcess})
     djp === nothing && return
-    if df.djp_mode == DynamicIndexingOnly || !_serves_after_indexing(key)
+    if df.djp_mode == DynamicIndexingOnly || (df.v2_lifecycle[] && !_serves_after_indexing(key))
         kill(djp)
         delete!(df.procs, key)
     else
@@ -1373,8 +1385,10 @@ function _evict_one_child!(df::DynamicFeature; idle_only::Bool)
 end
 
 # Evict until at most `max_alive_djps` settled children remain (or nothing
-# evictable is left: every settled child is serving a batch).
+# evictable is left: every settled child is serving a batch). Part of the
+# v2 lifecycle: a no-op without it.
 function _enforce_alive_cap!(df::DynamicFeature)
+    df.v2_lifecycle[] || return
     cap = df.max_alive_djps[]
     cap <= 0 && return
     while _settled_child_count(df) > cap
@@ -1388,6 +1402,7 @@ end
 # with queued batches is never sacrificed for another one's revive — that
 # would ping-pong.
 function _admit_settled_child!(df::DynamicFeature)
+    df.v2_lifecycle[] || return true
     cap = df.max_alive_djps[]
     cap <= 0 && return true
     _settled_child_count(df) < cap && return true
@@ -2090,6 +2105,17 @@ function handle!(df::DynamicFeature, msg::SetMaxAliveDjpsMsg)
     df.max_alive_djps[] = msg.n
     _enforce_alive_cap!(df)
     _drain_launch_queue!(df)   # a raised cap admits waiting revives
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::SetV2LifecycleMsg)
+    df.v2_lifecycle[] == msg.enabled && return false
+    @debug "v2 lifecycle" enabled=msg.enabled
+    df.v2_lifecycle[] = msg.enabled
+    # Switching on applies the cap to the children already settled;
+    # switching off lets every waiting revive/refresh through.
+    _enforce_alive_cap!(df)
+    _drain_launch_queue!(df)
     return false
 end
 
