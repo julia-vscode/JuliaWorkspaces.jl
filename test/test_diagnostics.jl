@@ -1414,9 +1414,10 @@ end
     """
 
     jw = JuliaWorkspace()
-    # These three rules are off in the `default` preset (measured false-positive
-    # rates); this suite tests the rules themselves, so it asks for them back.
-    add_file!(jw, TextFile(URI("file:///unresdots/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
+    # These rules are off in the `default` preset (measured false-positive
+    # rates; relative_import cannot know runtime nesting); this suite tests the
+    # rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresdots/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nrelative_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/src/UnresDots.jl"), SourceText(source, "julia")))
