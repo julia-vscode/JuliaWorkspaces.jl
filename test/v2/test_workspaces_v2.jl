@@ -13,6 +13,7 @@
     """
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///ws/Pkg/Project.toml"), SourceText(root_project, "toml")))
     add_file!(jw, TextFile(URI("file:///ws/Pkg/test/Project.toml"), SourceText("[deps]\n", "toml")))
     add_file!(jw, TextFile(URI("file:///ws/Pkg/docs/Project.toml"), SourceText("[deps]\n", "toml")))
@@ -48,6 +49,7 @@ end
     """
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///mono/Project.toml"), SourceText(mono_project, "toml")))
     add_file!(jw, TextFile(URI("file:///mono/PkgA/Project.toml"), SourceText(pkga_project, "toml")))
     add_file!(jw, TextFile(URI("file:///mono/PkgA/test/Project.toml"), SourceText("[deps]\n", "toml")))
@@ -103,6 +105,7 @@ end
     """
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///ws/Pkg/Project.toml"), SourceText(root_project, "toml")))
     add_file!(jw, TextFile(URI("file:///ws/Pkg/Manifest.toml"), SourceText(root_manifest, "toml")))
     add_file!(jw, TextFile(URI("file:///ws/Pkg/src/WorkspacePkg.jl"), SourceText("module WorkspacePkg end", "julia")))
@@ -185,6 +188,7 @@ end
         """)
 
         jw = workspace_from_folders([pkg_root])
+        set_v2_enabled!(jw, true)
 
         pkg_uri = filepath2uri(pkg_root)
         root_project = derived_project(jw.runtime, pkg_uri)
@@ -247,6 +251,7 @@ end
     """
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///ws/Pkg/Project.toml"), SourceText(root_project, "toml")))
     add_file!(jw, TextFile(URI("file:///ws/Pkg/Manifest.toml"), SourceText(root_manifest, "toml")))
     add_file!(jw, TextFile(URI("file:///ws/Pkg/src/WorkspacePkg.jl"), SourceText("module WorkspacePkg end", "julia")))

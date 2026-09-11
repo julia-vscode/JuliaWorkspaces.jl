@@ -305,6 +305,38 @@ end
     @test haskey(df.procs, standalone)
 end
 
+@testitem "Dynamic expansion: without the v2 lifecycle settled children stay alive and nothing is evicted" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg, ProcessIndexedMsg,
+        StandaloneProjectPrepDoneMsg, SetV2LifecycleMsg, WatchTestEnvironmentKey, ResolveEnvironmentKey,
+        DJPKey, handle!
+
+    # The default is the v1 lifecycle: under DynamicPersistent every settled
+    # child stays in `procs` until reconcile drops its key — no live-children
+    # cap, no post-index teardown of a resolved environment's child.
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_alive_djps=1,
+        launcher=(df, djp) -> push!(launches, djp.key))
+    @test !df.v2_lifecycle[]
+    a = WatchTestEnvironmentKey("/ws/a", "A", UInt64(1))
+    b = WatchTestEnvironmentKey("/ws/b", "B", UInt64(2))
+    handle!(df, ReconcileMsg(Set{DJPKey}([a, b])))
+    handle!(df, ProcessIndexedMsg(a, "/ws/a"))
+    handle!(df, ProcessIndexedMsg(b, "/ws/b"))
+    @test haskey(df.procs, a) && haskey(df.procs, b)   # two settled children over a cap of one
+
+    env = ResolveEnvironmentKey("/ws/P/docs", UInt64(1))
+    Threads.atomic_add!(df.pending_count, 1)
+    push!(df.inflight, env)
+    handle!(df, StandaloneProjectPrepDoneMsg(env, false))
+    handle!(df, ProcessIndexedMsg(env, "/scratch/env-docs"))
+    take!(df.out_channel)
+    @test haskey(df.procs, env)                        # kept, like on main
+
+    # Switching the v2 lifecycle on applies the cap to what is already settled.
+    handle!(df, SetV2LifecycleMsg(true))
+    @test count(k -> haskey(df.procs, k), (a, b, env)) == 1
+end
+
 # The live end-to-end slice: real child process, real indexing, real
 # macroexpand. Spawns a Julia child and takes ~30s warm, so it only runs when
 # explicitly requested via JW_E2E_DYNAMIC=1.

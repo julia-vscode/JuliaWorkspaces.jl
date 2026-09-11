@@ -12,6 +12,7 @@
 
     function toml_ws(src; name="Project.toml")
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         uri = URI("file:///pr/$name")
         add_file!(jw, TextFile(uri, SourceText(src, "toml")))
         return jw, uri

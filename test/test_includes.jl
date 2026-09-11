@@ -424,8 +424,6 @@ end
     root_uri = URI("file:///computedincl/src/CompIncl.jl")
 
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(URI("file:///computedincl/JuliaLint.toml"),
-        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///computedincl/Project.toml"), SourceText("""
     name = "CompIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef01"
@@ -456,8 +454,6 @@ end
     root_uri = URI("file:///customincl/src/CustIncl.jl")
 
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(URI("file:///customincl/JuliaLint.toml"),
-        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///customincl/Project.toml"), SourceText("""
     name = "CustIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef02"
@@ -497,8 +493,6 @@ end
     root_uri = URI("file:///fnincl/src/FnIncl.jl")
 
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(URI("file:///fnincl/JuliaLint.toml"),
-        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///fnincl/Project.toml"), SourceText("""
     name = "FnIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef06"
@@ -634,8 +628,6 @@ end
     root_uri = URI("file:///guardincl/src/GuardIncl.jl")
 
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(URI("file:///guardincl/JuliaLint.toml"),
-        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///guardincl/Project.toml"), SourceText("""
     name = "GuardIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef20"
@@ -814,6 +806,9 @@ end
     @test count(contains("can not be found"), msgs) == 1
 end
 
+# The v2 include walker (behind `input_v2_enabled`): runtime and computed
+# includes are analysis-boundary notices, quoted includes are data, `module`
+# and `@safetestset` bodies scope duplicate detection.
 @testitem "runtime include: a literal include inside a function body is a boundary notice" begin
     using JuliaWorkspaces: set_input_env_ready!
     using JuliaWorkspaces.URIs2: URI
@@ -824,6 +819,7 @@ end
     # determined statically", and never an include_errors warning.
     root_uri = URI("file:///rti/src/RtI.jl")
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///rti/JuliaLint.toml"),
         SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(root_uri, SourceText("""
@@ -848,6 +844,7 @@ end
     # A literal function-body include whose target is MISSING is still a
     # real MissingFile warning.
     jw2 = JuliaWorkspace()
+    set_v2_enabled!(jw2, true)
     add_file!(jw2, TextFile(root_uri, SourceText("function load()\n    include(\"nope.jl\")\nend\n", "julia")))
     set_input_env_ready!(jw2.runtime, true)
     missing = filter(d -> contains(d.message, "can not be found"), get_diagnostic(jw2, root_uri))
@@ -869,12 +866,14 @@ end
     # Default preset: silence. The linter does not report on what it cannot
     # analyze; it only suppresses the affected rules.
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(root_uri, SourceText(src, "julia")))
     set_input_env_ready!(jw.runtime, true)
     @test isempty(get_diagnostic(jw, root_uri))
 
     # Opted in: one notice naming the suppressed rules, at the configured severity.
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///cin/JuliaLint.toml"),
         SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(root_uri, SourceText(src, "julia")))
@@ -893,6 +892,7 @@ end
     # no duplicate, no boundary notice.
     q_uri = URI("file:///qi/src/Q.jl")
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(q_uri, SourceText("""
     init_code() = quote
         include("helpers.jl")
@@ -911,6 +911,7 @@ end
     # duplicate — and likewise into two `@safetestset` bodies.
     m_uri = URI("file:///mi/src/M.jl")
     jw2 = JuliaWorkspace()
+    set_v2_enabled!(jw2, true)
     add_file!(jw2, TextFile(m_uri, SourceText("""
     module A
     include("shared.jl")
@@ -925,6 +926,7 @@ end
 
     t_uri = URI("file:///si/test/runtests.jl")
     jw3 = JuliaWorkspace()
+    set_v2_enabled!(jw3, true)
     add_file!(jw3, TextFile(t_uri, SourceText("""
     using SafeTestsets
     @safetestset "one" begin

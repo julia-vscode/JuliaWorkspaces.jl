@@ -18,6 +18,7 @@
 
     function ef_workspace(; config=nothing)
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         config === nothing ||
             add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText(config, "toml")))
         add_file!(jw, TextFile(URI("file:///ef/Project.toml"), SourceText(EF_PROJECT, "toml")))
@@ -47,6 +48,7 @@ end
     version = "0.1.0"
     """
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///mono/Project.toml"), SourceText(root_project, "toml")))
     add_file!(jw, TextFile(URI("file:///mono/Manifest.toml"), SourceText(root_manifest, "toml")))
     add_file!(jw, TextFile(URI("file:///mono/src/Root.jl"), SourceText("module Root end\n", "julia")))
@@ -137,6 +139,7 @@ end
     # (opt-in), never an unresolved_import.
     for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\n")
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         config === nothing ||
             add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText(config, "toml")))
         add_file!(jw, TextFile(URI("file:///ef/Project.toml"), SourceText(EF_PROJECT * "\n[deps]\nNoSuchStore = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9f9\"\n", "toml")))

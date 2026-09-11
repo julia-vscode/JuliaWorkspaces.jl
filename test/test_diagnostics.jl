@@ -1837,13 +1837,8 @@ end
 
     diags = get_diagnostic(jw, URI("file:///uncacheddep/src/UncachedDep.jl"))
 
-    # Declared dependency whose symbols are not indexed: an environment gap,
-    # reported as an opt-in analysis boundary rather than an unresolved import.
-    @test !any(d -> d.code === :unresolved_import && occursin("DeclaredButUncached", d.message), diags)
-    @test !any(d -> d.code === :analysis_boundary, diags)
-    add_file!(jw, TextFile(URI("file:///uncacheddep/JuliaLint.toml"), SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
-    diags = get_diagnostic(jw, URI("file:///uncacheddep/src/UncachedDep.jl"))
-    @test any(d -> d.code === :analysis_boundary && d.message == "`DeclaredButUncached` is a declared dependency but its symbols could not be indexed. Analysis of what it provides is degraded.", diags)
+    # Declared dependency: message attributes the failure to indexing/caching
+    @test any(d -> d.message == "`DeclaredButUncached` is a declared dependency but its symbols could not be indexed. Anything imported through this statement is assumed to exist and will not be checked.", diags)
     # Undeclared name: keeps the generic "Failed to resolve" wording
     @test any(d -> d.message == "Failed to resolve `TotallyUnknownPkg`. Missing-reference checks are disabled in this scope and all nested scopes.", diags)
 end
@@ -2513,6 +2508,7 @@ end
     ]
 
     jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    set_v2_enabled!(jw, true)
     for (path, (content, lang)) in files
         write(path, content)
         _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
