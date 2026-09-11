@@ -945,7 +945,16 @@ function wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTo
     @debug "wait_until_ready"
 
     while !is_ready(jw)
-        _wait_for_dynamic_update(jw, cancel_token)
+        if cancel_token !== nothing
+            wait(jw.dynamic_feature.update_channel, cancel_token)
+        else
+            wait(jw.dynamic_feature.update_channel)
+        end
+        # Drain the update_channel and process any dynamic results
+        while isready(jw.dynamic_feature.update_channel)
+            take!(jw.dynamic_feature.update_channel)
+        end
+        process_from_dynamic(jw)
     end
 end
 
