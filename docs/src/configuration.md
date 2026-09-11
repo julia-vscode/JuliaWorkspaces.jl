@@ -365,11 +365,14 @@ govern it; such buffers always lint under `default` and cannot opt back in.
 | --- | --- | --- |
 | `syntax_errors` | `error` | Julia syntax errors |
 | `syntax_warnings` | `off` | Julia syntax warnings |
-| `lowering_errors` | `error` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — the file will not load. Experimental, requires the lowering-lint flag; when active it supersedes `duplicate_function_argument`/`break_continue`/`global_const_decl` |
-| `soft_scope_ambiguity` | `information` | Julia's soft-scope ambiguity warning, statically: an un-annotated assignment in a top-level `for`/`while`/`try` to a name that is also a plain module global (Julia warns at run time and treats it as a new local). Experimental, requires the lowering-lint flag |
-| `analysis_boundary` | `off` | Opt-in: one notice per construct the linter cannot see through (a computed or function-body `include`, an interpolated `@eval`, a runtime `eval`, a `using`/`import` inside `try`/`if`, a macro whose expansion failed) naming the rules it silences in that module. See [Analysis boundaries](@ref) |
+| `lowering_errors` | `error` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — the file will not load. v2 only (`set_v2_enabled!`); when active it supersedes `duplicate_function_argument`/`break_continue`/`global_const_decl` |
+| `soft_scope_ambiguity` | `information` | Julia's soft-scope ambiguity warning, statically: an un-annotated assignment in a top-level `for`/`while`/`try` to a name that is also a plain module global (Julia warns at run time and treats it as a new local). v2 only (`set_v2_enabled!`) |
+| `analysis_boundary` | `off` | Opt-in: one notice per construct the linter cannot see through (a computed or function-body `include`, an interpolated `@eval`, a runtime `eval`, a `using`/`import` inside `try`/`if`, a macro whose expansion failed) naming the rules it silences in that module. v2 only (`set_v2_enabled!`); see [Analysis boundaries](@ref) |
 | `testitem_errors` | `error` | Malformed `@testitem` blocks |
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
+| `project_file_errors` | `error` | Structure in a `Project.toml` that Pkg rejects (a malformed uuid, an extension trigger that is no declared weakdep, a `[sources]` entry with neither url nor path). v2 only (`set_v2_enabled!`) |
+| `project_file_warnings` | `warning` | Inconsistencies Pkg tolerates until the section is used (a target dep missing from `[extras]`, a stale manifest, a dangling `[sources]`/`[workspace]` path). v2 only (`set_v2_enabled!`) |
+| `manifest_errors` | `info` | A `Manifest.toml` shape the tooling cannot interpret. v2 only (`set_v2_enabled!`) |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |
 | `shadowed_config` | `info` | A config file that supersedes another of the same kind in an enclosing directory |
 | `environment_errors` | `info` | A project/test environment that could not be resolved, reported on its `Project.toml` |
@@ -391,12 +394,19 @@ govern it; such buffers always lint under `default` and cannot opt back in.
 | `global_const_decl` | `info` | Type declarations on globals; `const` on locals |
 | `const_decl` | `info` | Invalid `const` declarations and redefinitions |
 | `unused_binding` | `hint` | Variables assigned but never used |
-| `relative_import` | `off` | A relative import with more dots than available nesting |
+| `relative_import` | `info` | A relative import with more dots than available nesting |
 | `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
 | `missing_reference` | `off` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default). Off by default; see “Rules that are off by default” below |
 | `unresolved_import` | `off` | Imports whose target could not be resolved. Off by default; see “Rules that are off by default” below |
 
 ### Analysis boundaries
+
+!!! note "v2 only"
+    Everything in this section describes the v2 analysis stack, i.e. a
+    workspace with `set_v2_enabled!(jw, true)`. With the flag off (the
+    default) the behaviour is the legacy one: a computed include is an
+    `include_errors` warning, no `analysis_boundary` notice exists, and an
+    unresolved import is always reported as `unresolved_import`.
 
 Some constructs put part of a program beyond static analysis: an `include`
 whose path is computed or that runs inside a function body, an `@eval` with

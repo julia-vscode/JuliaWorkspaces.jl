@@ -109,18 +109,34 @@ From the bottom up:
 | Layer file | Responsibility |
 | --- | --- |
 | `layer_files.jl` | File-set queries: which files exist, which are Julia, and resolving regular-vs-indirect content. |
-| `layer_syntax_trees.jl` | Parsing: JuliaSyntax parse results and trees, and the legacy CSTParser tree. |
-| `layer_toml_tree.jl` | TOML files: the `TomlSyntax` parse products (table plus diagnostics at real ranges) and the TOML item walk (skeleton, bodies, maps), the v2 pattern applied to TOML. |
+| `layer_syntax_trees.jl` | Parsing: JuliaSyntax parse results and trees, the legacy CSTParser tree, and the `Pkg.TOML` parse of TOML files. |
+| `layer_toml_tree.jl` | v2 twin of the TOML parse: the `TomlSyntax` parse products (table plus diagnostics at real ranges) and the TOML item walk (skeleton, bodies, maps), the v2 pattern applied to TOML. |
 | `layer_includes.jl` | The `include(...)` graph and its roots. |
 | `layer_static_lint.jl` | Semantic analysis via StaticLint's `semantic_pass`. |
-| `layer_project_files_v2.jl` | Full-fidelity `Project.toml`/`Manifest.toml` parse products (`JuliaProjectFile`, `JuliaManifestFile`) with position-free problem records for every malformed or inconsistent section (located via the TOML item walk at the diagnostics last mile). |
-| `layer_workspaces_v2.jl` | `[workspace]` discovery: which folder is a member of which workspace, resolved upward to the outermost root the way Pkg does it. |
-| `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`, built on the parse products; a manifest-less workspace member synthesizes a project against the root's manifest ([deps] closure), and `[sources]` path entries surface as deved packages. |
-| `layer_extensions_v2.jl` | Package extensions: mapping `ext/` files to their `[extensions]` entry and finding an environment containing their `[weakdeps]` triggers (an existing covering manifest, else a resolved extension environment from a child process). |
-| `layer_environment.jl` | Resolving which project/environment a file belongs to and building its `ExternalEnv`. A workspace needs one watch item at its root — members (a `test/` project included) gate on and resolve through it. |
+| `layer_includes_staticlint_v2.jl` | v2 twin of the include analysis: a copy of StaticLint's include walker that skips quoted code, scopes duplicates per `module`/`@safetestset` body and reports function-body includes as runtime boundaries. |
+| `layer_project_files_v2.jl` | v2 only: full-fidelity `Project.toml`/`Manifest.toml` parse products (`JuliaProjectFile`, `JuliaManifestFile`) with position-free problem records for every malformed or inconsistent section (located via the TOML item walk at the diagnostics last mile). |
+| `layer_workspaces_v2.jl` | v2 only: `[workspace]` discovery — which folder is a member of which workspace, resolved upward to the outermost root the way Pkg does it. |
+| `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`. |
+| `layer_projects_v2.jl` | v2 twin of the project model, built on the typed parse products: a manifest-less workspace member synthesizes a project against the root's manifest ([deps] closure), and `[sources]` path entries surface as deved packages. |
+| `layer_extensions_v2.jl` | v2 only: package extensions — mapping `ext/` files to their `[extensions]` entry and finding an environment containing their `[weakdeps]` triggers (an existing covering manifest, else a resolved extension environment from a child process). |
+| `layer_environment.jl` | Resolving which project/environment a file belongs to and building its `ExternalEnv`. |
+| `layer_environment_v2.jl` | v2 twin of the environment selection: extension files, deeper env folders, workspace members (a `test/` project included, gating on and resolving through the root's single watch item), package scripts against the active project, extension-environment work items. |
 | `layer_testitems.jl` | `@testitem` / test-setup detection. |
+| `layer_testitems_v2.jl` | v2 twin: detection off the v2 skeleton, the same assembly below it. |
 | `layer_diagnostics.jl` | Aggregating syntax, lint, test, and TOML diagnostics, gated by configuration (see [Configuration](configuration.md)). |
+| `layer_diagnostics_v2.jl` | v2 twin of the diagnostics join: the lowering producer's takeover, analysis-boundary notices, project/manifest problems, located environment errors. |
 | `layer_hover.jl`, `layer_completions.jl`, `layer_references.jl`, `layer_signatures.jl`, `layer_symbols.jl`, `layer_navigation.jl`, `layer_actions.jl`, `layer_formatting.jl`, `layer_misc.jl` | LSP-feature query layers. |
+| `layer_features_v2.jl` | v2-backed answers for the references family, symbols, module-at, document links, selection/block ranges, hover and signature help. |
+
+**The v1/v2 convention.** Everything v2 hangs off one Salsa input,
+`input_v2_enabled` (`set_v2_enabled!`, default `false`). A v1 query that has
+a v2 counterpart keeps its name and its body exactly as before, with one
+inserted line at the top — `input_v2_enabled(rt) && return <name>_v2(rt, …)`
+— and the counterpart lives in the sibling `*_v2.jl` file (or `src/v2/`).
+Files named `*_v2.jl`, `src/v2/**` and `src/TomlSyntax/**` are reached only
+through those gates, so with the flag off the package runs the legacy code
+paths unchanged; `scripts/check_v1_parity.sh` checks that property against a
+base branch, and `test/test_v1_parity.jl` pins the gate allowlist at run time.
 
 A crucial design rule: **layers contain no LSP wire types**. They operate purely
 on syntax trees, StaticLint data, and SymbolServer stores, and they return the
@@ -287,7 +303,8 @@ which is the include manifest. The load order mirrors the dependency stack:
    `StaticLint`, then the tooling-configuration trio (`lint_rules.jl`,
    `config_common.jl`, `lint_emission.jl` — see
    [Configuration](configuration.md)), then the remaining `layer_*.jl` files
-   (see [Layers](#layers)).
+   (see [Layers](#layers)), each v1 layer directly followed by its `*_v2.jl`
+   twin where one exists.
 5. **Boundary** — `fileio.jl` (disc I/O) and `public.jl` (the public API).
 
 ## Design and roadmap

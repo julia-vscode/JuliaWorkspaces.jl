@@ -29,18 +29,35 @@ inputs, share `types.jl`, and share the diagnostics join — but nothing else.
   `layer_visibility.jl`.
 - **Inert by default.** The whole stack hangs off the `input_v2_enabled`
   feature flag, which lazily defaults to `false`. With the flag off, no v2 query
-  is ever demanded and diagnostics behave exactly as they do today.
+  is ever demanded and the package runs the legacy code paths unchanged.
+- **One convention for every fork.** A v1 query that has a v2 counterpart keeps
+  its name and its body verbatim, with one inserted line at the top —
+  `input_v2_enabled(rt) && return <name>_v2(rt, …)` — and the counterpart
+  lives in a sibling `src/layer_<name>_v2.jl` (outside `src/v2/` when it needs
+  StaticLint/CSTParser names, e.g. to build an `ExternalEnv`). That includes
+  the project/environment model (TomlSyntax-parsed project files,
+  `[workspace]`/`[sources]`/extension support), the include walker, the
+  diagnostics join, test item detection and the dynamic child lifecycle.
+  `scripts/check_v1_parity.sh` checks the property against a base branch
+  (v1 files byte-identical or gate lines only; shared files additions only);
+  `test/test_v1_parity.jl` pins the gate allowlist and the flag round trip.
 
 The complete set of touchpoints with the rest of the package:
 
 | File | Touchpoint |
 | --- | --- |
 | [`src/inputs.jl`](../../src/inputs.jl) | the `input_v2_enabled` feature flag (plus `input_macro_expansion` for the DJP) |
-| [`src/layer_diagnostics.jl`](../../src/layer_diagnostics.jl) | pulls v2 findings in / suppresses StaticLint's for the same rule ids |
-| [`src/public.jl`](../../src/public.jl) | `set_v2_enabled!` |
-| [`src/packagedef.jl`](../../src/packagedef.jl) | the single include |
+| [`src/public.jl`](../../src/public.jl) | `set_v2_enabled!` (which also posts `SetV2LifecycleMsg` to the dynamic reactor) |
+| [`src/packagedef.jl`](../../src/packagedef.jl) | the includes: `v2/v2.jl`, `TomlSyntax/`, and each `*_v2.jl` twin right after its v1 layer |
+| [`src/layer_syntax_trees.jl`](../../src/layer_syntax_trees.jl) → [`src/layer_toml_tree.jl`](../../src/layer_toml_tree.jl) | `derived_toml_parse_result` gates to the TomlSyntax twin (one gate: TOML is TomlSyntax everywhere under the flag, `Pkg.TOML` everywhere without it) |
+| [`src/layer_projects.jl`](../../src/layer_projects.jl) → [`src/layer_projects_v2.jl`](../../src/layer_projects_v2.jl) | `derived_package` / `derived_project` / `derived_nonpackage_env` gate to the v2 model (with `layer_project_files_v2.jl`, `layer_workspaces_v2.jl`, `layer_extensions_v2.jl` as v2-only helpers) |
+| [`src/layer_environment.jl`](../../src/layer_environment.jl) → [`src/layer_environment_v2.jl`](../../src/layer_environment_v2.jl) | `derived_project_uri_for_root` / `_test_environment_key` / `derived_file_env_ready` / `derived_required_dynamic_projects` gate to the v2 selection |
+| [`src/layer_includes.jl`](../../src/layer_includes.jl) → [`src/layer_includes_staticlint_v2.jl`](../../src/layer_includes_staticlint_v2.jl) | `derived_file_include_data` / `derived_include_diagnostics` gate to the v2 walker copy |
+| [`src/layer_file_analysis.jl`](../../src/layer_file_analysis.jl), [`src/layer_diagnostics.jl`](../../src/layer_diagnostics.jl) → [`src/layer_diagnostics_v2.jl`](../../src/layer_diagnostics_v2.jl) | `derived_new_static_lint_diagnostics` / `derived_diagnostics` gate to the v2 join (takeover, v2 findings, boundary notices, project/manifest problems) |
+| [`src/layer_testitems.jl`](../../src/layer_testitems.jl) → [`src/layer_testitems_v2.jl`](../../src/layer_testitems_v2.jl) | `derived_testitems` gates to detection off the v2 skeleton (§13) |
+| [`src/dynamic_feature/dynamic_feature.jl`](../../src/dynamic_feature/dynamic_feature.jl) | the reactor-owned `v2_lifecycle` ref gates the live-children cap and the post-index teardown (§8) |
 | [`src/layer_v2_env_seam.jl`](../../src/layer_v2_env_seam.jl) | the environment edge (plain-data store queries, §7½) |
-| [`src/layer_features_v2.jl`](../../src/layer_features_v2.jl) | v2-backed interactive features (A1 + resolvers; §10½) with flag branches in layer_references/symbols/navigation/misc |
+| [`src/layer_features_v2.jl`](../../src/layer_features_v2.jl) | v2-backed interactive features (A1 + resolvers; §10½) with flag branches in layer_references/symbols/navigation/misc/hover/signatures |
 
 Inside `src/v2/` the load order is the layering
 ([`src/v2/v2.jl`](../../src/v2/v2.jl)):
