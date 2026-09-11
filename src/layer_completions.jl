@@ -891,7 +891,7 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
                         _add_completion_item(state, CompletionResultItem(
                             n, CompletionKinds.Module,
                             _completion_details_description(m),
-                            m isa SymbolServer.SymStore ? m.doc : n,
+                            m isa SymbolServer.SymStore ? _sanitize_docstring(m.doc) : n,
                             _texteditfor(state, t.val, n)), t.val, _PRIO_MODULE_BASE)
                     end
                 end

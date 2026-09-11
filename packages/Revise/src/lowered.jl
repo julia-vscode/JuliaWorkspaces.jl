@@ -4,12 +4,30 @@ function assign_this!(frame::Frame, @nospecialize value)
     frame.framedata.ssavalues[frame.pc] = value
 end
 
+# The callee of a lowered statement may be a `GlobalRef`, or the function itself: JuliaInterpreter
+# resolves some `GlobalRef`s to their values (as a `QuoteNode`) when it builds a `FrameCode`.
+function is_getproperty(@nospecialize(f))
+    isa(f, QuoteNode) && (f = f.value)
+    isa(f, GlobalRef) && return f.name === :getproperty
+    return f === getproperty
+end
+
 function is_some_include(@nospecialize(f))
     @assert !isa(f, Core.SSAValue) && !isa(f, JuliaInterpreter.SSAValue)
     if isa(f, GlobalRef)
         return f.name === :include
     elseif isa(f, Symbol)
         return f === :include
+    elseif isa(f, Expr)
+        # A qualified `Mod.include` (e.g. `Base.include(mapexpr, mod, path)`) lowers to a
+        # `getproperty` call, so the callee of the `include` call is that expression rather
+        # than a `GlobalRef`. Whether it really resolves to an `include` function is settled
+        # by identity when the call is reached; here it need only be a candidate.
+        isexpr(f, :call) && length(f.args) == 3 || return false
+        is_getproperty(f.args[1]) || return false
+        name = f.args[3]
+        isa(name, QuoteNode) && (name = name.value)
+        return name === :include
     else
         if isa(f, QuoteNode)
             f = f.value
@@ -42,6 +60,56 @@ function is_defaultctors(@nospecialize(f))
     return false
 end
 
+# Keep this fallback synchronized until Revise can require the Base implementation.
+function _fieldtypes_constrain_typevars(tvars::Array{Any,1}, fts::Core.SimpleVector)
+    nparams = length(tvars)
+    n = length(fts)
+    i = nparams
+    while i !== 0
+        @inbounds tv = tvars[i]::TypeVar
+        constrained = false
+        j = 1
+        while j !== n + 1
+            ft = fts[j]
+            if Base.has_typevar(ft, tv)
+                constrained = true
+                break
+            end
+            j += 1
+        end
+        if !constrained
+            j = i + 1
+            remaining = nparams - i
+            while remaining !== 0
+                @inbounds tv2 = tvars[j]::TypeVar
+                if Base.has_typevar(tv2.ub, tv)
+                    constrained = true
+                    break
+                end
+                if tv2 === tv
+                    constrained = false
+                    break
+                end
+                j += 1
+                remaining = remaining - 1
+            end
+        end
+        constrained || return false
+        i -= 1
+    end
+    return true
+end
+
+is_define_method_ref(@nospecialize(f)) = isdefined(LoweredCodeUtils, :is_define_method_ref) &&
+    getfield(LoweredCodeUtils, :is_define_method_ref)(f)
+is_methoddef(@nospecialize(stmt)) = isdefined(LoweredCodeUtils, :ismethod) ?
+    getfield(LoweredCodeUtils, :ismethod)(stmt) : isexpr(stmt, :method)
+is_methoddef1(@nospecialize(stmt)) = isdefined(LoweredCodeUtils, :ismethod1) ?
+    getfield(LoweredCodeUtils, :ismethod1)(stmt) : isexpr(stmt, :method, 1)
+is_define_method_call_4arg(@nospecialize(stmt)) =
+    isdefined(LoweredCodeUtils, :is_define_method_call_4arg) &&
+    getfield(LoweredCodeUtils, :is_define_method_call_4arg)(stmt)
+
 function matches_eval(stmt::Expr)
     stmt.head === :call || return false
     f = stmt.args[1]
@@ -64,7 +132,7 @@ function categorize_stmt(@nospecialize(stmt), code::Vector{Any})
                 callee = code[callee.id]
             end
             isinclude = is_some_include(callee)
-            ismeth = is_defaultctors(callee)
+            ismeth = is_defaultctors(callee) || is_define_method_ref(callee)
         end
     end
     return ismeth, haseval, isinclude, isnamespace, istoplevel
@@ -227,7 +295,10 @@ function methods_by_execution!(
         mode === :sigs && return Pair{Any,Union{Nothing,Expr}}(nothing, nothing)
         return Pair{Any,Union{Nothing,Expr}}(Core.eval(mod, lwr), nothing)
     end
-    frame = Frame(mod, lwr.args[1]::CodeInfo)
+    # Interpret user code at the latest world (JuliaInterpreter dispatches it at `frame.world`),
+    # so that even when Revise's own machinery is pinned to its frozen world (issue #552), new
+    # definitions remain visible within the batch and to the running session.
+    frame = Frame(mod, lwr.args[1]::CodeInfo; world=Base.get_world_counter())
     mode === :eval || LoweredCodeUtils.rename_framemethods!(interp, frame)
     # Determine whether we need interpreted mode
     isrequired, evalassign = minimal_evaluation!(frame, mode)
@@ -287,8 +358,11 @@ function _methods_by_execution!(
     isok(lnn::LineTypes) = !iszero(lnn.line) || lnn.file !== :none   # might fail either one, but accept anything
 
     mod = moduleof(frame)
-    # Hoist this lookup for performance. Don't throw even when `mod` is a baremodule:
-    modinclude = isdefined(mod, :include) ? getglobal(mod, :include) : nothing
+    # Hoist this lookup for performance. Don't throw even when `mod` is a baremodule.
+    # Read at the latest world: when `frame` defines a new submodule, that module's
+    # `include` is a `const` created in a newer world than this frame runs in, and a
+    # plain access would be a backdated-const read (warning now, error in future Julia).
+    modinclude = @invokelatest(isdefinedglobal(mod, :include)) ? @invokelatest(getglobal(mod, :include)) : nothing
     signatures = MethodInfoKey[]  # temporary for method signature storage
     pc = frame.pc
     while true
@@ -324,7 +398,7 @@ function _methods_by_execution!(
             #     # They may be needed to define later signatures.
             #     # Note that named inner methods don't require special treatment.
             #     pc = step_expr!(interp, frame, stmt, true)
-            elseif head === :method
+            elseif is_methoddef(stmt)
                 empty!(signatures)
                 ret = methoddef!(interp, signatures, frame, stmt, pc; define=mode!==:sigs)
                 if ret === nothing
@@ -341,15 +415,19 @@ function _methods_by_execution!(
                             end
                         end
                     end
-                    @assert length(stmt.args) == 1
+                    @assert is_methoddef1(stmt)
                     pc = mode !== :sigs ? step_expr!(interp, frame, stmt, true) :
                         next_or_nothing!(frame)
                 else
                     pc, pc3 = ret
                     # Get the line number from the body
                     stmt3 = pc_expr(frame, pc3)::Expr
-                    lnn = nothing
-                    sigcode = lookup(interp, frame, stmt3.args[2])::Core.SimpleVector
+                    if is_define_method_call_4arg(stmt3)
+                        # define_method(mod, name, sigdata, body): sigdata = svec(types, sparams, lnn)
+                        sigcode = lookup(interp, frame, stmt3.args[4])::Core.SimpleVector
+                    else
+                        sigcode = lookup(interp, frame, stmt3.args[2])::Core.SimpleVector
+                    end
                     lnn = sigcode[end]
                     if !isa(lnn, LineNumberNode)
                         lnn = nothing
@@ -442,7 +520,30 @@ function _methods_by_execution!(
                 callstmt = stmt
                 @label call_dispatch
                 f = lookup(frame, callstmt.args[1])
-                if @static(isdefined(Core, :_typebody!) ? true : false) && f === Core._typebody!
+                if @static(isdefined(Core, :resolve_typegroup) ? true : false) && f === Core.resolve_typegroup
+                    # The statement that creates the type(s) of a struct definition or
+                    # `typegroup` block. In `:sigs` mode, when every type in the group is
+                    # already defined (e.g., by package loading), reuse the existing types
+                    # rather than re-creating them; the lowered `olds` argument holds
+                    # exactly the currently-bound types. Like `reuse_existing_type!`, no
+                    # structural equivalence check is performed. The subsequent
+                    # `declare_const` calls are skipped by `skip_declare_const`.
+                    pc0 = pc
+                    local groupresult
+                    if mode === :sigs && (existing = existing_typegroup_types(interp, frame, callstmt)) !== nothing
+                        groupresult = existing
+                        assign_this!(frame, existing)
+                        pc = next_or_nothing!(frame)
+                    else
+                        pc = step_expr!(interp, frame, stmt, true)
+                        # (guarded: an assignment form would store to the slot instead)
+                        groupresult = isassigned(frame.framedata.ssavalues, pc0) ?
+                            frame.framedata.ssavalues[pc0] : nothing
+                    end
+                    if __bpart__[]
+                        analyze_typegroup_result!(exinfo, groupresult)
+                    end
+                elseif @static(isdefined(Core, :_typebody!) ? true : false) && f === Core._typebody!
                     if __bpart__[]
                         analyze_typebody!(exinfo, interp, frame, callstmt)
                     end
@@ -468,16 +569,29 @@ function _methods_by_execution!(
                     lnn = lookup(frame, callstmt.args[3])
                     if T isa Type && lnn isa LineNumberNode
                         empty!(signatures)
-                        uT = Base.unwrap_unionall(T)::DataType
-                        ft = uT.types
+                        @static if isdefinedglobal(Base, :_defaultctor_typeinfo)
+                            uT, tvars, ft = Base._defaultctor_typeinfo(T)
+                        else
+                            uT = Base.unwrap_unionall(T)::DataType
+                            tvars = Any[]
+                            ua = T
+                            while ua isa UnionAll
+                                push!(tvars, ua.var)
+                                ua = ua.body
+                            end
+                            ft = ccall(:jl_get_fieldtypes, Any, (Any,), uT)::Core.SimpleVector
+                        end
                         sig1 = Tuple{Base.rewrap_unionall(Type{uT}, T), Any[Any for _ in 1:length(ft)]...}
                         push!(signatures, MethodInfoKey(nothing, sig1))
-                        sig2 = Base.rewrap_unionall(Tuple{Type{T}, ft...}, T)
-                        while T isa UnionAll
-                            sig2 isa UnionAll || (sig2 = sig1; break) # sig2 doesn't define all parameters, so drop it
-                            T = T.body
+                        @static if isdefinedglobal(Base, :_fieldtypes_constrain_typevars)
+                            constrains_all = Base._fieldtypes_constrain_typevars(tvars, ft)
+                        else
+                            constrains_all = _fieldtypes_constrain_typevars(tvars, ft)
                         end
-                        sig1 == sig2 || push!(signatures, MethodInfoKey(nothing, sig2))
+                        if constrains_all
+                            sig2 = Base.rewrap_unionall(Tuple{Type{T}, ft...}, T)
+                            sig1 == sig2 || push!(signatures, MethodInfoKey(nothing, sig2))
+                        end
                         for sig in signatures
                             add_signature!(exinfo, sig, lnn)
                         end
@@ -514,8 +628,8 @@ function _methods_by_execution!(
                     popfirst!(fargs)
                     length(fargs) == 3 && push!(fargs, Union{})  # add the default sig
                     dmod::Module, b::Base.Docs.Binding, str::Base.Docs.DocStr, sig = fargs
-                    if isdefined(b.mod, b.var)
-                        tmpvar = getfield(b.mod, b.var)
+                    if @invokelatest(isdefinedglobal(b.mod, b.var))
+                        tmpvar = @invokelatest(getglobal(b.mod, b.var))
                         if isa(tmpvar, Module)
                             dmod = tmpvar
                         end
@@ -570,36 +684,94 @@ function add_signature!(exinfo::ExInfo, mt_sig::MethodInfoKey, ln::LineNumberNod
     return exinfo
 end
 
+# The path may be a custom AbstractString from interpreted user code (e.g.
+# RelocatableFolders.Path) whose methods are newer than Revise's frozen world;
+# convert at the latest world.
+include_filename(path::String) = path
+include_filename(path::AbstractString) = (@invokelatest String(path))::String
+
 function handle_include!(exinfo::ExInfo, interp::Interpreter, frame::Frame, stmt::Expr)
     if length(stmt.args) == 2
+        # include(path)
         local arg2 = lookup(interp, frame, stmt.args[2])
         if arg2 isa AbstractString
-            push!(exinfo.includes, moduleof(frame)=>arg2)
+            push!(exinfo.includes, (moduleof(frame), identity, include_filename(arg2)))
             return exinfo
         end
-        error("Bad include call")
     elseif length(stmt.args) == 3
+        # include(mod, path) or include(mapexpr, path)
         local arg2 = lookup(interp, frame, stmt.args[2])
         local arg3 = lookup(interp, frame, stmt.args[3])
-        if arg2 isa Module && arg3 isa AbstractString
-            push!(exinfo.includes, arg2=>arg3)
+        if arg3 isa AbstractString
+            if arg2 isa Module
+                push!(exinfo.includes, (arg2, identity, include_filename(arg3)))
+                return exinfo
+            elseif arg2 isa Function
+                push!(exinfo.includes, (moduleof(frame), arg2, include_filename(arg3)))
+                return exinfo
+            end
+        end
+    elseif length(stmt.args) == 4
+        # include(mapexpr, mod, path)
+        local arg2 = lookup(interp, frame, stmt.args[2])
+        local arg3 = lookup(interp, frame, stmt.args[3])
+        local arg4 = lookup(interp, frame, stmt.args[4])
+        if arg2 isa Function && arg3 isa Module && arg4 isa AbstractString
+            push!(exinfo.includes, (arg3, arg2, include_filename(arg4)))
             return exinfo
         end
-        error("Bad include call")
     end
-    error("include(mapexpr::Function, mod::Module, path::AbstractString) is not supported") # TODO (issue #634)
+    error("Bad include call")
+end
+
+# `_typebody!` comes in two protocols: the older struct protocol
+# `_typebody!(prev, partial[, fieldtypes])`, where `prev` is `false` or the
+# existing type, and the typegroup-era `_typebody!(partial[, fieldtypes])`
+# (emitted at top level only for abstract and primitive type definitions).
+# Identify the partial type structurally so both lowerings are handled: in the
+# newer protocol the first argument is the type, followed by nothing or the
+# field-type `SimpleVector`; in the older one the type sits in second position.
+function typebody_partial(interp::Interpreter, frame::Frame, callstmt::Expr)
+    length(callstmt.args) >= 2 || return nothing
+    arg2 = lookup(interp, frame, callstmt.args[2])
+    if arg2 isa Type &&
+            (length(callstmt.args) == 2 || lookup(interp, frame, callstmt.args[3]) isa Core.SimpleVector)
+        return arg2
+    end
+    length(callstmt.args) >= 3 || return nothing
+    arg3 = lookup(interp, frame, callstmt.args[3])
+    return arg3 isa Type ? arg3 : nothing
 end
 
 function analyze_typebody!(exinfo::ExInfo, interp::Interpreter, frame::Frame, stmt::Expr)
-    if length(stmt.args) == 3 # abstract type definition
-        typ = lookup(interp, frame, stmt.args[3])::Type
-    elseif length(stmt.args) == 4 # general struct definition
-        typ = lookup(interp, frame, stmt.args[3])::Type
-    else
-        return nothing
-    end
+    typ = typebody_partial(interp, frame, stmt)
+    typ === nothing && return nothing
     datatype = Base.unwrap_unionall(typ)::DataType
     push!(exinfo.typeinfos, TypeInfo(datatype.name))
+    return exinfo
+end
+
+# For `resolve_typegroup(mod, typevars, infos, olds)` in `:sigs` mode: return a
+# tuple of the already-existing types for this group (to be assigned as the
+# statement's result in place of executing it), or `nothing` if any group member
+# is not currently defined.
+function existing_typegroup_types(interp::Interpreter, frame::Frame, callstmt::Expr)
+    length(callstmt.args) >= 5 || return nothing
+    olds = lookup(interp, frame, callstmt.args[5])
+    olds isa Core.SimpleVector || return nothing
+    isempty(olds) && return nothing
+    all(o -> o isa Type, olds) || return nothing
+    return (olds...,)
+end
+
+# Record a `TypeInfo` for each type created (or reused) by a `resolve_typegroup`
+# statement, whose result is the tuple of group types.
+function analyze_typegroup_result!(exinfo::ExInfo, @nospecialize(result))
+    result isa Tuple || return nothing
+    for typ in result
+        typ isa Type || continue
+        push!(exinfo.typeinfos, TypeInfo((Base.unwrap_unionall(typ)::DataType).name))
+    end
     return exinfo
 end
 
@@ -641,4 +813,224 @@ function skip_declare_const(interp::Interpreter, frame::Frame, stmt::Expr)
     name = name_arg isa QuoteNode ? name_arg.value : name_arg
     name isa Symbol || return false
     return @invokelatest isdefined(mod_arg, name)
+end
+
+## Prediction of type preservation (issue #1022)
+#
+# Before deletions are applied, `revise` asks whether the new source re-creates
+# each old type unchanged. If so, the subtype-tree walk in
+# `handle_type_deletion!` is unnecessary. Problems arise from `struct`
+# definitions like those in #1022, which disguise the fact that the type is
+# unchanged and only surrounding code is changed. We fix this with a two-phase
+# evaluation: first, a limited evaluation that reconstructs (from the lowered
+# code) the *proposed* new type (henceforth called the "prediction"). This
+# prediction is compared for type-equivalence against the existing type; if they
+# are equivalent, type-deletion is skipped. Constructing the prediction builds
+# only throwaway objects and never publishes a binding; the point is to determine
+# whether the deletion is necessary, and if not we can trust the ordinary
+# mechanisms to do the right thing.
+#
+# The prediction interprets only the lowered statements that feed
+# `Core._typebody!` calls, plus `eval` calls (whose contents may define types
+# via metaprogramming). This is implemented by mimicking the larger pipeline
+# above: a new set of `isrequired` rules plus a focused line-stepper.
+
+# Resolve the callee of `stmt` (or of the call it wraps as the RHS of an
+# assignment), following SSA chains; `nothing` if `stmt` is not a call.
+function typedef_callee(@nospecialize(stmt), code::Vector{Any})
+    isa(stmt, Expr) || return nothing
+    callstmt = stmt
+    if callstmt.head !== :call
+        LoweredCodeUtils.get_lhs_rhs(callstmt) === nothing && return nothing
+        rhs = LoweredCodeUtils.getrhs(callstmt)
+        isa(rhs, Expr) && rhs.head === :call || return nothing
+        callstmt = rhs
+    end
+    isempty(callstmt.args) && return nothing
+    callee = callstmt.args[1]
+    while isa(callee, Core.SSAValue) || isa(callee, JuliaInterpreter.SSAValue)
+        callee = code[callee.id]
+    end
+    return callee
+end
+
+# `true` when `stmt` is (or wraps, as the RHS of an assignment) a call to
+# `Core._typebody!`, following SSA chains to resolve the callee.
+function is_typebody_stmt(@nospecialize(stmt), code::Vector{Any})
+    callee = typedef_callee(stmt, code)
+    callee === nothing && return false
+    if isa(callee, GlobalRef)
+        return callee.mod === Core && callee.name === :_typebody!
+    end
+    isa(callee, QuoteNode) && (callee = callee.value)
+    return @static(isdefined(Core, :_typebody!) ? true : false) && callee === Core._typebody!
+end
+
+# `true` when `stmt` is (or wraps) a call to `Core.resolve_typegroup`, the
+# statement that creates the types of a struct definition or `typegroup` block.
+function is_resolve_typegroup_stmt(@nospecialize(stmt), code::Vector{Any})
+    callee = typedef_callee(stmt, code)
+    callee === nothing && return false
+    if isa(callee, GlobalRef)
+        return callee.mod === Core && callee.name === :resolve_typegroup
+    end
+    isa(callee, QuoteNode) && (callee = callee.value)
+    return @static(isdefined(Core, :resolve_typegroup) ? true : false) && callee === Core.resolve_typegroup
+end
+
+# Statement filter for the prediction pass: only type-defining calls
+# (`_typebody!`/`resolve_typegroup`), `eval` calls, and `:toplevel` blocks (and,
+# via `lines_required!`, their dependencies) run.
+function predict_predicate(@nospecialize(stmt), code::Vector{Any})
+    isa(stmt, Expr) || return (false, false)
+    haseval = matches_eval(stmt)
+    isreq = haseval | (stmt.head === :toplevel) | is_typebody_stmt(stmt, code) |
+            is_resolve_typegroup_stmt(stmt, code)
+    return (isreq, haseval)
+end
+
+# Execute `Core._typebody!` — its effects are confined to the throwaway partial type
+# created earlier in the frame — and record in `predictions` whether evaluating this
+# definition will preserve the existing binding. Returns the value to assign to the
+# statement's SSA slot.
+#
+# Both `_typebody!` protocols are handled (see `typebody_partial`). The
+# preservation test depends on the form: the older struct protocol passes a `prev`
+# argument (the existing type if `Core._equiv_typedef` judged the headers
+# equivalent, `false` otherwise) along with the field types, and
+# `_typebody!(prev, partial, ftypes)` returns `prev` exactly when evaluation would
+# reuse the existing type — so `result === existing` is the complete test. In every
+# other form (abstract and primitive types on either protocol), the lowering gates
+# the `const` on `Core._equiv_typedef`, so calling that directly replicates the
+# test evaluation would perform.
+function record_typebody_prediction!(predictions::TypePredictions, interp::Interpreter, frame::Frame, callstmt::Expr)
+    partial = typebody_partial(interp, frame, callstmt)
+    partial isa Type || error("unexpected _typebody! call ", callstmt)
+    tn = (Base.unwrap_unionall(partial)::DataType).name
+    existing = @invokelatest(isdefinedglobal(tn.module, tn.name)) ?
+               @invokelatest(getglobal(tn.module, tn.name)) : nothing
+    fargs = Any[lookup(interp, frame, a) for a in callstmt.args[2:end]]
+    result = Core._typebody!(fargs...)
+    oldstructform = length(fargs) >= 3 && partial === fargs[2]
+    preserved = if oldstructform
+        existing isa Type && result === existing
+    else
+        existing isa Type &&
+            @static(isdefined(Core, :_equiv_typedef) ? true : false) &&
+            Core._equiv_typedef(existing, partial)
+    end
+    predictions.preserved[(tn.module, tn.name)] = preserved
+    return result
+end
+
+# Execute `Core.resolve_typegroup` — it creates the group's types (or, per its
+# internal equivalence check, returns the existing ones) without publishing any
+# binding — and record for each group member whether evaluation would preserve
+# the existing binding: `resolve_typegroup` returns the existing type object
+# exactly when the new definition is equivalent to it. Returns the value to
+# assign to the statement's SSA slot.
+function record_typegroup_prediction!(predictions::TypePredictions, interp::Interpreter, frame::Frame, callstmt::Expr)
+    mod = lookup(interp, frame, callstmt.args[2])::Module
+    typevars = lookup(interp, frame, callstmt.args[3])::Core.SimpleVector
+    infos = lookup(interp, frame, callstmt.args[4])::Core.SimpleVector
+    olds = lookup(interp, frame, callstmt.args[5])::Core.SimpleVector
+    result = Core.resolve_typegroup(mod, typevars, infos, olds)
+    for (i, tv) in enumerate(typevars)
+        old = olds[i]
+        preserved = old isa Type && result[i] === old
+        predictions.preserved[(mod, (tv::TypeVar).name)] = preserved
+    end
+    return result
+end
+
+# Record a prediction for every type `ex` would define, without publishing any
+# binding or defining any method. Throws on lowering or execution failure; the
+# caller treats a throw as "no prediction", leaving the pessimistic deletion path
+# in force (correct, just unoptimized).
+function predict_typebodies!(predictions::TypePredictions, mod::Module, ex::Expr)
+    # The walk requires the Julia 1.12+ struct-lowering protocol, in which the
+    # type-defining statement (`_typebody!` with a `prev` argument, or
+    # `resolve_typegroup` on typegroup-based versions) builds only throwaway
+    # objects and the binding is published only by a subsequent
+    # `const`/`declare_const`. Older lowering binds the type through statements
+    # this walk executes, so prediction would not be non-destructive there;
+    # report "no prediction" instead.
+    @static VERSION >= v"1.12.0-DEV.2047" || return predictions
+    lwr = Meta.lower(mod, ex)
+    isa(lwr, Expr) || return predictions
+    if lwr.head === :error || lwr.head === :incomplete
+        throw(LoweringException(lwr))
+    end
+    lwr.head === :thunk || return predictions
+    src = lwr.args[1]::CodeInfo
+    any(stmt -> predict_predicate(stmt, src.code)[1], src.code) || return predictions
+    frame = Frame(mod, src; world=Base.get_world_counter())
+    isrequired, _ = minimal_evaluation!(predict_predicate, frame, :sigs)
+    interp = Compiled()
+    pc = frame.pc
+    while true
+        stmt = pc_expr(frame, pc)
+        if !isrequired[pc]
+            pc = next_or_nothing!(frame)
+        elseif isa(stmt, Expr)
+            head = stmt.head
+            if head === :const || head === :method || head === :thunk
+                # `:const` would publish a binding; `:method`/`:thunk` would define
+                # methods ahead of the deletion phase. None of these feed a
+                # `_typebody!` call, so skipping is safe; if one is nevertheless a
+                # dependency, evaluation fails and the caller falls back to the
+                # pessimistic path.
+                pc = next_or_nothing!(frame)
+            elseif head === :toplevel
+                for a in stmt.args
+                    a isa Expr || continue
+                    predict_typebodies!(predictions, mod, a)
+                end
+                assign_this!(frame, nothing)
+                pc = next_or_nothing!(frame)
+            else
+                callstmt = stmt
+                if head !== :call
+                    rhs = LoweredCodeUtils.get_lhs_rhs(stmt) === nothing ? nothing :
+                          LoweredCodeUtils.getrhs(stmt)
+                    callstmt = isa(rhs, Expr) && rhs.head === :call ? rhs : nothing
+                end
+                if callstmt === nothing
+                    pc = step_expr!(interp, frame, stmt, true)
+                else
+                    f = lookup(frame, callstmt.args[1])
+                    if @static(isdefined(Core, :resolve_typegroup) ? true : false) && f === Core.resolve_typegroup && length(callstmt.args) >= 5
+                        assign_this!(frame, record_typegroup_prediction!(predictions, interp, frame, callstmt))
+                        pc = next_or_nothing!(frame)
+                    elseif @static(isdefined(Core, :_typebody!) ? true : false) && f === Core._typebody! &&
+                           length(callstmt.args) >= 2
+                        assign_this!(frame, record_typebody_prediction!(predictions, interp, frame, callstmt))
+                        pc = next_or_nothing!(frame)
+                    elseif @static(isdefined(Core, :declare_const) ? true : false) && f === Core.declare_const
+                        pc = next_or_nothing!(frame)
+                    elseif f === Core.eval
+                        evalmod = lookup(interp, frame, callstmt.args[2])
+                        evalex = lookup(interp, frame, callstmt.args[3])
+                        if evalmod isa Module && evalex isa Expr
+                            for (newmod, newex) in ExprSplitter(evalmod, evalex)
+                                if is_doc_expr(newex)
+                                    newex = newex.args[4]
+                                end
+                                newex = unwrap(newex)
+                                newex isa Expr && predict_typebodies!(predictions, newmod, newex)
+                            end
+                        end
+                        assign_this!(frame, nothing)
+                        pc = next_or_nothing!(frame)
+                    else
+                        pc = step_expr!(interp, frame, stmt, true)
+                    end
+                end
+            end
+        else
+            pc = step_expr!(interp, frame, stmt, true)
+        end
+        pc === nothing && break
+    end
+    return predictions
 end

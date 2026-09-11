@@ -805,6 +805,10 @@ end
 
     # With env_ready = true and default missing-refs ("all"), missing refs should appear
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///mrt/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///mrt2/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///mrt/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///mrt/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///mrt/src/MissRefTest.jl"), SourceText(source, "julia")))
@@ -969,6 +973,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresexpl/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresexpl/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresexpl/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresexpl/src/UnresExpl.jl"), SourceText(source, "julia")))
@@ -1009,6 +1016,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresself/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresself/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresself/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresself/src/UnresSelf.jl"), SourceText(source, "julia")))
@@ -1049,6 +1059,9 @@ end
 
     # Enabled (default) — both the import warning and the genuine typo appear.
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unrestog/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unrestog/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unrestog/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unrestog/src/UnresTog.jl"), SourceText(source, "julia")))
@@ -1064,7 +1077,8 @@ end
     add_file!(jw2, TextFile(URI("file:///unrestog2/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw2, TextFile(URI("file:///unrestog2/src/UnresTog.jl"), SourceText(source, "julia")))
     add_file!(jw2, TextFile(URI("file:///unrestog2/JuliaLint.toml"), SourceText("[rules]
-unresolved_import = \"off\"", "toml")))
+unresolved_import = \"off\"
+missing_reference = \"warning\"", "toml")))
     JuliaWorkspaces.set_input_env_ready!(jw2.runtime, true)
 
     diags2 = get_diagnostic(jw2, URI("file:///unrestog2/src/UnresTog.jl"))
@@ -1179,6 +1193,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresflag/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresflag/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresflag/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresflag/src/UnresFlag.jl"), SourceText(source, "julia")))
@@ -1229,6 +1246,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresflaglate/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresflaglate/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresflaglate/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresflaglate/src/UnresFlagLate.jl"), SourceText(source, "julia")))
@@ -1403,6 +1423,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresas/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresas/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresas/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresas/src/UnresAs.jl"), SourceText(source, "julia")))
@@ -1442,6 +1465,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresdots/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/Manifest.toml"), SourceText(manifest_toml, "toml")))
     # relative_import is off in the default preset; this test is about the
@@ -1485,6 +1511,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unreswild/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unreswild/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unreswild/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unreswild/src/UnresWild.jl"), SourceText(source, "julia")))
@@ -1530,6 +1559,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unreswildmod/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unreswildmod/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unreswildmod/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unreswildmod/src/UnresWildMod.jl"), SourceText(source, "julia")))
@@ -1573,6 +1605,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresmacro/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresmacro/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresmacro/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresmacro/src/UnresMacro.jl"), SourceText(source, "julia")))
@@ -1613,6 +1648,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unrestop/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unrestop/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unrestop/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unrestop/src/UnresTop.jl"), SourceText(source, "julia")))
@@ -1694,6 +1732,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresop/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresop/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresop/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresop/src/UnresOp.jl"), SourceText(source, "julia")))
@@ -1740,6 +1781,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresquoted/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresquoted/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresquoted/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresquoted/src/UnresQuoted.jl"), SourceText(source, "julia")))
@@ -1787,6 +1831,9 @@ end
     """
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///uncacheddep/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///uncacheddep/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///uncacheddep/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///uncacheddep/src/UncachedDep.jl"), SourceText(source, "julia")))
@@ -1832,6 +1879,10 @@ end
     # Default config: getfield refs into resolved modules are checked, even
     # though an unresolved wildcard using suppresses bare missing refs here
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///missrefall/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///missrefall2/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///missrefall/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///missrefall/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///missrefall/src/MissRefAll.jl"), SourceText(source, "julia")))
@@ -2015,17 +2066,22 @@ end
 
     [deps]
     """, "toml")))
-    add_file!(jw, TextFile(uri, SourceText("import JSON\n", "julia")))
+    # An `x == nothing` comparison, like an unresolvable import, is an
+    # env-dependent finding: it stays suppressed until the buffer's environment
+    # resolves, so it observes the fallback just as well. `unresolved_import`
+    # cannot be used here — it is off in `default`, and an untitled buffer has
+    # no path, so no `JuliaLint.toml` can ever govern it.
+    add_file!(jw, TextFile(uri, SourceText("x = 1\nx == nothing\n", "julia")))
     set_active_project!(jw, env_dir)
     set_input_env_ready!(jw.runtime, true)
 
     # The untitled buffer's project is the active project (fallback env).
     @test derived_project_uri_for_root(jw.runtime, uri) == env_dir
 
-    # With the env ready, the unresolvable package import now flags.
+    # With the env ready, the env-dependent finding now flags.
     diags = get_diagnostic(jw, uri)
     @test any(d -> d.source == "StaticLint.jl", diags)
-    @test any(d -> occursin("JSON", d.message), diags)
+    @test any(d -> occursin("nothing", d.message), diags)
 end
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2050,6 +2106,9 @@ end
     """
 
     jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    _add_file!(jw, TextFile(URI("file:///ws/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     for (name, n) in (("EnvGateA", "41"), ("EnvGateB", "42"))
         _add_file!(jw, TextFile(URI("file:///ws/$name/Project.toml"), SourceText("""
         name = "$name"
@@ -2095,6 +2154,9 @@ end
     using JuliaWorkspaces.URIs2: URI, uri2filepath
 
     jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    _add_file!(jw, TextFile(URI("file:///ws/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     _add_file!(jw, TextFile(URI("file:///ws/EnvFail/Project.toml"), SourceText("""
     name = "EnvFail"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee43"
@@ -2136,6 +2198,9 @@ end
     fileuri = URI("file:///noman/foo.jl")
 
     jw = JuliaWorkspace()
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///noman/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///noman/Project.toml"), SourceText("""
     name = "NoMan"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee44"

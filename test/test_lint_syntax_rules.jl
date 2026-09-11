@@ -224,32 +224,77 @@ end
     @test d2[1].severity === :error
 end
 
-@testitem "Syntax rules: fused parse runs every check, config filters" begin
+@testitem "Syntax rules: detached_docstring flags docstrings bound to nothing" begin
     using JuliaWorkspaces.URIs2: URI
-    const JW = JuliaWorkspaces
 
-    # The fused parse (`derived_julia_parse_products`) runs ALL syntax checks
-    # unconditionally, so its findings are independent of the lint config; the
-    # enabled set is applied as a filter in `derived_syntax_lint_findings`.
-    jw = JuliaWorkspace()
-    uri = URI("file:///pr/src/a.jl")
-    add_file!(jw, TextFile(uri, SourceText("f(x) = x == NaN\ng() = @async h()\n", "julia")))
+    function dd_diags(source)
+        jw = JuliaWorkspace()
+        uri = URI("file:///pr/src/a.jl")
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        return filter(d -> d.code === :detached_docstring, get_diagnostic(jw, uri))
+    end
 
-    # No config at all: the unfiltered findings still contain both rules...
-    all_findings = JW.derived_all_syntax_lint_findings(jw.runtime, uri)
-    @test Set(f.rule_id for f in all_findings) == Set([:nan_comparison, :async_task])
+    D = "\"\"\"\n    f(x)\n\nDoes a thing.\n\"\"\""
+    X = "f(x) = 1"
 
-    # ...while the filtered query reports nothing (both rules default to off).
-    @test isempty(JW.derived_syntax_lint_findings(jw.runtime, uri))
+    # The containers it checks, severed by a comment and by a blank line.
+    @test length(dd_diags("$D\n# c\n$X\n")) == 1
+    @test length(dd_diags("$D\n\n$X\n")) == 1
+    @test length(dd_diags("module M\n$D\n# c\n$X\nend\n")) == 1
+    @test length(dd_diags("baremodule M\n$D\n# c\n$X\nend\n")) == 1
 
-    # Enabling one rule surfaces exactly that one.
-    add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
-        SourceText("[rules]\nnan_comparison = \"error\"\n", "toml")))
-    filtered = JW.derived_syntax_lint_findings(jw.runtime, uri)
-    @test [f.rule_id for f in filtered] == [:nan_comparison]
+    # Attached: nothing to report.
+    @test isempty(dd_diags("$D\n$X\n"))
+    @test isempty(dd_diags("module M\n$D\n$X\nend\n"))
 
-    # And the test-detail product comes out of the same parse: this file has
-    # no test items, so the raw details are empty rather than missing.
-    raw = JW.derived_raw_test_details(jw.runtime, uri)
-    @test isempty(raw.testitems) && isempty(raw.testsetups) && isempty(raw.testerrors)
+    # Not checked: either a docstring cannot bind there at all, or -- `begin`,
+    # `quote` -- it can but the container is indistinguishable from those by kind.
+    # `(a; b)` is a `K"block"` too, which is why kind alone cannot decide.
+    @test isempty(dd_diags("function g()\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("if c\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("let\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("for i in 1:1\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("while c\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("try\n$D\n$X\ncatch\nend\n"))
+    @test isempty(dd_diags("($D;\n$X)\n"))
+    @test isempty(dd_diags("begin\n$D\n# c\n$X\nend\n"))
+    @test isempty(dd_diags("struct S\n$D\n# c\nx::Int\nend\n"))
+
+    # The signature may sit below leading blank lines.
+    @test length(dd_diags("\"\"\"\n\n    f(x)\n\nDocs.\n\"\"\"\n# c\n$X\n")) == 1
+
+    # Each signature form the filter accepts, pinned separately.
+    for sig in ["    Foo <: Bar", "    struct Foo", "    (m::Foo)(x::T) where T",
+                "    @m x y", "    Base.f(x)", "    α(x)"]
+        @test length(dd_diags("\"\"\"\n$sig\n\nDoes a thing.\n\"\"\"\n# c\n$X\n")) == 1
+    end
+
+    # Prose that merely contains a bracket is not a signature: real call syntax
+    # has no space before the delimiter.
+    @test isempty(dd_diags("\"\"\"\n    Note (see below).\n\"\"\"\n# c\n$X\n"))
+    @test isempty(dd_diags("module M\n\"\"\"\n    Notes (details below).\n\"\"\"\n\n$X\nend\n"))
+
+    # Matching is bounded to the first non-blank line, so a long run of indent
+    # cannot make the patterns backtrack quadratically and throw.
+    @test isempty(dd_diags("\"" * " "^5000 * "\"\n# c\n$X\n"))
+
+    # Detached but not docstring-shaped, so the filter has to reject them.
+    @test isempty(dd_diags("\"Constants for the SHA implementation.\"\n# c\nconst A = 1\n"))
+    @test isempty(dd_diags("module M\n\"Notes about this module.\"\n\n$X\nend\n"))
+    @test isempty(dd_diags("\"\"\"\n    Example\n    (see the manual)\n\"\"\"\n# c\n$X\n"))
+
+    # An interpolated string is never classified, even when its first line is a
+    # signature: `$` can make the rest anything.
+    @test isempty(dd_diags("\"\"\"\n    f(x)\n\nReturns \$(T).\n\"\"\"\n# c\n$X\n"))
+
+    # One finding per detached docstring.
+    @test length(dd_diags("$D\n# c\n$X\n$D\n# c\ng(x) = 2\n")) == 2
+
+    # Reported as a warning in the default preset.
+    src = "$D\n# c\n$X\n"
+    d = only(dd_diags(src))
+    @test d.severity === :warning
+    @test occursin("immediately followed", d.message)
+    # The range is exactly the string, not the enclosing container.
+    @test src[first(d.range):last(d.range)-1] == D
 end

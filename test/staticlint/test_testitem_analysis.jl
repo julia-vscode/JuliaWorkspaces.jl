@@ -23,11 +23,17 @@
     project_hash = "0"
     """
 
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    const LINT_CONF = URI("file:///pkg/JuliaLint.toml")
+    const LINT_OPT_IN = "[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n"
+
     # A minimal workspace shaped like a real package: Project+Manifest so the
     # test-file root gets a project, an entry file so MyPkg is a workspace
     # package, and one test file whose analysis we assert on.
     function pkg_ws(; entry::String, testfile::String, extra::Dict{URI,String}=Dict{URI,String}())
         jw = JuliaWorkspace()
+        add_file!(jw, TextFile(LINT_CONF, SourceText(LINT_OPT_IN, "toml")))
         add_file!(jw, TextFile(PROJ, SourceText(PROJECT_TOML, "toml")))
         add_file!(jw, TextFile(MANIF, SourceText(MANIFEST_TOML, "toml")))
         add_file!(jw, TextFile(ENTRY, SourceText(entry, "julia")))

@@ -1106,6 +1106,16 @@ function _defines_constructor_method(x::EXPR)
     return name isa EXPR && headof(name) === :curly
 end
 
+# Read-only re-run of `check_datatype_decl`'s decision with the final
+# (post-inference) bindings; used by `collect_hints` to drop stale errors.
+function datatype_decl_still_invalid(x::EXPR, env::ExternalEnv, meta_dict)
+    (isdeclaration(x) && x.args !== nothing && !isempty(x.args)) || return true
+    if (dt = refof_maybe_getfield(last(x.args), meta_dict)) !== nothing
+        return is_never_datatype(dt, env, meta_dict)
+    end
+    return true
+end
+
 function check_datatype_decl(x::EXPR, env::ExternalEnv, meta_dict)
     # Only call in function signatures?
     if isdeclaration(x) && parentof(x) isa EXPR && iscall(parentof(x))
@@ -1372,7 +1382,14 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
             # existence guard, which is the missing-reference report for
             # using/import statements and is suppressed like the bare names
             # below. Other lint codes don't depend on which branch runs.
-            if !(errorof(x, meta_dict) === UnresolvedImport && in_existence_guarded_branch(x, env, meta_dict))
+            if errorof(x, meta_dict) === UnresolvedImport && in_existence_guarded_branch(x, env, meta_dict)
+            elseif errorof(x, meta_dict) === InvalidTypeDeclaration && !datatype_decl_still_invalid(x, env, meta_dict)
+                # The error was set during the semantic pass, but import
+                # resolution and by-use inference may only settle a binding's
+                # type afterwards (`import StaticArraysCore: Size` +
+                # `Size(::Type{...}) = ...` method extensions transiently
+                # shadow the type). Re-validate against the final bindings.
+            else
                 push!(errs, (pos, x))
             end
         elseif missingrefs != :none && isidentifier(x) && !hasref(x, meta_dict) &&
@@ -1387,6 +1404,7 @@ function collect_hints(x::EXPR, env, workspace_packages, meta_dict, missingrefs=
             push!(errs, (pos, x))
         end
     elseif isquoted && missingrefs == :all && should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict) &&
+            !in_macrocall_arg(x, env, meta_dict) &&
             !in_existence_guarded_branch(x, env, meta_dict)
         push!(errs, (pos, x))
     end
@@ -1482,9 +1500,10 @@ function should_mark_missing_getfield_ref(x, env, workspace_packages, meta_dict)
             if !(lhsref isa Binding)
                 # Not clear what is happening here.
                 return false
-            elseif lhsref.type isa SymbolServer.DataTypeStore && !(isempty(lhsref.type.fieldnames) || isunionfaketype(lhsref.type.name) || has_getproperty_method(lhsref.type, env))
+            elseif lhsref.type isa SymbolServer.DataTypeStore && !(isempty(lhsref.type.fieldnames) || isunionfaketype(lhsref.type.name) || isnamedtuplefaketype(lhsref.type.name) || has_getproperty_method(lhsref.type, env))
                 return true
-            elseif lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type)
+            elseif lhsref.type isa Binding && lhsref.type.val isa EXPR && CSTParser.defines_struct(lhsref.type.val) && !has_getproperty_method(lhsref.type) &&
+                   struct_fields_statically_enumerable(lhsref.type.val, meta_dict)
                 # We may have infered the lhs type after the semantic pass that was resolving references.
                 return !scopehasbinding(scopeof(lhsref.type.val, meta_dict), valofid(x))
             end
@@ -1541,6 +1560,26 @@ function is_type_of_call_to_getproperty(x::EXPR)
 end
 
 isunionfaketype(t::SymbolServer.FakeTypeName) = t.name.name === :Union && t.name.parent isa SymbolServer.VarRef && t.name.parent.name === :Core
+
+# `NamedTuple` field sets depend on the value's type parameters, which the
+# static `fieldnames` of the `DataTypeStore` cannot represent.
+isnamedtuplefaketype(t::SymbolServer.FakeTypeName) = t.name.name === :NamedTuple && t.name.parent isa SymbolServer.VarRef && t.name.parent.name === :Core
+
+# Only known field-modifier macros (`@atomic`, docstrings) are unwrapped when
+# struct field bindings are collected (see `mark_bindings!`); a member wrapped
+# in any other macrocall may still declare a field the binding pass cannot see,
+# so the struct's field set cannot be enumerated and a missing-field report
+# would be a guess.
+function struct_fields_statically_enumerable(strct::EXPR, meta_dict)
+    (strct.args !== nothing && length(strct.args) >= 3 && strct.args[3].args !== nothing) || return true
+    for arg in strct.args[3].args
+        CSTParser.defines_function(arg) && continue
+        if CSTParser.ismacrocall(arg) && !(arg.args !== nothing && length(arg.args) > 1 && hasbinding(last(arg.args), meta_dict))
+            return false
+        end
+    end
+    return true
+end
 
 function check_typeparams(x::EXPR, meta_dict)
     if iswhere(x)
@@ -1644,6 +1683,19 @@ end
 
 # Now called from add_binding
 # Should return true/false indicating whether the binding should actually be added?
+# Whether `x` (a binding-name identifier) sits inside a WHOLE-MODULE
+# `import`/`using` statement (`import Printf`), as opposed to a symbol import
+# (`import Base: name`, whose arguments are wrapped in a `:` operator call).
+function _is_in_whole_module_import(x::EXPR)
+    imp = x
+    while imp isa EXPR && !(headof(imp) === :import || headof(imp) === :using)
+        imp = parentof(imp)
+    end
+    imp isa EXPR || return false
+    return !(imp.args !== nothing && length(imp.args) > 0 &&
+             isoperator(headof(imp.args[1])) && valof(headof(imp.args[1])) == ":")
+end
+
 function check_const_decl(name::String, b::Binding, scope, meta_dict)
     # assumes `scopehasbinding(scope, name)`
 
@@ -1660,6 +1712,11 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
         # a redefinition. A quote passed directly to `eval` does execute and
         # must retain the warning.
         prev_b.val isa EXPR && _is_in_inert_quote(prev_b.val) && return
+        # `import HDF5; const HDF5 = Base.get_extension(...).HDF5` egal-rebinds
+        # an imported MODULE — legal and idiomatic extension access. Only
+        # whole-module imports are exempt: symbol imports (`import Base: name`)
+        # keep the "already declared as an import" error below.
+        prev_b.name isa EXPR && _is_in_whole_module_import(prev_b.name) && return
     end
 
     b.val isa Binding && return check_const_decl(name, b.val, scope, meta_dict)
@@ -1670,8 +1727,14 @@ function check_const_decl(name::String, b::Binding, scope, meta_dict)
         # per branch is not a redeclaration — the same exemption the
         # InvalidRedefofConst arm below already applies.
         prev = scope.names[name]
-        if prev isa Binding && prev.val isa EXPR && !in_same_if_branch(b.val, prev.val)
-            return
+        if prev isa Binding
+            # an import binding's `.val` may be a store, not an EXPR (`using
+            # Base: @x` in the other @static branch of a `const var"@x"`
+            # shim) — its `.name` EXPR still locates the branch
+            prev_expr = prev.val isa EXPR ? prev.val : (prev.name isa EXPR ? prev.name : nothing)
+            if prev_expr !== nothing && !in_same_if_branch(b.val, prev_expr)
+                return
+            end
         end
         seterror!(b.name, CannotDeclareConst, meta_dict)
     else

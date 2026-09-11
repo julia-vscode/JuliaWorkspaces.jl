@@ -29,14 +29,23 @@ directory; a pattern containing no `/` matches at any depth. A trailing `/`
 makes the pattern match everything below that directory.
 
 The source `pattern` is what participates in equality, so that configs compare
-and hash by their written form (the compiled `regex` is derived from it).
+and hash by their written form (the three compiled regexes are all derived from
+it). `regex` matches a file path; `subtree_regex` and `prefix_regex` are the
+directory-level predicates a walker needs, see [`dir_selected`](@ref).
 """
 struct GlobPattern
     pattern::String
     regex::Regex
+    subtree_regex::Regex
+    prefix_regex::Regex
 end
 
-GlobPattern(pattern::AbstractString) = GlobPattern(String(pattern), _glob_to_regex(pattern))
+GlobPattern(pattern::AbstractString) = GlobPattern(
+    String(pattern),
+    _glob_to_regex(pattern),
+    _glob_to_subtree_regex(pattern),
+    _glob_to_prefix_regex(pattern),
+)
 
 Base.:(==)(a::GlobPattern, b::GlobPattern) = a.pattern == b.pattern
 Base.isequal(a::GlobPattern, b::GlobPattern) = isequal(a.pattern, b.pattern)
@@ -58,6 +67,24 @@ function _glob_to_regex(pattern::AbstractString)
     if !anchored && !occursin('/', pat)
         print(io, "(?:.*/)?")
     end
+
+    print(io, _glob_body(pat))
+    print(io, dir_only ? "/.*\$" : "\$")
+
+    return Regex(String(take!(io)), _glob_regex_flags())
+end
+
+_glob_regex_flags() = Sys.iswindows() ? "i" : ""
+
+"""
+    _glob_body(pat) -> String
+
+The glob-to-regex translation of a pattern body, without anchors. Shared by
+[`_glob_to_regex`](@ref) and by [`_glob_to_prefix_regex`](@ref), which
+translates one path segment at a time.
+"""
+function _glob_body(pat::AbstractString)
+    io = IOBuffer()
 
     i = firstindex(pat)
     stop = lastindex(pat)
@@ -106,10 +133,7 @@ function _glob_to_regex(pattern::AbstractString)
         end
     end
 
-    print(io, dir_only ? "/.*\$" : "\$")
-
-    flags = Sys.iswindows() ? "i" : ""
-    return Regex(String(take!(io)), flags)
+    return String(take!(io))
 end
 
 const _REGEX_METACHARS = Set{Char}(raw".^$|()[]{}+*?\/")
@@ -117,6 +141,113 @@ const _REGEX_METACHARS = Set{Char}(raw".^$|()[]{}+*?\/")
 _regex_escape_char(c::Char) = c in _REGEX_METACHARS ? string('\\', c) : string(c)
 
 matches(g::GlobPattern, relpath::AbstractString) = occursin(g.regex, relpath)
+
+# ── Directory predicates ────────────────────────────────────────────────────
+#
+# `matches`/`path_selected` answer "is *this file* selected". A directory
+# walker needs two different questions about a *directory*, and both must be
+# sound in the same direction: never claim a directory can be skipped when it
+# could still hold a selected file. Being too permissive only costs a wasted
+# `readdir`; being too strict silently loses files.
+
+const _MATCH_ANY_REGEX = r"^.*$"
+const _MATCH_NONE_REGEX = r"^(?!)$"
+
+"""
+    _glob_to_subtree_regex(pattern) -> Regex
+
+A regex matching the relative path of any directory whose *entire* subtree the
+pattern covers.
+
+This is gitignore's rule that a pattern matching a directory applies to
+everything beneath it, so the pattern is reduced to its directory form — a
+trailing `/` or `/**` is dropped — and then matched against the directory's own
+relative path.
+
+Note that a naive `matches(g, reldir * "/")` test would be *unsound* here: for
+`src/*` it matches `src/`, which would prune the whole of `src` even though
+`src/a/b.jl` is not covered.
+"""
+function _glob_to_subtree_regex(pattern::AbstractString)
+    pat = replace(String(pattern), '\\' => '/')
+    endswith(pat, '/') && (pat = chop(pat))
+
+    # Whether the pattern is tied to the config directory rather than matching
+    # at any depth. Recorded before the tail is stripped, because stripping can
+    # remove the only separator (`packages/**` -> `packages`) and would
+    # otherwise turn an anchored pattern into an any-depth one.
+    anchored = startswith(pat, '/') || occursin('/', pat)
+
+    if pat == "**"
+        return _MATCH_ANY_REGEX
+    elseif endswith(pat, "/**")
+        pat = chop(pat, tail = 3)
+    elseif endswith(pat, "**")
+        # A `foo**` tail has no directory form; claim nothing.
+        return _MATCH_NONE_REGEX
+    end
+
+    isempty(pat) && return _MATCH_ANY_REGEX
+    anchored && !startswith(pat, '/') && (pat = "/" * pat)
+
+    return _glob_to_regex(pat)
+end
+
+"""
+    _glob_to_prefix_regex(pattern) -> Regex
+
+A regex matching the relative path of any directory that could contain a match
+for the pattern — that is, of any prefix of a path the pattern might select.
+
+Built as nested optional groups over the pattern's segments, unconstrained from
+the first `**` onwards: `src/**` becomes `^(?:src(?:/.*)?)?\$`, which admits
+`""`, `src` and `src/a/b`, but not `data`.
+"""
+function _glob_to_prefix_regex(pattern::AbstractString)
+    pat = replace(String(pattern), '\\' => '/')
+    endswith(pat, '/') && (pat = chop(pat))
+
+    anchored = startswith(pat, '/')
+    anchored && (pat = pat[nextind(pat, 1):end])
+
+    # gitignore: a pattern with no separator matches at any depth, so every
+    # directory is a possible parent.
+    !anchored && !occursin('/', pat) && return _MATCH_ANY_REGEX
+
+    io = IOBuffer()
+    print(io, "^")
+
+    depth = 0
+    for seg in split(pat, '/', keepempty = false)
+        seg == "**" && break   # everything below is unconstrained
+        print(io, "(?:")
+        depth > 0 && print(io, "/")
+        print(io, _glob_body(seg))
+        depth += 1
+    end
+
+    depth == 0 && return _MATCH_ANY_REGEX
+
+    print(io, "(?:/.*)?")
+    print(io, ")?"^depth)
+    print(io, "\$")
+
+    return Regex(String(take!(io)), _glob_regex_flags())
+end
+
+"""
+    covers_subtree(g, reldir) -> Bool
+
+Whether `g` covers every path below the directory `reldir`.
+"""
+covers_subtree(g::GlobPattern, reldir::AbstractString) = occursin(g.subtree_regex, reldir)
+
+"""
+    may_contain_match(g, reldir) -> Bool
+
+Whether any path below the directory `reldir` could match `g`.
+"""
+may_contain_match(g::GlobPattern, reldir::AbstractString) = occursin(g.prefix_regex, reldir)
 
 """
     struct PathFilter
@@ -145,6 +276,23 @@ function path_selected(filter::PathFilter, relpath::AbstractString)
     any(g -> matches(g, relpath), filter.exclude) && return false
     isempty(filter.include) && return true
     return any(g -> matches(g, relpath), filter.include)
+end
+
+"""
+    dir_selected(filter, reldir) -> Bool
+
+Whether the directory `reldir` (relative to the config file's directory,
+`/`-separated, no trailing slash, `""` for the config's own directory) can still
+hold a file selected by `filter`.
+
+This is the directory-level counterpart of [`path_selected`](@ref), and it is
+deliberately conservative: `false` means *provably* nothing below `reldir` is
+selected, so a walker may skip it entirely.
+"""
+function dir_selected(filter::PathFilter, reldir::AbstractString)
+    any(g -> covers_subtree(g, reldir), filter.exclude) && return false
+    isempty(filter.include) && return true
+    return any(g -> may_contain_match(g, reldir), filter.include)
 end
 
 """

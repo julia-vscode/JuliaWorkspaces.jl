@@ -25,6 +25,9 @@
 
     [deps]
     """, "toml")))
+    # `missing_reference` is off in the `default` preset; this suite asserts on
+    # missing-ref suppression semantics, so it asks for the rule back.
+    add_file!(jw, TextFile(URI("file:///opqmac/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\n", "toml")))
     # `@define_rule` is unknown: it might define `generated_name`.
     add_file!(jw, TextFile(root_uri, SourceText("""
     module OpqMac
@@ -60,6 +63,9 @@ end
 
     [deps]
     """, "toml")))
+    # `missing_reference` is off in the `default` preset; this suite asserts on
+    # missing-ref suppression semantics, so it asks for the rule back.
+    add_file!(jw, TextFile(URI("file:///knownmac/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(root_uri, SourceText("""
     module KnownMac
     @enum Fruit apple banana
@@ -96,6 +102,9 @@ end
 
     [deps]
     """, "toml")))
+    # `missing_reference` is off in the `default` preset; this suite asserts on
+    # missing-ref suppression semantics, so it asks for the rule back.
+    add_file!(jw, TextFile(URI("file:///localmac/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(root_uri, SourceText("""
     module LocalMac
     function f(c)

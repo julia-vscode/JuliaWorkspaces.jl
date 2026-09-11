@@ -314,12 +314,23 @@ end
 """
     struct JuliaTestEnv
 
-Details of a Julia test environment.
+What a test item in some file needs in order to run. Not a resolved environment:
+these are the ingredients a runner builds one from (see [`get_test_env`](@ref)).
 
-- package_name::String
-- package_uri::Union{URI,Nothing}
-- project_uri::Union{URI,Nothing}
-- `env_content_hash`::Union{UInt,Nothing}
+- `package_name::Union{String,Nothing}` — name of the package that owns the file.
+- `package_uri::Union{URI,Nothing}` — its folder, whose `Project.toml` carries
+  `name`, `uuid` and `version`. `nothing` when the file is not inside a package,
+  in which case its test items cannot run.
+- `project_uri::Union{URI,Nothing}` — the project whose `Manifest.toml` supplies
+  the version pins, or `nothing` to use the package folder itself. It is either
+  the package folder or a project whose manifest `dev`s the package; it supplies
+  pins only, never dependencies, since the test environment is built from the
+  package's test target.
+- `env_content_hash::Union{String,Nothing}` — an opaque hash of everything the
+  environment is built from: the project's Project and Manifest, the package's
+  own pair, and the package's `test/Project.toml` and `test/Manifest.toml`. A
+  runner reuses a test process while this matches and restarts it when it
+  changes.
 """
 @auto_hash_equals struct JuliaTestEnv
     package_name::Union{String,Nothing}

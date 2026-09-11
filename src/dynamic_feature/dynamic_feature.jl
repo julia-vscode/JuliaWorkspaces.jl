@@ -500,7 +500,7 @@ Default upstream URL from which precomputed package symbol caches are
 downloaded when `symbolcache_download` is enabled on a [`JuliaWorkspace`](@ref).
 Downloading a cached index avoids having to index a package locally.
 """
-const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://julia-symbolcache.org"
+const DEFAULT_SYMBOLCACHE_UPSTREAM = "https://symbolcache.julialang.net"
 
 """
     DEFAULT_MAX_FAILURE_ATTEMPTS

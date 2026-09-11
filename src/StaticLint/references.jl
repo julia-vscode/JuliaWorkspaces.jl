@@ -286,7 +286,6 @@ end
 Export statements need to be (pseudo) evaluated each time we consider
 whether a variable is made available by an import statement.
 """
-
 function initial_pass_on_exports(x::EXPR, name, state)
     meta_dict = state.meta_dict
     for a in x.args[3] # module block expressions
