@@ -60,56 +60,7 @@ function _package_source_path(src_env, manifest, package_name::String)
         end
     end
 
-    # A workspace root's manifest may dev a package none of the root's own
-    # `[deps]` name (a member's dependency — Plots' `StatsPlots`): by name.
-    entry = _manifest_entry_by_name(manifest, package_name)
-    if entry !== nothing && entry.path !== nothing
-        return entry.path
-    end
-
-    # A test-only extra pinned by `[sources]` (the OrdinaryDiffEq monorepo's
-    # `DiffEqDevTools = {path = "lib/DiffEqDevTools"}` under `[extras]`): in
-    # no manifest at all, its path is the project's.
-    src = _sources_path(src_env, package_name)
-    src === nothing || return src
-
     error("Cannot locate the source of package $package_name in the environment at $(dirname(src_env.project_file)).")
-end
-
-# `Pkg.resolve` the active environment when its project declares a
-# dependency the manifest lacks; a no-op otherwise (resolving a consistent
-# manifest could still rewrite it).
-function _resolve_missing_deps!()
-    env = try
-        Pkg.Types.EnvCache()
-    catch err
-        err isa InterruptException && rethrow()
-        return false
-    end
-    any(uuid -> !haskey(env.manifest, uuid), values(env.project.deps)) || return false
-    Pkg.resolve(; io = devnull)
-    return true
-end
-
-# The `[sources]` path of `package_name` in the source project, absolute, or
-# `nothing`.
-function _sources_path(src_env, package_name::String)
-    @static if VERSION >= v"1.11"
-        sources = src_env.project.sources
-        entry = get(sources, package_name, nothing)
-        (entry isa AbstractDict && haskey(entry, "path")) || return nothing
-        p = String(entry["path"])
-        return isabspath(p) ? p : normpath(joinpath(dirname(src_env.project_file), p))
-    else
-        return nothing
-    end
-end
-
-function _manifest_entry_by_name(manifest, package_name::String)
-    for (_, entry) in manifest.deps
-        entry.name == package_name && return entry
-    end
-    return nothing
 end
 
 # A manifest whose recorded project hash disagrees with the project makes
@@ -155,20 +106,6 @@ function materialize_scratch_env(project_path::String, package_name::String)
     env_dir = mktempdir()
 
     project = deepcopy(src_env.project)
-
-    # A package the manifest devs without the project naming it in `[deps]`
-    # must be declared by the wrapper, or its `[sources]` pin is rejected and
-    # TestEnv cannot activate it.
-    if !haskey(project.deps, package_name)
-        entry = _manifest_entry_by_name(manifest, package_name)
-        if entry !== nothing
-            project.deps[package_name] = entry.uuid
-        elseif haskey(project.extras, package_name)
-            # A test-only extra pinned by `[sources]`: declared by its
-            # `[extras]` uuid.
-            project.deps[package_name] = project.extras[package_name]
-        end
-    end
 
     @static if VERSION >= v"1.11"
         # `[sources]` paths are project-relative, so they need the same treatment
