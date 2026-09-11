@@ -951,20 +951,13 @@ project is active, `new == old` again.
 """
 Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     @debug "derived_new_static_lint_diagnostics" uri=uri
+    input_v2_enabled(rt) && return derived_new_static_lint_diagnostics_v2(rt, uri)
 
     res = Set{LintFinding}()
     for root in derived_roots_for_uri(rt, uri)
         # A project-less root contributes no diagnostics (parity with the old
-        # per-root query, layer_static_lint.jl) — except a package's script
-        # (`perf/`, `benchmark/`, `examples/`), which is checked against the
-        # active project or, without one, the stdlib-only environment: before
-        # scripts were routed to the active project they were linted in the
-        # package's environment, and the routing did not mean losing their
-        # findings (`index_from_length` in benchmark loops).
-        if derived_project_uri_for_root(rt, root) === nothing
-            pkg_uri = derived_package_for_file(rt, root)
-            (pkg_uri !== nothing && _is_package_script_file(rt, pkg_uri, root)) || continue
-        end
+        # per-root query, layer_static_lint.jl).
+        derived_project_uri_for_root(rt, root) === nothing && continue
         union!(res, derived_file_analysis(rt, root, uri).diagnostics)
     end
     return res
