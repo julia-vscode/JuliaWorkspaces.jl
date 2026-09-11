@@ -81,6 +81,36 @@ end
     end
 end
 
+@testitem "Manifest details skip deps-only entries" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, derived_project
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    [deps]
+    """
+
+    manifest_toml = """
+    julia_version = "$(VERSION)"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [[deps.FutureManifestShape]]
+    deps = ["Dates"]
+    """
+
+    folder_uri = URI("file:///depsonlymanifestentry")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///depsonlymanifestentry/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///depsonlymanifestentry/Manifest.toml"), SourceText(manifest_toml, "toml")))
+
+    project_details = derived_project(jw.runtime, folder_uri)
+    @test project_details !== nothing
+    @test !haskey(project_details.deved_packages, "FutureManifestShape")
+    @test !haskey(project_details.regular_packages, "FutureManifestShape")
+    @test !haskey(project_details.stdlib_packages, "FutureManifestShape")
+end
+
 @testitem "_stdlib_only_env contains Base symbols" begin
     import JuliaWorkspaces.StaticLint as StaticLint
 
