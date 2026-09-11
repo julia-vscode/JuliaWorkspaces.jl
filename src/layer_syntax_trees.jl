@@ -21,23 +21,10 @@ else
     _range(x) = _to_exclusive_end(range(x))
 end
 
+# A selector over the fused parse (layer_parse_products.jl): the parse is
+# shared with test item detection and the syntax lint tier.
 Salsa.@derived function derived_julia_syntax_diagnostics(rt, uri)
-    tf = derived_text_file_content(rt, uri)
-
-    _, syntax_diagnostics = parse_julia_syntax_tree(tf.content.content)
-
-    diag_results = map(syntax_diagnostics) do i
-        Diagnostic(
-            _range(i),
-            i.level,
-            i.message,
-            nothing,
-            Symbol[],
-            "JuliaSyntax.jl"
-        )
-    end
-
-    return diag_results
+    return derived_julia_parse_products(rt, uri).syntax_diagnostics
 end
 
 Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
