@@ -212,9 +212,30 @@ function _v2_declare!(node::_V2ModuleNodeBuilder, name::String, ref::V2ItemRef, 
     if prev !== nothing && _v2_is_datatype_kind(prev) && (kind === :function || kind === :assignment)
         return
     end
+    # v1's second method-extension rule: a bare `:function`/`:assignment`
+    # definition whose name was EXPLICITLY imported (`import X: Size` +
+    # `Size(::Type{...}) = ...`) extends the imported binding — Julia rejects
+    # re-declaring such a name — so the import stays the visible winner and
+    # the name is not recorded as declared here.
+    if (kind === :function || kind === :assignment) && _v2_explicitly_imported(node, name)
+        return
+    end
     node.declared[name] = ref
     node.declared_kinds[name] = kind
     return
+end
+
+# Whether an `import M: name` (or `import M: x as name`) recorded so far on
+# this node binds `name` — the imports precede the definition in splice order,
+# exactly as in v1's `_explicitly_imported`.
+function _v2_explicitly_imported(node::_V2ModuleNodeBuilder, name::String)
+    for (_, imp) in node.raw_imports
+        imp.kind === :import || continue
+        for s in imp.symbols
+            (s.alias === nothing ? s.name : s.alias) == name && return true
+        end
+    end
+    return false
 end
 
 # `inventory(rt, uri)` is the per-file inventory query the structure is built

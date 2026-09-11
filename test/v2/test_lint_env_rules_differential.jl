@@ -36,6 +36,9 @@
         SourceText(read(joinpath(root_dir, "Project.toml"), String), "toml")))
     add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Manifest.toml")),
         SourceText("julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"0\"\n\n[deps]\n", "toml")))
+    # The corpus asserts on rules `default` turns off: enable them for both engines.
+    add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "JuliaLint.toml")),
+        SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
     uris = JuliaWorkspaces.URIs2.URI[]
     for sub in ("src", "test")
         isdir(joinpath(root_dir, sub)) || continue

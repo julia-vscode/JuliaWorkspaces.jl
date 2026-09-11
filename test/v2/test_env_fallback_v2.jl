@@ -18,6 +18,7 @@
 
     function ef_workspace(; config=nothing)
         jw = JuliaWorkspace()
+        config === nothing && add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         set_v2_enabled!(jw, true)
         config === nothing ||
             add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText(config, "toml")))
@@ -48,6 +49,7 @@ end
     version = "0.1.0"
     """
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///mono/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
     set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///mono/Project.toml"), SourceText(root_project, "toml")))
     add_file!(jw, TextFile(URI("file:///mono/Manifest.toml"), SourceText(root_manifest, "toml")))
@@ -137,8 +139,9 @@ end
     # A dependency the project declares whose store is not indexed (a stale
     # manifest, an indexer failure) is an environment gap: a boundary notice
     # (opt-in), never an unresolved_import.
-    for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\n")
+    for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n")
         jw = JuliaWorkspace()
+        config === nothing && add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         set_v2_enabled!(jw, true)
         config === nothing ||
             add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText(config, "toml")))
@@ -192,10 +195,10 @@ end
     # `docs/` with a Project.toml AND a Manifest.toml is the environment of
     # `docs/make.jl`; a dependency it declares whose store is not indexed
     # (FilePathsBase's Documenter) is a boundary, not an unresolved import.
-    for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\n")
+    for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n")
         jw = ef_workspace()
         config === nothing ||
-            add_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText(config, "toml")))
+            JW.update_file!(jw, TextFile(URI("file:///ef/JuliaLint.toml"), SourceText(config, "toml")))
         add_file!(jw, TextFile(URI("file:///ef/docs/Project.toml"), SourceText(
             "[deps]\nNoSuchStore = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9f9\"\n", "toml")))
         add_file!(jw, TextFile(URI("file:///ef/docs/Manifest.toml"), SourceText(
@@ -216,7 +219,7 @@ end
 end
 
 @testitem "unresolved_import: a terminally failed environment is a boundary, not a defect" setup=[EnvFallbackWS] begin
-    for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\n")
+    for config in (nothing, "[rules]\nanalysis_boundary = \"warning\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n")
         jw = ef_workspace(; config)
         set_input_env_ready!(jw.runtime, true)
         add_file!(jw, TextFile(URI("file:///ef/docs/Project.toml"), SourceText(

@@ -14,6 +14,7 @@
 
     function ui_workspace(src::String; flag=true, config=nothing)
         jw = JuliaWorkspace()
+        config === nothing && add_file!(jw, TextFile(URI("file:///ui/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         config === nothing ||
             add_file!(jw, TextFile(URI("file:///ui/JuliaLint.toml"), SourceText(config, "toml")))
         add_file!(jw, TextFile(UI_URI, SourceText(src, "julia")))
@@ -158,6 +159,7 @@ end
     src_uri = URI("file:///uip/src/UiPkg.jl")
     function pkg_workspace(; ready)
         jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///uip/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         add_file!(jw, TextFile(URI("file:///uip/Project.toml"), SourceText(project, "toml")))
         add_file!(jw, TextFile(URI("file:///uip/Manifest.toml"), SourceText(manifest, "toml")))
         add_file!(jw, TextFile(src_uri, SourceText("module UiPkg\nusing NotAPackage\nend\n", "julia")))

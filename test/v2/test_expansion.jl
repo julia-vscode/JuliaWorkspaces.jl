@@ -14,6 +14,7 @@
     # `derived_v2_expansion_env` requires one.
     function exp_make_jw(src)
         jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///pkg/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         add_file!(jw, TextFile(URI("file:///pkg/Project.toml"), SourceText(
             "name = \"MyPkg\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9a5\"\nversion = \"1.0.0\"\n", "toml")))
         add_file!(jw, TextFile(URI("file:///pkg/Manifest.toml"), SourceText(
@@ -58,7 +59,7 @@
 
     exp_blind(jw, uri) = JW.derived_v2_module_has_opaque_macrocall(jw.runtime, uri, String[])
     exp_names(jw, uri) = JW.derived_v2_module_names(jw.runtime, uri, String[])
-    const EXP_OPT_IN = "[rules]\nanalysis_boundary = \"warning\"\n"
+    const EXP_OPT_IN = "[rules]\nanalysis_boundary = \"warning\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n"
 end
 
 @testitem "expansion: the source fallback blinds missing_reference and keeps soft-scope findings" setup=[ExpansionWS] begin
@@ -307,6 +308,7 @@ end
     # `derived_project_for_file`'s sense, but the dynamic tier materializes a
     # standalone scratch project for it — expansion batches route there (M1b).
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///nm/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///nm/Project.toml"), SourceText(
         "name = \"NoManifest\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9a6\"\nversion = \"1.0.0\"\n", "toml")))
     uri = URI("file:///nm/src/a.jl")
@@ -416,6 +418,7 @@ end
     root_project = "name = \"Root\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n\n[workspace]\nprojects = [\"test\"]\n"
     root_manifest = "julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n\n[[deps.Root]]\npath = \".\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n"
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///wsm/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///wsm/Project.toml"), SourceText(root_project, "toml")))
     add_file!(jw, TextFile(URI("file:///wsm/Manifest.toml"), SourceText(root_manifest, "toml")))
     add_file!(jw, TextFile(URI("file:///wsm/src/Root.jl"), SourceText("module Root end\n", "julia")))
@@ -431,6 +434,7 @@ end
 
 @testitem "expansion ctx: module path travels and re-keys the context" setup=[ExpansionWS] begin
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///mp/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///mp/Project.toml"), SourceText(
         "name = \"MP\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9a7\"\nversion = \"1.0.0\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///mp/Manifest.toml"), SourceText(
@@ -737,7 +741,7 @@ end
         ]
         jw, uri = exp_make_jw(src)
         config === nothing ||
-            add_file!(jw, TextFile(URI("file:///pkg/JuliaLint.toml"), SourceText(config, "toml")))
+            update_file!(jw, TextFile(URI("file:///pkg/JuliaLint.toml"), SourceText(config, "toml")))
         set_input_env_ready!(jw.runtime, true)
         before = Set(keyof(d) for d in get_diagnostic(jw, uri))
         @test !any(k -> k[1] === :analysis_boundary, before)
@@ -776,7 +780,7 @@ end
     function notice_jw(src; config=EXP_OPT_IN)
         jw, uri = exp_make_jw(src)
         config === nothing ||
-            add_file!(jw, TextFile(URI("file:///pkg/JuliaLint.toml"), SourceText(config, "toml")))
+            update_file!(jw, TextFile(URI("file:///pkg/JuliaLint.toml"), SourceText(config, "toml")))
         set_input_env_ready!(jw.runtime, true)
         return jw, uri
     end
@@ -876,6 +880,7 @@ end
     ext_src = "module MyPkgBarExt\nusing MyPkg, Bar\nf(x) = @bar_macro x\nend\n"
     function build(manifest)
         jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///pkg/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         add_file!(jw, TextFile(URI("file:///pkg/Project.toml"), SourceText(project, "toml")))
         add_file!(jw, TextFile(URI("file:///pkg/Manifest.toml"), SourceText(manifest, "toml")))
         add_file!(jw, TextFile(URI("file:///pkg/src/MyPkg.jl"), SourceText("module MyPkg end\n", "julia")))
@@ -935,6 +940,7 @@ end
     root_project = "name = \"Root\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n\n[workspace]\nprojects = [\"lib/Sub\"]\n"
     root_manifest = "julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"x\"\n\n[[deps.Root]]\npath = \".\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n\n[[deps.Sub]]\npath = \"lib/Sub\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c2\"\nversion = \"0.1.0\"\n"
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///mono/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///mono/Project.toml"), SourceText(root_project, "toml")))
     add_file!(jw, TextFile(URI("file:///mono/Manifest.toml"), SourceText(root_manifest, "toml")))
     add_file!(jw, TextFile(URI("file:///mono/src/Root.jl"), SourceText("module Root end\n", "julia")))
