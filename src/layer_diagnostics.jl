@@ -243,12 +243,27 @@ Salsa.@derived function derived_environment_error_messages(rt, uri)
     folder_uri = filepath2uri(dirname(uri2filepath(uri)))
     messages = String[]
     for (key, message) in input_dynamic_failure_messages(rt)
-        key_path = _key_folder_path(key)
-        if filepath2uri(key_path) == folder_uri
+        if _failure_folder_uri(rt, key) == folder_uri
             push!(messages, message)
         end
     end
     return unique!(sort!(messages))
+end
+
+# The folder whose Project.toml a key's failure is about. A test-environment
+# key names the package under test: its own project file is the closest file
+# the user can act on — not the (workspace) project that devs it, where the
+# message would land on a project file that is not the failing package's
+# (Plots' monorepo: one failed `StatsPlots` test env reported on the root).
+_failure_folder_uri(rt, key) = filepath2uri(_key_folder_path(key))
+function _failure_folder_uri(rt, key::WatchTestEnvironmentKey)
+    project_uri = filepath2uri(key.project_path)
+    project = derived_project(rt, project_uri)
+    if project !== nothing
+        deved = get(project.deved_packages, key.package_name, nothing)
+        deved === nothing || return deved.uri
+    end
+    return project_uri
 end
 
 Salsa.@derived function derived_diagnostics(rt, uri)
