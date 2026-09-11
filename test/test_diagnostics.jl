@@ -1997,6 +1997,34 @@ end
 
     @test cst isa JuliaWorkspaces.CSTParser.EXPR
     @test cst.fullspan == 0
+
+    # Julia-markdown is Markdown with Julia chunks, so it is skipped for the same
+    # reason.
+    jmd = URI("file:///note.jmd")
+    add_file!(jw, TextFile(jmd, SourceText("# Title\n\n\\\n]\n", "juliamarkdown")))
+    @test JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, jmd).fullspan == 0
+end
+
+@testitem "legacy CST parses Julia buffers whatever the URI looks like" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
+    using JuliaWorkspaces.URIs2: URI, @uri_str
+
+    # The gate is the recorded language id, not the path. These URIs all carry
+    # Julia source but have no usable `.jl` path: `file://test.jl` parses the name
+    # as the *authority* (path is empty), and untitled/notebook-cell documents have
+    # no extension at all. Gating on the path would silently disable every
+    # CST-derived feature -- linting, references, completions -- for them.
+    for (uri, text) in (
+        (uri"file://test.jl", "primitive type 1 8 end\n"),
+        (URI("file:///real.jl"), "x = 1\n"),
+        (URI("untitled:Untitled-1"), "x = 1\n"),
+        (URI("vscode-notebook-cell:/nb.ipynb#W0"), "x = 1\n"),
+    )
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(text, "julia")))
+        cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(jw.runtime, uri)
+        @test cst.fullspan > 0
+    end
 end
 
 @testitem "Untitled buffer uses active project as fallback environment" begin

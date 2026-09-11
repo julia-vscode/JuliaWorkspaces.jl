@@ -44,9 +44,19 @@ Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
     @debug "derived_julia_legacy_syntax_tree" uri=uri
 
     tf = derived_text_file_content(rt, uri)
-    if tf === nothing || !_is_julia_uri(rt, uri)
-        return CSTParser.parse("", true)
-    end
+    tf === nothing && return CSTParser.parse("", true)
+
+    # The legacy parser reads a whole document as Julia, so it must only ever see
+    # Julia source. Markdown and Julia-markdown are workspace documents too, and
+    # parsing their prose as Julia yields garbage -- or, as seen in the wild, sends
+    # CSTParser into its infinite-loop guard.
+    #
+    # Gate on the language id rather than the path: it is what the workspace
+    # actually recorded for the document (set from the extension for editor
+    # buffers, and from the path by `read_text_file_from_uri` on disc), so it is
+    # also correct for `untitled:` and `vscode-notebook-cell:` documents, which
+    # have no meaningful file extension at all.
+    tf.content.language_id == "julia" || return CSTParser.parse("", true)
 
     content = tf.content.content
 
