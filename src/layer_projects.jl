@@ -56,6 +56,17 @@ Salsa.@derived function derived_project_toml_files(rt, folder_uri)
     return (project_file=project_file, manifest_file=manifest_file)
 end
 
+function resolve_manifest_through_workspace(folder_uri::URI, mf::Dict{URI,URI}, parent_of::Dict{URI,URI})
+    seen = Set{URI}()
+    current = folder_uri
+    while current !== nothing && !(current in seen)
+        push!(seen, current)
+        haskey(mf, current) && return mf[current]
+        current = get(parent_of, current, nothing)
+    end
+    return nothing
+end
+
 Salsa.@derived function derived_potential_project_folders(rt)
     project_files = derived_project_files(rt)
 
@@ -85,8 +96,28 @@ Salsa.@derived function derived_potential_project_folders(rt)
         end
     end
 
+    parent_of = Dict{URI,URI}()
+    for (folder_uri, project_file) in pf
+        toml = derived_toml_syntax_tree(rt, project_file)
+        toml isa AbstractDict || continue
+        workspace_section = get(toml, "workspace", nothing)
+        workspace_section isa AbstractDict || continue
+        member_paths = get(workspace_section, "projects", nothing)
+        member_paths isa AbstractVector || continue
+
+        folder_path = uri2filepath(folder_uri)
+        for member in member_paths
+            member isa AbstractString || continue
+            member_path = normpath(joinpath(folder_path, member))
+            if endswith(member_path, '/') || endswith(member_path, '\\')
+                member_path = member_path[1:end-1]
+            end
+            parent_of[filepath2uri(member_path)] = folder_uri
+        end
+    end
+
     result = Dict{URI,@NamedTuple{project_file::Union{URI,Nothing}, manifest_file::Union{URI,Nothing}}}(
-        k => (project_file=v, manifest_file=get(mf, k, nothing)) for (k, v) in pf
+        k => (project_file=v, manifest_file=resolve_manifest_through_workspace(k, mf, parent_of)) for (k, v) in pf
     )
 
     # Include the active project folder even if its files are not in the
