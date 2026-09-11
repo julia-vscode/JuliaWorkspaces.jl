@@ -187,7 +187,7 @@ end
         :global_const_decl => :information,
         :unused_binding => :hint,
         :const_decl => :information,
-        :relative_import => :off,   # runtime nesting of included helpers is unknowable; dots saturate at Main
+        :relative_import => :information,
         :include_errors => :warning,
         :missing_reference => :off,     # demoted: 78% sampled FP
         :unresolved_import => :off,     # demoted: 77% sampled FP

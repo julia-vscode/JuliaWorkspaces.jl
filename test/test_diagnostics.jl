@@ -1470,10 +1470,6 @@ end
     add_file!(jw, TextFile(URI("file:///unresdots/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/Manifest.toml"), SourceText(manifest_toml, "toml")))
-    # relative_import is off in the default preset; this test is about the
-    # split between the two rules, so opt in.
-    add_file!(jw, TextFile(URI("file:///unresdots/JuliaLint.toml"),
-        SourceText("[rules]\nrelative_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/src/UnresDots.jl"), SourceText(source, "julia")))
     JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
 
