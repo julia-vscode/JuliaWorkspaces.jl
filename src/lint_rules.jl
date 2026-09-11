@@ -176,6 +176,7 @@ const LINT_RULES = LintRule[
             StaticLint.IncludePathContainsNULL,
             StaticLint.FileTooBig,
             StaticLint.FileNotAvailable,
+            StaticLint.ComputedInclude,
         ]),
     # Off in `default`: 78% of sampled findings were false positives, chiefly
     # names minted by `@eval` loops that no static pass can see.
@@ -276,8 +277,7 @@ const LINT_RULES = LintRule[
     # strict preset) to be told what blocks analysis, and get the full
     # diagnostic set back by avoiding those constructs.
     LintRule(id = :analysis_boundary, tier = TierWorkspace,
-        severity_minimal = :off, severity_default = :off, severity_strict = :warning,
-        codes = [StaticLint.ComputedInclude, StaticLint.RuntimeInclude]),
+        severity_minimal = :off, severity_default = :off, severity_strict = :warning),
 ]
 
 const LINT_RULES_BY_ID = Dict{Symbol,LintRule}(r.id => r for r in LINT_RULES)
