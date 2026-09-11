@@ -1143,12 +1143,8 @@ end
 # request timeout (huge env, slow disk, cold registry) says nothing about the
 # user's Project.toml, unlike e.g. an unsatisfiable-requirements Pkg error.
 # Infra failures are logged, get one free retry, and never surface as
-# `environment_errors` diagnostics on the user's project files. A dropped
-# child pipe (`TransportError`) is the same class: the transport died, not
-# the project (the top-500 sweep surfaced 7 of these as user diagnostics).
-_is_infra_failure(err) =
-    err isa DJPRequestTimeoutException || err isa JSONRPC.TransportError ||
-    _is_depot_lock_failure(err)
+# `environment_errors` diagnostics on the user's project files.
+_is_infra_failure(err) = err isa DJPRequestTimeoutException || _is_depot_lock_failure(err)
 
 # A depot file-lock collision (`IOError: stat(...manifest_usage.toml.pid...):
 # permission denied (EACCES)` during concurrent Pkg operations) says nothing
