@@ -48,8 +48,10 @@ include("layer_test_setups.jl")
 include("layer_project_files.jl")
 include("layer_workspaces.jl")
 include("layer_projects.jl")
+include("layer_projects_v2.jl")
 include("layer_extensions.jl")
 include("layer_environment.jl")
+include("layer_environment_v2.jl")
 # The v2 stack's ONLY contact with the environment stores; outside src/v2/
 # because the store walk needs StaticLint/SymbolServer names the v2 boundary
 # guard forbids (see the file header).
