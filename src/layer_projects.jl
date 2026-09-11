@@ -248,7 +248,10 @@ Salsa.@derived function derived_project(rt, uri)
 
             stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_stdlib_package, version_of_stdlib_package)
         else
-            error("Unknown manifest entry type $(keys(v_entry[1]))")
+            # An entry with no uuid (a `path` entry Pkg wrote without one, or a
+            # shape this tooling does not know): skip it rather than fail the
+            # whole project — a derived query must never throw on user input.
+            continue
         end
     end
 

@@ -374,3 +374,39 @@ end
 
     @test derived_project(jw2.runtime, other_uri) === nothing
 end
+
+@testitem "derived_project skips a manifest entry it cannot classify" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # A `path` entry without a uuid and an entry with no recognised key at all
+    # used to throw from inside `derived_project` and take the whole project
+    # down with them; they are skipped, the rest of the manifest is kept.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///skipentry/Project.toml"), SourceText("""
+    name = "SkipEntry"
+    uuid = "6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9e1"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///skipentry/Manifest.toml"), SourceText("""
+    julia_version = "1.12.0"
+    manifest_format = "2.0"
+    project_hash = "x"
+
+    [[deps.NoUuid]]
+    path = "lib/NoUuid"
+
+    [[deps.Odd]]
+    weird = 1
+
+    [[deps.Dates]]
+    uuid = "ade2ca70-3891-5945-98fb-dc099432e06a"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///skipentry/src/SkipEntry.jl"), SourceText("module SkipEntry end
+", "julia")))
+
+    project = JuliaWorkspaces.derived_project(jw.runtime, URI("file:///skipentry"))
+    @test project !== nothing
+    @test !haskey(project.deved_packages, "NoUuid")
+    @test !haskey(project.regular_packages, "Odd") && !haskey(project.stdlib_packages, "Odd")
+    @test haskey(project.stdlib_packages, "Dates")
+end
