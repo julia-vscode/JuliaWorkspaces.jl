@@ -844,9 +844,11 @@ end
         option_skip=Int32(5):Int32(9),
     ))
 
-    @test d.range === 1:10
-    @test d.code_range === 3:8
-    @test d.option_skip === 5:9
+    # `Int64(...)` on both sides: an untyped `1:10` is itself a `UnitRange{Int32}`
+    # on a 32-bit build, so it would not be `===` to the widened field there.
+    @test d.range === Int64(1):Int64(10)
+    @test d.code_range === Int64(3):Int64(8)
+    @test d.option_skip === Int64(5):Int64(9)
 end
 
 @testitem "test item ids are package qualified, package relative and label based" setup=[TestItemPackage] begin
