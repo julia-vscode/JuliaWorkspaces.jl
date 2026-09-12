@@ -88,8 +88,13 @@ end
 _ActionDef(id, title, kind, is_preferred, when, handler) =
     _ActionDef(id, title, kind, is_preferred, when, handler, nothing)
 
+# `uri` is not always the request document: `_action_get_next_line_offset`
+# passes the file that holds a `using` statement, which may be an indirect
+# include target. Read through the accessor that serves both populations.
 function _action_get_text(runtime, uri::URI)
-    return input_text_file(runtime, uri).content.content
+    tf = derived_text_file_content(runtime, uri)
+    tf === nothing && error("_action_get_text: no content for $uri")
+    return tf.content.content
 end
 
 function _action_get_next_line_offset(x, runtime)
