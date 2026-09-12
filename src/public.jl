@@ -252,14 +252,27 @@ function add_files!(jw::JuliaWorkspace, files)
         file.uri in new_files && throw(JWDuplicateFile("Duplicate file $(file.uri)"))
         push!(new_files, file.uri)
     end
-    set_input_files!(jw.runtime, new_files)
-
+    # Write every file's text first and publish membership once afterwards.
+    # The loop yields between files (letting connection handling in a host and
+    # the dynamic-feature reactor run during large batches), so every
+    # intermediate state must be one a concurrent query can hold: a URI is
+    # either not yet a regular file (its content, if any, still comes from the
+    # indirect input, exactly as before the batch) or a regular file WITH text.
+    # Publishing membership first would expose "in `input_files` but no
+    # `input_text_file` yet" to anything reading the text in that window.
     for file in files
         set_input_text_file!(jw.runtime, file.uri, file)
-        _clear_indirect_tracking!(jw, file.uri)
-        # Let cooperatively scheduled tasks (connection handling in a host, the
-        # dynamic-feature reactor) run between files during large batches.
         yield()
+    end
+
+    set_input_files!(jw.runtime, new_files)
+
+    # Promotion from indirect to regular happens after membership is set: a
+    # query in the window above may have lazily materialized an indirect entry
+    # for one of these URIs, and clearing it before the URI is regular would
+    # only let the next query read it in again.
+    for file in files
+        _clear_indirect_tracking!(jw, file.uri)
     end
 
     _reconcile!(jw)
@@ -519,6 +532,11 @@ Set the active project for the workspace. The active project serves as the
 fallback environment for files that are not inside any project folder and also
 as the fallback test project when determining test environments.
 
+As a test project it is subject to the same conditions as any other: it is used
+only if it has a readable manifest, and only if that manifest `dev`s the package
+that owns the file (or it is that package's folder). Setting it is therefore
+frequently a no-op for test items — see [`get_test_env`](@ref).
+
 Pass `nothing` to clear the active project.
 
 When the active project is outside the workspace folders, its Project.toml and
@@ -548,15 +566,26 @@ rules from StaticLint (same rule ids, severities, and config surface,
 different engine), and the interactive features ported to v2 (the references
 family, workspace/document symbols, module-at-position, document links,
 selection/block ranges, hover, signature help) answer from v2, each falling
-back to the legacy path whenever v2 declines. Default `false`: exactly the
-legacy behavior; the v2 machinery is never demanded. The DJP-side macro
-expansion has its own flag, [`set_macro_expansion!`](@ref).
+back to the legacy path whenever v2 declines. The project/environment
+model (TomlSyntax-parsed project files, `[workspace]`/`[sources]`/extension
+support), the include walker, the diagnostics join and the dynamic child
+lifecycle (the live-children cap, [`set_max_alive_djps!`](@ref)) switch
+with it too — every `_v2` twin in `src/` is reached only through this
+flag. Default `false`: exactly the legacy behavior; the v2 machinery is
+never demanded. The DJP-side macro expansion has its own flag,
+[`set_macro_expansion!`](@ref).
 """
 function set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
     @debug "set_v2_enabled!" enabled=enabled
 
     process_from_dynamic(jw)
     set_input_v2_enabled!(jw.runtime, enabled)
+    # The reactor owns the child lifecycle; tell it before the reconcile the
+    # flag change triggers (channel order), so that reconcile already runs
+    # under the new rules.
+    if jw.dynamic_feature !== nothing
+        put!(jw.dynamic_feature.in_channel, SetV2LifecycleMsg(enabled))
+    end
     _reconcile!(jw)
 end
 
@@ -623,6 +652,8 @@ on demand and not cached.
 # Returns
 
 - The `JuliaSyntax.SyntaxNode` root of the parsed file.
+
+Throws `JWNotAJuliaFile` if `uri` is not a Julia document, and `JWUnknownFile` if it has no content.
 """
 function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     @debug "get_julia_syntax_tree" uri=uri
@@ -630,6 +661,10 @@ function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     process_from_dynamic(jw)
 
     tf = derived_text_file_content(jw.runtime, uri)
+
+    tf === nothing && throw(JWUnknownFile("Requested a syntax tree for $uri, which has no content."))
+
+    _is_julia_uri(jw.runtime, uri) || throw(JWNotAJuliaFile("Requested a syntax tree for $uri, which is not a Julia document."))
 
     return parse_julia_syntax_tree(tf.content.content)[1]
 end
@@ -808,7 +843,22 @@ end
 """
     get_test_env(jw::JuliaWorkspace, uri::URI)
 
-Get the test environment that belongs to the given `uri` of the workspace `jw`.
+Resolve what a test item in `uri` needs in order to run, for the workspace `jw`.
+
+The **package** is the innermost enclosing folder whose `Project.toml` has a
+`name`, a `uuid` and a valid `version`, among the folders discovered under the
+workspace folders plus the active project.
+
+The **project** is the innermost enclosing folder that has both a project file
+and a readable manifest; when there is none, the active project, which likewise
+needs a manifest to qualify. Either way it is kept only if it *is* the package
+folder or if its manifest `dev`s the package — a project that merely contains the
+package on disk, or depends on it as a registered package, is discarded and the
+result carries no project at all.
+
+Note that this returns the *ingredients* of a test environment, not a resolved
+one: the project supplies version pins, while the dependencies come from the
+package's test target when a runner builds the environment.
 
 Returns
 
@@ -840,7 +890,9 @@ alive to serve expansions, so a monorepo of many packages would otherwise hold
 one Julia process per package indefinitely. Hosts should wire this to a user
 setting (the constructor's `max_alive_djps` sets the initial value).
 
-No-op when the workspace has no dynamic feature.
+Part of the v2 lifecycle: the bound is only applied while
+[`set_v2_enabled!`](@ref) is on (the value is kept either way). No-op when
+the workspace has no dynamic feature.
 """
 function set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
     @debug "set_max_alive_djps!" n=n
@@ -925,7 +977,16 @@ function wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTo
     @debug "wait_until_ready"
 
     while !is_ready(jw)
-        _wait_for_dynamic_update(jw, cancel_token)
+        if cancel_token !== nothing
+            wait(jw.dynamic_feature.update_channel, cancel_token)
+        else
+            wait(jw.dynamic_feature.update_channel)
+        end
+        # Drain the update_channel and process any dynamic results
+        while isready(jw.dynamic_feature.update_channel)
+            take!(jw.dynamic_feature.update_channel)
+        end
+        process_from_dynamic(jw)
     end
 end
 
@@ -965,6 +1026,8 @@ Get the CSTParser legacy syntax tree for a Julia file.
 
 # Returns
 - An `EXPR` (CSTParser expression tree).
+
+Throws `JWNotAJuliaFile` if `uri` is not a Julia document, and `JWUnknownFile` if it has no content.
 """
 function get_legacy_cst(jw::JuliaWorkspace, uri::URI)
     @debug "get_legacy_cst" uri=uri
@@ -1029,11 +1092,15 @@ needed by LS request handlers.
     since the per-file migration (deved-package method sets are now reached
     request-time through the module tree). Deletion candidate for M5.
   - `root::URI` — the root file that was used
+
+Returns `nothing` when `uri` is not a Julia document.
 """
 function get_static_lint_data(jw::JuliaWorkspace, uri::URI)
     @debug "get_static_lint_data" uri=uri
 
     process_from_dynamic(jw)
+
+    _is_julia_uri(jw.runtime, uri) || return nothing
 
     root = derived_best_root_for_uri(jw.runtime, uri)
     root === nothing && return nothing
@@ -1132,11 +1199,14 @@ end
 Return a Markdown documentation string for the expression at `index` (1-based
 Julia string index) in the file identified by `uri`, or `nothing` if there is
 no hover information for that position.
+
+Returns `nothing` when `uri` is not a Julia document.
 """
 function get_hover_text(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_hover_text" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return nothing
     return _get_hover_text(jw.runtime, uri, index)
 end
 
@@ -1164,11 +1234,14 @@ Return a `CompletionResult` with completion items at the given `index`
 
 `completion_mode` may be `:import` (default) or `:qualify` to control whether
 additional `using` statements are inserted for out-of-scope symbols.
+
+Returns an empty, complete result when `uri` is not a Julia document.
 """
 function get_completions(jw::JuliaWorkspace, uri::URI, index::Integer, completion_mode::Symbol=:import)
     @debug "get_completions" uri=uri index=index mode=completion_mode
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return CompletionResult(false, CompletionResultItem[])
     offset = index - 1  # Convert 1-based string index to 0-based CSTParser offset
     return _get_completions(jw.runtime, uri, offset, completion_mode, jw)
 end
@@ -1180,11 +1253,14 @@ end
 
 Return a vector of `DefinitionResult` for the symbol at `index` (1-based
 Julia string index) in the file identified by `uri`.
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function get_definitions(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_definitions" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return DefinitionResult[]
     offset = index - 1
     return _get_definitions(jw.runtime, uri, offset)
 end
@@ -1194,11 +1270,14 @@ end
 
 Return a vector of `ReferenceResult` for all references to the symbol at
 `index` (1-based Julia string index) in the file identified by `uri`.
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function get_references(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_references" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return ReferenceResult[]
     offset = index - 1
     return _get_references(jw.runtime, uri, offset)
 end
@@ -1208,11 +1287,14 @@ end
 
 Return a vector of `RenameEdit` for renaming the symbol at `index` (1-based
 Julia string index) in `uri` to `new_name`.
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function get_rename_edits(jw::JuliaWorkspace, uri::URI, index::Integer, new_name::String)
     @debug "get_rename_edits" uri=uri index=index new_name=new_name
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return RenameEdit[]
     offset = index - 1
     return _get_rename_edits(jw.runtime, uri, offset, new_name)
 end
@@ -1222,11 +1304,14 @@ end
 
 Return a vector of `HighlightResult` for highlighted occurrences of the
 symbol at `index` (1-based Julia string index) in the same file.
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function get_highlights(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_highlights" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return HighlightResult[]
     offset = index - 1
     return _get_highlights(jw.runtime, uri, offset)
 end
@@ -1238,11 +1323,14 @@ Check whether the symbol at `index` (1-based Julia string index) can be
 renamed. Returns a named tuple `(; start::Position, stop::Position)`
 describing the range of the renamable symbol (both positions use 1-based
 `line` and `column`), or `nothing` if the symbol cannot be renamed.
+
+Returns `nothing` when `uri` is not a Julia document.
 """
 function can_rename(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "can_rename" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return nothing
     offset = index - 1
     return _can_rename(jw.runtime, uri, offset)
 end
@@ -1254,11 +1342,14 @@ end
 
 Return a `SignatureResult` with signature information for the function call
 at `index` (1-based Julia string index) in the file identified by `uri`.
+
+Returns an empty result when `uri` is not a Julia document.
 """
 function get_signature_help(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_signature_help" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return SignatureResult(SignatureInfo[], 0, 0)
     offset = index - 1
     return _get_signature_help(jw.runtime, uri, offset)
 end
@@ -1272,11 +1363,14 @@ Return a vector of `DocumentSymbolResult` representing the document outline
 for the file identified by `uri`. Each result has `start_offset` and
 `end_offset` as 0-based byte offsets, plus `name`, `kind` (LSP SymbolKind
 integer), and `children`.
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function get_document_symbols(jw::JuliaWorkspace, uri::URI)
     @debug "get_document_symbols" uri=uri
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return DocumentSymbolResult[]
     return _get_document_symbols(jw.runtime, uri)
 end
 
@@ -1300,11 +1394,14 @@ end
 
 For each 1-based string index in `indices`, compute a nested selection range.
 Returns a vector of `Union{Nothing, SelectionRangeResult}`.
+
+Returns all-`nothing` when `uri` is not a Julia document.
 """
 function get_selection_ranges(jw::JuliaWorkspace, uri::URI, indices::Vector{Int})
     @debug "get_selection_ranges" uri=uri count=length(indices)
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return Union{Nothing,SelectionRangeResult}[nothing for _ in indices]
     offsets = [idx - 1 for idx in indices]
     return _get_selection_ranges(jw.runtime, uri, offsets)
 end
@@ -1314,11 +1411,14 @@ end
 
 Find the current top-level block at `index` (1-based Julia string index).
 Returns a `BlockRangeResult` with 0-based byte offsets, or `nothing`.
+
+Returns `nothing` when `uri` is not a Julia document.
 """
 function get_current_block_range(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_current_block_range" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return nothing
     offset = index - 1
     return _get_current_block_range(jw.runtime, uri, offset)
 end
@@ -1328,11 +1428,14 @@ end
 
 Return the fully qualified module name at `index` (1-based Julia string index),
 or "Main" if no module scope is found.
+
+Returns `"Main"` when `uri` is not a Julia document.
 """
 function get_module_at(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_module_at" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return "Main"
     offset = index - 1
     return _get_module_at(jw.runtime, uri, offset)
 end
@@ -1346,11 +1449,14 @@ end
 
 Return clickable document links (string literals that resolve to files).
 Offsets in results are 0-based byte offsets for direct use with CST spans.
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function get_document_links(jw::JuliaWorkspace, uri::URI)
     @debug "get_document_links" uri=uri
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return DocumentLinkResult[]
     return _get_document_links(jw.runtime, uri)
 end
 
@@ -1363,11 +1469,14 @@ end
 
 Return inlay hints (parameter names, variable types) for the given range.
 `start_index` and `end_index` are 1-based Julia string indices.
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function get_inlay_hints(jw::JuliaWorkspace, uri::URI, start_index::Integer, end_index::Integer, config::InlayHintConfig)
     @debug "get_inlay_hints" uri=uri start_index=start_index end_index=end_index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return InlayHintResult[]
     start_offset = start_index - 1
     end_offset = end_index - 1
     return _get_inlay_hints(jw.runtime, uri, start_offset, end_offset, config)
@@ -1383,11 +1492,14 @@ end
 Return the list of applicable code actions at `index` (1-based Julia string index).
 `diagnostic_messages` should contain the text of any diagnostics overlapping the cursor.
 `workspace_folders` is an optional list of workspace folder paths (used by license actions).
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String}, workspace_folders::Vector{String}=String[])
     @debug "get_code_actions" uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return CodeActionInfo[]
     offset = index - 1
     return _get_code_actions(jw.runtime, uri, offset, diagnostic_messages, workspace_folders)
 end
@@ -1398,11 +1510,14 @@ end
 Execute the code action identified by `action_id` at `index` (1-based Julia string index).
 Returns a vector of workspace file edits. Each edit contains a URI and a vector of
 `TextEditResult`s with 0-based byte offsets.
+
+Returns an empty vector when `uri` is not a Julia document.
 """
 function execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer, workspace_folders::Vector{String}=String[])
     @debug "execute_code_action" action_id=action_id uri=uri index=index
 
     process_from_dynamic(jw)
+    _is_julia_uri(jw.runtime, uri) || return WorkspaceFileEdit[]
     offset = index - 1
     return _execute_code_action(jw.runtime, action_id, uri, offset, workspace_folders)
 end

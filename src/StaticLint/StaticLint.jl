@@ -2,6 +2,7 @@ module StaticLint
 
 import ..derived_has_file
 import ..derived_julia_legacy_syntax_tree
+import .._is_julia_uri
 import ..derived_include_dict
 import ..derived_computed_include_ids
 import ..derived_testitem_segments
@@ -147,6 +148,19 @@ Implemented by the concrete context type; there is no context (and this is
 never called) in the whole-closure pass.
 """
 function tree_context_declares_datatype end
+
+"""
+    tree_context_imports_datatype(ctx::AbstractModuleContext, name::String, env) -> Bool
+
+Companion to [`tree_context_declares_datatype`](@ref) for IMPORTED names:
+whether the module tree resolves `name` in `ctx`'s module to an EXTERNAL
+symbol whose store is a datatype (`import StaticArraysCore: Size` in a
+sibling file). A method extension `Size(::Type{...}) = ...` in this file must
+not shadow the imported type with a local function binding for the same
+reason as the sibling-declaration case. The generic fallback is `false`;
+the concrete context type implements the store lookup.
+"""
+tree_context_imports_datatype(ctx, name, env) = false
 
 """
     TreeRef
@@ -678,7 +692,10 @@ function followinclude(x, state::Toplevel)
     # end
 
     # TODO DA FIX
-    if derived_has_file(rt, target_uri)
+    # `_is_julia_uri` because `include` takes a path, not a language: a workspace
+    # can hold the target of `include("README.md")`, and the legacy parser must
+    # never be handed it.
+    if derived_has_file(rt, target_uri) && _is_julia_uri(rt, target_uri)
         # Circular- and duplicate-include detection (and the corresponding
         # diagnostics) is handled structurally in `derived_all_include_diagnostics`,
         # independently of the semantic pass. Here we only use the same checks as

@@ -76,7 +76,9 @@ your methods and/or data. `__revise_mode__` must be a `Symbol` taking one of the
 - `:evalassign`: evaluate method definitions and assignment statements. A top-level expression
   `a = Int[]` would be evaluated, but `push!(a, 1)` would not because the latter is not an assignment.
 - `:sigs`: do not implement any changes, only scan method definitions for their signatures so that
-  their location can be updated as changes to the file(s) are made.
+  their location can be updated as changes to the file(s) are made. `using`, `import`, and `export`
+  statements added by a revision are still executed, because a signature may be written in terms of
+  a name the new statement brings into scope.
 
 If you're using `includet` from the REPL, you can enter `__revise_mode__ = :eval` to set
 it throughout `Main`. `__revise_mode__` can be set independently in each module.
@@ -122,23 +124,22 @@ string `"1"` (e.g., `JULIA_REVISE_INCLUDE=1` in a bash script).
     Most users should avoid setting `JULIA_REVISE_INCLUDE`.
     Try `includet` instead.
 
-### Enabling struct revision
+### Disabling struct revision
 
-On Julia 1.12+, Revise can automatically revise `struct` definitions in a
-running session.  This feature requires scanning the global method table and
-type hierarchy at startup, which can be slow so it's disabled by default. If you
-would like to enable it you can set the `revise_structs` preference to `true`
-via [Preferences.jl](https://github.com/JuliaPackaging/Preferences.jl).
+On Julia 1.12+, Revise automatically revises `struct` definitions in a running
+session; see [Limitations](@ref) for details. When a changed definition
+requires deleting a type, Revise scans the session's method tables and type
+hierarchy to find dependents, which can make such revisions slower than
+ordinary ones. To disable struct revision (so that struct changes once again
+require a session restart), set the `revise_structs` preference to `false` via
+[Preferences.jl](https://github.com/JuliaPackaging/Preferences.jl).
 
 Add the following to the `LocalPreferences.toml` file in your active project:
 
 ```toml
 [Revise]
-revise_structs = true
+revise_structs = false
 ```
-
-!!! warning
-    The default for this preference may change in the future.
 
 ## Configurations for fixing errors
 
@@ -202,4 +203,12 @@ string `"1"` (e.g., `JULIA_REVISE_POLL=1` in a bash script).
 !!! note
     NFS stands for [Network File System](https://en.wikipedia.org/wiki/Network_File_System) and is typically only used to mount shared network drives on *Unix* file systems.
     Despite similarities in the acronym, NTFS, the standard [filesystem on Windows](https://en.wikipedia.org/wiki/NTFS), is completely different from NFS; Revise's default configuration should work fine on Windows without polling.
-    However, WSL2 users currently need polling due to [this bug](https://github.com/JuliaLang/julia/issues/37029).
+
+!!! note
+    Under WSL, the Windows filesystem mounted at `/mnt/...` does not deliver file-change
+    notifications to Linux (an upstream [WSL bug](https://github.com/microsoft/WSL/issues/4739),
+    surfaced in Julia as [this issue](https://github.com/JuliaLang/julia/issues/37029)).
+    Revise detects this case automatically and falls back to polling for code stored there,
+    so you should not need to set `JULIA_REVISE_POLL` manually. Code kept in the native Linux
+    filesystem (e.g. under your home directory) continues to use fast notification-based watching.
+    Polling these `/mnt/...` files means revisions may take a few seconds to register.

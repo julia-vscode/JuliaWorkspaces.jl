@@ -42,6 +42,7 @@
 
     uri = URI("file:///fixture/Foo/Project.toml")
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(uri, SourceText(project, "toml")))
 
     pf = derived_project_file(jw.runtime, uri)
@@ -93,6 +94,7 @@ end
     folder = URI("file:///broken/Foo")
     uri = URI("file:///broken/Foo/Project.toml")
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(uri, SourceText(project, "toml")))
 
     pf = derived_project_file(jw.runtime, uri)
@@ -143,6 +145,7 @@ end
 
     uri = URI("file:///semantic/Foo/Project.toml")
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(uri, SourceText(project, "toml")))
 
     problems = derived_project_semantic_problems(jw.runtime, uri)
@@ -199,6 +202,7 @@ end
     project_uri = URI("file:///manifests/Foo/Project.toml")
     manifest_uri = URI("file:///manifests/Foo/Manifest.toml")
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(project_uri, SourceText(project, "toml")))
     add_file!(jw, TextFile(manifest_uri, SourceText(manifest, "toml")))
 
@@ -243,6 +247,7 @@ end
 
     uri = URI("file:///diag/Foo/Project.toml")
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(uri, SourceText(project, "toml")))
 
     diags = get_diagnostic(jw, uri)
@@ -266,6 +271,7 @@ end
 
     uri = URI("file:///diag/Foo/Manifest.toml")
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(uri, SourceText(manifest, "toml")))
 
     diags = get_diagnostic(jw, uri)

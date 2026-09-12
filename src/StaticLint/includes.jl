@@ -66,9 +66,11 @@ end
 
 # Whether `x` is a call to one of the TestItems.jl macros that run their body in
 # a fresh module at runtime (`@testitem`, `@testmodule`, `@testsnippet`), in
-# either the bare or the qualified `Mod.@testitem` form. `@testset`/
-# `@safetestset` are deliberately not included: they do not introduce a module,
-# so includes inside them share the enclosing file structure.
+# either the bare or the qualified `Mod.@testitem` form. `@testset` is
+# deliberately not included (it does not introduce a module), and neither are
+# third-party module-wrapping macros such as SafeTestsets' `@safetestset`: the
+# include analysis models the language and our own test-item framework, not
+# other packages, so includes inside those share the enclosing file structure.
 function _is_testitem_family_macrocall(x::EXPR)
     CSTParser.ismacrocall(x) || return false
     (x.args === nothing || isempty(x.args)) && return false
@@ -77,30 +79,17 @@ function _is_testitem_family_macrocall(x::EXPR)
     return _is_testitem_macro(name) || _is_testmodule_macro(name) || _is_testsnippet_macro(name)
 end
 
-# `@safetestset` (SafeTestsets.jl) wraps its body in a fresh module, so it
-# scopes include duplicates exactly like the testitem family does.
-function _is_safetestset_macro(x)
-    CSTParser.is_getfield_w_quotenode(x) && return _is_safetestset_macro(x.args[2].args[1])
-    return isidentifier(x) && valofid(x) == "@safetestset"
-end
-
-function _is_safetestset_macrocall(x::EXPR)
-    CSTParser.ismacrocall(x) || return false
-    (x.args === nothing || isempty(x.args)) && return false
-    name = x.args[1]
-    return name isa EXPR && _is_safetestset_macro(name)
-end
-
 # Shared walker for include-call analyses. Calls `f(x, pos, target, in_function,
 # guarded, testitem_ctx)` for every `include(...)`/`includet(...)` call, where
 # `pos` is the 0-based byte offset of the call EXPR, `target` the resolved target
 # `URI` or `nothing`, and `guarded` whether the call sits under an
 # existence-guarded conditional (see below). `testitem_ctx` is `nothing` for
 # ordinary calls, or the byte offset of the enclosing testitem-family macrocall
-# for a call inside one — each such body is its own module at runtime, so
-# duplicate-include detection scopes to it instead of to the include graph as a
-# whole. `file_dir` may be `nothing` (a file without a filesystem path, e.g. an
-# unsaved buffer), in which case only absolute include paths resolve.
+# or `module` block for a call inside one — each such body is its own module at
+# runtime, so duplicate-include detection scopes to it instead of to the include
+# graph as a whole. `file_dir` may be `nothing` (a file without a filesystem
+# path, e.g. an unsaved buffer), in which case only absolute include paths
+# resolve.
 #
 # Calls inside function/macro bodies are reported with `in_function = true` and
 # always `target = nothing`: a runtime `include` splices into whichever module
@@ -169,14 +158,14 @@ function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false,
             cond = x.args[1]
         end
 
-        # Each testitem-family body, `@safetestset` body and `module` block is
-        # evaluated in a fresh module, so includes below this point belong to
-        # that module rather than to the enclosing file — including one file
-        # into two different modules is legitimate, not a duplicate. Nested
-        # contexts keep the outermost one: the inner body is part of the same
-        # runtime module for duplicate-detection purposes.
+        # Each testitem-family body and `module` block is evaluated in a fresh
+        # module, so includes below this point belong to that module rather
+        # than to the enclosing file — including one file into two different
+        # modules is legitimate, not a duplicate. Nested contexts keep the
+        # outermost one: the inner body is part of the same runtime module for
+        # duplicate-detection purposes.
         child_ctx = testitem_ctx === nothing &&
-            (_is_testitem_family_macrocall(x) || _is_safetestset_macrocall(x) || headof(x) === :module) ?
+            (_is_testitem_family_macrocall(x) || headof(x) === :module) ?
             pos : testitem_ctx
 
         p = pos

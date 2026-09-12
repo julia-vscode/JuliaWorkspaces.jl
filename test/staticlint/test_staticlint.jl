@@ -14,7 +14,12 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     export module_name, find_module_by_name, find_first
     export ws_files, find_identifiers, find_binding
 
-    const TEST_URI = JuliaWorkspaces.URIs2.uri"file://test.jl"
+    const TEST_URI = JuliaWorkspaces.URIs2.uri"file:///test.jl"
+
+    # These three rules are off in the `default` preset (measured false-positive
+    # rates); this suite tests the rules themselves, so it asks for them back.
+    const LINT_OPT_IN = "[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n"
+    const LINT_OPT_IN_URI = JuliaWorkspaces.URIs2.uri"file:///JuliaLint.toml"
 
     # New-structure equivalent of the old `StaticLint.collect_hints(cst, server)`:
     # returns the diagnostics produced for the single test file.
@@ -60,6 +65,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     function parse_and_pass(s; dynamic::DynamicMode=DynamicOff)
         our_uri = TEST_URI
         jw = JuliaWorkspaces.JuliaWorkspace(;dynamic=dynamic, store_path=shared_store_path())
+        add_file!(jw, TextFile(LINT_OPT_IN_URI, SourceText(LINT_OPT_IN, "toml")))
         add_file!(jw, TextFile(our_uri, SourceText(s, "julia")))
 
         if dynamic==DynamicIndexingOnly
@@ -141,6 +147,7 @@ using StaticLint: scopeof, bindingof, refof, errorof, check_all, getenv
     # traversal tests that go through `derived_file_analysis`).
     function ws_files(pairs::Pair{<:JuliaWorkspaces.URIs2.URI,<:AbstractString}...)
         jw = JuliaWorkspaces.JuliaWorkspace()
+        add_file!(jw, TextFile(LINT_OPT_IN_URI, SourceText(LINT_OPT_IN, "toml")))
         for (u, s) in pairs
             add_file!(jw, TextFile(u, SourceText(s, "julia")))
         end
@@ -1134,7 +1141,7 @@ end
         """)
 
     # Checks that documented symbols are skipped
-    @test isempty(get_diagnostic(jw, uri"file://test.jl"))
+    @test isempty(get_diagnostic(jw, uri"file:///test.jl"))
 end
 
 @testitem "check_call imported function overload" setup=[shared_static_lint] begin
@@ -1147,7 +1154,7 @@ end
         """)
 
     # Checks that documented symbols are skipped
-    @test isempty(get_diagnostic(jw, uri"file://test.jl"))
+    @test isempty(get_diagnostic(jw, uri"file:///test.jl"))
 end
 
 @testitem "check_call strip type declaration from signature" setup=[shared_static_lint] begin
@@ -1158,7 +1165,7 @@ end
         """)
 
     # ensure we strip all type decl code from around signature
-    @test isempty(get_diagnostic(jw, uri"file://test.jl"))
+    @test isempty(get_diagnostic(jw, uri"file:///test.jl"))
 end
 
 @testitem "check_call strip nested where clauses (#436)" setup=[shared_static_lint] begin
@@ -5304,4 +5311,228 @@ end
     bare_store = SS.ModuleStore(SS.VarRef(nothing, :Bare), Dict{Symbol,Any}(),
         "", Symbol[], Symbol[], [:Core])
     @test SS.maybe_getfield(:sin, bare_store, env.symbols) === nothing
+end
+
+@testitem "struct fields behind field-modifier macros are not missing references" setup=[shared_static_lint] begin
+    # `@atomic` is a known field modifier: the wrapped declaration still gets a
+    # field binding, so accesses resolve and are not hinted.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        mutable struct T
+            @atomic field::Int
+        end
+        f(arg::T) = arg.field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Same for a docstring-wrapped field.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            "a documented field"
+            field::Int
+        end
+        f(arg::T) = arg.field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # A member wrapped in an arbitrary macro may declare fields the binding
+    # pass cannot see, so the struct's field set is not enumerable: accesses to
+    # unknown names must not be flagged...
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro addfield(x)
+            esc(x)
+        end
+        struct T
+            @addfield hidden
+            x::Int
+        end
+        f(arg::T) = arg.hidden
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # ...but a plain struct without macro members still flags unknown fields.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            x::Int
+        end
+        f(arg::T) = arg.missing_field
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+    end
+
+    # A docstring-wrapped field keeps the struct enumerable: unknown fields on
+    # a documented struct are still flagged.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct T
+            "a documented field"
+            field::Int
+        end
+        f(arg::T) = arg.missing_field
+        """)
+        hints = collect_hints(cst, meta_dict, jw)
+        @test length(hints) == 1
+    end
+end
+
+@testitem "getfield inside macro args is not a missing reference" setup=[shared_static_lint] begin
+    # The plain-identifier arm already suppresses names inside opaque macro
+    # calls; the getfield arm must do the same for `a.b` field names.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        macro m(x)
+        end
+        struct T
+            x::Int
+        end
+        t = T(1)
+        @m t.some_field
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
+
+@testitem "NamedTuple field access is not a missing reference" setup=[shared_static_lint] begin
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        f(nt::NamedTuple) = nt.some_key
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+end
+
+@testitem "eval-loop constructors do not shadow their types" setup=[shared_static_lint] begin
+    # `for FT in (:A, :B) @eval $FT(x) = ... end` hoists constructor
+    # definitions; they must not replace the DataType bindings, or every later
+    # `::A` annotation reports InvalidTypeDeclaration.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct AType{T} end
+        struct BType{T} end
+        const AVec{T} = AType{T}
+        for FT in (:AType, :BType)
+            @eval \$FT(x::Int) = [x]
+        end
+        f(a::AType) = a
+        g(b::BType) = b
+        h(v::AVec) = v
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Single interpolated name (`name = :AType`) takes the other interpret_eval
+    # arm; same rule applies.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        struct AType{T} end
+        name = :AType
+        @eval \$name(x::Int) = [x]
+        f(a::AType) = a
+        """)
+        @test isempty(collect_hints(cst, meta_dict, jw))
+    end
+
+    # Negative control: a genuine non-type annotation still flags.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        foo() = 1
+        f(x::foo) = x
+        """)
+        @test length(collect_hints(cst, meta_dict, jw)) == 1
+    end
+end
+
+@testitem "struct plus outer constructor inside a block scope" setup=[shared_static_lint] begin
+    # A function definition over a SAME-scope struct (inside @testset/let) is a
+    # method addition; it must not shadow the type.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        using Test
+        @testset "t" begin
+            struct Flipped <: AbstractVector{Float64}
+                x::Float64
+            end
+            Flipped(t::Tuple) = Flipped(t[1])
+            Base.getindex(a::Flipped, i::Int) = a.x
+        end
+        """)
+        SL = JuliaWorkspaces.StaticLint
+        hints = collect_hints(cst, meta_dict, jw)
+        @test !any(h -> SL.errorof(h[2], meta_dict) === SL.InvalidTypeDeclaration, hints)
+    end
+end
+
+@testitem "const/function pairs in mutually exclusive branches" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue, CannotDeclareConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # `const` in one branch, assignment-form function in the other (Parsers'
+    # OncePerTask fallback idiom): only one branch ever runs.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        if isdefined(Base, :OncePerTask)
+            const _get_bigint = Base.OncePerTask{BigInt}(() -> BigInt())
+        else
+            _get_bigint() = 1
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+
+    # `using Base: @x` in one @static branch, `const var"@x" = ...` in the
+    # other (StaticArrays' @_inline_meta shim).
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        @static if VERSION < v"1.8.0-DEV.410"
+            using Base: @_inline_meta
+        else
+            const var"@_inline_meta" = Base.var"@inline"
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDeclareConst)
+    end
+
+    # A genuine same-branch clash is still reported.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        const f = 1
+        f() = 2
+        """)
+        @test has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
+@testitem "let-global function with additional top-level methods" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDefineFuncAlreadyHasValue
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # UnicodeFun's closure-capture idiom: `global f` + `function f(...)` inside
+    # `let`, plus more methods of `f` at top level. All are method additions.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        let subscript_map = Dict('a' => 'b')
+            global to_subscript
+            function to_subscript(x::Char)
+                subscript_map[x]
+            end
+        end
+        function to_subscript(x::Int)
+            Char(x)
+        end
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDefineFuncAlreadyHasValue)
+    end
+end
+
+@testitem "const rebinding of an imported name" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: errorof, CannotDeclareConst, InvalidRedefofConst
+
+    has_error(cst, meta_dict, jw, err) =
+        any(errorof(x, meta_dict) === err for (_, x) in collect_hints(cst, meta_dict, jw))
+
+    # `import HDF5; const HDF5 = Base.get_extension(...).HDF5` — an egal
+    # rebind of the imported module, legal at runtime.
+    let (cst, meta_dict, jw) = parse_and_pass("""
+        import Printf
+        const Printf = Base.get_extension(Main, :Whatever).Printf
+        """)
+        @test !has_error(cst, meta_dict, jw, CannotDeclareConst)
+        @test !has_error(cst, meta_dict, jw, InvalidRedefofConst)
+    end
 end

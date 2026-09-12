@@ -4,8 +4,52 @@ This file describes only major changes, and does not include bug fixes,
 cleanups, or minor enhancements.
 
 <!-- links start -->
+[Revise 3.17]: https://github.com/timholy/Revise.jl/compare/v3.16.0...v3.17.0
+[Revise 3.16]: https://github.com/timholy/Revise.jl/compare/v3.15.0...v3.16.0
+[Revise 3.15]: https://github.com/timholy/Revise.jl/compare/v3.14.5...v3.15.0
 [Revise 3.13]: https://github.com/timholy/Revise.jl/compare/v3.12.3...v3.13.0
 <!-- links end -->
+
+## [Revise 3.17]
+
+- **Struct revision is on by default** (Julia 1.12+): the automatic revision of
+  `struct` definitions introduced in Revise 3.13 no longer requires opting in.
+  To disable it, set the `revise_structs` preference to `false` (see the
+  "Disabling struct revision" section of the documentation).
+  (https://github.com/timholy/Revise.jl/pull/1128)
+
+- **Revise notifies about changing package versions** (experimental): Pkg
+  operations may change package versions, and such indirect changes differ from
+  the intentional editor-based changes Revise typically tracks. The can be more
+  difficult updates than most, sometimes requiring coordinated changes across
+  packages. For this reason, Revise now warns when making such changes
+  (https://github.com/timholy/Revise.jl/pull/1124).
+
+## [Revise 3.16]
+
+- **`include(mapexpr, file)` support**: revising a file that was included with a
+  transform now re-applies the same transform to each top-level expression, instead of
+  silently dropping it. For files included while a package loads, discovering the
+  transform relies on `Base.include_mapexprs` (Julia ≥ 1.14); `includet` and
+  `Revise.track` also accept a leading `mapexpr` on all supported Julia versions.
+  (https://github.com/timholy/Revise.jl/issues/634,
+  https://github.com/timholy/Revise.jl/issues/820)
+
+- **Load a package from a stale precompile cache**: `Revise.stale_load("MyPackage")`
+  loads a package from its most recent loadable cache even if the source files have
+  been edited since the cache was built, and then revises the loaded code up to date.
+  This skips the re-precompilation that `using` would otherwise trigger, which can be
+  a substantial savings for packages that are expensive to compile.
+  (https://github.com/timholy/Revise.jl/issues/738)
+
+## [Revise 3.15]
+
+- **Track packages baked into a system image**: `Revise.track(SomePackage)` now works
+  for a package compiled into the running system image (e.g. one built with
+  PackageCompiler.jl). Such a package is already loaded at startup, so Revise's usual
+  package callback never fires; calling `Revise.track` on it starts watching the
+  package and applies any source edits made since the image was built.
+  (https://github.com/timholy/Revise.jl/pull/688)
 
 ## [Revise 3.13]
 

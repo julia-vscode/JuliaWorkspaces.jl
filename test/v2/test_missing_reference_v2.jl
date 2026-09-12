@@ -13,6 +13,7 @@
 
     function mr_workspace(src::String; flag=true, config::Union{Nothing,String}=nothing)
         jw = JuliaWorkspace()
+        config === nothing && add_file!(jw, TextFile(URI("file:///mr/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         config !== nothing &&
             add_file!(jw, TextFile(URI("file:///mr/JuliaLint.toml"), SourceText(config, "toml")))
         add_file!(jw, TextFile(MR_URI, SourceText(src, "julia")))
@@ -141,6 +142,7 @@ end
     project = "name = \"MrPkg\"\nuuid = \"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee41\"\nversion = \"0.1.0\"\n"
     helper = URI("file:///mrp/test/helpers.jl")
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///mrp/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///mrp/Project.toml"), SourceText(project, "toml")))
     add_file!(jw, TextFile(URI("file:///mrp/src/MrPkg.jl"), SourceText("module MrPkg\nend\n", "julia")))
     add_file!(jw, TextFile(helper, SourceText("helper_f() = undefined_from_helper\n", "julia")))

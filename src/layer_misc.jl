@@ -99,7 +99,7 @@ function _get_document_links(runtime, uri::URI)
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     cst === nothing && return links
     fpath = something(URIs2.uri2filepath(uri), "")
-    st = input_text_file(runtime, uri).content
+    st = derived_text_file_content(runtime, uri).content
     _find_document_links(cst, fpath, 0, links, st)
     return links
 end
@@ -206,7 +206,7 @@ function _get_inlay_hints(runtime, uri::URI, start_offset::Int, end_offset::Int,
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
     cst === nothing && return hints
 
-    st = input_text_file(runtime, uri).content
+    st = derived_text_file_content(runtime, uri).content
 
     return _collect_inlay_hints(cst, meta_dict, env, config, start_offset, end_offset, st, 0, hints)
 end

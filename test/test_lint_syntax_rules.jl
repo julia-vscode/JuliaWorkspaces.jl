@@ -224,6 +224,81 @@ end
     @test d2[1].severity === :error
 end
 
+@testitem "Syntax rules: detached_docstring flags docstrings bound to nothing" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    function dd_diags(source)
+        jw = JuliaWorkspace()
+        uri = URI("file:///pr/src/a.jl")
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        return filter(d -> d.code === :detached_docstring, get_diagnostic(jw, uri))
+    end
+
+    D = "\"\"\"\n    f(x)\n\nDoes a thing.\n\"\"\""
+    X = "f(x) = 1"
+
+    # The containers it checks, severed by a comment and by a blank line.
+    @test length(dd_diags("$D\n# c\n$X\n")) == 1
+    @test length(dd_diags("$D\n\n$X\n")) == 1
+    @test length(dd_diags("module M\n$D\n# c\n$X\nend\n")) == 1
+    @test length(dd_diags("baremodule M\n$D\n# c\n$X\nend\n")) == 1
+
+    # Attached: nothing to report.
+    @test isempty(dd_diags("$D\n$X\n"))
+    @test isempty(dd_diags("module M\n$D\n$X\nend\n"))
+
+    # Not checked: either a docstring cannot bind there at all, or -- `begin`,
+    # `quote` -- it can but the container is indistinguishable from those by kind.
+    # `(a; b)` is a `K"block"` too, which is why kind alone cannot decide.
+    @test isempty(dd_diags("function g()\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("if c\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("let\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("for i in 1:1\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("while c\n$D\n$X\nend\n"))
+    @test isempty(dd_diags("try\n$D\n$X\ncatch\nend\n"))
+    @test isempty(dd_diags("($D;\n$X)\n"))
+    @test isempty(dd_diags("begin\n$D\n# c\n$X\nend\n"))
+    @test isempty(dd_diags("struct S\n$D\n# c\nx::Int\nend\n"))
+
+    # The signature may sit below leading blank lines.
+    @test length(dd_diags("\"\"\"\n\n    f(x)\n\nDocs.\n\"\"\"\n# c\n$X\n")) == 1
+
+    # Each signature form the filter accepts, pinned separately.
+    for sig in ["    Foo <: Bar", "    struct Foo", "    (m::Foo)(x::T) where T",
+                "    @m x y", "    Base.f(x)", "    α(x)"]
+        @test length(dd_diags("\"\"\"\n$sig\n\nDoes a thing.\n\"\"\"\n# c\n$X\n")) == 1
+    end
+
+    # Prose that merely contains a bracket is not a signature: real call syntax
+    # has no space before the delimiter.
+    @test isempty(dd_diags("\"\"\"\n    Note (see below).\n\"\"\"\n# c\n$X\n"))
+    @test isempty(dd_diags("module M\n\"\"\"\n    Notes (details below).\n\"\"\"\n\n$X\nend\n"))
+
+    # Matching is bounded to the first non-blank line, so a long run of indent
+    # cannot make the patterns backtrack quadratically and throw.
+    @test isempty(dd_diags("\"" * " "^5000 * "\"\n# c\n$X\n"))
+
+    # Detached but not docstring-shaped, so the filter has to reject them.
+    @test isempty(dd_diags("\"Constants for the SHA implementation.\"\n# c\nconst A = 1\n"))
+    @test isempty(dd_diags("module M\n\"Notes about this module.\"\n\n$X\nend\n"))
+    @test isempty(dd_diags("\"\"\"\n    Example\n    (see the manual)\n\"\"\"\n# c\n$X\n"))
+
+    # An interpolated string is never classified, even when its first line is a
+    # signature: `$` can make the rest anything.
+    @test isempty(dd_diags("\"\"\"\n    f(x)\n\nReturns \$(T).\n\"\"\"\n# c\n$X\n"))
+
+    # One finding per detached docstring.
+    @test length(dd_diags("$D\n# c\n$X\n$D\n# c\ng(x) = 2\n")) == 2
+
+    # Reported as a warning in the default preset.
+    src = "$D\n# c\n$X\n"
+    d = only(dd_diags(src))
+    @test d.severity === :warning
+    @test occursin("immediately followed", d.message)
+    # The range is exactly the string, not the enclosing container.
+    @test src[first(d.range):last(d.range)-1] == D
+end
+
 @testitem "Syntax rules: fused parse runs every check, config filters" begin
     using JuliaWorkspaces.URIs2: URI
     const JW = JuliaWorkspaces
@@ -252,149 +327,4 @@ end
     # no test items, so the raw details are empty rather than missing.
     raw = JW.derived_raw_test_details(jw.runtime, uri)
     @test isempty(raw.testitems) && isempty(raw.testsetups) && isempty(raw.testerrors)
-end
-
-@testitem "Syntax rules: unbound_type_parameter core positives and negatives" begin
-    using JuliaWorkspaces.URIs2: URI
-
-    function utp_diags(source)
-        jw = JuliaWorkspace()
-        add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
-            SourceText("[rules]\nunbound_type_parameter = \"warning\"\n", "toml")))
-        uri = URI("file:///pr/src/a.jl")
-        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-        return filter(d -> d.code === :unbound_type_parameter, get_diagnostic(jw, uri))
-    end
-
-    # The classic: a trailing vararg's element type is unbound for the empty
-    # call. Verified against Test.detect_unbound_args on Julia 1.12.
-    @test length(utp_diags("f(x::T...) where T = 1")) == 1
-    @test length(utp_diags("f(x::Int, y::T...) where T = 1")) == 1
-    @test isempty(utp_diags("f(x::T, y::T...) where T = 1"))
-
-    # The range points at the parameter in the where clause.
-    src = "f(x::T...) where T = 1"
-    d = only(utp_diags(src))
-    @test src[first(d.range):last(d.range)-1] == "T"
-    @test first(d.range) > findfirst("where", src)[1]
-    @test occursin("`T`", d.message)
-
-    # Direct and invariant-parameter binding.
-    @test isempty(utp_diags("f(x::T) where T = 1"))
-    @test isempty(utp_diags("f(x::Vector{T}) where T = 1"))
-    @test isempty(utp_diags("f(x::Vector{Vector{T}}) where T = 1"))
-    @test isempty(utp_diags("f(x::AbstractArray{T,2}) where T = 1"))
-    @test isempty(utp_diags("f(x::Base.RefValue{T}) where T = 1"))
-    @test isempty(utp_diags("f(::Type{T}) where T = 1"))
-    @test isempty(utp_diags("f(x::Val{T}) where T = 1"))
-
-    # A `<:` upper bound binds covariantly (top level of an argument) but not
-    # under an invariant parameter.
-    @test isempty(utp_diags("f(x::Vector{<:T}) where T = 1"))
-    @test isempty(utp_diags("f(x::Base.RefValue{<:AbstractVector{T}}) where T = 1"))
-    @test length(utp_diags("f(x::Ref{Vector{<:T}}) where T = 1")) == 1
-
-    # Union binds only when every branch binds.
-    @test length(utp_diags("f(x::Union{Int,T}) where T = 1")) == 1
-    @test isempty(utp_diags("f(x::Union{Vector{T},Ref{T}}) where T = 1"))
-
-    # Tuples are covariant; a trailing Vararg element type does not bind, its
-    # length `N` does.
-    @test isempty(utp_diags("f(x::Tuple{T}) where T = 1"))
-    @test isempty(utp_diags("f(x::Tuple{Vector{<:T}}) where T = 1"))
-    @test length(utp_diags("f(x::Tuple{Vararg{T}}) where T = 1")) == 1
-    @test length(utp_diags("f(x::Type{Tuple{Vararg{E}}}) where E = 1")) == 1
-    @test length(utp_diags("_totuple(::Type{Tuple{Vararg{E}}}, itr, s...) where {E} = E")) == 1
-    @test isempty(utp_diags("f(x::NTuple{N,Int}) where N = 1"))
-
-    # `Vararg{T,N}` as the last argument: `N` binds, `T` does not.
-    ds = utp_diags("f(x::Vararg{T,N}) where {T,N} = 1")
-    @test length(ds) == 1
-    @test occursin("`T`", ds[1].message)
-end
-
-@testitem "Syntax rules: unbound_type_parameter forms, kwargs, defaults, chains" begin
-    using JuliaWorkspaces.URIs2: URI
-
-    function utp_diags(source)
-        jw = JuliaWorkspace()
-        add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
-            SourceText("[rules]\nunbound_type_parameter = \"warning\"\n", "toml")))
-        uri = URI("file:///pr/src/a.jl")
-        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
-        return filter(d -> d.code === :unbound_type_parameter, get_diagnostic(jw, uri))
-    end
-
-    # Long form, callable objects, constructors, macro-wrapped definitions.
-    @test length(utp_diags("function f(x::T...) where T\n    1\nend")) == 1
-    @test isempty(utp_diags("function (o::CO{T})(x) where T\n    1\nend"))
-    @test isempty(utp_diags("Foo{T}(x::T) where T = 1"))
-    @test isempty(utp_diags("Foo{T}(x) where T = 1"))
-    @test length(utp_diags("@inline f(x::T...) where T = 1")) == 1
-
-    # A return-type annotation does not bind (the long form; in the short form
-    # `f(x)::T where T = 1` the `where` belongs to the return type and there is
-    # no method type parameter at all).
-    @test length(utp_diags("function f(x)::T where T\n    return one(T)\nend")) == 1
-
-    # Keyword argument types bind — lowering passes them positionally to the
-    # keyword-body method (verified against Test.detect_unbound_args).
-    @test isempty(utp_diags("f(x; y::T = 1) where T = 2"))
-    @test length(utp_diags("f(x; y::Ref{Vector{<:T}} = Ref([[1]])) where T = 2")) == 1
-
-    # Defaults do not unbind: the generated shorter methods drop the unused
-    # type parameter entirely.
-    @test isempty(utp_diags("f(x::T = 1) where T = 2"))
-    @test isempty(utp_diags("f(x = 1, y::T = 2) where T = 2"))
-
-    # A later parameter's upper bound binds an earlier one covariantly.
-    @test isempty(utp_diags("f(x::S) where {T, S<:AbstractVector{T}} = 1"))
-    @test isempty(utp_diags("f(x::(Vector{S} where S<:T)) where T = 1"))
-
-    # Bounds on the parameter itself change nothing about bindedness; lower
-    # bounds never bind.
-    @test isempty(utp_diags("f(x::T) where {T<:Integer} = 1"))
-    @test isempty(utp_diags("f(x::T) where Int<:T<:Real = 1"))
-    @test length(utp_diags("f(x::S...) where {S>:Int} = 1")) == 1
-
-    # Nested wheres.
-    @test length(utp_diags("f(x::T, y::S...) where S where T = 1")) == 1
-
-    # A parameter that is never mentioned again is unused_type_parameter's
-    # finding, not this rule's.
-    @test isempty(utp_diags("f(x) where T = 1"))
-    @test isempty(utp_diags("function f(x) where T\n    1\nend"))
-    # ... but one used in the body (or a non-binding position) is reported.
-    @test length(utp_diags("f(x) where T = T[]")) == 1
-
-    # Type expressions the model cannot interpret suppress the finding.
-    @test isempty(utp_diags("f(x::my_type(T)) where T = 1"))
-    @test isempty(utp_diags("f(x::@NamedTuple{a::T}) where T = 1"))
-
-    # Anonymous functions and structs have no method where clause to check.
-    @test isempty(utp_diags("struct Foo{T} end"))
-    @test isempty(utp_diags("g = x -> x"))
-
-    # Multiple parameters report individually.
-    ds = utp_diags("f(x::T2, y::T3...) where {T1, T2, T3} = T1")
-    @test length(ds) == 2
-    @test any(d -> occursin("`T1`", d.message), ds)
-    @test any(d -> occursin("`T3`", d.message), ds)
-end
-
-@testitem "Syntax rules: unbound_type_parameter off by default, on in strict" begin
-    using JuliaWorkspaces.URIs2: URI
-
-    source = "f(x::T...) where T = 1\n"
-
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(URI("file:///pr/src/a.jl"), SourceText(source, "julia")))
-    @test !any(d -> d.code === :unbound_type_parameter, get_diagnostic(jw, URI("file:///pr/src/a.jl")))
-
-    jw = JuliaWorkspace()
-    add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"), SourceText("preset = \"strict\"\n", "toml")))
-    add_file!(jw, TextFile(URI("file:///pr/src/a.jl"), SourceText(source, "julia")))
-    diags = filter(d -> d.code === :unbound_type_parameter, get_diagnostic(jw, URI("file:///pr/src/a.jl")))
-    @test length(diags) == 1
-    @test diags[1].severity === :warning
 end

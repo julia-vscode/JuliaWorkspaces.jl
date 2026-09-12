@@ -183,6 +183,20 @@ function StaticLint.tree_context_declares_datatype(ctx::TreeModuleContext, name:
     return _is_datatype_kind(vn.kind)
 end
 
+# See `StaticLint.tree_context_imports_datatype`'s docstring: `name` is an
+# imported external symbol whose store resolves to a datatype (directly, or a
+# constructor FunctionStore extending one).
+function StaticLint.tree_context_imports_datatype(ctx::TreeModuleContext, name::String, env)::Bool
+    visible = derived_module_visible_names_idfree(ctx.rt, ctx.root, ctx.path)
+    vn = get(visible, name, nothing)
+    vn === nothing && return false
+    vn.kind === :external_symbol || return false
+    store = StaticLint.resolve_treeref_store(_tree_ref_for(ctx, name, vn), env)
+    store isa SymbolServer.DataTypeStore && return true
+    return store isa SymbolServer.FunctionStore &&
+        SymbolServer._lookup(store.extends, StaticLint.getsymbols(env)) isa SymbolServer.DataTypeStore
+end
+
 # The tree path of the module a module-kinded VisibleName DENOTES, or
 # `nothing` when it isn't a module of this root's tree (external and
 # workspace-package modules chain no further in-file). `VisibleName` doesn't
@@ -707,6 +721,32 @@ end
 _store_extended_in_workspace(rt, root, env, func_ref) =
     !isempty(_matching_workspace_extensions(rt, root, env, func_ref))
 
+# Roots we can attribute a splice context to without an include edge: the
+# package entry file, standard tool entry points, and @testitem files (which
+# carry their own analysis context). Every OTHER root exists either because it
+# genuinely is a standalone script or because a computed include loads it —
+# indistinguishable statically.
+function _is_recognized_entry_point(rt, uri)
+    _file_has_testitems(rt, uri) && return true
+
+    fp = uri2filepath(uri)
+    fp === nothing && return false
+    name = lowercase(basename(fp))
+    dir = lowercase(basename(dirname(fp)))
+    name == "runtests.jl" && dir == "test" && return true
+    name == "make.jl" && dir == "docs" && return true
+
+    pkg_folder = derived_package_for_file(rt, uri)
+    if pkg_folder !== nothing
+        pkg = derived_package(rt, pkg_folder)
+        if pkg !== nothing
+            entry = joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl")
+            lowercase(fp) == lowercase(entry) && return true
+        end
+    end
+    return false
+end
+
 """
     derived_file_analysis(rt, root::URI, file::URI) -> FileAnalysis
 
@@ -754,32 +794,6 @@ frame reads the whole `derived_module_tree` value. Consequences:
   reference an actually-shifted name re-execute, and those MUST (their
   outbound `ItemRef`s change).
 """
-# Roots we can attribute a splice context to without an include edge: the
-# package entry file, standard tool entry points, and @testitem files (which
-# carry their own analysis context). Every OTHER root exists either because it
-# genuinely is a standalone script or because a computed include loads it —
-# indistinguishable statically.
-function _is_recognized_entry_point(rt, uri)
-    _file_has_testitems(rt, uri) && return true
-
-    fp = uri2filepath(uri)
-    fp === nothing && return false
-    name = lowercase(basename(fp))
-    dir = lowercase(basename(dirname(fp)))
-    name == "runtests.jl" && dir == "test" && return true
-    name == "make.jl" && dir == "docs" && return true
-
-    pkg_folder = derived_package_for_file(rt, uri)
-    if pkg_folder !== nothing
-        pkg = derived_package(rt, pkg_folder)
-        if pkg !== nothing
-            entry = joinpath(uri2filepath(pkg_folder), "src", "$(pkg.name).jl")
-            lowercase(fp) == lowercase(entry) && return true
-        end
-    end
-    return false
-end
-
 Salsa.@derived function derived_file_analysis(rt, root, file)
     @debug "derived_file_analysis" root=root file=file
 
@@ -937,20 +951,13 @@ project is active, `new == old` again.
 """
 Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     @debug "derived_new_static_lint_diagnostics" uri=uri
+    input_v2_enabled(rt) && return derived_new_static_lint_diagnostics_v2(rt, uri)
 
     res = Set{LintFinding}()
     for root in derived_roots_for_uri(rt, uri)
         # A project-less root contributes no diagnostics (parity with the old
-        # per-root query, layer_static_lint.jl) — except a package's script
-        # (`perf/`, `benchmark/`, `examples/`), which is checked against the
-        # active project or, without one, the stdlib-only environment: before
-        # scripts were routed to the active project they were linted in the
-        # package's environment, and the routing did not mean losing their
-        # findings (`index_from_length` in benchmark loops).
-        if derived_project_uri_for_root(rt, root) === nothing
-            pkg_uri = derived_package_for_file(rt, root)
-            (pkg_uri !== nothing && _is_package_script_file(rt, pkg_uri, root)) || continue
-        end
+        # per-root query, layer_static_lint.jl).
+        derived_project_uri_for_root(rt, root) === nothing && continue
         union!(res, derived_file_analysis(rt, root, uri).diagnostics)
     end
     return res

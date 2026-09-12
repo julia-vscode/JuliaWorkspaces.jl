@@ -3,7 +3,7 @@
 # layer_visibility.jl algorithm onto the v2 module tree.
 #
 #   THE ENVIRONMENT EDGE. `:external` import targets resolve through the
-#   plain-data queries in src/layer_v2_env_seam.jl (outside src/v2 — see its
+#   plain-data queries in src/v2/bridge/layer_v2_env_seam.jl (the bridge — see its
 #   header for why) at exactly four places: `_v2_external_bring_ins`, the
 #   `:external` arm of `_v2_member_lookup`, the `:external` arm of
 #   `_v2_extend_target`, and the `:external` rules in

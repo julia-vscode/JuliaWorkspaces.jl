@@ -357,11 +357,9 @@ The caller is expected to `Pkg.activate` the result and `Pkg.instantiate` it,
 which resolves a manifest into `project_dir`; the environment at `env_path` is
 only ever read.
 
-Note: a `[workspace]` member no longer reaches this path at all — the host
-models it as a synthesized project against the root's manifest and the root's
-watch item covers it (layer_workspaces.jl / layer_projects.jl). A resolve item
-is only ever scheduled for genuinely standalone environments, so the copy
-resolving standalone is exact, not an approximation.
+Note: an environment that is a `[workspace]` member normally resolves against
+the workspace root's manifest; the copy resolves standalone instead, which may
+pick different versions. That is acceptable for symbol indexing.
 """
 function write_resolved_env_project(env_path::String, project_dir::String)
     mkpath(project_dir)

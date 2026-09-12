@@ -188,6 +188,19 @@ struct SetMaxAliveDjpsMsg <: DynamicReactorMessage
 end
 
 """
+    SetV2LifecycleMsg(enabled)
+
+Switch the reactor's v2 lifecycle rules — the live-children cap and the
+teardown of children that serve nothing after indexing — on or off. Posted
+by [`set_v2_enabled!`](@ref) ahead of its reconcile, so the next
+`ReconcileMsg` already runs under the new rules; `false` restores the v1
+lifecycle.
+"""
+struct SetV2LifecycleMsg <: DynamicReactorMessage
+    enabled::Bool
+end
+
+"""
 Reconcile the set of running/required dynamic processes.
 
 Carries the full set of [`DJPKey`](@ref)s the workspace currently needs (as

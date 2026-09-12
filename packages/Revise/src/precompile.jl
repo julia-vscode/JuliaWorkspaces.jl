@@ -73,15 +73,15 @@ function _precompile_()
     mex = which(methods_by_execution!, (Compiled, MI, Module, Expr))
     mbody = bodymethod(mex)
     # use `typeof(pairs(NamedTuple()))` here since it actually differs between Julia versions
-    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, typeof(pairs(NamedTuple())), typeof(methods_by_execution!), Compiled, MI, Module, Expr})
+    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, Bool, typeof(pairs(NamedTuple())), typeof(methods_by_execution!), Compiled, MI, Module, Expr})
     if VERSION >= v"1.12-"
-        @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, Iterators.Pairs{Symbol,Bool,Nothing,NamedTuple{(:skip_include,),Tuple{Bool}}}, typeof(methods_by_execution!), Compiled, MI, Module, Expr})
+        @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, Bool, Iterators.Pairs{Symbol,Bool,Nothing,NamedTuple{(:skip_include,),Tuple{Bool}}}, typeof(methods_by_execution!), Compiled, MI, Module, Expr})
     else
-        @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, Iterators.Pairs{Symbol,Bool,Tuple{Symbol},NamedTuple{(:skip_include,),Tuple{Bool}}}, typeof(methods_by_execution!), Compiled, MI, Module, Expr})
+        @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, Bool, Iterators.Pairs{Symbol,Bool,Tuple{Symbol},NamedTuple{(:skip_include,),Tuple{Bool}}}, typeof(methods_by_execution!), Compiled, MI, Module, Expr})
     end
     mfr = which(_methods_by_execution!, (Compiled, MI, Frame, Vector{Bool}))
     mbody = bodymethod(mfr)
-    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, typeof(_methods_by_execution!), Compiled, MI, Frame, Vector{Bool}})
+    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, typeof(_methods_by_execution!), Compiled, MI, Frame, Vector{Bool}})
 
     @warnpcfail precompile(Tuple{typeof(get_def), Method})
     @warnpcfail precompile(Tuple{typeof(parse_pkg_files), PkgId})
@@ -90,6 +90,7 @@ function _precompile_()
     end
     @warnpcfail precompile(Tuple{typeof(Revise.iswritable), String})
     @warnpcfail precompile(Tuple{typeof(Revise.active_repl_backend_available)})
+    @warnpcfail precompile(Tuple{typeof(wait_for_repl_backend)})
     @warnpcfail precompile(Tuple{typeof(pkg_fileinfo), PkgId})
     @warnpcfail precompile(Tuple{typeof(push!), WatchList, Pair{String,PkgId}})
     @warnpcfail precompile(Tuple{typeof(pushex!), ExprsInfos, Expr})
@@ -98,7 +99,7 @@ function _precompile_()
     @warnpcfail precompile(Tuple{Type{PkgData}, PkgId})
     @warnpcfail precompile(Tuple{typeof(Base._deleteat!), Vector{Tuple{Module,String,Float64}}, Vector{Int}})
     @warnpcfail precompile(Tuple{typeof(add_require), String, Module, String, String, Expr})
-    @warnpcfail precompile(Tuple{Core.kwftype(typeof(maybe_add_includes_to_pkgdata!)),NamedTuple{(:eval_now,), Tuple{Bool}},typeof(maybe_add_includes_to_pkgdata!),PkgData,String,Vector{Pair{Module, String}}})
+    @warnpcfail precompile(Tuple{Core.kwftype(typeof(maybe_add_includes_to_pkgdata!)),NamedTuple{(:eval_now,), Tuple{Bool}},typeof(maybe_add_includes_to_pkgdata!),PkgData,String,Vector{Tuple{Module, Function, String}}})
 
     for TT in (Tuple{Module,Expr}, Tuple{DataType,MethodSummary})
         @warnpcfail precompile(Tuple{Core.kwftype(typeof(Base.CoreLogging.handle_message)),NamedTuple{(:time, :deltainfo), Tuple{Float64, TT}},typeof(Base.CoreLogging.handle_message),ReviseLogger,LogLevel,String,Module,String,Symbol,String,Int})

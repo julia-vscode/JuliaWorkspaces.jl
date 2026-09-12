@@ -1,5 +1,7 @@
 # Tests for the undocumented_public_name rule (Aqua.jl's
 # test_undocumented_names, statically).
+# The rule is v2-only: its emission is joined only in
+# `derived_diagnostics_v2`, so every item here turns the flag on.
 
 @testitem "undocumented_public_name: Aqua fixture parity" begin
     using JuliaWorkspaces.URIs2: URI
@@ -11,6 +13,7 @@
         version = "0.1.0"
         """
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
             SourceText("[rules]\nundocumented_public_name = \"warning\"\n", "toml")))
         add_file!(jw, TextFile(URI("file:///pr/Project.toml"), SourceText(project, "toml")))
@@ -110,6 +113,7 @@ end
         version = "0.1.0"
         """
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
             SourceText("[rules]\nundocumented_public_name = \"warning\"\n", "toml")))
         add_file!(jw, TextFile(URI("file:///pr/Project.toml"), SourceText(project, "toml")))
@@ -221,16 +225,25 @@ end
     source = "module Pkg\nf() = 1\nexport f\nend\n"
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///pr/Project.toml"), SourceText(project, "toml")))
     uri = URI("file:///pr/src/Pkg.jl")
     add_file!(jw, TextFile(uri, SourceText(source, "julia")))
     @test !any(d -> d.code === :undocumented_public_name, get_diagnostic(jw, uri))
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"), SourceText("preset = \"strict\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///pr/Project.toml"), SourceText(project, "toml")))
     add_file!(jw, TextFile(uri, SourceText(source, "julia")))
     ds = filter(d -> d.code === :undocumented_public_name, get_diagnostic(jw, uri))
     @test length(ds) == 1
     @test ds[1].severity === :warning
+
+    # Flag off, the rule is v2-only: strict emits nothing for it.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"), SourceText("preset = \"strict\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///pr/Project.toml"), SourceText(project, "toml")))
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+    @test !any(d -> d.code === :undocumented_public_name, get_diagnostic(jw, uri))
 end

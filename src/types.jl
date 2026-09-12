@@ -314,12 +314,23 @@ end
 """
     struct JuliaTestEnv
 
-Details of a Julia test environment.
+What a test item in some file needs in order to run. Not a resolved environment:
+these are the ingredients a runner builds one from (see [`get_test_env`](@ref)).
 
-- package_name::String
-- package_uri::Union{URI,Nothing}
-- project_uri::Union{URI,Nothing}
-- `env_content_hash`::Union{UInt,Nothing}
+- `package_name::Union{String,Nothing}` — name of the package that owns the file.
+- `package_uri::Union{URI,Nothing}` — its folder, whose `Project.toml` carries
+  `name`, `uuid` and `version`. `nothing` when the file is not inside a package,
+  in which case its test items cannot run.
+- `project_uri::Union{URI,Nothing}` — the project whose `Manifest.toml` supplies
+  the version pins, or `nothing` to use the package folder itself. It is either
+  the package folder or a project whose manifest `dev`s the package; it supplies
+  pins only, never dependencies, since the test environment is built from the
+  package's test target.
+- `env_content_hash::Union{String,Nothing}` — an opaque hash of everything the
+  environment is built from: the project's Project and Manifest, the package's
+  own pair, and the package's `test/Project.toml` and `test/Manifest.toml`. A
+  runner reuses a test process while this matches and restarts it when it
+  changes.
 """
 @auto_hash_equals struct JuliaTestEnv
     package_name::Union{String,Nothing}
@@ -386,10 +397,20 @@ end
     _offset_to_position(runtime, uri, offset)
 
 Convert a 0-based byte offset in the file identified by `uri` to a `Position`.
+
+`uri` may be any file the analysis layers know about — a regular workspace
+file OR an *indirect* one (reached only through `include(...)` and read lazily
+from disc). Cross-file results (references, definitions, rename edits, hover
+method links, …) routinely land in indirect files, so this must go through
+`derived_text_file_content`, the accessor that serves both populations; the
+regular-file input alone throws `KeyError` for an indirect URI.
 """
 function _offset_to_position(runtime, uri::URI, offset::Int)
-    st = input_text_file(runtime, uri).content
-    return position_at(st, offset + 1)
+    tf = derived_text_file_content(runtime, uri)
+    # An offset always comes from a syntax tree of `uri` in the same Salsa
+    # revision, so content is present; a miss here is an invariant violation.
+    tf === nothing && error("_offset_to_position: no content for $uri")
+    return position_at(tf.content, offset + 1)
 end
 
 """

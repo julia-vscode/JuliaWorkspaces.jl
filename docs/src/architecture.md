@@ -109,18 +109,36 @@ From the bottom up:
 | Layer file | Responsibility |
 | --- | --- |
 | `layer_files.jl` | File-set queries: which files exist, which are Julia, and resolving regular-vs-indirect content. |
-| `layer_syntax_trees.jl` | Parsing: JuliaSyntax parse results and trees, and the legacy CSTParser tree. |
-| `layer_toml_tree.jl` | TOML files: the `TomlSyntax` parse products (table plus diagnostics at real ranges) and the TOML item walk (skeleton, bodies, maps), the v2 pattern applied to TOML. |
+| `layer_syntax_trees.jl` | Parsing: JuliaSyntax parse results and trees, the legacy CSTParser tree, and the `Pkg.TOML` parse of TOML files. |
+| `v2/layer_toml_tree.jl` | v2 twin of the TOML parse: the `TomlSyntax` parse products (table plus diagnostics at real ranges) and the TOML item walk (skeleton, bodies, maps), the v2 pattern applied to TOML. |
 | `layer_includes.jl` | The `include(...)` graph and its roots. |
 | `layer_static_lint.jl` | Semantic analysis via StaticLint's `semantic_pass`. |
-| `layer_project_files.jl` | Full-fidelity `Project.toml`/`Manifest.toml` parse products (`JuliaProjectFile`, `JuliaManifestFile`) with position-free problem records for every malformed or inconsistent section (located via the TOML item walk at the diagnostics last mile). |
-| `layer_workspaces.jl` | `[workspace]` discovery: which folder is a member of which workspace, resolved upward to the outermost root the way Pkg does it. |
-| `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`, built on the parse products; a manifest-less workspace member synthesizes a project against the root's manifest ([deps] closure), and `[sources]` path entries surface as deved packages. |
-| `layer_extensions.jl` | Package extensions: mapping `ext/` files to their `[extensions]` entry and finding an environment containing their `[weakdeps]` triggers (an existing covering manifest, else a resolved extension environment from a child process). |
-| `layer_environment.jl` | Resolving which project/environment a file belongs to and building its `ExternalEnv`. A workspace needs one watch item at its root — members (a `test/` project included) gate on and resolve through it. |
+| `v2/bridge/layer_include_diagnostics_v2.jl` | v2 twin of the include diagnostics: the same walk, but computed and function-body includes are analysis-boundary notices instead of `include_errors` warnings. |
+| `v2/layer_project_files_v2.jl` | v2 only: full-fidelity `Project.toml`/`Manifest.toml` parse products (`JuliaProjectFile`, `JuliaManifestFile`) with position-free problem records for every malformed or inconsistent section (located via the TOML item walk at the diagnostics last mile). |
+| `v2/layer_workspaces_v2.jl` | v2 only: `[workspace]` discovery — which folder is a member of which workspace, resolved upward to the outermost root the way Pkg does it. |
+| `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`. |
+| `v2/layer_projects_v2.jl` | v2 twin of the project model, built on the typed parse products: a manifest-less workspace member synthesizes a project against the root's manifest ([deps] closure), and `[sources]` path entries surface as deved packages. |
+| `v2/layer_extensions_v2.jl` | v2 only: package extensions — mapping `ext/` files to their `[extensions]` entry and finding an environment containing their `[weakdeps]` triggers (an existing covering manifest, else a resolved extension environment from a child process). |
+| `layer_environment.jl` | Resolving which project/environment a file belongs to and building its `ExternalEnv`. |
+| `v2/layer_environment_v2.jl` | v2 twin of the environment selection: extension files, deeper env folders, workspace members (a `test/` project included, gating on and resolving through the root's single watch item), package scripts against the active project, extension-environment work items. |
 | `layer_testitems.jl` | `@testitem` / test-setup detection. |
+| `v2/layer_testitems_v2.jl` | v2 twin: detection off the v2 skeleton, the same assembly below it over the fused parse's `RawTest*Detail` records. |
+| `v2/bridge/layer_undocumented_names_v2.jl` | v2 only: the `undocumented_public_name` inventory (Aqua parity) — per-file documented names, per-root undocumented public names, and the last-mile range reattachment. In bridge/ because it reads the v1 module tree. |
+| `v2/bridge/lint_unbound_type_parameter_v2.jl` | v2 only: the `unbound_type_parameter` check (Aqua parity) — a syntax-tier rule kept out of the shared `SYNTAX_CHECKS` tuple so flag-off behaviour stays main's; its producer is joined only in the v2 diagnostics twin. |
 | `layer_diagnostics.jl` | Aggregating syntax, lint, test, and TOML diagnostics, gated by configuration (see [Configuration](configuration.md)). |
+| `v2/bridge/layer_diagnostics_v2.jl` | v2 twin of the diagnostics join: the lowering producer's takeover, analysis-boundary notices, project/manifest problems, package-quality (Aqua) findings, located environment errors. |
 | `layer_hover.jl`, `layer_completions.jl`, `layer_references.jl`, `layer_signatures.jl`, `layer_symbols.jl`, `layer_navigation.jl`, `layer_actions.jl`, `layer_formatting.jl`, `layer_misc.jl` | LSP-feature query layers. |
+| `v2/bridge/layer_features_v2.jl` | v2-backed answers for the references family, symbols, module-at, document links, selection/block ranges, hover and signature help. |
+
+**The v1/v2 convention.** Everything v2 hangs off one Salsa input,
+`input_v2_enabled` (`set_v2_enabled!`, default `false`). A v1 query that has
+a v2 counterpart keeps its name and its body exactly as before, with one
+inserted line at the top — `input_v2_enabled(rt) && return <name>_v2(rt, …)`
+— and the counterpart lives under `src/v2/` (`src/v2/bridge/` for the twins that must name StaticLint or CSTParser).
+`src/v2/**` and `src/TomlSyntax/**` are reached only
+through those gates, so with the flag off the package runs the legacy code
+paths unchanged; `scripts/check_v1_parity.sh` checks that property against a
+base branch, and `test/test_v1_parity.jl` pins the gate allowlist at run time.
 
 A crucial design rule: **layers contain no LSP wire types**. They operate purely
 on syntax trees, StaticLint data, and SymbolServer stores, and they return the
@@ -201,6 +219,35 @@ that an operation like [`add_folder_from_disc!`](@ref) reconciles only once.
 derived query: [`get_diagnostics`](@ref), [`get_julia_syntax_tree`](@ref),
 [`get_completions`](@ref), [`get_definitions`](@ref),
 [`get_document_symbols`](@ref), and so on.
+
+### Language gating
+
+A workspace holds Markdown, Julia-markdown and TOML documents as well as Julia
+source, and a host may ask about any of them: the VS Code extension's document
+selector for the language server includes `markdown` and `juliamarkdown`, so
+hover, completion, document-symbol and document-link requests genuinely arrive
+for `.md` buffers. The parsers read a whole document as Julia, so those requests
+must not reach them.
+
+`_is_julia_uri(rt, uri)` (`src/layer_files.jl`) is the single predicate that
+decides this: a `.jl` path for a `file:` URI, otherwise — for `untitled:`,
+`vscode-notebook-cell:` and other pathless documents — the language id the
+editor recorded in the [`SourceText`](@ref). The rule is:
+
+- **Every query taking a URI gates on it**, at its entry point in `public.jl`,
+  and returns its documented empty value (`nothing`, an empty vector, …).
+  [`get_legacy_cst`](@ref) and [`get_julia_syntax_tree`](@ref) instead throw
+  `JWNotAJuliaFile`, since a tree is the whole point of the call.
+- **Internal walks inherit the gate** by iterating `derived_julia_files` /
+  `derived_all_julia_files`. The exceptions are the traversals that follow
+  `include` *targets* rather than the file set — `include` takes a path, not a
+  language, so `include("README.md")` resolves to a document we hold. Those
+  check `_is_julia_uri` themselves (`derived_all_julia_files`,
+  `derived_include_closure`, `_collect_include_diagnostics!`,
+  `StaticLint.followinclude`).
+- **`derived_julia_legacy_syntax_tree` enforces the contract** by throwing
+  rather than degrading to an empty tree, so a missed gate surfaces as a crash
+  report naming the caller instead of features that silently stop working.
 
 **Disc/boundary helpers** ([`src/fileio.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/fileio.jl)) —
 [`workspace_from_folders`](@ref), [`add_folder_from_disc!`](@ref),
@@ -283,11 +330,12 @@ which is the include manifest. The load order mirrors the dependency stack:
 3. **Core** — `types.jl`, `sourcetext.jl`, `inputs.jl`.
 4. **Layer stack** — `layer_files.jl`, `layer_syntax_trees.jl`, the v2 stack
    (`v2/`, which loads the vendored JuliaSyntax), the `TomlSyntax` submodule
-   and `layer_toml_tree.jl` on top of it, the bundled
+   and `v2/layer_toml_tree.jl` on top of it, the bundled
    `StaticLint`, then the tooling-configuration trio (`lint_rules.jl`,
    `config_common.jl`, `lint_emission.jl` — see
    [Configuration](configuration.md)), then the remaining `layer_*.jl` files
-   (see [Layers](#layers)).
+   (see [Layers](#layers)), each v1 layer directly followed by its `v2/…_v2.jl`
+   twin where one exists.
 5. **Boundary** — `fileio.jl` (disc I/O) and `public.jl` (the public API).
 
 ## Design and roadmap

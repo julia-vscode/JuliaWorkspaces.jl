@@ -82,14 +82,14 @@ Salsa.@derived function derived_workspace_root(rt, folder_uri)
 end
 
 """
-    derived_workspace_members(rt, root_uri) -> Vector{URI}
+    derived_workspace_members_v2(rt, root_uri) -> Vector{URI}
 
 The transitive `[workspace]` members declared from `root_uri` downward
 (members of members included), deduplicated and sorted. Purely declarative —
 a listed folder is a member even when it has no Project.toml yet (the
-semantic validation in layer_project_files.jl reports that).
+semantic validation in layer_project_files_v2.jl reports that).
 """
-Salsa.@derived function derived_workspace_members(rt, root_uri)
+Salsa.@derived function derived_workspace_members_v2(rt, root_uri)
     result = URI[]
     seen = Set{URI}([root_uri])
     queue = URI[root_uri]

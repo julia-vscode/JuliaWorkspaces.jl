@@ -13,14 +13,14 @@
 # when rebuilt-but-unchanged (structural isequal over shared stores), but a
 # *changed* env would still invalidate any tree that depended on it.
 
+# `@auto_hash_equals` is load-bearing: the fallback for an immutable struct is
+# field-wise egality, whereas `URI`'s own `==`/`hash` must be the ones used —
+# Salsa's early exit compares whole values with `isequal`.
 """
     ItemRef(file, id)
 
 Reference to a top-level item (in a file inventory) by file URI and item ID.
 """
-# `@auto_hash_equals` is load-bearing: the fallback for an immutable struct is
-# field-wise egality, whereas `URI`'s own `==`/`hash` must be the ones used —
-# Salsa's early exit compares whole values with `isequal`.
 @auto_hash_equals struct ItemRef
     file::URI
     id::Int64   # Int64, not Int: an item id needs 62 bits (see `_mint_ids!`)
@@ -218,9 +218,28 @@ function _declare!(node::_ModuleNodeBuilder, name::String, ref::ItemRef, kind::S
     if prev !== nothing && _is_datatype_kind(prev) && (kind === :function || kind === :assignment)
         return
     end
+    # A bare `:function`/`:assignment` definition whose name was EXPLICITLY
+    # imported (`import StaticArraysCore: Size` + `Size(::Type{...}) = ...`)
+    # extends the imported binding — real Julia rejects re-declaring such a
+    # name — so the import stays the visible winner. Recording it as a locally
+    # declared :function would hide that the name may denote an external TYPE,
+    # misclassifying later `::Size` annotations in per-file mode.
+    if (kind === :function || kind === :assignment) && _explicitly_imported(node, name)
+        return
+    end
     node.declared[name] = ref
     node.declared_kinds[name] = kind
     return
+end
+
+function _explicitly_imported(node::_ModuleNodeBuilder, name::String)
+    for (_, imp) in node.raw_imports
+        imp.kind === :import || continue
+        for s in imp.symbols
+            (s.alias === nothing ? s.name : s.alias) == name && return true
+        end
+    end
+    return false
 end
 
 """

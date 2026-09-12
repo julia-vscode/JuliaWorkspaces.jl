@@ -12,13 +12,24 @@ Salsa.@derived function derived_file_language_id(rt, uri)
 end
 
 # A URI whose content should be treated as Julia: a file-scheme `.jl` path
-# (case-insensitive), or a non-file buffer (e.g. untitled) whose language id is
-# "julia". The language query is value-stable, so a keystroke in an untitled
-# buffer never invalidates the root set. Single source of truth for both root
-# admission (`derived_julia_files`) and the diagnostics gate.
+# (case-insensitive), or a buffer with no usable path (an untitled or
+# notebook-cell document, say) whose language id is "julia". The language query
+# is value-stable, so a keystroke in an untitled buffer never invalidates the
+# root set, and a well-formed path answers without querying it at all.
+#
+# Single source of truth for: root admission (`derived_julia_files`), the
+# diagnostics gate, include-target admission, formatting, and the contract
+# `derived_julia_legacy_syntax_tree` enforces. Every entry point that can be
+# handed an arbitrary URI goes through here.
 function _is_julia_uri(rt, uri)
     if uri.scheme == "file"
-        return is_path_julia_file(uri2filepath(uri))
+        path = uri2filepath(uri)
+        # A degenerate `file:` URI carries no path to classify — `file://x.jl`
+        # parses `x.jl` as the *authority*, leaving the path empty. Ask the
+        # recorded language id rather than answering "not Julia", which would
+        # silently switch off every feature for that document.
+        (path === nothing || isempty(path)) && return derived_file_language_id(rt, uri) == "julia"
+        return is_path_julia_file(path)
     else
         return derived_file_language_id(rt, uri) == "julia"
     end

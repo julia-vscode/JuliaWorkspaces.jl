@@ -1,6 +1,9 @@
 # Tests for the package-quality lint rules ported from Aqua.jl:
 # missing_compat (Aqua test_deps_compat) and unused_dependency (Aqua
 # test_stale_deps, static variant).
+# Both rules are v2-only: their producers live in
+# src/v2/layer_project_files_v2.jl and are joined only in
+# `derived_diagnostics_v2`, so every item here turns the flag on.
 
 @testitem "missing_compat: off by default, on in strict" begin
     using JuliaWorkspaces.URIs2: URI
@@ -14,17 +17,25 @@
     """
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     uri = URI("file:///pr/Project.toml")
     add_file!(jw, TextFile(uri, SourceText(project, "toml")))
     @test !any(d -> d.code === :missing_compat, get_diagnostic(jw, uri))
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"), SourceText("preset = \"strict\"\n", "toml")))
     add_file!(jw, TextFile(uri, SourceText(project, "toml")))
     diags = filter(d -> d.code === :missing_compat, get_diagnostic(jw, uri))
     # `Bar` has no compat, and `[compat]` has no `julia` entry.
     @test length(diags) == 2
     @test all(d -> d.severity === :warning, diags)
+
+    # Flag off, the rule is v2-only: strict emits nothing for it.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"), SourceText("preset = \"strict\"\n", "toml")))
+    add_file!(jw, TextFile(uri, SourceText(project, "toml")))
+    @test !any(d -> d.code === :missing_compat, get_diagnostic(jw, uri))
 end
 
 @testitem "missing_compat: flags deps, extras, weakdeps and julia" begin
@@ -32,6 +43,7 @@ end
 
     function compat_diags(project; rules = "missing_compat = \"warning\"")
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
             SourceText("[rules]\n$rules\n", "toml")))
         uri = URI("file:///pr/Project.toml")
@@ -104,6 +116,7 @@ end
 
     function messages(rules)
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
             SourceText("[rules]\n$rules\n", "toml")))
         uri = URI("file:///pr/Project.toml")
@@ -135,6 +148,7 @@ end
     # A non-package environment (no name/uuid) declares deps without compat all
     # the time; the rule stays silent there.
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
         SourceText("[rules]\nmissing_compat = \"warning\"\n", "toml")))
     uri = URI("file:///pr/Project.toml")
@@ -149,6 +163,7 @@ end
     using JuliaWorkspaces.URIs2: URI
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     config_uri = URI("file:///pr/JuliaLint.toml")
     add_file!(jw, TextFile(config_uri, SourceText("""
     [rules]
@@ -175,6 +190,7 @@ end
 
     function unused_diags(source; project = project, extra = Dict{String,String}())
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
             SourceText("[rules]\nunused_dependency = \"warning\"\n", "toml")))
         uri = URI("file:///pr/Project.toml")
@@ -227,6 +243,7 @@ end
 
     function diags(; project, files, rules = "unused_dependency = \"warning\"")
         jw = JuliaWorkspace()
+        set_v2_enabled!(jw, true)
         add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
             SourceText("[rules]\n$rules\n", "toml")))
         uri = URI("file:///pr/Project.toml")

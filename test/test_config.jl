@@ -58,6 +58,75 @@ end
     @test a != c
 end
 
+@testitem "Glob: covers_subtree reduces a pattern to its directory form" begin
+    cs(p, d) = JuliaWorkspaces.covers_subtree(JuliaWorkspaces.GlobPattern(p), d)
+
+    # `foo/**` covers the whole of `foo`, and stays anchored to the config
+    # directory even though stripping `/**` removes its only separator.
+    @test cs("packages/**", "packages")
+    @test !cs("packages/**", "nested/packages")
+    @test !cs("packages/**", "")
+
+    # A directory suffix and a separator-less pattern both match at any depth.
+    @test cs("gen/", "gen")
+    @test cs("gen/", "a/b/gen")
+    @test cs("node_modules", "a/node_modules")
+
+    # `src/*` covers each directory directly inside `src`, but not `src`
+    # itself — a naive `matches(g, "src/")` test would wrongly claim it does.
+    @test !cs("src/*", "src")
+    @test cs("src/*", "src/a")
+
+    @test cs("**/excluded/**", "excluded")
+    @test cs("**/excluded/**", "a/excluded")
+    @test cs("test/manual/**", "test/manual")
+    @test !cs("test/manual/**", "test")
+
+    @test cs("**", "anything")
+end
+
+@testitem "Glob: may_contain_match admits every possible parent directory" begin
+    pf(p, d) = JuliaWorkspaces.may_contain_match(JuliaWorkspaces.GlobPattern(p), d)
+
+    @test pf("src/**", "")
+    @test pf("src/**", "src")
+    @test pf("src/**", "src/a/b")
+    @test !pf("src/**", "data")
+
+    # A pattern with no separator matches at any depth, so every directory is a
+    # possible parent.
+    @test pf("generated.jl", "a/b/c")
+    @test pf("**/*.jl", "a/b/c")
+
+    @test pf("test/manual", "test")
+    @test !pf("test/manual", "test/other")
+
+    @test pf("/foo.jl", "")
+    @test !pf("/foo.jl", "data")
+end
+
+@testitem "Glob: dir_selected is the directory counterpart of path_selected" begin
+    f(inc, exc) = JuliaWorkspaces.PathFilter(
+        JuliaWorkspaces.GlobPattern[JuliaWorkspaces.GlobPattern(x) for x in inc],
+        JuliaWorkspaces.GlobPattern[JuliaWorkspaces.GlobPattern(x) for x in exc],
+    )
+    ds(filter, d) = JuliaWorkspaces.dir_selected(filter, d)
+
+    only_src_and_test = f(["src/**", "test/**"], String[])
+    @test ds(only_src_and_test, "")
+    @test ds(only_src_and_test, "src")
+    @test ds(only_src_and_test, "test/a")
+    @test !ds(only_src_and_test, "data")
+
+    no_bigdata = f(String[], ["bigdata/**"])
+    @test ds(no_bigdata, "")
+    @test ds(no_bigdata, "src")
+    @test !ds(no_bigdata, "bigdata")
+
+    # An empty filter selects everything.
+    @test ds(JuliaWorkspaces.PathFilter(), "anything/at/all")
+end
+
 @testitem "PathFilter: exclude beats include, empty include means all" begin
     G = JuliaWorkspaces.GlobPattern
     sel = JuliaWorkspaces.path_selected
@@ -94,11 +163,13 @@ end
 
 @testitem "Lint rules: preset severities match the pre-registry values" begin
     # The presets used to be three hand-written dicts; they are now derived from
-    # per-rule severity fields. This pins every value to what the hand-written
-    # dicts contained, so the registry refactor is provably behavior-neutral and
-    # any future change to a preset severity is a conscious test update.
+    # per-rule severity fields. This pins every value, so any change to a preset
+    # severity is a conscious test update rather than a side effect. Values are
+    # the original hand-written ones except for the three rules deliberately
+    # demoted to `:off` in `default` on measured false-positive rates — see the
+    # comment above `LINT_RULES`.
     expected_default = Dict{Symbol,Symbol}(
-        :incorrect_call_args => :information,
+        :incorrect_call_args => :off,   # demoted: 93% sampled FP
         :incorrect_iter_spec => :information,
         :index_from_length => :information,
         :nothing_comparison => :information,
@@ -118,8 +189,8 @@ end
         :const_decl => :information,
         :relative_import => :off,   # runtime nesting of included helpers is unknowable; dots saturate at Main
         :include_errors => :warning,
-        :missing_reference => :warning,
-        :unresolved_import => :warning,
+        :missing_reference => :off,     # demoted: 78% sampled FP
+        :unresolved_import => :off,     # demoted: 77% sampled FP
         :syntax_errors => :error,
         :syntax_warnings => :off,
         :testitem_errors => :error,
@@ -133,13 +204,15 @@ end
         :project_file_errors => :error,
         :project_file_warnings => :warning,
         :manifest_errors => :information,
-        # Syntactic rules added with the rule registry; off outside `strict`.
+        # Syntactic rules added with the rule registry; off outside `strict`,
+        # except `detached_docstring` (see its LintRule entry).
         :nan_comparison => :off,
         :duplicate_branch_condition => :off,
         :string_concat_style => :off,
         :bare_using => :off,
         :debug_statement => :off,
         :async_task => :off,
+        :detached_docstring => :warning,
         # Lowering-backed rule (Harvest JuliaLowering): shapes Julia will not
         # load — same class and treatment as syntax_errors.
         :lowering_errors => :error,
@@ -337,6 +410,44 @@ end
     mixed = cfg_for("preset = \"minimal\"\n[rules]\nunused_binding = \"error\"")
     @test JuliaWorkspaces.rule_severity(mixed, :unused_binding) === :error
     @test JuliaWorkspaces.rule_severity(mixed, :type_piracy) === :off
+end
+
+@testitem "Lint config: the resolution-dependent rules are off in `default`" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # These three rules accounted for ~92% of the false positives on the
+    # 2026-08-12 corpus sweep and are deliberately silent out of the box. A
+    # project that wants them asks for them; `strict` still reports all three.
+    demoted = (:incorrect_call_args, :missing_reference, :unresolved_import)
+
+    function cfg_for(content)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///dem/JuliaLint.toml"), SourceText(content, "toml")))
+        add_file!(jw, TextFile(URI("file:///dem/a.jl"), SourceText("x = 1\n", "julia")))
+        return JuliaWorkspaces.derived_effective_lint_config(jw.runtime, URI("file:///dem/a.jl"))
+    end
+
+    default = cfg_for("preset = \"default\"")
+    for id in demoted
+        @test JuliaWorkspaces.rule_severity(default, id) === :off
+        @test !JuliaWorkspaces.rule_enabled(default, id)
+    end
+
+    strict = cfg_for("preset = \"strict\"")
+    for id in demoted
+        @test JuliaWorkspaces.rule_severity(strict, id) === :warning
+    end
+
+    # The demotion must reach the derived gates, not just the severity map:
+    # `incorrect_call_args` is the only rule in the `:call` category, and
+    # `missing_reference` drives the `missingrefs` mode.
+    @test !JuliaWorkspaces.lint_options_from_config(default).call
+    @test JuliaWorkspaces.missingrefs_from_config(default) === :none
+
+    # ...and re-enabling with a `[rules]` delta must turn those gates back on.
+    restored = cfg_for("preset = \"default\"\n[rules]\nincorrect_call_args = \"warning\"\nmissing_reference = \"warning\"")
+    @test JuliaWorkspaces.lint_options_from_config(restored).call
+    @test JuliaWorkspaces.missingrefs_from_config(restored) === :all
 end
 
 @testitem "Lint config: override blocks re-scope rules by path" begin

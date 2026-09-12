@@ -14,6 +14,7 @@
 
     function ca_workspace(files::Pair{String,String}...; flag=true)
         jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///ca/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         for (path, src) in files
             add_file!(jw, TextFile(URI("file:///ca/src/$path"), SourceText(src, "julia")))
         end
@@ -147,7 +148,8 @@ end
     @test !any(d -> d.source == "JuliaWorkspaces.jl", ca_diags(jw))
     # Config off silences the takeover producer too.
     jw = JuliaWorkspace()
-    add_file!(jw, TextFile(URI("file:///ca/JuliaLint.toml"),
+    add_file!(jw, TextFile(URI("file:///ca/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
+    JW.update_file!(jw, TextFile(URI("file:///ca/JuliaLint.toml"),
         SourceText("[rules]\nincorrect_call_args = \"off\"\n", "toml")))
     add_file!(jw, TextFile(CA_URI, SourceText(src, "julia")))
     set_v2_enabled!(jw, true)
@@ -262,6 +264,7 @@ end
     # 2-arg `size` valid in the package's TEST files and computed-include
     # orphans, which are their own roots (DataStructures, Distributions).
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///ca/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///ca/Project.toml"), SourceText(
         "name = \"Root\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9c1\"\nversion = \"1.0.0\"\n", "toml")))
     add_file!(jw, TextFile(CA_URI, SourceText("""
@@ -366,6 +369,7 @@ end
     ext = "module CaPkgBarExt\nusing CaPkg\nCaPkg.stub(x, y) = x + y\nend\n"
     function build(; with_ext)
         jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///cax/JuliaLint.toml"), SourceText("[rules]\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nincorrect_call_args = \"warning\"\n", "toml")))
         add_file!(jw, TextFile(URI("file:///cax/Project.toml"), SourceText(project, "toml")))
         add_file!(jw, TextFile(URI("file:///cax/src/CaPkg.jl"), SourceText(src, "julia")))
         with_ext && add_file!(jw, TextFile(URI("file:///cax/ext/CaPkgBarExt.jl"), SourceText(ext, "julia")))

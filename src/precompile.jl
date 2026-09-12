@@ -272,6 +272,15 @@ using PrecompileTools: @setup_workload, @compile_workload
         get_diagnostics_blocking(jw)
         get_test_items(jw)
 
+        # The same workload again under the v2 flag: the v2 project model
+        # (TomlSyntax, `[weakdeps]`/`[extensions]`/`[workspace]`), diagnostics
+        # join and test item detection compile too. The flag-off pass above
+        # is the legacy workload, untouched.
+        set_v2_enabled!(jw, true)
+        get_diagnostics_blocking(jw)
+        get_test_items(jw)
+        set_v2_enabled!(jw, false)
+
         # TomlSyntax: the recovering tree API and the table pass (the project
         # files above already exercised the parse-result path).
         let tree = TomlSyntax.parsetoml(TomlSyntax.TomlNode,

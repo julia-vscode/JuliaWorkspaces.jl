@@ -10,6 +10,12 @@
 # per-root query of the public names that lack one (both position-free, both
 # backdate), and a per-file emission walk that reattaches byte ranges through
 # a fresh parse at the last mile.
+#
+# In src/v2/bridge/ because the rule is v2-only (its emission lives only in
+# `derived_diagnostics_v2`) while the queries read the v1 pipeline's module
+# tree (`derived_workspace_package_roots`, `derived_roots_for_uri`,
+# `derived_file_module_path`), names the v2 boundary guard forbids in src/v2/
+# itself.
 
 # ── Documented names of one file ────────────────────────────────────────────
 

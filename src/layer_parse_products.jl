@@ -78,14 +78,9 @@ Salsa.@derived function derived_julia_parse_products(rt, uri)
     TestItemDetection.find_test_detail!(tree, testitems, testsetups, testerrors)
 
     raw_test_details = RawTestDetails(
-        # `option_skip` needs the explicit conversion: on 32-bit the detail
-        # carries a `UnitRange{Int32}`, which has no implicit `convert` into the
-        # `Union{Bool,UnitRange{Int64}}` field.
         [RawTestItemDetail(string(ti.name), ti.range, ti.code_range,
                            ti.option_default_imports, ti.option_tags,
-                           ti.option_setup,
-                           ti.option_skip isa Bool ? ti.option_skip :
-                               UnitRange{Int64}(ti.option_skip)) for ti in testitems],
+                           ti.option_setup, ti.option_skip) for ti in testitems],
         [RawTestSetupDetail(ts.name, ts.kind, ts.range, ts.code_range) for ts in testsetups],
         [RawTestErrorDetail(string(te.name), te.message, te.range) for te in testerrors],
     )

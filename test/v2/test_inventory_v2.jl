@@ -467,7 +467,7 @@ end
                  # v2 owns its copy of the package-name → entry-file map.
                  "derived_workspace_package_roots",
                  # Environment stores are reachable from v2 ONLY through the
-                 # plain-data queries in src/layer_v2_env_seam.jl (outside this
+                 # plain-data queries in src/v2/bridge/layer_v2_env_seam.jl (in bridge/, outside this
                  # directory); direct store contact must not creep in.
                  "derived_environment", "derived_stdlib_only_env",
                  "SymbolServer", "_resolve_external_module"]

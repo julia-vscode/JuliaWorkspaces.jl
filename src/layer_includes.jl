@@ -18,7 +18,7 @@ Salsa.@derived function derived_file_include_data(rt, uri)
     @debug "derived_file_include_data" uri=uri
 
     tf = derived_text_file_content(rt, uri)
-    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing},Bool,Union{Nothing,Int}}[], computed_ids=Set{UInt64}())
+    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing},Bool,Union{Nothing,Int}}[], computed_ids=Set{UInt64}(), runtime_targets=Dict{Int,Union{Nothing,URI}}())
 
     cst = derived_julia_legacy_syntax_tree(rt, uri)
 
@@ -83,6 +83,14 @@ Salsa.@derived function derived_all_julia_files(rt)
             if !derived_has_content(rt, included_file)
                 continue
             end
+            # An `include` target is only Julia source if the document itself is
+            # Julia. `include("README.md")` resolves to a file we hold — but
+            # pulling it in here would put a Markdown document into the set every
+            # CST-driven query iterates, and the legacy parser would then be asked
+            # to read prose as Julia.
+            if !_is_julia_uri(rt, included_file)
+                continue
+            end
             if !(included_file in all_files) && !(included_file in files_to_check)
                 push!(files_to_check, included_file)
             end
@@ -103,8 +111,9 @@ only files whose lint state a root rooted at `uri` ever depends on.
 Built by BFS over the per-file, value-stable `derived_includes`, so it depends
 only on the include structure of files *within* the closure — an edit to a file
 outside the closure never invalidates it. Files without content (unresolved or
-missing include targets) are skipped, matching `derived_all_julia_files`. The
-visited set makes self- and cyclic includes terminate.
+missing include targets) are skipped, as are non-Julia ones (`include("x.md")`),
+matching `derived_all_julia_files`. The visited set makes self- and cyclic
+includes terminate.
 """
 Salsa.@derived function derived_include_closure(rt, uri)
     @debug "derived_include_closure" uri=uri
@@ -118,6 +127,7 @@ Salsa.@derived function derived_include_closure(rt, uri)
         for included in derived_includes(rt, current)
             included in closure && continue
             derived_has_content(rt, included) || continue
+            _is_julia_uri(rt, included) || continue
             push!(closure, included)
             push!(queue, included)
         end
@@ -253,8 +263,8 @@ resolved include target (or `nothing` when the path could not be determined
 statically);
 `guarded` marks calls under an existence/definedness-test conditional, for which
 the include diagnostics abstain from MissingFile/DuplicateInclude/ComputedInclude.
-`testitem_ctx` identifies the enclosing testitem-family macrocall for calls
-inside one, which scopes duplicate detection to that body.
+`testitem_ctx` identifies the enclosing testitem-family macrocall or `module`
+block for calls inside one, which scopes duplicate detection to that body.
 The records
 are in source order, which the include-graph diagnostics rely on to flag the
 *repeated* `include` rather than the first one.
@@ -266,21 +276,17 @@ end
 function _include_diagnostic(offset, span, code)
     rng = (offset + 1):(offset + span + 1)
     description = StaticLint.LintCodeDescriptions[code]
-    # Computed and function-body includes are analysis-boundary NOTICES, not
-    # include errors: the rule id rides on the diagnostic so the emission join
-    # routes them (and their severity) to `analysis_boundary`.
-    rule = (code === StaticLint.ComputedInclude || code === StaticLint.RuntimeInclude) ?
-        :analysis_boundary : :include_errors
-    return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl", rule)
+    return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl")
 end
 
 function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited, result)
     push!(stack, uri)
 
-    # A `@testitem`/`@testmodule`/`@testsnippet` body runs in a module of its
-    # own, so including a file there says nothing about whether the same file
-    # was included elsewhere: each body gets its own visited sets, keyed by the
-    # macrocall offset. Including the same file twice *within* one body is
+    # A `@testitem`/`@testmodule`/`@testsnippet` body or a `module` block runs
+    # in a module of its own, so including a file there says nothing about
+    # whether the same file was included elsewhere: each body gets its own
+    # visited sets, keyed by the macrocall or `module` offset. Including the
+    # same file twice *within* one body is
     # still a duplicate, and so is a repeat further down that body's include
     # subtree, which inherits these sets.
     testitem_visited = Dict{Int,Tuple{Set{URI},Set{URI}}}()
@@ -292,28 +298,25 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited,
             get!(() -> (Set{URI}(), Set{URI}()), testitem_visited, testitem_ctx)
 
         if target === nothing
-            # An unattributable include: the target is analyzed without this
-            # module's context and bare missing-reference checking is
-            # unreliable in this module (see
-            # `derived_module_has_computed_include`). One honest notice here
-            # replaces the storm of false missing_reference positives the
-            # unattributed file would otherwise produce. Guarded includes
-            # (`const depsjl = joinpath(...); isfile(depsjl) && include(depsjl)`)
-            # abstain like the rest; the missing-reference relaxation applies
-            # either way.
+            # A computed include path: the target file cannot be attributed,
+            # so it is analyzed without this module's context and bare
+            # missing-reference checking is unreliable in this module (see
+            # `derived_module_has_computed_include`). One honest diagnostic
+            # here replaces the storm of false missing_reference positives
+            # the unattributed file would otherwise produce. Guarded computed
+            # includes (`const depsjl = joinpath(...); isfile(depsjl) &&
+            # include(depsjl)`) abstain like the rest; the missing-reference
+            # relaxation applies either way.
             #
-            # Two flavors: a LITERAL path inside a function body (spliced at
-            # run time — the SciML `@safetestset … include("x.jl")` thunks) is
-            # a runtime boundary whose target can still be existence-checked;
-            # everything else is a computed path.
+            # A LITERAL path inside a function body is spliced at run time —
+            # no static splice context, so still a computed include for
+            # analysis purposes — but its target can be existence-checked:
+            # a missing file is a MissingFile, not a "path could not be
+            # determined" (a `load() = include("x.jl")` thunk).
             rtarget = get(runtime_targets, offset, nothing)
             if !guarded
-                code = if rtarget !== nothing
-                    derived_text_file_content(rt, rtarget) === nothing ?
-                        StaticLint.MissingFile : StaticLint.RuntimeInclude
-                else
-                    StaticLint.ComputedInclude
-                end
+                code = rtarget !== nothing && derived_text_file_content(rt, rtarget) === nothing ?
+                    StaticLint.MissingFile : StaticLint.ComputedInclude
                 push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, code))
             end
             continue
@@ -350,6 +353,14 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited,
 
         push!(seen, target)
         guarded && push!(guarded_seen, target)
+
+        # This walk follows include *targets*, so unlike the other traversals it
+        # is not fed by `derived_all_julia_files` and can reach a non-Julia
+        # document (`include("README.md")`). Loop and duplicate detection above
+        # still counts it; descending would ask the legacy parser to read its
+        # prose as Julia.
+        _is_julia_uri(rt, target) || continue
+
         _collect_include_diagnostics!(rt, target, stack, seen, guarded_seen, result)
     end
 
@@ -390,6 +401,7 @@ Salsa.@derived function derived_all_include_diagnostics(rt)
 end
 
 Salsa.@derived function derived_include_diagnostics(rt, uri)
+    input_v2_enabled(rt) && return derived_include_diagnostics_v2(rt, uri)
     all_diags = derived_all_include_diagnostics(rt)
 
     return get(all_diags, uri, Diagnostic[])

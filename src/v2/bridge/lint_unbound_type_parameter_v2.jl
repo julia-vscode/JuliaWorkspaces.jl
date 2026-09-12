@@ -18,6 +18,13 @@
 # a parameter that is never mentioned again at all is `unused_type_parameter`'s
 # finding and skipped here; a type expression the model cannot interpret (a
 # macro call, a computed type) suppresses the check for that parameter.
+#
+# The rule is v2-only, so the check is NOT in the shared `SYNTAX_CHECKS`
+# tuple (src/lint_syntax_rules/ stays byte-identical to main, and flag-off
+# behaviour with it): `derived_diagnostics_v2` joins the producer query below
+# instead. In src/v2/bridge/ because the producer re-parses through
+# `parse_julia_syntax_tree`, a token the v2 boundary guard forbids in src/v2/
+# itself.
 
 const _UNBOUND_TYPE_PARAMETER_MESSAGE_SUFFIX =
     " is not bound by the argument types of this method and will be undefined when it runs."
@@ -313,5 +320,35 @@ function _check_unbound_type_parameter(emit!, node, _ctx)
     return nothing
 end
 
-const UNBOUND_TYPE_PARAMETER_CHECK =
-    SyntaxCheck(:unbound_type_parameter, (K"function",), _check_unbound_type_parameter)
+function _utp_walk!(emit!, node::SyntaxNode)
+    kind(node) === K"function" && _check_unbound_type_parameter(emit!, node, nothing)
+    JuliaSyntax.is_leaf(node) && return nothing
+    for c in children(node)
+        _utp_walk!(emit!, c)
+    end
+    return nothing
+end
+
+"""
+    derived_unbound_type_parameter_findings(rt, uri) -> Vector{LintFinding}
+
+The `unbound_type_parameter` findings of one file, from a fresh parse (the
+rule is off outside `strict`, and the `enabled` guard in
+`derived_diagnostics_v2` skips this query entirely when it is off, so the
+parse is only paid for by files the rule actually runs on).
+"""
+Salsa.@derived function derived_unbound_type_parameter_findings(rt, uri)
+    @debug "derived_unbound_type_parameter_findings" uri=uri
+
+    tf = derived_text_file_content(rt, uri)
+    tf === nothing && return LintFinding[]
+
+    tree, _ = parse_julia_syntax_tree(tf.content.content)
+    findings = LintFinding[]
+    emit! = (range, message) -> begin
+        push!(findings, LintFinding(range, :unbound_type_parameter, message, nothing, "JuliaWorkspaces.jl"))
+        nothing
+    end
+    _utp_walk!(emit!, tree)
+    return findings
+end

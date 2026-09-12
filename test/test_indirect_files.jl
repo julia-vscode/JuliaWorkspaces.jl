@@ -232,3 +232,113 @@ end
         @test a_uri in roots_for_b
     end
 end
+
+# Cross-file results routinely land in indirect files: a regular root includes
+# a sibling that was never `add_file!`d (single-file mode, a package outside
+# the workspace folders, a workspace over the file cap). Every position that
+# is materialized for such a location must be served from the indirect content,
+# not the regular-file input (which throws `KeyError` for these URIs).
+@testitem "Indirect file: cross-file navigation lands in an indirect file" begin
+    using JuliaWorkspaces: get_references, get_definitions, get_rename_edits,
+        get_hover_text, get_document_symbols
+    using JuliaWorkspaces.URIs2: URI, filepath2uri
+
+    mktempdir() do dir
+        a_path = joinpath(dir, "A.jl")
+        b_path = joinpath(dir, "B.jl")
+        a_src = "include(\"B.jl\")\ncaller() = greet(1)\nfmt(x, p::P) = relpath(x, p)\n"
+        b_src = "greet(name) = 1\nstruct P end\nBase.relpath(x::AbstractString, p::P) = x\n"
+        write(a_path, a_src)
+        write(b_path, b_src)
+
+        a_uri = filepath2uri(a_path)
+        b_uri = filepath2uri(b_path)
+
+        jw = JuliaWorkspace()
+        JuliaWorkspaces.add_file!(jw, TextFile(a_uri, SourceText(a_src, "julia")))
+        @test is_indirect_file(jw, b_uri)
+
+        loc(r) = (r.uri, r.start.line, r.start.column)
+        idx = findfirst("greet", a_src).start
+
+        refs = loc.(get_references(jw, a_uri, idx))
+        @test (a_uri, 2, 12) in refs
+        @test (b_uri, 1, 1) in refs
+
+        @test loc.(get_definitions(jw, a_uri, idx)) == [(b_uri, 1, 1)]
+
+        edits = get_rename_edits(jw, a_uri, idx, "hello")
+        @test (b_uri, 1, 1) in loc.(edits)
+        @test all(e -> e.new_text == "hello", edits)
+
+        # Hover on a Base function lists the workspace overload declared in the
+        # indirect file, linked to its line there.
+        h = get_hover_text(jw, a_uri, findfirst("relpath", a_src).start)
+        @test h !== nothing
+        @test occursin("relpath(x::AbstractString, p::P)", h)
+        @test occursin("[B.jl:3]", h)
+
+        # The outline of the indirect file itself.
+        names = [s.name for s in get_document_symbols(jw, b_uri)]
+        @test "greet" in names
+        @test "P" in names
+    end
+end
+
+# `remove_file!` of a file that still exists on disc does not drop it from the
+# include graph: the including file still names it, so it is demoted from a
+# regular file to an indirect one. Cross-file navigation keeps landing in it.
+@testitem "Indirect file: demotion via remove_file! keeps navigation working" begin
+    using JuliaWorkspaces: get_references, get_definitions, remove_file!
+    using JuliaWorkspaces.URIs2: URI, filepath2uri
+
+    mktempdir() do dir
+        a_path = joinpath(dir, "A.jl")
+        b_path = joinpath(dir, "B.jl")
+        a_src = "include(\"B.jl\")\ncaller() = greet(1)\n"
+        b_src = "greet(name) = 1\n"
+        write(a_path, a_src)
+        write(b_path, b_src)
+
+        a_uri = filepath2uri(a_path)
+        b_uri = filepath2uri(b_path)
+
+        jw = JuliaWorkspace()
+        JuliaWorkspaces.add_file!(jw, TextFile(a_uri, SourceText(a_src, "julia")))
+        JuliaWorkspaces.add_file!(jw, TextFile(b_uri, SourceText(b_src, "julia")))
+        @test !is_indirect_file(jw, b_uri)
+
+        loc(r) = (r.uri, r.start.line, r.start.column)
+        idx = findfirst("greet", a_src).start
+        @test (b_uri, 1, 1) in loc.(get_references(jw, a_uri, idx))
+
+        remove_file!(jw, b_uri)
+        @test !JuliaWorkspaces.has_file(jw, b_uri)
+        @test is_indirect_file(jw, b_uri)
+
+        @test (b_uri, 1, 1) in loc.(get_references(jw, a_uri, idx))
+        @test loc.(get_definitions(jw, a_uri, idx)) == [(b_uri, 1, 1)]
+    end
+end
+
+# `input_text_file` only knows regular files. Everything that renders a
+# position or reads a file's text must go through `derived_text_file_content`,
+# which also serves indirect files; the input itself is an implementation
+# detail of that accessor and of the mutators in `public.jl`.
+@testitem "Indirect file: feature layers never read input_text_file directly" begin
+    src_dir = normpath(joinpath(@__DIR__, "..", "src"))
+    allowed = Set(["inputs.jl", "layer_files.jl", "public.jl"])
+
+    offenders = String[]
+    for (root, _, files) in walkdir(src_dir), f in files
+        endswith(f, ".jl") || continue
+        f in allowed && continue
+        path = joinpath(root, f)
+        for (i, line) in enumerate(eachline(path))
+            occursin("input_text_file(", line) || continue
+            push!(offenders, string(relpath(path, src_dir), ":", i))
+        end
+    end
+
+    @test isempty(offenders)
+end

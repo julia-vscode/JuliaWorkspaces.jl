@@ -75,15 +75,27 @@ Base.@kwdef struct LintRule
     category::Union{Nothing,Symbol} = nothing
 end
 
-# `severity_default` reproduces the severities that were hard-coded before
-# rules became configurable, so an absent config file changes nothing.
-# `severity_strict` follows the convention "everything on, and everything that
-# is merely a hint promoted to a warning"; `severity_minimal` keeps only the
-# checks that catch outright breakage.
+# `severity_default` started out reproducing the severities that were hard-coded
+# before rules became configurable. `severity_strict` follows the convention
+# "everything on, and everything that is merely a hint promoted to a warning";
+# `severity_minimal` keeps only the checks that catch outright breakage.
+#
+# Three rules have since been demoted to `:off` in `default`:
+# `incorrect_call_args`, `missing_reference` and `unresolved_import`. On the
+# 2026-08-12 corpus sweep they accounted for ~92% of all false positives, at
+# sampled FP rates of 93%, 78% and 77% respectively. They share one cause — the
+# analysis cannot see a complete method/symbol set for a callee or import — so
+# they are not independently fixable by rule-local work, and none of them is
+# trustworthy enough to fire on a project that never asked for it. They stay on
+# in `strict`, and a project can restore any of them with a one-line `[rules]`
+# entry. Re-promote only on sweep evidence, and changelog it: a preset floats,
+# so the change reaches every project that names it.
 const LINT_RULES = LintRule[
     # ── StaticLint rules gated by a `LintOptions` field ──────────────────────
+    # Off in `default`: 93% of sampled findings were false positives (2026-08-12
+    # sweep), because the checker's method table is incomplete for most callees.
     LintRule(id = :incorrect_call_args, tier = TierSemantic,
-        severity_default = :information, severity_strict = :warning,
+        severity_default = :off, severity_strict = :warning,
         env_dependent = true,
         codes = [StaticLint.IncorrectCallArgs, StaticLint.FunctionHasNoMethods], category = :call),
     LintRule(id = :incorrect_iter_spec, tier = TierSemantic,
@@ -164,20 +176,28 @@ const LINT_RULES = LintRule[
             StaticLint.IncludePathContainsNULL,
             StaticLint.FileTooBig,
             StaticLint.FileNotAvailable,
+            StaticLint.ComputedInclude,
         ]),
+    # Off in `default`: 78% of sampled findings were false positives, chiefly
+    # names minted by `@eval` loops that no static pass can see.
     LintRule(id = :missing_reference, tier = TierSemantic,
-        severity_default = :warning, severity_strict = :warning,
+        severity_default = :off, severity_strict = :warning,
         env_dependent = true, option_keys = [:scope],
         codes = [StaticLint.MissingRef]),
+    # Off in `default`: 77% of sampled findings were false positives, chiefly
+    # `using X` in `ext/` where X is a `[weakdeps]` trigger.
     LintRule(id = :unresolved_import, tier = TierSemantic,
-        severity_default = :warning, severity_strict = :warning,
+        severity_default = :off, severity_strict = :warning,
         env_dependent = true,
         codes = [StaticLint.UnresolvedImport]),
 
     # ── Purely syntactic rules (see lint_syntax_rules.jl) ────────────────────
     # New rules ship `:off` outside `strict` so an upgrade never switches them
     # on for existing projects; promotion to default-on is a deliberate,
-    # sweep-validated release decision.
+    # sweep-validated release decision. The one exception is
+    # `detached_docstring`, and even it caps at `:warning`: no new rule may
+    # enter `default` at `:error`, so an upgrade never flips `julialint`'s
+    # exit code.
     LintRule(id = :nan_comparison, tier = TierSyntax,
         severity_default = :off, severity_strict = :warning,
         doc_link = URI("https://docs.julialang.org/en/v1/base/numbers/#Base.isnan")),
@@ -191,11 +211,12 @@ const LINT_RULES = LintRule[
         severity_default = :off, severity_strict = :warning),
     LintRule(id = :async_task, tier = TierSyntax,
         severity_default = :off, severity_strict = :warning),
-    # Aqua.jl's `test_unbound_args`, statically: a method `where` parameter no
-    # argument type binds, so it is undefined when the method runs (e.g.
-    # `f(::T...) where T` called with zero arguments).
-    LintRule(id = :unbound_type_parameter, tier = TierSyntax,
-        severity_default = :off, severity_strict = :warning),
+    # The text is discarded outright rather than a style opinion, so it does not
+    # follow the `:off`-by-default convention for a new rule. `:warning`, not
+    # `:error`: the detector is a heuristic, and only the definitional
+    # breakage rules below may fail CI out of the box.
+    LintRule(id = :detached_docstring, tier = TierSyntax,
+        severity_default = :warning, severity_strict = :warning),
 
     # ── Rules backed by analyses other than StaticLint ───────────────────────
     # Shapes JuliaLowering rejects (v2 lowering producer, behind the lowering
@@ -256,12 +277,13 @@ const LINT_RULES = LintRule[
     # strict preset) to be told what blocks analysis, and get the full
     # diagnostic set back by avoiding those constructs.
     LintRule(id = :analysis_boundary, tier = TierWorkspace,
-        severity_minimal = :off, severity_default = :off, severity_strict = :warning,
-        codes = [StaticLint.ComputedInclude, StaticLint.RuntimeInclude]),
+        severity_minimal = :off, severity_default = :off, severity_strict = :warning),
 
     # ── Package-quality rules (ported from Aqua.jl) ──────────────────────────
-    # Like the syntactic rules, these ship `:off` outside `strict` so an
-    # upgrade never switches them on for existing projects.
+    # All four are v2-only producers (their queries are reached only through
+    # `derived_diagnostics_v2`, like `project_file_errors`), and like the
+    # syntactic rules they ship `:off` outside `strict` so an upgrade never
+    # switches them on for existing projects.
     # Aqua's `test_deps_compat`: a package should have a `[compat]` entry for
     # `julia` and for every `[deps]`/`[extras]`/`[weakdeps]` entry, stdlibs
     # included. Options gate the julia/extras/weakdeps checks and exempt
@@ -276,6 +298,11 @@ const LINT_RULES = LintRule[
     LintRule(id = :unused_dependency, tier = TierWorkspace,
         severity_default = :off, severity_strict = :warning,
         option_keys = [:ignore]),
+    # Aqua's `test_unbound_args`, statically: a method `where` parameter no
+    # argument type binds, so it is undefined when the method runs (e.g.
+    # `f(::T...) where T` called with zero arguments).
+    LintRule(id = :unbound_type_parameter, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
     # Aqua's `test_undocumented_names`, statically: an exported/`public` name a
     # workspace package declares without a docstring, or a submodule without a
     # module docstring (the root module falls back to the README). Re-exported
@@ -373,15 +400,15 @@ Base.isequal(a::EffectiveLintConfig, b::EffectiveLintConfig) = _lint_config_fiel
 Base.hash(c::EffectiveLintConfig, h::UInt) =
     hash(c.severities, hash(c.options, hash(c.selected, hash(EffectiveLintConfig, h))))
 
+# No severity fallback: every preset classifies every rule (by construction),
+# and an effective config always starts from a preset, so a miss here means the
+# caller passed something that is not a rule id — which should be loud.
 """
     rule_severity(config, rule_id) -> Symbol
 
 The configured severity of `rule_id`, or its `default` preset severity when the
 config does not mention it.
 """
-# No severity fallback: every preset classifies every rule (by construction),
-# and an effective config always starts from a preset, so a miss here means the
-# caller passed something that is not a rule id — which should be loud.
 rule_severity(config::EffectiveLintConfig, rule_id::Symbol) =
     get(config.severities, rule_id, _PRESET_DEFAULT[rule_id])
 

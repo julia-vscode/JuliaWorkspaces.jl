@@ -160,7 +160,7 @@ One `@testitem`/`@testmodule`/`@testsnippet`, as the walker sees it (design doc
 §13.4). Position-free BY OMISSION: no ranges and no `code` string, so the record
 backdates on any edit that does not change the label, an option, or the item
 set. Ranges and the code slice are reattached from `derived_v2_file_maps` at the
-emission join (`derived_v2_testitem_details`), the same last-mile split the lint
+emission join (`derived_testitems_v2`), the same last-mile split the lint
 findings use.
 
 `id` is the walker's item id — the one id authority — so "did this test's body
@@ -1502,7 +1502,7 @@ end
 Projection of the skeleton's test records, so consumers backdate on any edit
 that does not change a label, an option, or the set of items — including every
 position-only edit and every body edit. The volatile half (ranges, `code`) is
-reattached in `derived_v2_testitem_details` (layer_testitems.jl).
+reattached in `derived_testitems_v2` (layer_testitems_v2.jl).
 """
 Salsa.@derived function derived_v2_file_testitems(rt, uri)
     skel = derived_v2_file_skeleton(rt, uri)

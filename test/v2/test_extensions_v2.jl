@@ -18,6 +18,7 @@
     """
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///ext/Foo/Project.toml"), SourceText(project, "toml")))
     add_file!(jw, TextFile(URI("file:///ext/Foo/src/Foo.jl"), SourceText("module Foo end", "julia")))
     add_file!(jw, TextFile(URI("file:///ext/Foo/ext/FooBarExt.jl"), SourceText("module FooBarExt end", "julia")))
@@ -73,6 +74,7 @@ end
     """
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///ext/Foo/Project.toml"), SourceText(project, "toml")))
     add_file!(jw, TextFile(URI("file:///ext/Foo/Manifest.toml"), SourceText(manifest, "toml")))
     add_file!(jw, TextFile(URI("file:///ext/Foo/src/Foo.jl"), SourceText("module Foo end", "julia")))
@@ -110,6 +112,7 @@ end
     """
 
     jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
     add_file!(jw, TextFile(URI("file:///ext/Foo/Project.toml"), SourceText(project, "toml")))
     add_file!(jw, TextFile(URI("file:///ext/Foo/src/Foo.jl"), SourceText("module Foo end", "julia")))
     add_file!(jw, TextFile(URI("file:///ext/Foo/ext/FooBarExt.jl"), SourceText("module FooBarExt end", "julia")))

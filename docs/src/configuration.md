@@ -263,9 +263,11 @@ rules run on the JuliaSyntax tree of a single file alone
 | `bare_using` | `using Foo` without an explicit name list; prefer `using Foo: x, y` or `import Foo`. |
 | `debug_statement` | A leftover `@show`. |
 | `async_task` | `@async`, which pins the task to the current thread; consider `Threads.@spawn`. |
-| `unbound_type_parameter` | A method `where` parameter no argument type binds, so it is undefined when the method runs (`f(::T...) where T` with zero arguments). Mirrors `Test.detect_unbound_args`; see [Package-quality rules](@ref). |
+| `detached_docstring` | A string that looks like a docstring but is not attached to anything, because a comment or a blank line sits between it and the expression it documents. The text is evaluated and discarded. |
 
-All of these are currently `"off"` outside the `strict` preset.
+All of these are `"off"` outside the `strict` preset, except `detached_docstring`,
+which reports as a warning in every preset but `minimal`: a severed docstring
+discards its text outright rather than expressing a style preference.
 
 ### Severities
 
@@ -318,6 +320,10 @@ A preset name **floats**: it tracks the tool rather than pinning a frozen rule
 set, so upgrading the tooling can change what a preset reports. To keep that
 from breaking projects on upgrade, a rule that did not exist before enters
 existing presets as `"off"`; promoting it is a deliberate, changelogged change.
+The one exception so far is `detached_docstring`, which found its way into
+`default` directly because its finding is outright discarded program text — and
+even that class of rule enters at `"warning"` at most, never `"error"`, so an
+upgrade can never change `julialint`'s exit status.
 Version-pinning syntax (`preset = "default@2"`) may be added later — bare names
 will keep floating, so nothing written today changes meaning.
 
@@ -325,21 +331,52 @@ Every preset must classify every rule. This is enforced when `lint_rules.jl`
 loads, so a rule added without a decision fails the build rather than appearing
 in everyone's `default` at whatever severity a fallback happened to pick.
 
+### Rules that are off by default
+
+Three rules are classified `off` in `default` despite being long-standing
+checks: `incorrect_call_args`, `missing_reference` and `unresolved_import`.
+
+They share a limitation. Each needs a complete picture of something the
+analysis often cannot see in full — the method set of a callee, every name a
+module actually defines, the environment an import resolves against. Where that
+picture is incomplete the rule reports anyway, and on a corpus sweep of the 100
+most-depended-upon registered packages their sampled false-positive rates were
+93%, 78% and 77% respectively, together accounting for roughly 92% of every
+false positive measured. A check that is wrong more often than right should not
+fire on a project that never asked for it.
+
+All three remain on in `strict`, and any project can restore one:
+
+```toml
+[rules]
+missing_reference = "warning"
+```
+
+They are worth turning on deliberately — they find real bugs, and the sweep that
+measured their false positives also turned up genuine `UndefVarError`s and
+`MethodError`s through them. Expect to spend time tuning around the noise.
+
+Note that an untitled/unsaved buffer has no path, so no `JuliaLint.toml` can
+govern it; such buffers always lint under `default` and cannot opt back in.
+
 ### The rules
 
 | Rule | Default | Reports |
 | --- | --- | --- |
 | `syntax_errors` | `error` | Julia syntax errors |
 | `syntax_warnings` | `off` | Julia syntax warnings |
-| `lowering_errors` | `error` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — the file will not load. Experimental, requires the lowering-lint flag; when active it supersedes `duplicate_function_argument`/`break_continue`/`global_const_decl` |
-| `soft_scope_ambiguity` | `information` | Julia's soft-scope ambiguity warning, statically: an un-annotated assignment in a top-level `for`/`while`/`try` to a name that is also a plain module global (Julia warns at run time and treats it as a new local). Experimental, requires the lowering-lint flag |
-| `analysis_boundary` | `off` | Opt-in: one notice per construct the linter cannot see through (a computed or function-body `include`, an interpolated `@eval`, a runtime `eval`, a `using`/`import` inside `try`/`if`, a macro whose expansion failed) naming the rules it silences in that module. See [Analysis boundaries](@ref) |
+| `lowering_errors` | `error` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — the file will not load. v2 only (`set_v2_enabled!`); when active it supersedes `duplicate_function_argument`/`break_continue`/`global_const_decl` |
+| `soft_scope_ambiguity` | `information` | Julia's soft-scope ambiguity warning, statically: an un-annotated assignment in a top-level `for`/`while`/`try` to a name that is also a plain module global (Julia warns at run time and treats it as a new local). v2 only (`set_v2_enabled!`) |
+| `analysis_boundary` | `off` | Opt-in: one notice per construct the linter cannot see through (a computed or function-body `include`, an interpolated `@eval`, a runtime `eval`, a `using`/`import` inside `try`/`if`, a macro whose expansion failed) naming the rules it silences in that module. v2 only (`set_v2_enabled!`); see [Analysis boundaries](@ref) |
 | `testitem_errors` | `error` | Malformed `@testitem` blocks |
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
+| `project_file_errors` | `error` | Structure in a `Project.toml` that Pkg rejects (a malformed uuid, an extension trigger that is no declared weakdep, a `[sources]` entry with neither url nor path). v2 only (`set_v2_enabled!`) |
+| `project_file_warnings` | `warning` | Inconsistencies Pkg tolerates until the section is used (a target dep missing from `[extras]`, a stale manifest, a dangling `[sources]`/`[workspace]` path). v2 only (`set_v2_enabled!`) |
+| `manifest_errors` | `info` | A `Manifest.toml` shape the tooling cannot interpret. v2 only (`set_v2_enabled!`) |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |
 | `shadowed_config` | `info` | A config file that supersedes another of the same kind in an enclosing directory |
 | `environment_errors` | `info` | A project/test environment that could not be resolved, reported on its `Project.toml` |
-| `incorrect_call_args` | `info` | Wrong argument count/type; calls to method-less functions |
+| `incorrect_call_args` | `off` | Wrong argument count/type; calls to method-less functions. Off by default; see “Rules that are off by default” below |
 | `incorrect_iter_spec` | `info` | Loop iterators that will likely error |
 | `index_from_length` | `info` | Indexing off `1:length(...)`/`1:size(...)` instead of `eachindex`/`axes`. Ranges that don't start at 1 (`2:length(x)`) are not flagged — they have no direct rewrite |
 | `nothing_comparison` | `info` | `== nothing` / `!= nothing` instead of `isnothing`/`===` |
@@ -359,14 +396,19 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 | `unused_binding` | `hint` | Variables assigned but never used |
 | `relative_import` | `off` | A relative import with more dots than available nesting |
 | `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
-| `missing_reference` | `warning` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default) |
-| `unresolved_import` | `warning` | Imports whose target could not be resolved |
-| `missing_compat` | `off` | A package `[deps]`/`[extras]`/`[weakdeps]` entry (stdlibs included) or `julia` without a `[compat]` entry. Options: `check_julia`, `check_extras`, `check_weakdeps` (booleans, default `true`), `ignore` (array of names) |
-| `unused_dependency` | `off` | A package `[deps]` entry that no `using`/`import` in the package's source (or its extensions) references. Option: `ignore` (array of names) |
-| `unbound_type_parameter` | `off` | A method `where` parameter no argument type binds (undefined at run time) |
-| `undocumented_public_name` | `off` | An exported/`public` name a workspace package declares without a docstring; a submodule without a module docstring |
+| `missing_reference` | `off` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default). Off by default; see “Rules that are off by default” below |
+| `unresolved_import` | `off` | Imports whose target could not be resolved. Off by default; see “Rules that are off by default” below |
+| `missing_compat` | `off` | A package `[deps]`/`[extras]`/`[weakdeps]` entry (stdlibs included) or `julia` without a `[compat]` entry. Options: `check_julia`, `check_extras`, `check_weakdeps` (booleans, default `true`), `ignore` (array of names). v2 only (`set_v2_enabled!`) |
+| `unused_dependency` | `off` | A package `[deps]` entry that no `using`/`import` in the package's source (or its extensions) references. Option: `ignore` (array of names). v2 only (`set_v2_enabled!`) |
+| `unbound_type_parameter` | `off` | A method `where` parameter no argument type binds (undefined at run time). v2 only (`set_v2_enabled!`) |
+| `undocumented_public_name` | `off` | An exported/`public` name a workspace package declares without a docstring; a submodule without a module docstring. v2 only (`set_v2_enabled!`) |
 
 ### Package-quality rules (Aqua.jl parity)
+
+!!! note "v2 only"
+    All four rules in this section are produced by the v2 analysis stack, i.e.
+    a workspace with `set_v2_enabled!(jw, true)`. With the flag off (the
+    default) they emit nothing, whatever their configured severity.
 
 Four rules port the statically-checkable parts of
 [Aqua.jl](https://github.com/JuliaTesting/Aqua.jl)'s package-quality test
@@ -390,6 +432,13 @@ and a `test/Project.toml` comparison that only matters for packages
 supporting Julia ≤ 1.1).
 
 ### Analysis boundaries
+
+!!! note "v2 only"
+    Everything in this section describes the v2 analysis stack, i.e. a
+    workspace with `set_v2_enabled!(jw, true)`. With the flag off (the
+    default) the behaviour is the legacy one: a computed include is an
+    `include_errors` warning, no `analysis_boundary` notice exists, and an
+    unresolved import is always reported as `unresolved_import`.
 
 Some constructs put part of a program beyond static analysis: an `include`
 whose path is computed or that runs inside a function body, an `@eval` with
@@ -551,6 +600,53 @@ Every value reachable from a config struct has well-defined `==` and `hash`
 (`GlobPattern` compares by its written pattern, not its compiled regex) so that
 Salsa can backdate correctly when a config edit turns out not to change the
 effective result.
+
+### Scope can prune the directory walk
+
+Scope is resolved per file by the queries above, which is what a language server
+needs: it must still see a file no config selected in order to answer
+go-to-definition across it.
+
+A batch tool does not. `juliati` in a repository that keeps a few hundred
+thousand `.jl` files of test data under an excluded directory should never
+`readdir` that directory at all — the ~64 s spent listing such a tree dwarfs the
+~35 ms of listing `src/` and `test/`. So the walk itself can honour one or more
+config kinds:
+
+```julia
+JuliaWorkspaces.workspace_from_folders([path]; scope=:testitems)
+```
+
+`scope` is a `Symbol` or a collection of them, drawn from `:testitems`, `:lint`
+and `:format`; the default `nothing` walks everything, exactly as before.
+[`collect_workspace_paths`](@ref) does the walking and documents the details.
+
+Three properties make this safe:
+
+- **Directory pruning is conservative.** A directory is skipped only when no
+  file below it could be selected — decided by `dir_selected`, which asks
+  whether an `exclude` pattern covers the whole subtree and whether any
+  `include` pattern could still match beneath it. `exclude = ["src/*"]` prunes
+  each directory directly inside `src`, but never `src` itself.
+- **Nested configs still compose.** Because a nested config may only
+  [narrow scope](#scope-every-enclosing-file-must-admit-the-file), a directory
+  ruled out by an ancestor can never be reclaimed below it, so it is safe to
+  stop descending there. Config files themselves are always read from a
+  surviving directory, so they keep reporting their own diagnostics.
+- **Several kinds compose as a union.** A caller building one workspace to serve
+  lint, format and test-item queries alike passes all three kinds, and a file any
+  one of them wants is read. A kind with no config file of its own selects
+  everything, so asking for several kinds prunes only what all of them exclude.
+
+A malformed config file fails open — it prunes nothing, and its `config_errors`
+diagnostic is reported as usual once it is part of the workspace.
+
+The one thing to know before excluding a subtree: **its `Project.toml` and
+`Manifest.toml` are not read either.** A package that is in scope but whose test
+environment reaches into the excluded subtree — through `[sources]`, or a
+relative `dev` path — will have that environment resolved incompletely. Exclude
+directories that hold data, not directories that hold environments an in-scope
+package depends on.
 
 ### Where rules are applied
 

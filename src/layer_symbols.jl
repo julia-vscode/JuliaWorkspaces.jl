@@ -273,7 +273,10 @@ function _get_document_symbols(runtime, uri::URI)
     # as `derived_julia_legacy_syntax_tree`, so objectids line up.
     meta_dict = derived_file_analysis(runtime, root, uri).meta
     cst = derived_julia_legacy_syntax_tree(runtime, uri)
-    st = input_text_file(runtime, uri).content
+    cst === nothing && return DocumentSymbolResult[]
+    # `uri` may be an indirect file (hosts enumerate `get_julia_files`, which
+    # includes them), so read through the indirect-aware accessor.
+    st = derived_text_file_content(runtime, uri).content
 
     return _collect_document_symbols(cst, meta_dict, st)
 end

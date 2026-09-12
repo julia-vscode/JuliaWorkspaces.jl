@@ -1,6 +1,6 @@
 # v2 visibility layer (layer_visibility_v2.jl): unit tests, mirroring v1's
 # suite in test/test_module_tree.jl. External targets resolve through the env
-# seam (src/layer_v2_env_seam.jl). These workspaces have no project, so the
+# seam (src/v2/bridge/layer_v2_env_seam.jl). These workspaces have no project, so the
 # env is load_core()'s bake — `Base`/`Core` (and nested submodules) have
 # stores; `Printf`/`Downloads` are genuinely MISSING stores here, which is
 # what makes them the store-missing fixtures below.
