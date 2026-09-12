@@ -340,10 +340,10 @@ parse is only paid for by files the rule actually runs on).
 Salsa.@derived function derived_unbound_type_parameter_findings(rt, uri)
     @debug "derived_unbound_type_parameter_findings" uri=uri
 
-    tf = derived_text_file_content(rt, uri)
-    tf === nothing && return LintFinding[]
+    content = derived_julia_source_view(rt, uri)
+    content === nothing && return LintFinding[]
 
-    tree, _ = parse_julia_syntax_tree(tf.content.content)
+    tree, _ = parse_julia_syntax_tree(content)
     findings = LintFinding[]
     emit! = (range, message) -> begin
         push!(findings, LintFinding(range, :unbound_type_parameter, message, nothing, "JuliaWorkspaces.jl"))

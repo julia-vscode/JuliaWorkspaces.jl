@@ -323,9 +323,10 @@ Salsa.@derived function derived_diagnostics(rt, uri)
     emit!(range, rule_id, message, related_uri, source) =
         emit_finding!(LintFinding(range, rule_id, message, related_uri, source))
 
-    # Julia-content diagnostics run for file-scheme .jl files AND non-file
-    # (e.g. untitled) buffers whose language is julia.
-    if _is_julia_uri(rt, uri)
+    # Julia-content diagnostics run for file-scheme .jl files, non-file
+    # (e.g. untitled) buffers whose language is julia, AND markdown documents,
+    # whose Julia view (layer_markdown.jl) puts every range inside a fence.
+    if _is_julia_analysis_uri(rt, uri)
         # The `enabled` guards below do not filter (materialize does); they skip
         # running a producer query at all when nothing it can emit is on.
         if enabled(:syntax_errors) || enabled(:syntax_warnings)

@@ -15,6 +15,7 @@ makedocs(
         "Architecture" => "architecture.md",
         "Configuration" => "configuration.md",
         "TomlSyntax" => "tomlsyntax.md",
+        "MarkdownSyntax" => "markdownsyntax.md",
         "Functions" => "functions.md",
         "Types" => "types.md"
     ])

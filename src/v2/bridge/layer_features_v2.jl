@@ -123,9 +123,9 @@ function v2_item_docstring(rt, ref::V2ItemRef)
     r = v2_item_doc_range(rt, ref.file, ref.id)
     r === nothing && return nothing
     derived_has_content(rt, ref.file) || return nothing
-    tf = derived_text_file_content(rt, ref.file)
-    tf === nothing && return nothing
-    text = tf.content.content
+    # The Julia view: parse-derived ranges are sliced against what was parsed.
+    text = derived_julia_source_view(rt, ref.file)
+    text === nothing && return nothing
     (1 <= first(r) && last(r) - 1 <= ncodeunits(text)) || return nothing
     slice = text[first(r):(last(r) - 1)]
     return try
@@ -966,12 +966,11 @@ end
 # whitespace so multi-line signatures read as one line. Plain functions, like
 # everything in this file: the map is the volatile last-mile leaf.
 
-"Slice `uri`'s text at 1-based exclusive-end range `r`, or `nothing`."
+"Slice `uri`'s Julia view at 1-based exclusive-end range `r`, or `nothing`."
 function _v2f_slice(rt, uri::URI, r::UnitRange{Int})
     derived_has_content(rt, uri) || return nothing
-    tf = derived_text_file_content(rt, uri)
-    tf === nothing && return nothing
-    text = tf.content.content
+    text = derived_julia_source_view(rt, uri)
+    text === nothing && return nothing
     (1 <= first(r) && last(r) - 1 <= ncodeunits(text)) || return nothing
     return text[first(r):(last(r) - 1)]
 end
@@ -1419,9 +1418,10 @@ function _get_signature_help_v2(runtime, uri::URI, offset0::Int)
     isempty(sigs) && return nothing
 
     # v1's active-parameter rule: LPAREN → 0, else the call's comma count.
-    tf = derived_text_file_content(runtime, uri)
-    tf === nothing && return nothing
-    text = tf.content.content
+    # Scanned on the Julia view, so commas in a markdown document's prose
+    # (blanked there) can never be counted.
+    text = derived_julia_source_view(runtime, uri)
+    text === nothing && return nothing
     call_range = view.ranges[call_addr]
     child_addrs = _v2_child_addresses(call, call_addr)
     child_ranges = [view.ranges[a] for a in child_addrs if 1 <= a <= length(view.ranges)]

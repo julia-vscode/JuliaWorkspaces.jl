@@ -1963,20 +1963,24 @@ end
     @test any(d -> occursin("JSON", d.message), new)  # the real-package import now flags
 end
 
-@testitem "derived_julia_files admits untitled Julia buffers, not markdown" begin
+@testitem "derived_julia_files admits untitled Julia buffers and markdown buffers" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI
 
     jw = JuliaWorkspace()
     jl = URI("untitled:Untitled-1")
     md = URI("untitled:Untitled-2")
+    toml = URI("untitled:Untitled-3")
     add_file!(jw, TextFile(jl, SourceText("x = 1\n", "julia")))
     add_file!(jw, TextFile(md, SourceText("# hi\n", "markdown")))
+    add_file!(jw, TextFile(toml, SourceText("a = 1\n", "toml")))
 
     julia_files = JuliaWorkspaces.derived_julia_files(jw.runtime)
 
     @test jl in julia_files
-    @test !(md in julia_files)
+    # Markdown buffers are analyzed through their Julia view (layer_markdown.jl).
+    @test md in julia_files
+    @test !(toml in julia_files)
 
     # value-stable language query
     @test JuliaWorkspaces.derived_file_language_id(jw.runtime, jl) == "julia"
@@ -1997,10 +2001,11 @@ end
 
     julia_files = JuliaWorkspaces.derived_julia_files(jw.runtime)
 
-    # Root admission agrees with `_is_julia_uri` (the diagnostics gate): the raw
-    # `.jl`-suffix no longer decides it.
+    # Root admission agrees with `_is_julia_analysis_uri` (the diagnostics
+    # gate): the raw `.jl`-suffix no longer decides it. A `.jl`-suffixed buffer
+    # tagged markdown is not *Julia*, but it is admitted as a markdown root.
     @test upper in julia_files
-    @test !(untitled_jl_md in julia_files)
+    @test untitled_jl_md in julia_files
     @test untitled_julia in julia_files
     @test JuliaWorkspaces._is_julia_uri(jw.runtime, upper)
     @test !JuliaWorkspaces._is_julia_uri(jw.runtime, untitled_jl_md)
@@ -2028,8 +2033,9 @@ end
 
     uri = URI("untitled:Untitled-2")
     jw = JuliaWorkspace()
-    # Content that is a Julia syntax error but the buffer is markdown: it must
-    # not be parsed as Julia, so no diagnostics.
+    # Content that is a Julia syntax error but the buffer is markdown: only
+    # fenced Julia chunks are parsed as Julia, and prose is blanked in the
+    # Julia view, so no diagnostics.
     add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "markdown")))
 
     diags = get_diagnostic(jw, uri)
