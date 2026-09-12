@@ -21,7 +21,7 @@
         "layer_syntax_trees.jl" => 1,   # derived_toml_parse_result
         "layer_projects.jl" => 3,       # derived_package / derived_project / derived_nonpackage_env
         "layer_environment.jl" => 4,    # project_uri_for_root / _test_environment_key / file_env_ready / required_dynamic_projects
-        "layer_includes.jl" => 2,       # derived_file_include_data / derived_include_diagnostics
+        "layer_includes.jl" => 1,       # derived_include_diagnostics
         "layer_diagnostics.jl" => 1,    # derived_diagnostics
         "layer_file_analysis.jl" => 1,  # derived_new_static_lint_diagnostics
         "layer_testitems.jl" => 1,      # derived_testitems
@@ -174,14 +174,18 @@ end
     )
 
     off = snapshot()
-    # v1: a manifest-less folder is not a project, and no extension-environment
-    # work item exists.
-    @test off[3][3] === nothing
+    # v1: a manifest-less workspace member borrows the root's manifest wholesale
+    # (every root entry is its dependency), and no extension-environment work
+    # item exists.
+    @test off[3][3] !== nothing && off[3][3].manifest_file_uri == URI("file:///mono/Manifest.toml")
+    @test Set(keys(off[3][3].deved_packages)) == Set(["Root", "Pkg"])
     @test !any(k -> nameof(typeof(k)) === :ResolveExtensionEnvironmentKey, off[2])
 
     set_v2_enabled!(jw, true)
     on = snapshot()
-    @test on[3][3] !== nothing                         # the test member is a synthesized project
+    # v2: the member is synthesized from its own `[deps]` closure over the root
+    # manifest, not from every root entry.
+    @test Set(keys(on[3][3].deved_packages)) == Set(["Pkg"])
     @test on != off
 
     set_v2_enabled!(jw, false)

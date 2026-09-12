@@ -16,7 +16,6 @@ reparse (objectids are fresh), but `derived_includes` /
 """
 Salsa.@derived function derived_file_include_data(rt, uri)
     @debug "derived_file_include_data" uri=uri
-    input_v2_enabled(rt) && return derived_file_include_data_v2(rt, uri)
 
     tf = derived_text_file_content(rt, uri)
     tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing},Bool,Union{Nothing,Int}}[], computed_ids=Set{UInt64}(), runtime_targets=Dict{Int,Union{Nothing,URI}}())

@@ -2,34 +2,8 @@
 # `derived_testitems` (layer_testitems.jl gates to it). Detection comes off
 # the v2 skeleton (`derived_v2_file_testitems`), so position-only and body
 # edits backdate instead of re-detecting; everything below detection is the
-# same assembly as v1's, copied here as `_assemble_test_details`.
-
-# Typed plain-data capture of `TestItemDetection.find_test_detail!` output.
-# Ranges are STRING-INDEX ranges with an inclusive end (`our_range`), unlike
-# the byte/exclusive-end ranges used elsewhere — they are consumed by
-# `_assemble_test_details`, which slices file text with them directly.
-@auto_hash_equals struct RawTestItemDetail
-    name::String
-    range::UnitRange{Int64}
-    code_range::UnitRange{Int64}
-    option_default_imports::Bool
-    option_tags::Vector{Symbol}
-    option_setup::Vector{Symbol}
-    option_skip::Union{Bool,UnitRange{Int64}}   # range = source of a non-literal skip expression
-end
-
-@auto_hash_equals struct RawTestSetupDetail
-    name::Symbol
-    kind::Symbol            # :module | :snippet
-    range::UnitRange{Int64}
-    code_range::UnitRange{Int64}
-end
-
-@auto_hash_equals struct RawTestErrorDetail
-    name::String
-    message::String
-    range::UnitRange{Int64}
-end
+# same assembly as v1's, copied here as `_assemble_test_details` over the
+# `RawTest*Detail` records of main's fused parse (layer_parse_products.jl).
 
 """
     _assemble_test_details(rt, uri, text, testitems, testsetups, testerrors) -> TestDetails

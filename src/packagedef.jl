@@ -44,7 +44,7 @@ include("lint_emission.jl")
 
 include("layer_file_analysis.jl")
 include("layer_static_lint.jl")
-include("layer_includes_staticlint_v2.jl")
+include("layer_include_diagnostics_v2.jl")
 include("layer_test_setups.jl")
 include("layer_project_files_v2.jl")
 include("layer_workspaces_v2.jl")

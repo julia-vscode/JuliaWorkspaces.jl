@@ -71,22 +71,6 @@ Salsa.@derived function derived_environment_error_messages_v2(rt, uri)
     return unique!(sort!(messages))
 end
 
-# The folder whose Project.toml a key's failure is about. A test-environment
-# key names the package under test: its own project file is the closest file
-# the user can act on — not the (workspace) project that devs it, where every
-# synthesized member and every `test/Project.toml` would repeat the message
-# (Plots' monorepo: one failed `StatsPlots` test env on 13 project files).
-_failure_folder_uri(rt, key) = filepath2uri(_key_folder_path(key))
-function _failure_folder_uri(rt, key::WatchTestEnvironmentKey)
-    project_uri = filepath2uri(key.project_path)
-    project = derived_project_v2(rt, project_uri)
-    if project !== nothing
-        deved = get(project.deved_packages, key.package_name, nothing)
-        deved === nothing || return deved.uri
-    end
-    return project_uri
-end
-
 """
     _environment_error_range(rt, uri, pf, message) -> UnitRange{Int}
 

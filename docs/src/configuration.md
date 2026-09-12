@@ -394,7 +394,7 @@ govern it; such buffers always lint under `default` and cannot opt back in.
 | `global_const_decl` | `info` | Type declarations on globals; `const` on locals |
 | `const_decl` | `info` | Invalid `const` declarations and redefinitions |
 | `unused_binding` | `hint` | Variables assigned but never used |
-| `relative_import` | `info` | A relative import with more dots than available nesting |
+| `relative_import` | `off` | A relative import with more dots than available nesting |
 | `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
 | `missing_reference` | `off` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default). Off by default; see “Rules that are off by default” below |
 | `unresolved_import` | `off` | Imports whose target could not be resolved. Off by default; see “Rules that are off by default” below |

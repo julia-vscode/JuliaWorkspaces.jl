@@ -113,7 +113,7 @@ From the bottom up:
 | `layer_toml_tree.jl` | v2 twin of the TOML parse: the `TomlSyntax` parse products (table plus diagnostics at real ranges) and the TOML item walk (skeleton, bodies, maps), the v2 pattern applied to TOML. |
 | `layer_includes.jl` | The `include(...)` graph and its roots. |
 | `layer_static_lint.jl` | Semantic analysis via StaticLint's `semantic_pass`. |
-| `layer_includes_staticlint_v2.jl` | v2 twin of the include analysis: a copy of StaticLint's include walker that skips quoted code, scopes duplicates per `module`/`@safetestset` body and reports function-body includes as runtime boundaries. |
+| `layer_include_diagnostics_v2.jl` | v2 twin of the include diagnostics: the same walk, but computed and function-body includes are analysis-boundary notices instead of `include_errors` warnings. |
 | `layer_project_files_v2.jl` | v2 only: full-fidelity `Project.toml`/`Manifest.toml` parse products (`JuliaProjectFile`, `JuliaManifestFile`) with position-free problem records for every malformed or inconsistent section (located via the TOML item walk at the diagnostics last mile). |
 | `layer_workspaces_v2.jl` | v2 only: `[workspace]` discovery — which folder is a member of which workspace, resolved upward to the outermost root the way Pkg does it. |
 | `layer_projects.jl` | Project/package discovery from `Project.toml`/`Manifest.toml`. |
@@ -122,7 +122,7 @@ From the bottom up:
 | `layer_environment.jl` | Resolving which project/environment a file belongs to and building its `ExternalEnv`. |
 | `layer_environment_v2.jl` | v2 twin of the environment selection: extension files, deeper env folders, workspace members (a `test/` project included, gating on and resolving through the root's single watch item), package scripts against the active project, extension-environment work items. |
 | `layer_testitems.jl` | `@testitem` / test-setup detection. |
-| `layer_testitems_v2.jl` | v2 twin: detection off the v2 skeleton, the same assembly below it. |
+| `layer_testitems_v2.jl` | v2 twin: detection off the v2 skeleton, the same assembly below it over the fused parse's `RawTest*Detail` records. |
 | `layer_diagnostics.jl` | Aggregating syntax, lint, test, and TOML diagnostics, gated by configuration (see [Configuration](configuration.md)). |
 | `layer_diagnostics_v2.jl` | v2 twin of the diagnostics join: the lowering producer's takeover, analysis-boundary notices, project/manifest problems, located environment errors. |
 | `layer_hover.jl`, `layer_completions.jl`, `layer_references.jl`, `layer_signatures.jl`, `layer_symbols.jl`, `layer_navigation.jl`, `layer_actions.jl`, `layer_formatting.jl`, `layer_misc.jl` | LSP-feature query layers. |

@@ -57,7 +57,13 @@ Salsa.@derived function derived_project_v2(rt, uri)
 
     # A folder without a manifest of its own may still be a project: a
     # `[workspace]` member resolves against the outermost root's manifest.
-    if manifest_file === nothing || manifest_file.scheme != "file"
+    # v1's folder table already hands a member its declaring parent's
+    # manifest (`derived_potential_project_folders`); for v2 a manifest that
+    # is not in the folder itself is still "no manifest of its own", so the
+    # member is synthesized from its `[deps]` closure, not from the whole root
+    # manifest.
+    if manifest_file === nothing || manifest_file.scheme != "file" ||
+            filepath2uri(dirname(uri2filepath(manifest_file))) != uri
         return _workspace_member_project(rt, uri, project_file)
     end
 
@@ -86,9 +92,9 @@ Salsa.@derived function derived_project_v2(rt, uri)
     # A workspace root's environment covers its members: fold every member's
     # Project.toml text into the hash so a member dep change re-keys the root's
     # watch item (the shared manifest and index must be refreshed for it).
-    # `derived_workspace_members` is sorted, so the fold is deterministic.
+    # `derived_workspace_members_v2` is sorted, so the fold is deterministic.
     if pf !== nothing && pf.workspace_projects !== nothing
-        for member_uri in derived_workspace_members(rt, uri)
+        for member_uri in derived_workspace_members_v2(rt, uri)
             member_project_file = _folder_toml_files(rt, member_uri).project_file
             member_project_file === nothing && continue
             member_text = derived_text_file_content(rt, member_project_file)

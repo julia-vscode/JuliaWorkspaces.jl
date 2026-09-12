@@ -32,6 +32,7 @@ identical=(
   src/exception_types.jl
   src/sourcetext.jl
   src/layer_files.jl
+  src/layer_parse_products.jl
   src/layer_inventory.jl
   src/layer_module_tree.jl
   src/layer_visibility.jl

@@ -1,6 +1,6 @@
 @testitem "workspace root discovery and member map" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText,
-        derived_workspace_root, derived_declaring_workspace_parent, derived_workspace_members
+        derived_workspace_root, derived_declaring_workspace_parent, derived_workspace_members_v2
     using JuliaWorkspaces.URIs2: URI
 
     root_project = """
@@ -26,13 +26,13 @@
     @test derived_workspace_root(jw.runtime, pkg) === nothing
     @test derived_workspace_root(jw.runtime, URI("file:///ws/Pkg/benchmark")) === nothing
 
-    @test derived_workspace_members(jw.runtime, pkg) ==
+    @test derived_workspace_members_v2(jw.runtime, pkg) ==
         [URI("file:///ws/Pkg/docs"), URI("file:///ws/Pkg/test")]
 end
 
 @testitem "nested workspaces chase to the outermost root" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText,
-        derived_workspace_root, derived_workspace_members
+        derived_workspace_root, derived_workspace_members_v2
     using JuliaWorkspaces.URIs2: URI
 
     mono_project = """
@@ -57,7 +57,7 @@ end
     mono = URI("file:///mono")
     @test derived_workspace_root(jw.runtime, URI("file:///mono/PkgA")) == mono
     @test derived_workspace_root(jw.runtime, URI("file:///mono/PkgA/test")) == mono
-    @test derived_workspace_members(jw.runtime, mono) ==
+    @test derived_workspace_members_v2(jw.runtime, mono) ==
         [URI("file:///mono/PkgA"), URI("file:///mono/PkgA/test")]
 end
 

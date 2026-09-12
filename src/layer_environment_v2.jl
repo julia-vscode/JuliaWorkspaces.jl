@@ -13,31 +13,6 @@
 # `derived_stdlib_names` and `derived_file_stdlibs_visible` feed the v2
 # diagnostics join and lint producers only.
 
-"""
-    _watch_target_for_project(rt, project_uri) -> (uri, content_hash)
-
-The `(project_uri, content_hash)` pair whose `WatchEnvironmentKey` covers the
-environment of `project_uri`: the project's own folder normally, the workspace
-root's folder and hash for a synthesized member project (a member has no watch
-item of its own — the root's covers it, and its hash folds every member's
-Project.toml).
-
-Single source of truth for that identity: the required set (which schedules
-the item via the root's `derived_project`), the readiness gates and every
-other consumer must derive the same pair, or a recorded result is looked up
-under a key nobody ever produced.
-"""
-function _watch_target_for_project(rt, project_uri)
-    project = derived_project(rt, project_uri)
-    project === nothing && return (project_uri, UInt64(0))
-    if _is_synthesized_member(project, project_uri)
-        root_uri = filepath2uri(dirname(uri2filepath(project.manifest_file_uri)))
-        root_project = derived_project(rt, root_uri)
-        root_project === nothing || return (root_uri, root_project.content_hash)
-    end
-    return (project_uri, project.content_hash)
-end
-
 Salsa.@derived function derived_project_uri_for_root_v2(rt, uri)
     @debug "derived_project_uri_for_root_v2" uri=uri
 
