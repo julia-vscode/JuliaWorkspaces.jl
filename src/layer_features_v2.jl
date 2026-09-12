@@ -123,7 +123,7 @@ function v2_item_docstring(rt, ref::V2ItemRef)
     r = v2_item_doc_range(rt, ref.file, ref.id)
     r === nothing && return nothing
     derived_has_content(rt, ref.file) || return nothing
-    tf = input_text_file(rt, ref.file)
+    tf = derived_text_file_content(rt, ref.file)
     tf === nothing && return nothing
     text = tf.content.content
     (1 <= first(r) && last(r) - 1 <= ncodeunits(text)) || return nothing
@@ -448,7 +448,7 @@ end
 # transparency drops the string part from item bodies.
 function _get_document_links_v2(runtime, uri::URI)
     links = DocumentLinkResult[]
-    tf = input_text_file(runtime, uri)
+    tf = derived_text_file_content(runtime, uri)
     tf === nothing && return links
     st = tf.content
     fpath = something(URIs2.uri2filepath(uri), "")
@@ -502,7 +502,7 @@ function _get_selection_ranges_v2(runtime, uri::URI, offsets::Vector{Int})
     results = Union{Nothing,SelectionRangeResult}[]
     maps = derived_v2_file_maps(runtime, uri)
     skel = derived_v2_file_skeleton(runtime, uri)
-    tf = input_text_file(runtime, uri)
+    tf = derived_text_file_content(runtime, uri)
     eof0 = tf === nothing ? 0 : ncodeunits(tf.content.content)
     cst = nothing
     for offset0 in offsets
@@ -647,7 +647,7 @@ function _get_current_block_range_v2(runtime, uri::URI, offset0::Int)
     isempty(maps) && return :v1
     skel = derived_v2_file_skeleton(runtime, uri)
     docs = derived_v2_file_doc_ranges(runtime, uri)
-    tf = input_text_file(runtime, uri)
+    tf = derived_text_file_content(runtime, uri)
     tf === nothing && return :v1
     text = tf.content.content
     eof0 = ncodeunits(text)
@@ -969,7 +969,7 @@ end
 "Slice `uri`'s text at 1-based exclusive-end range `r`, or `nothing`."
 function _v2f_slice(rt, uri::URI, r::UnitRange{Int})
     derived_has_content(rt, uri) || return nothing
-    tf = input_text_file(rt, uri)
+    tf = derived_text_file_content(rt, uri)
     tf === nothing && return nothing
     text = tf.content.content
     (1 <= first(r) && last(r) - 1 <= ncodeunits(text)) || return nothing
@@ -1419,7 +1419,7 @@ function _get_signature_help_v2(runtime, uri::URI, offset0::Int)
     isempty(sigs) && return nothing
 
     # v1's active-parameter rule: LPAREN → 0, else the call's comma count.
-    tf = input_text_file(runtime, uri)
+    tf = derived_text_file_content(runtime, uri)
     tf === nothing && return nothing
     text = tf.content.content
     call_range = view.ranges[call_addr]
