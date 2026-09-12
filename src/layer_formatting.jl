@@ -214,6 +214,13 @@ Salsa.@derived function derived_formatted_text(rt, uri)
     tf = derived_text_file_content(rt, uri)
     tf === nothing && return (nothing, "File not found.")
 
+    # The formatters read a whole document as Julia source. On Markdown that
+    # either fails with a confusing parse error or — worse, when a stretch of
+    # prose happens to parse — rewrites the user's Markdown as Julia code.
+    # LanguageServer only advertises formatting for `julia` documents
+    # (`FORMATTING_LANGUAGES`); refuse here too, so any other consumer is safe.
+    _is_julia_uri(rt, uri) || return (nothing, "Cannot format $uri: it is not a Julia document.")
+
     text = tf.content.content
     config = derived_format_configuration(rt, uri)
     config.selected || return (nothing, _FORMAT_EXCLUDED_MESSAGE)
