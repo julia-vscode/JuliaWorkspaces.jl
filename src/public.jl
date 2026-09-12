@@ -163,14 +163,27 @@ function add_files!(jw::JuliaWorkspace, files)
         file.uri in new_files && throw(JWDuplicateFile("Duplicate file $(file.uri)"))
         push!(new_files, file.uri)
     end
-    set_input_files!(jw.runtime, new_files)
-
+    # Write every file's text first and publish membership once afterwards.
+    # The loop yields between files (letting connection handling in a host and
+    # the dynamic-feature reactor run during large batches), so every
+    # intermediate state must be one a concurrent query can hold: a URI is
+    # either not yet a regular file (its content, if any, still comes from the
+    # indirect input, exactly as before the batch) or a regular file WITH text.
+    # Publishing membership first would expose "in `input_files` but no
+    # `input_text_file` yet" to anything reading the text in that window.
     for file in files
         set_input_text_file!(jw.runtime, file.uri, file)
-        _clear_indirect_tracking!(jw, file.uri)
-        # Let cooperatively scheduled tasks (connection handling in a host, the
-        # dynamic-feature reactor) run between files during large batches.
         yield()
+    end
+
+    set_input_files!(jw.runtime, new_files)
+
+    # Promotion from indirect to regular happens after membership is set: a
+    # query in the window above may have lazily materialized an indirect entry
+    # for one of these URIs, and clearing it before the URI is regular would
+    # only let the next query read it in again.
+    for file in files
+        _clear_indirect_tracking!(jw, file.uri)
     end
 
     _reconcile!(jw)
