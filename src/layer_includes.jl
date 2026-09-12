@@ -83,6 +83,14 @@ Salsa.@derived function derived_all_julia_files(rt)
             if !derived_has_content(rt, included_file)
                 continue
             end
+            # An `include` target is only Julia source if the document itself is
+            # Julia. `include("README.md")` resolves to a file we hold — but
+            # pulling it in here would put a Markdown document into the set every
+            # CST-driven query iterates, and the legacy parser would then be asked
+            # to read prose as Julia.
+            if !_is_julia_uri(rt, included_file)
+                continue
+            end
             if !(included_file in all_files) && !(included_file in files_to_check)
                 push!(files_to_check, included_file)
             end
@@ -103,8 +111,9 @@ only files whose lint state a root rooted at `uri` ever depends on.
 Built by BFS over the per-file, value-stable `derived_includes`, so it depends
 only on the include structure of files *within* the closure — an edit to a file
 outside the closure never invalidates it. Files without content (unresolved or
-missing include targets) are skipped, matching `derived_all_julia_files`. The
-visited set makes self- and cyclic includes terminate.
+missing include targets) are skipped, as are non-Julia ones (`include("x.md")`),
+matching `derived_all_julia_files`. The visited set makes self- and cyclic
+includes terminate.
 """
 Salsa.@derived function derived_include_closure(rt, uri)
     @debug "derived_include_closure" uri=uri
@@ -118,6 +127,7 @@ Salsa.@derived function derived_include_closure(rt, uri)
         for included in derived_includes(rt, current)
             included in closure && continue
             derived_has_content(rt, included) || continue
+            _is_julia_uri(rt, included) || continue
             push!(closure, included)
             push!(queue, included)
         end
@@ -330,6 +340,14 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited,
 
         push!(seen, target)
         guarded && push!(guarded_seen, target)
+
+        # This walk follows include *targets*, so unlike the other traversals it
+        # is not fed by `derived_all_julia_files` and can reach a non-Julia
+        # document (`include("README.md")`). Loop and duplicate detection above
+        # still counts it; descending would ask the legacy parser to read its
+        # prose as Julia.
+        _is_julia_uri(rt, target) || continue
+
         _collect_include_diagnostics!(rt, target, stack, seen, guarded_seen, result)
     end
 

@@ -198,6 +198,35 @@ derived query: [`get_diagnostics`](@ref), [`get_julia_syntax_tree`](@ref),
 [`get_completions`](@ref), [`get_definitions`](@ref),
 [`get_document_symbols`](@ref), and so on.
 
+### Language gating
+
+A workspace holds Markdown, Julia-markdown and TOML documents as well as Julia
+source, and a host may ask about any of them: the VS Code extension's document
+selector for the language server includes `markdown` and `juliamarkdown`, so
+hover, completion, document-symbol and document-link requests genuinely arrive
+for `.md` buffers. The parsers read a whole document as Julia, so those requests
+must not reach them.
+
+`_is_julia_uri(rt, uri)` (`src/layer_files.jl`) is the single predicate that
+decides this: a `.jl` path for a `file:` URI, otherwise — for `untitled:`,
+`vscode-notebook-cell:` and other pathless documents — the language id the
+editor recorded in the [`SourceText`](@ref). The rule is:
+
+- **Every query taking a URI gates on it**, at its entry point in `public.jl`,
+  and returns its documented empty value (`nothing`, an empty vector, …).
+  [`get_legacy_cst`](@ref) and [`get_julia_syntax_tree`](@ref) instead throw
+  `JWNotAJuliaFile`, since a tree is the whole point of the call.
+- **Internal walks inherit the gate** by iterating `derived_julia_files` /
+  `derived_all_julia_files`. The exceptions are the traversals that follow
+  `include` *targets* rather than the file set — `include` takes a path, not a
+  language, so `include("README.md")` resolves to a document we hold. Those
+  check `_is_julia_uri` themselves (`derived_all_julia_files`,
+  `derived_include_closure`, `_collect_include_diagnostics!`,
+  `StaticLint.followinclude`).
+- **`derived_julia_legacy_syntax_tree` enforces the contract** by throwing
+  rather than degrading to an empty tree, so a missed gate surfaces as a crash
+  report naming the caller instead of features that silently stop working.
+
 **Disc/boundary helpers** ([`src/fileio.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/fileio.jl)) —
 [`workspace_from_folders`](@ref), [`add_folder_from_disc!`](@ref),
 [`add_file_from_disc!`](@ref), [`update_file_from_disc!`](@ref), plus path
