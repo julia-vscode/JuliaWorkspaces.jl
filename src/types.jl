@@ -557,8 +557,11 @@ Create an empty workspace. To build one directly from folders on disc, use
 [`workspace_from_folders`](@ref) instead.
 
 ## Keyword arguments
-- `dynamic::DynamicMode`: Whether and how to run the out-of-process dynamic
-  feature that indexes environments. See [`DynamicMode`](@ref).
+- `dynamic::DynamicMode`: The initial mode of the out-of-process dynamic
+  feature that indexes environments; changeable at any time with
+  [`set_dynamic_mode!`](@ref). The feature's reactor runs under every mode
+  (under `DynamicOff` it launches no child processes). See
+  [`DynamicMode`](@ref).
 - `store_path::Union{Nothing,String}`: Directory used to cache package symbol
   data (`.jstore` files). Defaults to a managed scratch space.
 - `symbolcache_download::Bool`: If `true`, allow downloading precomputed symbol
@@ -599,22 +602,27 @@ Create an empty workspace. To build one directly from folders on disc, use
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
-    dynamic_feature::Union{Nothing,DynamicFeature}
+    dynamic_feature::DynamicFeature
 
-    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, max_alive_djps::Int=DEFAULT_MAX_ALIVE_DJPS, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true)
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, max_alive_djps::Int=DEFAULT_MAX_ALIVE_DJPS, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true, launcher::Function=_launch_process!)
         if store_path === nothing
             # Tie the local scratch store to the cache format version so a format
             # bump starts fresh instead of reading stale-format caches.
             scratch_key = "store_path_$(SymbolServer.CACHE_STORE_VERSION)"
             store_path = get_scratch_rate_limited(scratch_key)
         end
-        need_dynamic_feature = dynamic != DynamicOff || symbolcache_download
-        dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, max_concurrent_djps=max_concurrent_djps, max_alive_djps=max_alive_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds) : nothing
-        dynamic_feature === nothing || start(dynamic_feature)
+        # The dynamic feature always exists and its reactor always runs, even
+        # under `DynamicOff` (where it launches no children and settles work
+        # best-effort): the mode can be switched at any time with
+        # `set_dynamic_mode!`, so "off" must not mean "absent". An idle
+        # reactor costs one task and two channels.
+        dynamic_feature = DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, max_concurrent_djps=max_concurrent_djps, max_alive_djps=max_alive_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds, launcher=launcher)
+        start(dynamic_feature)
 
         rt = Salsa.Runtime{SContext}(SContext(dynamic_feature, indirect_file_watch_callback))
 
         set_input_files!(rt, Set{URI}())
+        set_input_dynamic_mode!(rt, dynamic)
         set_input_active_project!(rt, nothing)
         set_input_env_ready!(rt, false)
         set_input_resolve_workspace_environments!(rt, resolve_workspace_environments)
@@ -764,7 +772,6 @@ function _load_missing_package_metadata!(jw::JuliaWorkspace)
 end
 
 function process_from_dynamic(jw::JuliaWorkspace)
-    jw.dynamic_feature === nothing && return
     df = jw.dynamic_feature
     isready(df.out_channel) || return
 

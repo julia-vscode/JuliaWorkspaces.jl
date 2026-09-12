@@ -84,6 +84,8 @@ get_test_env
 is_ready
 wait_until_ready
 get_update_channel
+set_dynamic_mode!
+get_dynamic_mode
 retry_failed_dynamic_projects!
 set_max_alive_djps!
 ```

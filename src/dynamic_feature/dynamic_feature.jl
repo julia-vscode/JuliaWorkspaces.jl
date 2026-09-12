@@ -1,36 +1,7 @@
-"""
-    @enum DynamicMode DynamicOff DynamicIndexingOnly DynamicPersistent
-
-Controls how a [`JuliaWorkspace`](@ref) uses the out-of-process *dynamic
-feature* that indexes package environments and resolves symbol information.
-
-- `DynamicOff`: No dynamic feature is started. The workspace only relies on
-  statically available information (parsed sources, `Project.toml`/`Manifest.toml`
-  contents, and any locally cached symbol data). Environment-dependent
-  diagnostics are suppressed because no environment can be resolved.
-- `DynamicIndexingOnly`: Child Julia processes are spawned to index project and
-  test environments (populating the on-disc symbol cache), but they are torn
-  down once indexing completes. Use this for one-shot tools such as CI runs.
-- `DynamicPersistent`: Like `DynamicIndexingOnly`, but the child processes are
-  kept alive so the workspace can react to ongoing changes. Under the v2
-  lifecycle ([`set_v2_enabled!`](@ref)) they also serve macro expansion
-  batches for the files of their environment (a test-environment child
-  serves the package's test files; a resolved non-package environment's
-  child serves nothing and is torn down after indexing), and the number of
-  settled children kept alive is bounded by `max_alive_djps`
-  ([`set_max_alive_djps!`](@ref)): beyond it idle ones are evicted
-  least-recently-used first and relaunched on demand. Without the v2
-  lifecycle every settled child stays alive until reconcile kills it. Use
-  this for long-running hosts such as a language server.
-
-See also [`is_ready`](@ref), [`wait_until_ready`](@ref).
-"""
-@enum DynamicMode DynamicOff DynamicIndexingOnly DynamicPersistent
-
-# The DJPKey identity types (`WatchEnvironmentKey`, `WatchTestEnvironmentKey`,
-# `CreateStandaloneProjectKey`) and the reactor/result message types are defined
-# in `dynamic_messages.jl` (included before this file). The FSM helpers live in
-# `dynamic_fsm.jl`.
+# `DynamicMode`, the DJPKey identity types (`WatchEnvironmentKey`,
+# `WatchTestEnvironmentKey`, `CreateStandaloneProjectKey`) and the
+# reactor/result message types are defined in `dynamic_messages.jl` (included
+# before this file). The FSM helpers live in `dynamic_fsm.jl`.
 
 mutable struct DynamicJuliaProcess
     key::DJPKey
@@ -571,7 +542,10 @@ end
 const PkgCacheKey = @NamedTuple{name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}}
 
 struct DynamicFeature
-    djp_mode::DynamicMode
+    # The current DynamicMode. A `Ref` because hosts change it at runtime
+    # (`set_dynamic_mode!` posts `SetDynamicModeMsg`); reactor-owned, like
+    # `max_alive_djps`/`v2_lifecycle` below. Mirrors `input_dynamic_mode`.
+    djp_mode::Base.RefValue{DynamicMode}
     store_path::String
     download_enabled::Bool
     upstream_url::String
@@ -688,7 +662,7 @@ struct DynamicFeature
             max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS,
             djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
         return new(
-            djp_mode,
+            Ref(djp_mode),
             store_path,
             download_enabled,
             upstream_url,
@@ -1326,7 +1300,7 @@ _serves_after_indexing(::DJPKey) = true
 # completion.
 function _settle_child!(df::DynamicFeature, key::DJPKey, djp::Union{Nothing,DynamicJuliaProcess})
     djp === nothing && return
-    if df.djp_mode == DynamicIndexingOnly || (df.v2_lifecycle[] && !_serves_after_indexing(key))
+    if df.djp_mode[] == DynamicIndexingOnly || (df.v2_lifecycle[] && !_serves_after_indexing(key))
         kill(djp)
         delete!(df.procs, key)
     else
@@ -1586,7 +1560,7 @@ function handle!(df::DynamicFeature, msg::EnvironmentPrepDoneMsg)
         # An env that completed WITHOUT a child: expansion batches waiting on
         # it can now trigger the revive-a-child path.
         _drain_expansion_queue!(df, key)
-    elseif df.djp_mode != DynamicOff
+    elseif df.djp_mode[] != DynamicOff
         @info "$(_short_path(key.project_path)) not fully resolved, enqueueing local indexing process..."
         _report_progress(df, _progress_key("index", key), "Enqueueing indexer for $(basename(key.project_path))...", 0)
         _request_launch!(df, key)
@@ -1616,7 +1590,7 @@ function handle!(df::DynamicFeature, msg::WatchTestEnvironmentMsg)
     # A test environment can only be produced by a child process; without
     # dynamic indexing this work is terminal (best-effort readiness, like the
     # watch-env DynamicOff branch).
-    if df.djp_mode == DynamicOff
+    if df.djp_mode[] == DynamicOff
         @info "Test environment needs a dynamic child process but dynamic indexing is disabled; skipping" key
         put!(df.out_channel, FailedResult(key))
         push!(df.done, key)
@@ -1703,9 +1677,9 @@ function handle!(df::DynamicFeature, msg::StandaloneProjectPrepDoneMsg)
         _complete_work_item!(df, key)
         # A refresh needs a child process, which dynamic-off mode never runs;
         # the served (possibly stale) environment is all it gets.
-        df.djp_mode != DynamicOff && push!(df.refresh_queue, key)
+        df.djp_mode[] != DynamicOff && push!(df.refresh_queue, key)
         _drain_launch_queue!(df)
-    elseif df.djp_mode == DynamicOff
+    elseif df.djp_mode[] == DynamicOff
         # Creating the scratch project needs a child process; terminal
         # without one (files fall back to the active project's environment).
         @info "Scratch project needs a dynamic child process but dynamic indexing is disabled; skipping" key
@@ -2013,7 +1987,7 @@ function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
         # kicks this drain). At most once per key — a second disappearance
         # means the child crashed or a batch killed it, and looping a doomed
         # launch would wedge readiness.
-        if df.djp_mode == DynamicPersistent && key in df.done && !(key in df.expansion_revive_attempted) &&
+        if df.djp_mode[] == DynamicPersistent && key in df.done && !(key in df.expansion_revive_attempted) &&
            !(key in df.refreshing) && !(key in df.refresh_queue)
             push!(df.expansion_revive_attempted, key)
             push!(df.refresh_queue, key)
@@ -2055,7 +2029,7 @@ function handle!(df::DynamicFeature, msg::ExpansionBatchMsg)
     # waits on these keys.
     child_forthcoming = haskey(df.procs, key) || key in df.inflight ||
         key in df.launch_queue || key in df.launching || key in df.done
-    if df.djp_mode != DynamicPersistent || key in df.failed_projects || !child_forthcoming
+    if df.djp_mode[] != DynamicPersistent || key in df.failed_projects || !child_forthcoming
         _settle_expansions_failed!(df, ExpansionKey[e.key for e in msg.entries])
         return false
     end
@@ -2120,6 +2094,116 @@ function handle!(df::DynamicFeature, msg::SetV2LifecycleMsg)
     # switching off lets every waiting revive/refresh through.
     _enforce_alive_cap!(df)
     _drain_launch_queue!(df)
+    return false
+end
+
+# Settle every queued expansion batch `:failed` and forget the revive
+# bookkeeping. Batches currently in flight are left to settle through their
+# own terminal message (`ExpansionBatchDoneMsg`/`ExpansionBatchFailedMsg`),
+# whose handlers clean up after themselves and tolerate a missing process.
+function _fail_queued_expansions!(df::DynamicFeature)
+    for q in values(df.expansion_queue)
+        for batch in q
+            _settle_expansions_failed!(df, ExpansionKey[e.key for e in batch.entries])
+        end
+    end
+    empty!(df.expansion_queue)
+    empty!(df.expansion_revive_attempted)
+    return
+end
+
+# Downgrade to `DynamicOff`: kill every child and settle all outstanding work
+# the way the Off branches of the work handlers would have. `done` is
+# deliberately KEPT — clearing it would make the next reconcile re-dispatch
+# previously succeeded keys under Off, overwriting their live artifacts with
+# skip-`FailedResult`s.
+function _enter_off_mode!(df::DynamicFeature)
+    isempty(df.procs) || @info "Dynamic mode is now off, terminating $(length(df.procs)) process(es)"
+    for (key, djp) in collect(df.procs)
+        try kill(djp) catch; end
+        delete!(df.procs, key)
+    end
+    empty!(df.launching)
+    empty!(df.launch_queue)
+
+    # Refreshes need a child: queued entries just vanish (they are not work
+    # items), launched ones were killed above.
+    empty!(df.refresh_queue)
+    for key in collect(df.refreshing)
+        delete!(df.refreshing, key)
+        delete!(df.child_progress, key)
+        _report_progress(df, _progress_key("refresh", key), "Done", 100)
+    end
+
+    # Settle every in-flight work item with its Off-mode terminal outcome,
+    # mirroring the Off branches of the work handlers: an environment is
+    # declared ready best-effort with whatever caches exist; test envs and
+    # scratch projects need a child, so they settle as skipped. Late prep-done
+    # or terminated messages for these keys are dropped by the existing
+    # staleness guards (key no longer inflight / proc no longer in `procs`) —
+    # the same races the `ReconcileMsg` kill path already tolerates.
+    for key in collect(df.inflight)
+        if key isa WatchEnvironmentKey
+            put!(df.out_channel, EnvironmentReadyResult(key.project_path, key.content_hash))
+            push!(df.done, key)
+            _clear_failure_budget!(df, key)
+        else
+            put!(df.out_channel, FailedResult(key))
+            push!(df.done, key)
+        end
+        _complete_work_item!(df, key)
+    end
+
+    _fail_queued_expansions!(df)
+
+    # Nothing is outstanding any more: settle readiness like an empty
+    # reconcile does.
+    if df.pending_count[] == 0 && isempty(df.inflight)
+        df.saw_result[] = true
+        isready(df.update_channel) || try put!(df.update_channel, :data_available) catch; end
+    end
+    return
+end
+
+function handle!(df::DynamicFeature, msg::SetDynamicModeMsg)
+    old = df.djp_mode[]
+    old == msg.mode && return false
+    @info "Dynamic mode switched from $(old) to $(msg.mode)"
+    df.djp_mode[] = msg.mode
+
+    if msg.mode == DynamicOff
+        _enter_off_mode!(df)
+    elseif old == DynamicOff
+        # Upgrade from Off: every `done` entry was produced without a child
+        # (fast-lane serves and Off skips), so forget completion AND failure
+        # bookkeeping wholesale — the next reconcile re-dispatches those keys
+        # under the new mode. Wholesale rather than selective: skip-failures
+        # and infra failures are indistinguishable here (both can carry empty
+        # messages), and a mode upgrade is an explicit user action — the same
+        # license `retry_failed_dynamic_projects!` takes. Keys still in their
+        # async prep window need nothing: their prep-done handler reads the
+        # new mode at handle time and launches.
+        empty!(df.done)
+        empty!(df.failed_projects)
+        empty!(df.failure_attempts)
+        empty!(df.failure_messages)
+    elseif old == DynamicPersistent && msg.mode == DynamicIndexingOnly
+        # What `_settle_child!` would have done at settle time: a settled
+        # child has no role under IndexingOnly. In-flight and refreshing
+        # children are kept — they settle under the new mode. Expansion
+        # batches can no longer be served (queued ones settle `:failed` now,
+        # future ones at the `ExpansionBatchMsg` gate); one in flight settles
+        # through its own terminal message once its child dies.
+        for key in collect(keys(df.procs))
+            _is_settled_child(df, key) || continue
+            try kill(df.procs[key]) catch; end
+            delete!(df.procs, key)
+        end
+        _fail_queued_expansions!(df)
+    end
+    # IndexingOnly -> Persistent needs no enforcement: children settling after
+    # the flip stay alive (`_settle_child!` reads the Ref at settle time), and
+    # the expansion machinery revives children on demand.
     return false
 end
 

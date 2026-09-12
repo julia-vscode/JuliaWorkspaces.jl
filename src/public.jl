@@ -5,6 +5,8 @@ export JuliaWorkspace,
     remove_file!,
     remove_all_children!,
     set_active_project!,
+    set_dynamic_mode!,
+    get_dynamic_mode,
     set_v2_enabled!,
     set_indirect_file_content!,
     clear_indirect_file!,
@@ -102,11 +104,10 @@ Recompute the set of dynamic processes the workspace currently needs (via
 reconcile, send a [`ReconcileMsg`](@ref) to the dynamic-feature reactor so it
 can spawn newly-required processes and cancel ones that are no longer needed.
 
-This is a no-op when no dynamic feature is attached, and a no-op when the
-required set is unchanged (so it is cheap to call after every mutation).
+This is a no-op when the required set is unchanged (so it is cheap to call
+after every mutation).
 """
 function _reconcile!(jw::JuliaWorkspace)
-    jw.dynamic_feature === nothing && return
     df = jw.dynamic_feature
 
     required = derived_required_dynamic_projects(jw.runtime)
@@ -144,11 +145,7 @@ derived value ever depends on positions. Cheap when the flag is off or nothing
 changed (`derived_required_macro_expansions` is memoized).
 """
 function _reconcile_expansions!(jw::JuliaWorkspace)
-    # No dynamic feature at all: nothing to send batches to. Keys stay pending
-    # (the flag together with no dynamic feature is a misconfiguration — and
-    # the process-free test seam).
     df = jw.dynamic_feature
-    df === nothing && return
     input_macro_expansion(jw.runtime) || return
 
     # Prune bookkeeping for envs that left the workspace (env edits re-key
@@ -582,11 +579,77 @@ function set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
     # The reactor owns the child lifecycle; tell it before the reconcile the
     # flag change triggers (channel order), so that reconcile already runs
     # under the new rules.
-    if jw.dynamic_feature !== nothing
-        put!(jw.dynamic_feature.in_channel, SetV2LifecycleMsg(enabled))
-    end
+    put!(jw.dynamic_feature.in_channel, SetV2LifecycleMsg(enabled))
     _reconcile!(jw)
 end
+
+"""
+    set_dynamic_mode!(jw::JuliaWorkspace, mode::DynamicMode)
+
+Switch the workspace's dynamic-feature mode at runtime — see
+[`DynamicMode`](@ref) for what each mode does. The set of running dynamic
+child processes adjusts immediately:
+
+- Switching to `DynamicOff` kills every child process; outstanding work
+  settles best-effort (environments are declared ready with whatever symbol
+  caches exist, work that needs a child settles as skipped), so
+  [`is_ready`](@ref) still becomes `true`.
+- Switching away from `DynamicOff` forgets the completion and failure
+  bookkeeping accumulated while off (the same license
+  [`retry_failed_dynamic_projects!`](@ref) takes) and re-dispatches the
+  workspace's required dynamic work under the new mode.
+- `DynamicPersistent` → `DynamicIndexingOnly` kills the settled child
+  processes and fails queued macro-expansion batches; children still indexing
+  finish and are then torn down.
+- `DynamicIndexingOnly` → `DynamicPersistent` keeps children that settle from
+  now on alive; already-departed children are relaunched on demand when a
+  macro expansion needs them. Note that expansions negative-cached under the
+  previous mode stay `:failed` until their environment re-keys.
+
+The constructor's `dynamic` keyword sets the initial mode; a same-mode call is
+a no-op. See also [`get_dynamic_mode`](@ref).
+"""
+function set_dynamic_mode!(jw::JuliaWorkspace, mode::DynamicMode)
+    @debug "set_dynamic_mode!" mode=mode
+
+    process_from_dynamic(jw)
+    old = input_dynamic_mode(jw.runtime)
+    old == mode && return
+    set_input_dynamic_mode!(jw.runtime, mode)
+
+    df = jw.dynamic_feature
+    # The reactor owns the child lifecycle; tell it before the reconcile
+    # (channel order), so that reconcile already runs under the new rules.
+    put!(df.in_channel, SetDynamicModeMsg(mode))
+
+    if old == DynamicOff
+        # The reactor forgets its Off-accumulated bookkeeping in the message
+        # handler; mirror that on the query side so readiness gates re-open,
+        # and force a reconcile through even though the required set is
+        # unchanged (same shape as `retry_failed_dynamic_projects!`).
+        set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}())
+        set_input_dynamic_failure_messages!(jw.runtime, Dict{DJPKey,String}())
+        empty!(df.last_required)
+        df.reconciled_once[] = false
+        # Un-settle readiness too: the work parked under Off is about to be
+        # re-dispatched, and without this `is_ready` would report a stale
+        # `true` (and `wait_until_ready` return) in the window before the
+        # reactor processes the reconcile. The reconcile re-settles it when
+        # nothing needs re-doing.
+        df.saw_result[] = false
+    end
+
+    _reconcile!(jw)
+    return
+end
+
+"""
+    get_dynamic_mode(jw::JuliaWorkspace)
+
+The workspace's current [`DynamicMode`](@ref), as set by the constructor's
+`dynamic` keyword or the most recent [`set_dynamic_mode!`](@ref).
+"""
+get_dynamic_mode(jw::JuliaWorkspace) = input_dynamic_mode(jw.runtime)
 
 """
     set_macro_expansion!(jw::JuliaWorkspace, enabled::Bool)
@@ -791,7 +854,7 @@ function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{Cancel
         # immediately under non-persistent modes) and every settle path pings
         # the update channel. Required-but-unrequestable entries (volatile map
         # misses) are deliberately not waited on — no wakeup would come.
-        if jw.dynamic_feature !== nothing && input_macro_expansion(jw.runtime)
+        if input_macro_expansion(jw.runtime)
             _reconcile!(jw)
             settled = input_macro_expansions(jw.runtime)
             if any(k -> !haskey(settled, k), jw.dynamic_feature.requested_expansions)
@@ -892,17 +955,13 @@ one Julia process per package indefinitely. Hosts should wire this to a user
 setting (the constructor's `max_alive_djps` sets the initial value).
 
 Part of the v2 lifecycle: the bound is only applied while
-[`set_v2_enabled!`](@ref) is on (the value is kept either way). No-op when
-the workspace has no dynamic feature.
+[`set_v2_enabled!`](@ref) is on (the value is kept either way).
 """
 function set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
     @debug "set_max_alive_djps!" n=n
 
-    df = jw.dynamic_feature
-    df === nothing && return
-
     # `max_alive_djps`/`procs` are owned by the reactor task.
-    put!(df.in_channel, SetMaxAliveDjpsMsg(n))
+    put!(jw.dynamic_feature.in_channel, SetMaxAliveDjpsMsg(n))
     return
 end
 
@@ -919,14 +978,11 @@ env, an unregistered dependency — from launching a fresh child process on ever
 edit to its `Project.toml`. Hosts should wire this function to an explicit user
 action such as "restart language server" or "reindex", which is the intended way
 past the bound.
-
-No-op when the workspace has no dynamic feature.
 """
 function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
     @debug "retry_failed_dynamic_projects!"
 
     df = jw.dynamic_feature
-    df === nothing && return
 
     # `failed_projects`/`failure_attempts` are owned by the reactor task;
     # clearing them from here directly would race it.
@@ -952,8 +1008,10 @@ end
     is_ready(jw::JuliaWorkspace)
 
 Check whether the workspace's dynamic environment loading has completed.
-Returns `true` if no dynamic feature is configured, or if at least one result
-has been consumed (successful or failed) and no work item is pending.
+Returns `true` if at least one result has been consumed (successful or
+failed) — or a reconcile completed with no work to do — and no work item is
+pending. Under `DynamicOff` every work item settles best-effort without a
+child process, so an off workspace becomes ready too.
 
 This is a whole-workspace question and stays coarse: per-file consumers want
 the internal `derived_file_env_ready` query instead, which is settled per
@@ -963,7 +1021,6 @@ function is_ready(jw::JuliaWorkspace)
     @debug "is_ready"
 
     df = jw.dynamic_feature
-    df === nothing && return true
     return df.saw_result[] && df.pending_count[] == 0
 end
 
@@ -976,6 +1033,12 @@ when the token is cancelled.
 """
 function wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
     @debug "wait_until_ready"
+
+    # A workspace that has never reconciled (freshly constructed, no mutation
+    # yet) would otherwise wait forever: `saw_result` only settles once the
+    # reactor has processed a reconcile. Sending one here is cheap — the
+    # required set of an empty workspace is empty.
+    _reconcile!(jw)
 
     while !is_ready(jw)
         if cancel_token !== nothing
@@ -1010,11 +1073,10 @@ end
     get_update_channel(jw::JuliaWorkspace)
 
 Return the `Channel{Symbol}` that receives notifications when dynamic data
-becomes available.  Returns `nothing` if no dynamic feature is configured.
-Consumers can `take!` or `wait` on this channel to be notified of updates.
+becomes available. Consumers can `take!` or `wait` on this channel to be
+notified of updates.
 """
 function get_update_channel(jw::JuliaWorkspace)
-    jw.dynamic_feature === nothing && return nothing
     return jw.dynamic_feature.update_channel
 end
 
