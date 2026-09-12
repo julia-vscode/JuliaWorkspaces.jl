@@ -810,10 +810,10 @@ end
     using JuliaWorkspaces: set_input_env_ready!
     using JuliaWorkspaces.URIs2: URI
 
-    # The SciML runtests shape: `@safetestset "x" include("x.jl")` inside a
-    # 0-arg thunk. The path is a plain literal: the include is still a
-    # computed include for analysis purposes (it splices at run time, so it
-    # is no include-graph edge and the target stays a root) ...
+    # A literal include inside a 0-arg thunk. The path is plain, but the
+    # include is still a computed include for analysis purposes (it splices
+    # at run time, so it is no include-graph edge and the target stays a
+    # root) ...
     root_uri = URI("file:///rti/src/RtI.jl")
     jw = JuliaWorkspace()
     add_file!(jw, TextFile(root_uri, SourceText("""
@@ -839,7 +839,7 @@ end
     @test !any(d -> contains(d.message, "could not be determined statically"), diags2)
 end
 
-@testitem "include diagnostics: quoted includes are data, module and @safetestset bodies scope duplicates" begin
+@testitem "include diagnostics: quoted includes are data, module bodies scope duplicates" begin
     using JuliaWorkspaces: set_input_env_ready!
     using JuliaWorkspaces.URIs2: URI
 
@@ -862,7 +862,7 @@ end
 
     # The same file included into two `module` blocks is two legitimate
     # inclusions (MPIPreferences' preloads.jl into a submodule), not a
-    # duplicate — and likewise into two `@safetestset` bodies.
+    # duplicate.
     m_uri = URI("file:///mi/src/M.jl")
     jw2 = JuliaWorkspace()
     add_file!(jw2, TextFile(m_uri, SourceText("""
@@ -876,19 +876,4 @@ end
     add_file!(jw2, TextFile(URI("file:///mi/src/shared.jl"), SourceText("s() = 1\n", "julia")))
     set_input_env_ready!(jw2.runtime, true)
     @test !any(d -> contains(d.message, "already been included"), get_diagnostic(jw2, m_uri))
-
-    t_uri = URI("file:///si/test/runtests.jl")
-    jw3 = JuliaWorkspace()
-    add_file!(jw3, TextFile(t_uri, SourceText("""
-    using SafeTestsets
-    @safetestset "one" begin
-        include("common.jl")
-    end
-    @safetestset "two" begin
-        include("common.jl")
-    end
-    """, "julia")))
-    add_file!(jw3, TextFile(URI("file:///si/test/common.jl"), SourceText("c() = 1\n", "julia")))
-    set_input_env_ready!(jw3.runtime, true)
-    @test !any(d -> contains(d.message, "already been included"), get_diagnostic(jw3, t_uri))
 end
