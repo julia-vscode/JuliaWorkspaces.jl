@@ -3,7 +3,7 @@
 `packages/JuliaSyntax/` and `packages/JuliaLowering/` are verbatim copies of the
 `JuliaSyntax/` and `JuliaLowering/` subdirectories of the JuliaLang/julia repository at
 
-    commit b657e6a0d95c9a5fc2497347f8123ef6e5932475 (master, 2026-08)
+    commit 7c019557415a97d0bb60d11c42db5405e5203416 (master, 2026-09)
 
 They are NOT git subtrees (they are subdirectories of a monorepo) and are NOT Pkg
 dependencies — the registered JuliaSyntax 1.0.2 remains JW's Pkg dep and coexists as a

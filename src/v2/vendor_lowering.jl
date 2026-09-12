@@ -3,7 +3,7 @@
 #
 # The vendored files under packages/ are never patched. This wrapper owns all
 # deviations. The `JuliaLowering` block below MIRRORS
-# packages/JuliaLowering/src/JuliaLowering.jl (SHA b657e6a0d95c) with exactly
+# packages/JuliaLowering/src/JuliaLowering.jl (SHA 7c019557415a) with exactly
 # these deviations — keep this list in sync when refreshing the vendored copy:
 #   1. `using ..JuliaSyntax` (the vendored sibling below) instead of the
 #      upstream `parentmodule === Base ? Base.JuliaSyntax : JuliaSyntax` switch.
