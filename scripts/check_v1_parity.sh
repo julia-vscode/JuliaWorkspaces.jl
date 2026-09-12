@@ -14,7 +14,7 @@
 #      lists / type unions and the reactor's lifecycle gates: their deleted
 #      lines are printed with their replacements for a by-eye check.
 #
-# Everything else (`src/v2/**`, `src/TomlSyntax/**`, every `src/*_v2.jl`) is
+# Everything else (`src/v2/**` incl. `src/v2/bridge/`, `src/TomlSyntax/**`) is
 # v2-only code reached through those gates, and is free to change.
 #
 # Usage: scripts/check_v1_parity.sh [base-ref]

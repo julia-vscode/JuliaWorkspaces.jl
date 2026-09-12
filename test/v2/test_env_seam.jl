@@ -1,4 +1,4 @@
-# The v2 environment seam (src/layer_v2_env_seam.jl): plain-data store
+# The v2 environment seam (src/v2/bridge/layer_v2_env_seam.jl): plain-data store
 # queries. Workspaces here have no project, so every root resolves to the
 # stdlib-only env — which, despite the name, is `load_core()`'s bake: `Core`,
 # `Base` (with nested submodule stores) and an empty `Main`, no actual

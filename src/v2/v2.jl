@@ -1,5 +1,9 @@
 # The v2 static analysis framework: a JuliaLowering-backed stack that runs
 # alongside StaticLint. Everything under src/v2/ is v2; nothing outside it is.
+# The files directly in this directory are the analysis core; src/v2/bridge/
+# holds the v2 twins of v1 queries that must name StaticLint/CSTParser to
+# honour a v1 contract (the diagnostics join, include diagnostics, the
+# feature layer, the environment seam) — the one place v2 code may do so.
 #
 # v2 is CSTParser-free and StaticLint-free by construction: it parses with the
 # vendored JuliaSyntax v2, enumerates items with its own walker, and mints its
@@ -9,10 +13,12 @@
 #
 # Inert unless `input_v2_enabled` is true. The complete set of touchpoints
 # with the rest of the package:
-#   src/inputs.jl            - the `input_v2_enabled` feature flag
-#   src/layer_diagnostics.jl - pulls v2 findings in / suppresses StaticLint's
-#   src/public.jl            - `set_v2_enabled!`
-#   src/packagedef.jl        - the single include of this file
+#   src/inputs.jl     - the `input_v2_enabled` feature flag
+#   src/public.jl     - `set_v2_enabled!`
+#   src/packagedef.jl - includes this file, and each `_v2` twin right after
+#                       the v1 layer whose gate dispatches to it
+#   the one-line gates `input_v2_enabled(rt) && return <name>_v2(...)` at
+#   the top of the gated v1 queries (allowlisted in test/test_v1_parity.jl)
 
 # Parser-agnostic foundations, so they come before the vendored parser loads.
 # `item_ids.jl` and `macro_tables.jl` are v2's OWN copies of machinery v1 also

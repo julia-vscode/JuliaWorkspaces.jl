@@ -30,7 +30,7 @@ include("v2/v2.jl")
 # TomlSyntax needs the vendored JuliaSyntax loaded by v2/ (kinds register at
 # include time) and nothing else from the package.
 include("TomlSyntax/TomlSyntax.jl")
-include("layer_toml_tree.jl")
+include("v2/layer_toml_tree.jl")
 include("layer_visibility.jl")
 include("layer_scope_modules.jl")
 
@@ -44,23 +44,23 @@ include("lint_emission.jl")
 
 include("layer_file_analysis.jl")
 include("layer_static_lint.jl")
-include("layer_include_diagnostics_v2.jl")
+include("v2/bridge/layer_include_diagnostics_v2.jl")
 include("layer_test_setups.jl")
-include("layer_project_files_v2.jl")
-include("layer_workspaces_v2.jl")
+include("v2/layer_project_files_v2.jl")
+include("v2/layer_workspaces_v2.jl")
 include("layer_projects.jl")
-include("layer_projects_v2.jl")
-include("layer_extensions_v2.jl")
+include("v2/layer_projects_v2.jl")
+include("v2/layer_extensions_v2.jl")
 include("layer_environment.jl")
-include("layer_environment_v2.jl")
-# The v2 stack's ONLY contact with the environment stores; outside src/v2/
+include("v2/layer_environment_v2.jl")
+# The v2 stack's ONLY contact with the environment stores; in src/v2/bridge/
 # because the store walk needs StaticLint/SymbolServer names the v2 boundary
-# guard forbids (see the file header).
-include("layer_v2_env_seam.jl")
+# guard forbids in src/v2/ itself (see the file header).
+include("v2/bridge/layer_v2_env_seam.jl")
 include("layer_testitems.jl")
-include("layer_testitems_v2.jl")
+include("v2/layer_testitems_v2.jl")
 include("layer_diagnostics.jl")
-include("layer_diagnostics_v2.jl")
+include("v2/bridge/layer_diagnostics_v2.jl")
 include("layer_hover.jl")
 include("layer_completions.jl")
 include("layer_references.jl")
@@ -68,9 +68,9 @@ include("layer_signatures.jl")
 include("layer_symbols.jl")
 include("layer_navigation.jl")
 include("layer_misc.jl")
-# v2-backed interactive features (behind `input_v2_enabled`); outside src/v2/
+# v2-backed interactive features (behind `input_v2_enabled`); in src/v2/bridge/
 # because it joins v2 data with feature result structs and v1 fallback paths.
-include("layer_features_v2.jl")
+include("v2/bridge/layer_features_v2.jl")
 include("layer_actions.jl")
 include("layer_formatting.jl")
 include("fileio.jl")

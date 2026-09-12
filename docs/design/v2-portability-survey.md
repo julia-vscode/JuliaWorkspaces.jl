@@ -127,7 +127,7 @@ StaticLint's `loose_refs`/`Scope` walks are heuristics. Cross-file/module is
 uniformly blocked on a v2 visibility layer ("A3"); Base/stdlib/package content
 on the env seam.
 
-✅ **A1 shipped** (M1, `src/layer_features_v2.jl`): `V2ItemView` +
+✅ **A1 shipped** (M1, `src/v2/bridge/layer_features_v2.jl`): `V2ItemView` +
 `v2_item_row_at` + `v2_identifier_addr_at` — plain volatile-map consumers
 reproducing `get_expr1`'s identifier right-edge tie-break in range terms.
 
@@ -165,7 +165,7 @@ testitem suite doubles as a differential harness.
   `:macro_declared` / `:external_names`; building it caught and fixed the
   missing method-extension rule in v2's module-tree declare.
 - ✅ **Milestone C — the env edge + first env rules**
-  (`src/layer_v2_env_seam.jl`, outside src/v2 because the store walk needs
+  (`src/v2/bridge/layer_v2_env_seam.jl`, in the bridge because the store walk needs
   guard-forbidden names; stores never escape into derived values): external
   exports/member-kind/first-missing-segment/implicit-scope/project-deps as
   plain-data queries; the four visibility seam places restored (the
@@ -200,7 +200,7 @@ testitem suite doubles as a differential harness.
 
 1. ✅ **Harvest JuliaLowering** (this milestone): lowering errors + routed
    takeover ids + `unused_type_parameter` + the module-tree pair.
-2. ✅ **v2 features M1** (`src/layer_features_v2.jl`, behind
+2. ✅ **v2 features M1** (`src/v2/bridge/layer_features_v2.jl`, behind
    `input_v2_enabled` / `set_v2_enabled!`, since M3 the SINGLE v2 flag):
    A1 + local references family + workspace symbols + module-at-position +
    document links, each with the try-v2-else-v1 composition and a corpus

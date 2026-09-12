@@ -1,4 +1,4 @@
-# The TOML layer of the workspace (src/layer_toml_tree.jl): TomlSyntax-backed
+# The TOML layer of the workspace (src/v2/layer_toml_tree.jl): TomlSyntax-backed
 # parse results with real ranges, and the TOML item walk (skeleton, bodies,
 # maps) with the v2 backdating contract.
 

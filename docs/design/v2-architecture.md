@@ -19,22 +19,26 @@ actually runs for users: CSTParser + StaticLint + `layer_inventory.jl` /
 Both stacks are `include`d into the same `JuliaWorkspaces` module, so they share
 inputs, share `types.jl`, and share the diagnostics join — but nothing else.
 
-- **v2 is everything under `src/v2/`, and nothing outside it.** That is a
-  literal rule, not a slogan: v2 is CSTParser-free and StaticLint-free by
-  construction, and a guard testitem in `test/v2/test_inventory_v2.jl` enforces
-  it. If v2 code appears to need `derived_file_inventory` or `CSTParser`, the
-  correct conclusion is that a v2 layer is missing, not that the rule bends.
-- **One include line**: [`src/packagedef.jl:29`](../../src/packagedef.jl) →
-  `include("v2/v2.jl")`, sitting after `layer_module_tree.jl` and before
-  `layer_visibility.jl`.
+- **v2 is everything under `src/v2/`, and nothing outside it.** The files
+  directly in that directory are the analysis core: CSTParser-free and
+  StaticLint-free by construction, and a guard testitem in
+  `test/v2/test_inventory_v2.jl` enforces it. If core code appears to need
+  `derived_file_inventory` or `CSTParser`, the correct conclusion is that a v2
+  layer is missing, not that the rule bends. `src/v2/bridge/` is the one
+  exemption: the twins that honour a v1 contract and therefore must name
+  StaticLint/CSTParser (the diagnostics join, the include diagnostics, the
+  feature layer, the environment seam).
+- **Includes**: [`src/packagedef.jl`](../../src/packagedef.jl) includes
+  `v2/v2.jl` (the core) after `layer_module_tree.jl`, and each `_v2` twin right
+  after the v1 layer whose gate dispatches to it.
 - **Inert by default.** The whole stack hangs off the `input_v2_enabled`
   feature flag, which lazily defaults to `false`. With the flag off, no v2 query
   is ever demanded and the package runs the legacy code paths unchanged.
 - **One convention for every fork.** A v1 query that has a v2 counterpart keeps
   its name and its body verbatim, with one inserted line at the top —
   `input_v2_enabled(rt) && return <name>_v2(rt, …)` — and the counterpart
-  lives in a sibling `src/layer_<name>_v2.jl` (outside `src/v2/` when it needs
-  StaticLint/CSTParser names, e.g. to build an `ExternalEnv`). That includes
+  lives in `src/v2/layer_<name>_v2.jl` (or `src/v2/bridge/` when it needs
+  StaticLint/CSTParser names, e.g. to join StaticLint findings). That includes
   the project/environment model (TomlSyntax-parsed project files,
   `[workspace]`/`[sources]`/extension support), the include walker, the
   diagnostics join, test item detection and the dynamic child lifecycle.
@@ -49,15 +53,15 @@ The complete set of touchpoints with the rest of the package:
 | [`src/inputs.jl`](../../src/inputs.jl) | the `input_v2_enabled` feature flag (plus `input_macro_expansion` for the DJP) |
 | [`src/public.jl`](../../src/public.jl) | `set_v2_enabled!` (which also posts `SetV2LifecycleMsg` to the dynamic reactor) |
 | [`src/packagedef.jl`](../../src/packagedef.jl) | the includes: `v2/v2.jl`, `TomlSyntax/`, and each `*_v2.jl` twin right after its v1 layer |
-| [`src/layer_syntax_trees.jl`](../../src/layer_syntax_trees.jl) → [`src/layer_toml_tree.jl`](../../src/layer_toml_tree.jl) | `derived_toml_parse_result` gates to the TomlSyntax twin (one gate: TOML is TomlSyntax everywhere under the flag, `Pkg.TOML` everywhere without it) |
-| [`src/layer_projects.jl`](../../src/layer_projects.jl) → [`src/layer_projects_v2.jl`](../../src/layer_projects_v2.jl) | `derived_package` / `derived_project` / `derived_nonpackage_env` gate to the v2 model (with `layer_project_files_v2.jl`, `layer_workspaces_v2.jl`, `layer_extensions_v2.jl` as v2-only helpers) |
-| [`src/layer_environment.jl`](../../src/layer_environment.jl) → [`src/layer_environment_v2.jl`](../../src/layer_environment_v2.jl) | `derived_project_uri_for_root` / `_test_environment_key` / `derived_file_env_ready` / `derived_required_dynamic_projects` gate to the v2 selection |
-| [`src/layer_includes.jl`](../../src/layer_includes.jl) → [`src/layer_include_diagnostics_v2.jl`](../../src/layer_include_diagnostics_v2.jl) | `derived_include_diagnostics` gates to the v2 emission (boundary notices); the include walk is v1's |
-| [`src/layer_file_analysis.jl`](../../src/layer_file_analysis.jl), [`src/layer_diagnostics.jl`](../../src/layer_diagnostics.jl) → [`src/layer_diagnostics_v2.jl`](../../src/layer_diagnostics_v2.jl) | `derived_new_static_lint_diagnostics` / `derived_diagnostics` gate to the v2 join (takeover, v2 findings, boundary notices, project/manifest problems) |
-| [`src/layer_testitems.jl`](../../src/layer_testitems.jl) → [`src/layer_testitems_v2.jl`](../../src/layer_testitems_v2.jl) | `derived_testitems` gates to detection off the v2 skeleton (§13) |
+| [`src/layer_syntax_trees.jl`](../../src/layer_syntax_trees.jl) → [`src/v2/layer_toml_tree.jl`](../../src/v2/layer_toml_tree.jl) | `derived_toml_parse_result` gates to the TomlSyntax twin (one gate: TOML is TomlSyntax everywhere under the flag, `Pkg.TOML` everywhere without it) |
+| [`src/layer_projects.jl`](../../src/layer_projects.jl) → [`src/v2/layer_projects_v2.jl`](../../src/v2/layer_projects_v2.jl) | `derived_package` / `derived_project` / `derived_nonpackage_env` gate to the v2 model (with `layer_project_files_v2.jl`, `layer_workspaces_v2.jl`, `layer_extensions_v2.jl` as v2-only helpers) |
+| [`src/layer_environment.jl`](../../src/layer_environment.jl) → [`src/v2/layer_environment_v2.jl`](../../src/v2/layer_environment_v2.jl) | `derived_project_uri_for_root` / `_test_environment_key` / `derived_file_env_ready` / `derived_required_dynamic_projects` gate to the v2 selection |
+| [`src/layer_includes.jl`](../../src/layer_includes.jl) → [`src/v2/bridge/layer_include_diagnostics_v2.jl`](../../src/v2/bridge/layer_include_diagnostics_v2.jl) | `derived_include_diagnostics` gates to the v2 emission (boundary notices); the include walk is v1's |
+| [`src/layer_file_analysis.jl`](../../src/layer_file_analysis.jl), [`src/layer_diagnostics.jl`](../../src/layer_diagnostics.jl) → [`src/v2/bridge/layer_diagnostics_v2.jl`](../../src/v2/bridge/layer_diagnostics_v2.jl) | `derived_new_static_lint_diagnostics` / `derived_diagnostics` gate to the v2 join (takeover, v2 findings, boundary notices, project/manifest problems) |
+| [`src/layer_testitems.jl`](../../src/layer_testitems.jl) → [`src/v2/layer_testitems_v2.jl`](../../src/v2/layer_testitems_v2.jl) | `derived_testitems` gates to detection off the v2 skeleton (§13) |
 | [`src/dynamic_feature/dynamic_feature.jl`](../../src/dynamic_feature/dynamic_feature.jl) | the reactor-owned `v2_lifecycle` ref gates the live-children cap and the post-index teardown (§8) |
-| [`src/layer_v2_env_seam.jl`](../../src/layer_v2_env_seam.jl) | the environment edge (plain-data store queries, §7½) |
-| [`src/layer_features_v2.jl`](../../src/layer_features_v2.jl) | v2-backed interactive features (A1 + resolvers; §10½) with flag branches in layer_references/symbols/navigation/misc/hover/signatures |
+| [`src/v2/bridge/layer_v2_env_seam.jl`](../../src/v2/bridge/layer_v2_env_seam.jl) | the environment edge (plain-data store queries, §7½) |
+| [`src/v2/bridge/layer_features_v2.jl`](../../src/v2/bridge/layer_features_v2.jl) | v2-backed interactive features (A1 + resolvers; §10½) with flag branches in layer_references/symbols/navigation/misc/hover/signatures |
 
 Inside `src/v2/` the load order is the layering
 ([`src/v2/v2.jl`](../../src/v2/v2.jl)):
@@ -424,7 +428,7 @@ re-enter or poison).
 
 > **The environment edge (Milestone C, resolved).** `:external` targets
 > resolve through the plain-data queries in
-> [`src/layer_v2_env_seam.jl`](../../src/layer_v2_env_seam.jl) at exactly
+> [`src/v2/bridge/layer_v2_env_seam.jl`](../../src/v2/bridge/layer_v2_env_seam.jl) at exactly
 > four places: `_v2_external_bring_ins` (a store-backed wildcard `using`
 > expands the export list, module-valued exports get ledger targets), the
 > `:external` arm of `_v2_member_lookup` (colon members resolve via the
@@ -693,7 +697,7 @@ store docs), plus the doc/type-hungry feature layers.
 
 ---
 
-## 10½. Features on v2 (`src/layer_features_v2.jl`)
+## 10½. Features on v2 (`src/v2/bridge/layer_features_v2.jl`)
 
 The interactive features behind `input_v2_enabled` (since M3 the single flag for lint takeovers
 and features alike — no separate lint
