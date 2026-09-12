@@ -294,10 +294,20 @@ end
     _offset_to_position(runtime, uri, offset)
 
 Convert a 0-based byte offset in the file identified by `uri` to a `Position`.
+
+`uri` may be any file the analysis layers know about — a regular workspace
+file OR an *indirect* one (reached only through `include(...)` and read lazily
+from disc). Cross-file results (references, definitions, rename edits, hover
+method links, …) routinely land in indirect files, so this must go through
+`derived_text_file_content`, the accessor that serves both populations; the
+regular-file input alone throws `KeyError` for an indirect URI.
 """
 function _offset_to_position(runtime, uri::URI, offset::Int)
-    st = input_text_file(runtime, uri).content
-    return position_at(st, offset + 1)
+    tf = derived_text_file_content(runtime, uri)
+    # An offset always comes from a syntax tree of `uri` in the same Salsa
+    # revision, so content is present; a miss here is an invariant violation.
+    tf === nothing && error("_offset_to_position: no content for $uri")
+    return position_at(tf.content, offset + 1)
 end
 
 """
