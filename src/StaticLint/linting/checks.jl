@@ -904,13 +904,8 @@ function check_incorrect_iter_spec(x, body, env, meta_dict)
             end
         elseif hasref(rng, meta_dict) && refof(rng, meta_dict) isa Binding && refof(rng, meta_dict).type !== nothing
             type = get_eventual_datatype(refof(rng, meta_dict).type, env)
-            try
-                if type !== nothing && _issubtype(type, getsymbols(env)[:Core][:Number], env.symbols, meta_dict) === true
-                    seterror!(x, IncorrectIterSpec, meta_dict)
-                end
-            catch err
-                # TODO Should this be an error for crash reporting, I think?
-                @warn "iter type checker crashed with" ex=(err, catch_backtrace())
+            if type !== nothing && _issubtype(type, getsymbols(env)[:Core][:Number], env.symbols, meta_dict) === true
+                seterror!(x, IncorrectIterSpec, meta_dict)
             end
         end
     end

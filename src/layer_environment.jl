@@ -501,12 +501,11 @@ Check whether a file contains `@testitem` macros by looking at the
 already-computed test item detection results (which use JuliaSyntax, not CSTParser).
 """
 function _file_has_testitems(rt, uri)
-    try
-        details = derived_testitems(rt, uri)
-        return !isempty(details.testitems)
-    catch
-        return false
-    end
+    # `derived_testitems` is our own derived query; a parse problem in the file
+    # surfaces as diagnostics, not as a throw, so an exception here is a bug
+    # that should propagate rather than silently degrade env classification.
+    details = derived_testitems(rt, uri)
+    return !isempty(details.testitems)
 end
 
 """
