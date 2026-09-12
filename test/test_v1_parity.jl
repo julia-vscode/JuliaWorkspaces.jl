@@ -22,7 +22,7 @@
         "layer_projects.jl" => 3,       # derived_package / derived_project / derived_nonpackage_env
         "layer_environment.jl" => 4,    # project_uri_for_root / _test_environment_key / file_env_ready / required_dynamic_projects
         "layer_includes.jl" => 1,       # derived_include_diagnostics
-        "layer_diagnostics.jl" => 1,    # derived_diagnostics
+        "layer_diagnostics.jl" => 4,    # derived_diagnostics + the three lint-config queries (the v2 registry split)
         "layer_file_analysis.jl" => 1,  # derived_new_static_lint_diagnostics
         "layer_testitems.jl" => 1,      # derived_testitems
         "layer_hover.jl" => 1,

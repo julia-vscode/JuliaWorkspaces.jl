@@ -190,12 +190,12 @@ Salsa.@derived function derived_diagnostics_v2(rt, uri)
         return results
     end
 
-    enabled(rule) = rule_enabled(lint_config, rule)
+    enabled(rule) = rule_enabled_v2(lint_config, rule)
 
     # The single point where severity, tags and doc links are applied — every
     # producer path below funnels its findings through `materialize`.
     emit_finding!(f::LintFinding) = begin
-        d = materialize(f, lint_config)
+        d = materialize_v2(f, lint_config)
         d === nothing || push!(results, d)
         nothing
     end
@@ -272,14 +272,14 @@ Salsa.@derived function derived_diagnostics_v2(rt, uri)
         # emit is off. `include_errors` is excluded from the test — its
         # findings come from the separate structural pass below, so leaving it
         # on is no reason to run the (much more expensive) semantic one.
-        if any(enabled(r.id) for r in LINT_RULES if !isempty(r.codes) && r.id !== :include_errors)
+        if any(enabled(r.id) for r in LINT_RULES_V2 if !isempty(r.codes) && r.id !== :include_errors)
             env_ready = derived_file_env_ready(rt, uri)
             # Experiment flag: when the lowering-backed producer is active it
             # takes over these rule ids, so StaticLint's findings for them are
             # suppressed here (no double-reporting; same ids, different engine).
             lowering_takeover = derived_lowering_lint_active(rt, uri)
             for f in derived_new_static_lint_diagnostics_v2(rt, uri)
-                if !env_ready && _is_env_dependent_finding(f)
+                if !env_ready && _is_env_dependent_finding_v2(f)
                     continue
                 end
                 if lowering_takeover && f.rule_id in LOWERING_TAKEOVER_RULES
@@ -308,10 +308,10 @@ Salsa.@derived function derived_diagnostics_v2(rt, uri)
         # the `derived_file_env_ready` edge through this path.
         v2_findings = derived_semantic_lint_findings(rt, uri)
         if !isempty(v2_findings)
-            v2_env_suppress = any(f -> f.rule_id in ENV_DEPENDENT_LINT_RULES, v2_findings) &&
+            v2_env_suppress = any(f -> f.rule_id in ENV_DEPENDENT_LINT_RULES_V2, v2_findings) &&
                 !derived_file_env_ready(rt, uri)
             for f in v2_findings
-                v2_env_suppress && f.rule_id in ENV_DEPENDENT_LINT_RULES && continue
+                v2_env_suppress && f.rule_id in ENV_DEPENDENT_LINT_RULES_V2 && continue
                 emit_semantic_finding!(f)
             end
         end
