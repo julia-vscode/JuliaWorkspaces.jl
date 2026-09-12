@@ -31,6 +31,14 @@ Salsa.@declare_input input_env_ready(rt)::Bool
 # project environments are watched.
 Salsa.@declare_input input_resolve_workspace_environments(rt)::Bool
 
+# The dynamic-feature mode. Eager (seeded from the constructor's `dynamic`
+# kwarg) because the initial value is caller-chosen; changed at runtime via
+# `set_dynamic_mode!`, which mirrors it into the reactor-owned
+# `DynamicFeature.djp_mode`. No derived query reads it yet — the mode is
+# enforced reactor-side per work kind — so this input is the host-readable
+# source of truth and the invalidation point for future derived use.
+Salsa.@declare_input input_dynamic_mode(rt)::DynamicMode
+
 # Lazy input for files that are pulled in via `include(...)` from a regular
 # JW file but are not themselves regular files. Initial content is read
 # synchronously from disc; the watcher callback (if any) is invoked once per

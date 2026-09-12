@@ -262,10 +262,14 @@ is the only asynchronous, stateful subsystem. Everything else is pure. It exists
 to index package environments — work that requires actually loading packages and
 therefore cannot be done by static analysis.
 
-Its behavior is controlled by [`DynamicMode`](@ref):
+Its behavior is controlled by [`DynamicMode`](@ref). The feature and its
+reactor exist under every mode; the constructor's `dynamic` keyword sets the
+initial mode (mirrored in the `input_dynamic_mode` Salsa input), and
+[`set_dynamic_mode!`](@ref) switches it at any time, with the set of running
+child processes adjusting immediately.
 
-- `DynamicOff` — no child processes; environment-dependent diagnostics are
-  suppressed.
+- `DynamicOff` — no child processes are launched; work that would need one
+  settles best-effort and environment-dependent diagnostics are suppressed.
 - `DynamicIndexingOnly` — spawn child processes to index environments, then tear
   them down (good for CI / one-shot tooling).
 - `DynamicPersistent` — keep child processes alive to react to ongoing changes
@@ -314,7 +318,8 @@ Two consequences worth knowing:
 - **Readiness API.** Callers can poll [`is_ready`](@ref), block on
   [`wait_until_ready`](@ref) (optionally with a cancellation token), or subscribe
   to [`get_update_channel`](@ref) to be notified when new dynamic data arrives.
-  With no dynamic feature, [`is_ready`](@ref) is always `true`.
+  Under `DynamicOff` every work item settles best-effort without a child
+  process, so an off workspace becomes ready too.
 
 ## Module layout
 
