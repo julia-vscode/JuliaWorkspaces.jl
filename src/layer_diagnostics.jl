@@ -110,6 +110,8 @@ function _validate_lint_rules!(res::Vector{Diagnostic}, table, into::Dict{Symbol
 end
 
 Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
+    input_v2_enabled(rt) && return derived_lintconfig_diagnostics_v2(rt, uri)
+
     toml_content = derived_toml_syntax_tree(rt, uri)
 
     res = Diagnostic[]
@@ -166,6 +168,7 @@ ParsedLintConfig() = ParsedLintConfig(
 
 Salsa.@derived function derived_parsed_lint_config(rt, config_uri)
     @debug "derived_parsed_lint_config" config_uri=config_uri
+    input_v2_enabled(rt) && return derived_parsed_lint_config_v2(rt, config_uri)
 
     toml_content = derived_toml_syntax_tree(rt, config_uri)
     discard = Diagnostic[]   # diagnostics are reported by derived_lintconfig_diagnostics
@@ -196,6 +199,7 @@ end
 
 Salsa.@derived function derived_effective_lint_config(rt, uri)
     @debug "derived_effective_lint_config" uri=uri
+    input_v2_enabled(rt) && return derived_effective_lint_config_v2(rt, uri)
 
     # Scope composes over every enclosing `JuliaLint.toml`, so it is resolved
     # before the nearest-file lookup that decides the preset and rules.
@@ -268,6 +272,7 @@ end
 
 Salsa.@derived function derived_diagnostics(rt, uri)
     @debug "derived_diagnostics" uri=uri
+    input_v2_enabled(rt) && return derived_diagnostics_v2(rt, uri)
 
     # Indirect files participate in the include graph (so cross-file
     # resolution works) but never report diagnostics — they are not files
@@ -318,9 +323,10 @@ Salsa.@derived function derived_diagnostics(rt, uri)
     emit!(range, rule_id, message, related_uri, source) =
         emit_finding!(LintFinding(range, rule_id, message, related_uri, source))
 
-    # Julia-content diagnostics run for file-scheme .jl files AND non-file
-    # (e.g. untitled) buffers whose language is julia.
-    if _is_julia_uri(rt, uri)
+    # Julia-content diagnostics run for file-scheme .jl files, non-file
+    # (e.g. untitled) buffers whose language is julia, AND markdown documents,
+    # whose Julia view (layer_markdown.jl) puts every range inside a fence.
+    if _is_julia_analysis_uri(rt, uri)
         # The `enabled` guards below do not filter (materialize does); they skip
         # running a producer query at all when nothing it can emit is on.
         if enabled(:syntax_errors) || enabled(:syntax_warnings)

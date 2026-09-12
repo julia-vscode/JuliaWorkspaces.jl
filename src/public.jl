@@ -5,6 +5,9 @@ export JuliaWorkspace,
     remove_file!,
     remove_all_children!,
     set_active_project!,
+    set_dynamic_mode!,
+    get_dynamic_mode,
+    set_v2_enabled!,
     set_indirect_file_content!,
     clear_indirect_file!,
     get_indirect_files,
@@ -32,6 +35,7 @@ export JuliaWorkspace,
     is_ready,
     wait_until_ready,
     retry_failed_dynamic_projects!,
+    set_max_alive_djps!,
     get_update_channel,
     get_legacy_cst,
     get_roots_for_uri,
@@ -100,11 +104,10 @@ Recompute the set of dynamic processes the workspace currently needs (via
 reconcile, send a [`ReconcileMsg`](@ref) to the dynamic-feature reactor so it
 can spawn newly-required processes and cancel ones that are no longer needed.
 
-This is a no-op when no dynamic feature is attached, and a no-op when the
-required set is unchanged (so it is cheap to call after every mutation).
+This is a no-op when the required set is unchanged (so it is cheap to call
+after every mutation).
 """
 function _reconcile!(jw::JuliaWorkspace)
-    jw.dynamic_feature === nothing && return
     df = jw.dynamic_feature
 
     required = derived_required_dynamic_projects(jw.runtime)
@@ -119,6 +122,88 @@ function _reconcile!(jw::JuliaWorkspace)
         empty!(df.last_required)
         union!(df.last_required, required)
         put!(df.in_channel, ReconcileMsg(required))
+    end
+
+    _reconcile_expansions!(jw)
+
+    return
+end
+
+# Batch caps: a whole-workspace cold pass can hold thousands of expansion
+# sites; grouping per (env, ctx) and capping keeps individual requests small
+# enough that a timeout loses little and the child stays responsive.
+const EXPANSION_BATCH_MAX_ENTRIES = 200
+const EXPANSION_BATCH_MAX_BYTES = 256 * 1024
+
+"""
+    _reconcile_expansions!(jw::JuliaWorkspace)
+
+Send expansion batches for every macro-expansion key the workspace needs and
+has not requested yet. Host-side by design: this is where source text is
+reattached (the last-mile read of `derived_v2_file_maps` + file content), so no
+derived value ever depends on positions. Cheap when the flag is off or nothing
+changed (`derived_required_macro_expansions` is memoized).
+"""
+function _reconcile_expansions!(jw::JuliaWorkspace)
+    df = jw.dynamic_feature
+    input_macro_expansion(jw.runtime) || return
+
+    # Prune bookkeeping for envs that left the workspace (env edits re-key
+    # everything under a new env_hash, so stale entries only cost memory).
+    # Every hash an expansion env can carry must count as live while its child
+    # can still serve batches — otherwise a settled `:failed` outcome is
+    # pruned here, re-required, re-settled, … and a one-shot settle loop never
+    # ends (the borrowed-test-env routing bug of round 4, and again the
+    # test-env hash of round 5). `derived_v2_live_expansion_env_hashes` derives
+    # the hashes exactly as the routing does — never recompute them here.
+    live_env_hashes = derived_v2_live_expansion_env_hashes(jw.runtime)
+    if any(k -> !(k.env_hash in live_env_hashes), keys(input_macro_expansions(jw.runtime)))
+        set_input_macro_expansions!(jw.runtime,
+            filter(p -> p.first.env_hash in live_env_hashes, input_macro_expansions(jw.runtime)))
+    end
+    filter!(k -> k.env_hash in live_env_hashes, df.requested_expansions)
+
+    # Batches are sent regardless of mode: under a non-persistent mode the
+    # reactor settles every entry `:failed` immediately, which is exactly what
+    # the readiness gate and the negative cache need to stay honest.
+    required = derived_required_macro_expansions(jw.runtime)
+    isempty(required) && return
+
+    # Group new work per (env child, module context).
+    groups = Dict{Tuple{DJPKey,String},@NamedTuple{imports::Vector{String}, ctx_module::Vector{String}, entries::Vector{ExpansionEntry}}}()
+    for r in required
+        r.key in df.requested_expansions && continue
+
+        # Reattach the macrocall's source text (volatile, last mile only).
+        maps = derived_v2_file_maps(jw.runtime, r.file)
+        rngs = get(maps, r.item_id, nothing)
+        (rngs === nothing || !(1 <= r.addr <= length(rngs))) && continue
+        text = derived_julia_source_view(jw.runtime, r.file)
+        text === nothing && continue
+        rng = rngs[r.addr]
+        last(rng) - 1 <= ncodeunits(text) || continue
+        macro_text = text[first(rng):prevind(text, last(rng))]
+
+        push!(df.requested_expansions, r.key)
+        g = get!(groups, (r.env_key, r.ctx_id)) do
+            (imports=r.imports, ctx_module=r.ctx_module, entries=ExpansionEntry[])
+        end
+        push!(g.entries, (key=r.key, text=macro_text))
+    end
+
+    for ((env_key, ctx_id), g) in groups
+        i = 1
+        while i <= length(g.entries)
+            batch = ExpansionEntry[]
+            bytes = 0
+            while i <= length(g.entries) && length(batch) < EXPANSION_BATCH_MAX_ENTRIES &&
+                  bytes < EXPANSION_BATCH_MAX_BYTES
+                push!(batch, g.entries[i])
+                bytes += ncodeunits(g.entries[i].text)
+                i += 1
+            end
+            put!(df.in_channel, ExpansionBatchMsg(env_key, ctx_id, g.imports, g.ctx_module, batch))
+        end
     end
 
     return
@@ -468,6 +553,120 @@ function _set_active_project!(jw::JuliaWorkspace, uri_or_nothing::Union{URI,Noth
     set_input_active_project!(jw.runtime, uri_or_nothing)
 end
 
+"""
+    set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
+
+THE v2 opt-in (experiment): when `true`, the v2 (JuliaLowering-backed) static
+analysis framework takes over — its lint producer supersedes the takeover
+rules from StaticLint (same rule ids, severities, and config surface,
+different engine), and the interactive features ported to v2 (the references
+family, workspace/document symbols, module-at-position, document links,
+selection/block ranges, hover, signature help) answer from v2, each falling
+back to the legacy path whenever v2 declines. The project/environment
+model (TomlSyntax-parsed project files, `[workspace]`/`[sources]`/extension
+support), the include walker, the diagnostics join and the dynamic child
+lifecycle (the live-children cap, [`set_max_alive_djps!`](@ref)) switch
+with it too — every `_v2` twin in `src/` is reached only through this
+flag. Default `false`: exactly the legacy behavior; the v2 machinery is
+never demanded. The DJP-side macro expansion has its own flag,
+[`set_macro_expansion!`](@ref).
+"""
+function set_v2_enabled!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_v2_enabled!" enabled=enabled
+
+    process_from_dynamic(jw)
+    set_input_v2_enabled!(jw.runtime, enabled)
+    # The reactor owns the child lifecycle; tell it before the reconcile the
+    # flag change triggers (channel order), so that reconcile already runs
+    # under the new rules.
+    put!(jw.dynamic_feature.in_channel, SetV2LifecycleMsg(enabled))
+    _reconcile!(jw)
+end
+
+"""
+    set_dynamic_mode!(jw::JuliaWorkspace, mode::DynamicMode)
+
+Switch the workspace's dynamic-feature mode at runtime — see
+[`DynamicMode`](@ref) for what each mode does. The set of running dynamic
+child processes adjusts immediately:
+
+- Switching to `DynamicOff` kills every child process; outstanding work
+  settles best-effort (environments are declared ready with whatever symbol
+  caches exist, work that needs a child settles as skipped), so
+  [`is_ready`](@ref) still becomes `true`.
+- Switching away from `DynamicOff` forgets the completion and failure
+  bookkeeping accumulated while off (the same license
+  [`retry_failed_dynamic_projects!`](@ref) takes) and re-dispatches the
+  workspace's required dynamic work under the new mode.
+- `DynamicPersistent` → `DynamicIndexingOnly` kills the settled child
+  processes and fails queued macro-expansion batches; children still indexing
+  finish and are then torn down.
+- `DynamicIndexingOnly` → `DynamicPersistent` keeps children that settle from
+  now on alive; already-departed children are relaunched on demand when a
+  macro expansion needs them. Note that expansions negative-cached under the
+  previous mode stay `:failed` until their environment re-keys.
+
+The constructor's `dynamic` keyword sets the initial mode; a same-mode call is
+a no-op. See also [`get_dynamic_mode`](@ref).
+"""
+function set_dynamic_mode!(jw::JuliaWorkspace, mode::DynamicMode)
+    @debug "set_dynamic_mode!" mode=mode
+
+    process_from_dynamic(jw)
+    old = input_dynamic_mode(jw.runtime)
+    old == mode && return
+    set_input_dynamic_mode!(jw.runtime, mode)
+
+    df = jw.dynamic_feature
+    # The reactor owns the child lifecycle; tell it before the reconcile
+    # (channel order), so that reconcile already runs under the new rules.
+    put!(df.in_channel, SetDynamicModeMsg(mode))
+
+    if old == DynamicOff
+        # The reactor forgets its Off-accumulated bookkeeping in the message
+        # handler; mirror that on the query side so readiness gates re-open,
+        # and force a reconcile through even though the required set is
+        # unchanged (same shape as `retry_failed_dynamic_projects!`).
+        set_input_failed_dynamic_keys!(jw.runtime, Set{DJPKey}())
+        set_input_dynamic_failure_messages!(jw.runtime, Dict{DJPKey,String}())
+        empty!(df.last_required)
+        df.reconciled_once[] = false
+        # Un-settle readiness too: the work parked under Off is about to be
+        # re-dispatched, and without this `is_ready` would report a stale
+        # `true` (and `wait_until_ready` return) in the window before the
+        # reactor processes the reconcile. The reconcile re-settles it when
+        # nothing needs re-doing.
+        df.saw_result[] = false
+    end
+
+    _reconcile!(jw)
+    return
+end
+
+"""
+    get_dynamic_mode(jw::JuliaWorkspace)
+
+The workspace's current [`DynamicMode`](@ref), as set by the constructor's
+`dynamic` keyword or the most recent [`set_dynamic_mode!`](@ref).
+"""
+get_dynamic_mode(jw::JuliaWorkspace) = input_dynamic_mode(jw.runtime)
+
+"""
+    set_macro_expansion!(jw::JuliaWorkspace, enabled::Bool)
+
+Feature flag (experiment): when `true`, opaque macrocalls in v2 lowering are
+expanded out-of-process by the persistent env child and spliced into the
+analysis (see `src/v2/layer_expansion.jl`). Only effective together with
+[`set_v2_enabled!`](@ref) and `DynamicPersistent` mode. Default `false`.
+"""
+function set_macro_expansion!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_macro_expansion!" enabled=enabled
+
+    process_from_dynamic(jw)
+    set_input_macro_expansion!(jw.runtime, enabled)
+    _reconcile!(jw)
+end
+
 # Projects
 
 """
@@ -516,20 +715,22 @@ on demand and not cached.
 
 - The `JuliaSyntax.SyntaxNode` root of the parsed file.
 
-Throws `JWNotAJuliaFile` if `uri` is not a Julia document, and `JWUnknownFile` if it has no content.
+Throws `JWNotAJuliaFile` if `uri` is not a Julia or markdown document (a markdown
+document is parsed through its Julia view, see `derived_julia_source_view`),
+and `JWUnknownFile` if it has no content.
 """
 function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     @debug "get_julia_syntax_tree" uri=uri
 
     process_from_dynamic(jw)
 
-    tf = derived_text_file_content(jw.runtime, uri)
+    content = derived_julia_source_view(jw.runtime, uri)
 
-    tf === nothing && throw(JWUnknownFile("Requested a syntax tree for $uri, which has no content."))
+    content === nothing && throw(JWUnknownFile("Requested a syntax tree for $uri, which has no content."))
 
-    _is_julia_uri(jw.runtime, uri) || throw(JWNotAJuliaFile("Requested a syntax tree for $uri, which is not a Julia document."))
+    _is_julia_analysis_uri(jw.runtime, uri) || throw(JWNotAJuliaFile("Requested a syntax tree for $uri, which is not a Julia document."))
 
-    return parse_julia_syntax_tree(tf.content.content)[1]
+    return parse_julia_syntax_tree(content)[1]
 end
 
 """
@@ -643,6 +844,24 @@ function get_diagnostics_blocking(jw::JuliaWorkspace; cancel_token::Union{Cancel
                 yield()
             end
         end
+        # Macro-expansion settlement, for one-shot flows: expansion batches
+        # leave the host only through `_reconcile!` (the mutation path) and
+        # never count as pending work items, so without this a CLI run would
+        # return before any expansion settles — the flag would be a silent
+        # no-op outside an editor. Send batches for whatever the pass above
+        # made newly required, then wait while any REQUESTED key is still
+        # unsettled: every batch settles eventually (`:failed` on timeout,
+        # immediately under non-persistent modes) and every settle path pings
+        # the update channel. Required-but-unrequestable entries (volatile map
+        # misses) are deliberately not waited on — no wakeup would come.
+        if input_macro_expansion(jw.runtime)
+            _reconcile!(jw)
+            settled = input_macro_expansions(jw.runtime)
+            if any(k -> !haskey(settled, k), jw.dynamic_feature.requested_expansions)
+                _wait_for_dynamic_update(jw, cancel_token)
+                continue
+            end
+        end
         is_ready(jw) && break
         wait_until_ready(jw; cancel_token=cancel_token)
     end
@@ -718,6 +937,35 @@ function get_test_env(jw::JuliaWorkspace, uri::URI)
 end
 
 """
+    set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
+
+Bound the number of settled dynamic child processes kept alive to `n`
+(`n <= 0`: unlimited), effective immediately: idle children beyond the bound
+are killed least-recently-used first, and any of them is relaunched on demand
+when a macro expansion batch next needs its environment — a relaunch waits
+for room under the bound. Children still indexing or refreshing come on top
+(at most `max_concurrent_djps`), so the live total is bounded by the sum; a
+child serving a batch counts but is never killed. Raising the bound
+relaunches nothing.
+
+Under `DynamicPersistent` every environment — a project's, a package's merged
+test environment, a standalone or extension scratch project — keeps its child
+alive to serve expansions, so a monorepo of many packages would otherwise hold
+one Julia process per package indefinitely. Hosts should wire this to a user
+setting (the constructor's `max_alive_djps` sets the initial value).
+
+Part of the v2 lifecycle: the bound is only applied while
+[`set_v2_enabled!`](@ref) is on (the value is kept either way).
+"""
+function set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
+    @debug "set_max_alive_djps!" n=n
+
+    # `max_alive_djps`/`procs` are owned by the reactor task.
+    put!(jw.dynamic_feature.in_channel, SetMaxAliveDjpsMsg(n))
+    return
+end
+
+"""
     retry_failed_dynamic_projects!(jw::JuliaWorkspace)
 
 Forget every terminal dynamic-work failure, so projects that previously failed
@@ -730,14 +978,11 @@ env, an unregistered dependency — from launching a fresh child process on ever
 edit to its `Project.toml`. Hosts should wire this function to an explicit user
 action such as "restart language server" or "reindex", which is the intended way
 past the bound.
-
-No-op when the workspace has no dynamic feature.
 """
 function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
     @debug "retry_failed_dynamic_projects!"
 
     df = jw.dynamic_feature
-    df === nothing && return
 
     # `failed_projects`/`failure_attempts` are owned by the reactor task;
     # clearing them from here directly would race it.
@@ -763,8 +1008,10 @@ end
     is_ready(jw::JuliaWorkspace)
 
 Check whether the workspace's dynamic environment loading has completed.
-Returns `true` if no dynamic feature is configured, or if at least one result
-has been consumed (successful or failed) and no work item is pending.
+Returns `true` if at least one result has been consumed (successful or
+failed) — or a reconcile completed with no work to do — and no work item is
+pending. Under `DynamicOff` every work item settles best-effort without a
+child process, so an off workspace becomes ready too.
 
 This is a whole-workspace question and stays coarse: per-file consumers want
 the internal `derived_file_env_ready` query instead, which is settled per
@@ -774,7 +1021,6 @@ function is_ready(jw::JuliaWorkspace)
     @debug "is_ready"
 
     df = jw.dynamic_feature
-    df === nothing && return true
     return df.saw_result[] && df.pending_count[] == 0
 end
 
@@ -787,6 +1033,12 @@ when the token is cancelled.
 """
 function wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
     @debug "wait_until_ready"
+
+    # A workspace that has never reconciled (freshly constructed, no mutation
+    # yet) would otherwise wait forever: `saw_result` only settles once the
+    # reactor has processed a reconcile. Sending one here is cheap — the
+    # required set of an empty workspace is empty.
+    _reconcile!(jw)
 
     while !is_ready(jw)
         if cancel_token !== nothing
@@ -802,15 +1054,29 @@ function wait_until_ready(jw::JuliaWorkspace; cancel_token::Union{CancellationTo
     end
 end
 
+# One blocking round of the dynamic-update pump: wait for the reactor's
+# coalesced wakeup, drain it, and fold the results into the Salsa inputs.
+function _wait_for_dynamic_update(jw::JuliaWorkspace, cancel_token)
+    if cancel_token !== nothing
+        wait(jw.dynamic_feature.update_channel, cancel_token)
+    else
+        wait(jw.dynamic_feature.update_channel)
+    end
+    while isready(jw.dynamic_feature.update_channel)
+        take!(jw.dynamic_feature.update_channel)
+    end
+    process_from_dynamic(jw)
+    return
+end
+
 """
     get_update_channel(jw::JuliaWorkspace)
 
 Return the `Channel{Symbol}` that receives notifications when dynamic data
-becomes available.  Returns `nothing` if no dynamic feature is configured.
-Consumers can `take!` or `wait` on this channel to be notified of updates.
+becomes available. Consumers can `take!` or `wait` on this channel to be
+notified of updates.
 """
 function get_update_channel(jw::JuliaWorkspace)
-    jw.dynamic_feature === nothing && return nothing
     return jw.dynamic_feature.update_channel
 end
 
@@ -824,7 +1090,9 @@ Get the CSTParser legacy syntax tree for a Julia file.
 # Returns
 - An `EXPR` (CSTParser expression tree).
 
-Throws `JWNotAJuliaFile` if `uri` is not a Julia document, and `JWUnknownFile` if it has no content.
+Throws `JWNotAJuliaFile` if `uri` is not a Julia or markdown document (a markdown
+document is parsed through its Julia view, see `derived_julia_source_view`),
+and `JWUnknownFile` if it has no content.
 """
 function get_legacy_cst(jw::JuliaWorkspace, uri::URI)
     @debug "get_legacy_cst" uri=uri
@@ -890,14 +1158,14 @@ needed by LS request handlers.
     request-time through the module tree). Deletion candidate for M5.
   - `root::URI` — the root file that was used
 
-Returns `nothing` when `uri` is not a Julia document.
+Returns `nothing` when `uri` is not a Julia or markdown document.
 """
 function get_static_lint_data(jw::JuliaWorkspace, uri::URI)
     @debug "get_static_lint_data" uri=uri
 
     process_from_dynamic(jw)
 
-    _is_julia_uri(jw.runtime, uri) || return nothing
+    _is_julia_analysis_uri(jw.runtime, uri) || return nothing
 
     root = derived_best_root_for_uri(jw.runtime, uri)
     root === nothing && return nothing
@@ -997,13 +1265,13 @@ Return a Markdown documentation string for the expression at `index` (1-based
 Julia string index) in the file identified by `uri`, or `nothing` if there is
 no hover information for that position.
 
-Returns `nothing` when `uri` is not a Julia document.
+Returns `nothing` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_hover_text(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_hover_text" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return nothing
+    _julia_position_admitted(jw.runtime, uri, index) || return nothing
     return _get_hover_text(jw.runtime, uri, index)
 end
 
@@ -1032,13 +1300,13 @@ Return a `CompletionResult` with completion items at the given `index`
 `completion_mode` may be `:import` (default) or `:qualify` to control whether
 additional `using` statements are inserted for out-of-scope symbols.
 
-Returns an empty, complete result when `uri` is not a Julia document.
+Returns an empty, complete result when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_completions(jw::JuliaWorkspace, uri::URI, index::Integer, completion_mode::Symbol=:import)
     @debug "get_completions" uri=uri index=index mode=completion_mode
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return CompletionResult(false, CompletionResultItem[])
+    _julia_position_admitted(jw.runtime, uri, index) || return CompletionResult(false, CompletionResultItem[])
     offset = index - 1  # Convert 1-based string index to 0-based CSTParser offset
     return _get_completions(jw.runtime, uri, offset, completion_mode, jw)
 end
@@ -1051,13 +1319,13 @@ end
 Return a vector of `DefinitionResult` for the symbol at `index` (1-based
 Julia string index) in the file identified by `uri`.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_definitions(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_definitions" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return DefinitionResult[]
+    _julia_position_admitted(jw.runtime, uri, index) || return DefinitionResult[]
     offset = index - 1
     return _get_definitions(jw.runtime, uri, offset)
 end
@@ -1068,13 +1336,13 @@ end
 Return a vector of `ReferenceResult` for all references to the symbol at
 `index` (1-based Julia string index) in the file identified by `uri`.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_references(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_references" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return ReferenceResult[]
+    _julia_position_admitted(jw.runtime, uri, index) || return ReferenceResult[]
     offset = index - 1
     return _get_references(jw.runtime, uri, offset)
 end
@@ -1085,13 +1353,13 @@ end
 Return a vector of `RenameEdit` for renaming the symbol at `index` (1-based
 Julia string index) in `uri` to `new_name`.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_rename_edits(jw::JuliaWorkspace, uri::URI, index::Integer, new_name::String)
     @debug "get_rename_edits" uri=uri index=index new_name=new_name
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return RenameEdit[]
+    _julia_position_admitted(jw.runtime, uri, index) || return RenameEdit[]
     offset = index - 1
     return _get_rename_edits(jw.runtime, uri, offset, new_name)
 end
@@ -1102,13 +1370,13 @@ end
 Return a vector of `HighlightResult` for highlighted occurrences of the
 symbol at `index` (1-based Julia string index) in the same file.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_highlights(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_highlights" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return HighlightResult[]
+    _julia_position_admitted(jw.runtime, uri, index) || return HighlightResult[]
     offset = index - 1
     return _get_highlights(jw.runtime, uri, offset)
 end
@@ -1121,13 +1389,13 @@ renamed. Returns a named tuple `(; start::Position, stop::Position)`
 describing the range of the renamable symbol (both positions use 1-based
 `line` and `column`), or `nothing` if the symbol cannot be renamed.
 
-Returns `nothing` when `uri` is not a Julia document.
+Returns `nothing` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function can_rename(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "can_rename" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return nothing
+    _julia_position_admitted(jw.runtime, uri, index) || return nothing
     offset = index - 1
     return _can_rename(jw.runtime, uri, offset)
 end
@@ -1140,13 +1408,13 @@ end
 Return a `SignatureResult` with signature information for the function call
 at `index` (1-based Julia string index) in the file identified by `uri`.
 
-Returns an empty result when `uri` is not a Julia document.
+Returns an empty result when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_signature_help(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_signature_help" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return SignatureResult(SignatureInfo[], 0, 0)
+    _julia_position_admitted(jw.runtime, uri, index) || return SignatureResult(SignatureInfo[], 0, 0)
     offset = index - 1
     return _get_signature_help(jw.runtime, uri, offset)
 end
@@ -1161,13 +1429,13 @@ for the file identified by `uri`. Each result has `start_offset` and
 `end_offset` as 0-based byte offsets, plus `name`, `kind` (LSP SymbolKind
 integer), and `children`.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia or markdown document. Markdown documents are answered from their Julia code chunks.
 """
 function get_document_symbols(jw::JuliaWorkspace, uri::URI)
     @debug "get_document_symbols" uri=uri
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return DocumentSymbolResult[]
+    _is_julia_analysis_uri(jw.runtime, uri) || return DocumentSymbolResult[]
     return _get_document_symbols(jw.runtime, uri)
 end
 
@@ -1192,15 +1460,21 @@ end
 For each 1-based string index in `indices`, compute a nested selection range.
 Returns a vector of `Union{Nothing, SelectionRangeResult}`.
 
-Returns all-`nothing` when `uri` is not a Julia document.
+Returns all-`nothing` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_selection_ranges(jw::JuliaWorkspace, uri::URI, indices::Vector{Int})
     @debug "get_selection_ranges" uri=uri count=length(indices)
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return Union{Nothing,SelectionRangeResult}[nothing for _ in indices]
+    admitted = Bool[_julia_position_admitted(jw.runtime, uri, idx) for idx in indices]
+    any(admitted) || return Union{Nothing,SelectionRangeResult}[nothing for _ in indices]
     offsets = [idx - 1 for idx in indices]
-    return _get_selection_ranges(jw.runtime, uri, offsets)
+    results = _get_selection_ranges(jw.runtime, uri, offsets)
+    # In a markdown document, positions outside a Julia chunk get no range.
+    for (i, ok) in enumerate(admitted)
+        ok || (results[i] = nothing)
+    end
+    return results
 end
 
 """
@@ -1209,13 +1483,13 @@ end
 Find the current top-level block at `index` (1-based Julia string index).
 Returns a `BlockRangeResult` with 0-based byte offsets, or `nothing`.
 
-Returns `nothing` when `uri` is not a Julia document.
+Returns `nothing` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_current_block_range(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_current_block_range" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return nothing
+    _julia_position_admitted(jw.runtime, uri, index) || return nothing
     offset = index - 1
     return _get_current_block_range(jw.runtime, uri, offset)
 end
@@ -1226,13 +1500,13 @@ end
 Return the fully qualified module name at `index` (1-based Julia string index),
 or "Main" if no module scope is found.
 
-Returns `"Main"` when `uri` is not a Julia document.
+Returns `"Main"` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_module_at(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_module_at" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return "Main"
+    _julia_position_admitted(jw.runtime, uri, index) || return "Main"
     offset = index - 1
     return _get_module_at(jw.runtime, uri, offset)
 end
@@ -1247,13 +1521,13 @@ end
 Return clickable document links (string literals that resolve to files).
 Offsets in results are 0-based byte offsets for direct use with CST spans.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia or markdown document. Markdown documents are answered from their Julia code chunks.
 """
 function get_document_links(jw::JuliaWorkspace, uri::URI)
     @debug "get_document_links" uri=uri
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return DocumentLinkResult[]
+    _is_julia_analysis_uri(jw.runtime, uri) || return DocumentLinkResult[]
     return _get_document_links(jw.runtime, uri)
 end
 
@@ -1267,13 +1541,13 @@ end
 Return inlay hints (parameter names, variable types) for the given range.
 `start_index` and `end_index` are 1-based Julia string indices.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia or markdown document. Markdown documents are answered from their Julia code chunks.
 """
 function get_inlay_hints(jw::JuliaWorkspace, uri::URI, start_index::Integer, end_index::Integer, config::InlayHintConfig)
     @debug "get_inlay_hints" uri=uri start_index=start_index end_index=end_index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return InlayHintResult[]
+    _is_julia_analysis_uri(jw.runtime, uri) || return InlayHintResult[]
     start_offset = start_index - 1
     end_offset = end_index - 1
     return _get_inlay_hints(jw.runtime, uri, start_offset, end_offset, config)
@@ -1290,13 +1564,13 @@ Return the list of applicable code actions at `index` (1-based Julia string inde
 `diagnostic_messages` should contain the text of any diagnostics overlapping the cursor.
 `workspace_folders` is an optional list of workspace folder paths (used by license actions).
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String}, workspace_folders::Vector{String}=String[])
     @debug "get_code_actions" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return CodeActionInfo[]
+    _julia_position_admitted(jw.runtime, uri, index) || return CodeActionInfo[]
     offset = index - 1
     return _get_code_actions(jw.runtime, uri, offset, diagnostic_messages, workspace_folders)
 end
@@ -1308,13 +1582,13 @@ Execute the code action identified by `action_id` at `index` (1-based Julia stri
 Returns a vector of workspace file edits. Each edit contains a URI and a vector of
 `TextEditResult`s with 0-based byte offsets.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer, workspace_folders::Vector{String}=String[])
     @debug "execute_code_action" action_id=action_id uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return WorkspaceFileEdit[]
+    _julia_position_admitted(jw.runtime, uri, index) || return WorkspaceFileEdit[]
     offset = index - 1
     return _execute_code_action(jw.runtime, action_id, uri, offset, workspace_folders)
 end

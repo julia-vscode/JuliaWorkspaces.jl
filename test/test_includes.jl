@@ -877,3 +877,81 @@ end
     set_input_env_ready!(jw2.runtime, true)
     @test !any(d -> contains(d.message, "already been included"), get_diagnostic(jw2, m_uri))
 end
+
+# The v2 include diagnostics (behind `input_v2_enabled`): the include walker is
+# v1's, but runtime and computed includes are analysis-boundary notices under
+# the flag instead of include_errors warnings.
+@testitem "runtime include: a literal include inside a function body is a boundary notice" begin
+    using JuliaWorkspaces: set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    # The SciML runtests shape: `@safetestset "x" include("x.jl")` inside a
+    # 0-arg thunk. The path is a plain literal and the file exists — that is a
+    # runtime boundary (analysis_boundary, opt-in), NOT "the path could not be
+    # determined statically", and never an include_errors warning.
+    root_uri = URI("file:///rti/src/RtI.jl")
+    jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
+    add_file!(jw, TextFile(URI("file:///rti/JuliaLint.toml"),
+        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module RtI
+    function load()
+        include("lu_test.jl")
+    end
+    end
+    """, "julia")))
+    add_file!(jw, TextFile(URI("file:///rti/src/lu_test.jl"), SourceText("x = 1\n", "julia")))
+    set_input_env_ready!(jw.runtime, true)
+
+    diags = get_diagnostic(jw, root_uri)
+    notice = only(filter(d -> contains(d.message, "runs inside a function body"), diags))
+    @test notice.code === :analysis_boundary
+    @test notice.severity === :warning
+    @test !any(d -> contains(d.message, "could not be determined statically"), diags)
+    @test !any(d -> d.code === :include_errors, diags)
+    # The runtime include is not an include-graph edge: lu_test.jl stays a root.
+    @test URI("file:///rti/src/lu_test.jl") in JuliaWorkspaces.derived_roots(jw.runtime)
+
+    # A literal function-body include whose target is MISSING is still a
+    # real MissingFile warning.
+    jw2 = JuliaWorkspace()
+    set_v2_enabled!(jw2, true)
+    add_file!(jw2, TextFile(root_uri, SourceText("function load()\n    include(\"nope.jl\")\nend\n", "julia")))
+    set_input_env_ready!(jw2.runtime, true)
+    missing = filter(d -> contains(d.message, "can not be found"), get_diagnostic(jw2, root_uri))
+    @test length(missing) == 1
+    @test only(missing).code === :include_errors
+end
+
+@testitem "computed include: the notice is an opt-in analysis_boundary, not an include_errors warning" begin
+    using JuliaWorkspaces: set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    src = """
+    for f in readdir(@__DIR__)
+        include(f)
+    end
+    """
+    root_uri = URI("file:///cin/src/CIn.jl")
+
+    # Default preset: silence. The linter does not report on what it cannot
+    # analyze; it only suppresses the affected rules.
+    jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
+    add_file!(jw, TextFile(root_uri, SourceText(src, "julia")))
+    set_input_env_ready!(jw.runtime, true)
+    @test isempty(get_diagnostic(jw, root_uri))
+
+    # Opted in: one notice naming the suppressed rules, at the configured severity.
+    jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
+    add_file!(jw, TextFile(URI("file:///cin/JuliaLint.toml"),
+        SourceText("[rules]\nanalysis_boundary = \"warning\"\n", "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText(src, "julia")))
+    set_input_env_ready!(jw.runtime, true)
+    d = only(filter(d -> contains(d.message, "could not be determined statically"), get_diagnostic(jw, root_uri)))
+    @test d.code === :analysis_boundary
+    @test d.severity === :warning
+    @test occursin("missing_reference", d.message)
+end

@@ -189,6 +189,7 @@ end
 
 Salsa.@derived function derived_package(rt, uri)
     @debug "derived_package" uri=uri
+    input_v2_enabled(rt) && return derived_package_v2(rt, uri)
 
     # Try the known project folders first (workspace files + active project),
     # then fall back to lazy probing for DJP-created projects.
@@ -219,6 +220,7 @@ end
 
 Salsa.@derived function derived_project(rt, uri)
     @debug "derived_project" uri=uri
+    input_v2_enabled(rt) && return derived_project_v2(rt, uri)
 
     # `nothing` means no project (e.g. no active project and the file is not
     # inside any package or project folder)
@@ -391,6 +393,7 @@ name+uuid+version (`derived_package`), a project has a manifest
 """
 Salsa.@derived function derived_nonpackage_env(rt, uri)
     @debug "derived_nonpackage_env" uri=uri
+    input_v2_enabled(rt) && return derived_nonpackage_env_v2(rt, uri)
 
     project_folders = derived_potential_project_folders(rt)
     toml_files = get(project_folders, uri, nothing)

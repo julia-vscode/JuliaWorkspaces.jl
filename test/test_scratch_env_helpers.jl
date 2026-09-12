@@ -36,6 +36,9 @@ needs_stdlib_test_env(project_path, package_name) =
 write_resolved_env_project(env_path, project_dir) =
     Base.invokelatest(_scratch_env_module().write_resolved_env_project, env_path, project_dir)
 
+write_extension_env_project(package_path, project_dir) =
+    Base.invokelatest(_scratch_env_module().write_extension_env_project, package_path, project_dir)
+
 # Same story for the vendored TestEnv.
 function activate_test_env(package_name)
     mod = Module(:TestEnvUnderTest)

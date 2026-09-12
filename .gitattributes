@@ -1,0 +1,3 @@
+# The toml-test conformance corpus must stay byte-exact: it contains CRLF,
+# bare-CR and invalid-UTF-8 cases that line-ending normalisation would destroy.
+testdata/toml-test/** -text

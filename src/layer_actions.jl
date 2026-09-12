@@ -92,9 +92,11 @@ _ActionDef(id, title, kind, is_preferred, when, handler) =
 # passes the file that holds a `using` statement, which may be an indirect
 # include target. Read through the accessor that serves both populations.
 function _action_get_text(runtime, uri::URI)
-    tf = derived_text_file_content(runtime, uri)
-    tf === nothing && error("_action_get_text: no content for $uri")
-    return tf.content.content
+    # The Julia view: action handlers scan this text for insertion points, and
+    # a markdown document's prose must never match.
+    text = derived_julia_source_view(runtime, uri)
+    text === nothing && error("_action_get_text: no content for $uri")
+    return text
 end
 
 function _action_get_next_line_offset(x, runtime)

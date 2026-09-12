@@ -1,3 +1,39 @@
+"""
+    @enum DynamicMode DynamicOff DynamicIndexingOnly DynamicPersistent
+
+Controls how a [`JuliaWorkspace`](@ref) uses the out-of-process *dynamic
+feature* that indexes package environments and resolves symbol information.
+
+- `DynamicOff`: No child Julia processes are launched. The workspace only
+  relies on statically available information (parsed sources,
+  `Project.toml`/`Manifest.toml` contents, and any locally cached symbol
+  data); work that would need a child process settles best-effort instead.
+  Environment-dependent diagnostics are suppressed because no environment can
+  be resolved.
+- `DynamicIndexingOnly`: Child Julia processes are spawned to index project and
+  test environments (populating the on-disc symbol cache), but they are torn
+  down once indexing completes. Use this for one-shot tools such as CI runs.
+- `DynamicPersistent`: Like `DynamicIndexingOnly`, but the child processes are
+  kept alive so the workspace can react to ongoing changes. Under the v2
+  lifecycle ([`set_v2_enabled!`](@ref)) they also serve macro expansion
+  batches for the files of their environment (a test-environment child
+  serves the package's test files; a resolved non-package environment's
+  child serves nothing and is torn down after indexing), and the number of
+  settled children kept alive is bounded by `max_alive_djps`
+  ([`set_max_alive_djps!`](@ref)): beyond it idle ones are evicted
+  least-recently-used first and relaunched on demand. Without the v2
+  lifecycle every settled child stays alive until reconcile kills it. Use
+  this for long-running hosts such as a language server.
+
+The mode is chosen at construction (`JuliaWorkspace(dynamic=...)`) and can be
+switched at any time with [`set_dynamic_mode!`](@ref): a downgrade kills the
+child processes the new mode forbids and settles outstanding work best-effort;
+an upgrade from `DynamicOff` re-dispatches the work that was skipped.
+
+See also [`is_ready`](@ref), [`wait_until_ready`](@ref).
+"""
+@enum DynamicMode DynamicOff DynamicIndexingOnly DynamicPersistent
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Dynamic process keys
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -35,11 +71,20 @@ end
     content_hash::UInt64
 end
 
-const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey, ResolveEnvironmentKey}
+# One per package (covering all of its extensions): a scratch project holding
+# the package's `[weakdeps]` plus the package itself, resolved and indexed so
+# `ext/` files get an environment containing their triggers. Scheduled only
+# when no existing manifest (own, workspace root, test) covers the triggers.
+@auto_hash_equals struct ResolveExtensionEnvironmentKey
+    package_path::String
+    content_hash::UInt64
+end
+
+const DJPKey = Union{WatchEnvironmentKey, WatchTestEnvironmentKey, CreateStandaloneProjectKey, ResolveEnvironmentKey, ResolveExtensionEnvironmentKey}
 
 # Keys whose work item is "materialize a project into a persistent scratch dir"
 # — they share the dir-prep / fast-lane / background-refresh machinery.
-const ScratchProjectKey = Union{CreateStandaloneProjectKey, ResolveEnvironmentKey}
+const ScratchProjectKey = Union{CreateStandaloneProjectKey, ResolveEnvironmentKey, ResolveExtensionEnvironmentKey}
 
 """
     DJPIdentity
@@ -62,10 +107,12 @@ _djp_identity(k::WatchEnvironmentKey)        = (kind=:watch_environment,        
 _djp_identity(k::WatchTestEnvironmentKey)    = (kind=:watch_test_environment,    path=k.project_path, package=k.package_name)
 _djp_identity(k::CreateStandaloneProjectKey) = (kind=:create_standalone_project, path=k.package_path, package="")
 _djp_identity(k::ResolveEnvironmentKey)      = (kind=:resolve_environment,       path=k.env_path,     package="")
+_djp_identity(k::ResolveExtensionEnvironmentKey) = (kind=:resolve_extension_environment, path=k.package_path, package="")
 
 # The folder a key's failure diagnostics should be attached to.
 _key_folder_path(k::CreateStandaloneProjectKey) = k.package_path
 _key_folder_path(k::ResolveEnvironmentKey)      = k.env_path
+_key_folder_path(k::ResolveExtensionEnvironmentKey) = k.package_path
 _key_folder_path(k::DJPKey)                     = k.project_path
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -102,6 +149,60 @@ struct CreateStandaloneProjectMsg <: DynamicReactorMessage
     key::ScratchProjectKey
 end
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Macro expansion (served by the persistent env child; no key kind of its own)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+"""
+    ExpansionKey
+
+Content address of one macro expansion: the environment (Project/Manifest
+content hash), the module context (hash over the module's canonical import
+statements, plus the macro-definition hashes of any deved packages it can see),
+and the macrocall itself (`BodyTree.hash`). Position edits and unrelated file
+edits change none of the three, so cached expansions survive them.
+"""
+const ExpansionKey = @NamedTuple{env_hash::UInt64, ctx_hash::UInt64, mac_hash::UInt64}
+
+"One macrocall to expand: its content key and its source text."
+const ExpansionEntry = @NamedTuple{key::ExpansionKey, text::String}
+
+"The settled value of one expansion: `:ok` with the expansion text, or `:failed`."
+const ExpansionOutcome = @NamedTuple{status::Symbol, text::String}
+
+"One settled expansion with its key: `:ok` with the expansion text, or `:failed`."
+const ExpansionOutcomeEntry = @NamedTuple{key::ExpansionKey, status::Symbol, text::String}
+
+"""
+Request to expand a batch of macrocalls sharing one environment and one module
+context. `env_key` is the environment's ordinary `DJPKey` — the batch is served
+by that env's persistent child (the one that indexed it), never by a child of
+its own.
+"""
+struct ExpansionBatchMsg <: DynamicReactorMessage
+    env_key::DJPKey
+    ctx_id::String
+    imports::Vector{String}
+    # Module path of the expansion sites within their package (see
+    # `ExpandMacrosParams.ctxModule`): lets the child expand in the real
+    # module, where internal macros resolve.
+    ctx_module::Vector{String}
+    entries::Vector{ExpansionEntry}
+end
+
+"""Posted by the async expansion task once the child answered a batch."""
+struct ExpansionBatchDoneMsg <: DynamicReactorMessage
+    env_key::DJPKey
+    results::Vector{ExpansionOutcomeEntry}
+end
+
+"""Posted by the async expansion task when a batch failed (timeout, child death, JSONRPC error)."""
+struct ExpansionBatchFailedMsg <: DynamicReactorMessage
+    env_key::DJPKey
+    entry_keys::Vector{ExpansionKey}
+    err::Any
+end
+
 """Request an orderly shutdown of the reactor."""
 struct ShutdownMsg <: DynamicReactorMessage end
 
@@ -112,6 +213,45 @@ reactor task owns `failed_projects`/`failure_attempts`. See
 [`retry_failed_dynamic_projects!`](@ref).
 """
 struct ResetFailuresMsg <: DynamicReactorMessage end
+
+"""
+Change the bound on live child processes (`<= 0`: unlimited) and evict down to
+it at once. Queued because the reactor task owns `max_alive_djps` and `procs`.
+See [`set_max_alive_djps!`](@ref).
+"""
+struct SetMaxAliveDjpsMsg <: DynamicReactorMessage
+    n::Int
+end
+
+"""
+    SetV2LifecycleMsg(enabled)
+
+Switch the reactor's v2 lifecycle rules — the live-children cap and the
+teardown of children that serve nothing after indexing — on or off. Posted
+by [`set_v2_enabled!`](@ref) ahead of its reconcile, so the next
+`ReconcileMsg` already runs under the new rules; `false` restores the v1
+lifecycle.
+"""
+struct SetV2LifecycleMsg <: DynamicReactorMessage
+    enabled::Bool
+end
+
+"""
+    SetDynamicModeMsg(mode)
+
+Switch the reactor's [`DynamicMode`](@ref) at runtime and enforce the new
+mode's child lifecycle on existing state: a downgrade to `DynamicOff` kills
+every child and settles all outstanding work the way the Off branches would
+have; `DynamicPersistent` → `DynamicIndexingOnly` kills the settled children
+and fails queued expansion batches; an upgrade from `DynamicOff` forgets the
+Off-parked completion/failure bookkeeping so those keys re-dispatch. Posted
+by [`set_dynamic_mode!`](@ref) ahead of its reconcile, so the next
+`ReconcileMsg` already runs under the new rules. Queued because the reactor
+task owns `djp_mode` and everything it gates.
+"""
+struct SetDynamicModeMsg <: DynamicReactorMessage
+    mode::DynamicMode
+end
 
 """
 Reconcile the set of running/required dynamic processes.
@@ -254,4 +394,19 @@ struct ResolvedEnvironmentReadyResult <: DynamicResultMessage
     env_folder_uri::URI
     project_uri::URI
     content_hash::UInt64
+end
+
+"""A resolved extension environment (package + weakdep triggers) is ready."""
+struct ExtensionEnvironmentReadyResult <: DynamicResultMessage
+    package_folder_uri::URI
+    project_uri::URI
+    content_hash::UInt64
+end
+
+"""
+A batch of macro expansions settled — each entry `:ok` with expansion text or
+`:failed` (negative-cached so the same key is not re-requested).
+"""
+struct MacroExpansionsResult <: DynamicResultMessage
+    entries::Vector{ExpansionOutcomeEntry}
 end

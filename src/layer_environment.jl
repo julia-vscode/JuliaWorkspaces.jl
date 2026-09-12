@@ -275,6 +275,7 @@ end
 
 Salsa.@derived function derived_project_uri_for_root(rt, uri)
     @debug "derived_project_uri_for_root" uri=uri
+    input_v2_enabled(rt) && return derived_project_uri_for_root_v2(rt, uri)
 
     active_project = input_active_project(rt)
 
@@ -394,6 +395,7 @@ fabricated for it under that same folder). Only for a deved package does the
 active project provide it.
 """
 function _test_environment_key(rt, package_folder_uri, pkg)
+    input_v2_enabled(rt) && return _test_environment_key_v2(rt, package_folder_uri, pkg)
     project_for_test = if package_folder_uri in derived_project_folders(rt) ||
             !_is_package_deved_in_workspace(rt, package_folder_uri)
         package_folder_uri
@@ -431,6 +433,7 @@ The global `input_env_ready` flag is honored as a manual override for tests: it
 pretends every environment is ready.
 """
 Salsa.@derived function derived_file_env_ready(rt, uri)
+    input_v2_enabled(rt) && return derived_file_env_ready_v2(rt, uri)
     input_env_ready(rt) && return true
 
     # Determine the file's effective project URI and require its env to be
@@ -534,6 +537,7 @@ end
 
 Salsa.@derived function derived_required_dynamic_projects(rt)
     @debug "derived_required_dynamic_projects"
+    input_v2_enabled(rt) && return derived_required_dynamic_projects_v2(rt)
 
     required = Set{DJPKey}()
 

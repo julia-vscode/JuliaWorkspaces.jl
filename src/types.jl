@@ -209,6 +209,109 @@ Details of a Julia project.
 end
 
 """
+    struct JuliaSourceEntry
+
+One `[sources]` entry of a Project.toml: where Pkg gets the dependency from
+instead of the registry. Fields are `nothing` when the key is absent; a
+well-formed entry has exactly one of `url`/`path`.
+"""
+@auto_hash_equals struct JuliaSourceEntry
+    url::Union{Nothing,String}
+    path::Union{Nothing,String}
+    rev::Union{Nothing,String}
+    subdir::Union{Nothing,String}
+end
+
+"""
+    struct JuliaProjectFile
+
+A parsed Project.toml, full fidelity: every section Pkg reads is a field.
+Malformed fields degrade to `nothing`/empty rather than failing the parse —
+each degradation is recorded as a [`ProjectTomlProblem`](@ref) by the parsing
+query, so consumers can rely on the invariants (a non-`nothing` `uuid` parses,
+`deps` values are valid UUIDs, …).
+
+Strictly position-free (`content_hash` covers the text): the struct backdates,
+diagnostics reattach positions through the TOML item walk at the last mile.
+
+- `workspace_projects` is `nothing` when there is no `[workspace]` section,
+  distinct from an empty member list.
+- `app_names` models `[apps]` by name only; nothing analyzes app definitions.
+"""
+@auto_hash_equals struct JuliaProjectFile
+    uri::URI
+    name::Union{Nothing,String}
+    uuid::Union{Nothing,UUID}
+    version::Union{Nothing,String}
+    deps::Dict{String,UUID}
+    weakdeps::Dict{String,UUID}
+    extras::Dict{String,UUID}
+    extensions::Dict{String,Vector{String}}
+    targets::Dict{String,Vector{String}}
+    sources::Dict{String,JuliaSourceEntry}
+    workspace_projects::Union{Nothing,Vector{String}}
+    compat::Dict{String,String}
+    app_names::Vector{String}
+    content_hash::UInt64
+end
+
+"""
+    struct JuliaManifestEntry
+
+One entry of a Manifest.toml, as written: `path` is not absolutized (that
+needs the manifest's folder and happens where the entry is consumed), and
+`deps`/`weakdeps` keep whichever of the two manifest shapes was used — a name
+list (`Vector{String}`) or a name→uuid table (`Dict{String,UUID}`) — or
+`nothing` when absent.
+"""
+@auto_hash_equals struct JuliaManifestEntry
+    name::String
+    uuid::Union{Nothing,UUID}
+    version::Union{Nothing,String}
+    path::Union{Nothing,String}
+    git_tree_sha1::Union{Nothing,String}
+    repo_url::Union{Nothing,String}
+    deps::Union{Nothing,Vector{String},Dict{String,UUID}}
+    weakdeps::Union{Nothing,Vector{String},Dict{String,UUID}}
+    extensions::Dict{String,Vector{String}}
+end
+
+"""
+    struct JuliaManifestFile
+
+A parsed Manifest.toml. `entries` maps a package name to all entries recorded
+under that name (more than one only when distinct UUIDs share a name).
+Format 1 manifests (no `manifest_format` key) have `manifest_format == v"1.0.0"`,
+no `julia_version` and no `project_hash`. Position-free, like
+[`JuliaProjectFile`](@ref).
+"""
+@auto_hash_equals struct JuliaManifestFile
+    uri::URI
+    manifest_format::VersionNumber
+    julia_version::Union{Nothing,VersionNumber}
+    project_hash::Union{Nothing,String}
+    entries::Dict{String,Vector{JuliaManifestEntry}}
+    content_hash::UInt64
+end
+
+"""
+    struct ProjectTomlProblem
+
+A semantic problem in a Project.toml or Manifest.toml, position-free so the
+parse products backdate. `code` is the lint rule id (`:project_file_errors`,
+`:project_file_warnings` or `:manifest_errors`); `key_path` the dotted key the
+diagnostic points at (empty ⇒ whole file); `at` whether it points at the key
+or its value. Byte ranges are attached in `derived_diagnostics` via the TOML
+item walk.
+"""
+@auto_hash_equals struct ProjectTomlProblem
+    code::Symbol
+    key_path::Vector{String}
+    at::Symbol
+    message::String
+end
+
+"""
     struct JuliaTestEnv
 
 What a test item in some file needs in order to run. Not a resolved environment:
@@ -454,8 +557,11 @@ Create an empty workspace. To build one directly from folders on disc, use
 [`workspace_from_folders`](@ref) instead.
 
 ## Keyword arguments
-- `dynamic::DynamicMode`: Whether and how to run the out-of-process dynamic
-  feature that indexes environments. See [`DynamicMode`](@ref).
+- `dynamic::DynamicMode`: The initial mode of the out-of-process dynamic
+  feature that indexes environments; changeable at any time with
+  [`set_dynamic_mode!`](@ref). The feature's reactor runs under every mode
+  (under `DynamicOff` it launches no child processes). See
+  [`DynamicMode`](@ref).
 - `store_path::Union{Nothing,String}`: Directory used to cache package symbol
   data (`.jstore` files). Defaults to a managed scratch space.
 - `symbolcache_download::Bool`: If `true`, allow downloading precomputed symbol
@@ -474,6 +580,13 @@ Create an empty workspace. To build one directly from folders on disc, use
   0–100 range); a report with `percentage >= 100` ends that operation's bar.
 - `max_concurrent_djps::Int`: Maximum number of concurrently working dynamic
   child processes (`0` disables the limit). Defaults to 4.
+- `max_alive_djps::Int`: Maximum number of settled dynamic child processes
+  kept alive under `DynamicPersistent` to serve macro expansion (`0` disables
+  the limit; children still indexing come on top). Idle children beyond it
+  are evicted least-recently-used first and relaunched on demand.
+  Defaults to
+  [`DEFAULT_MAX_ALIVE_DJPS`](@ref); changeable at runtime with
+  [`set_max_alive_djps!`](@ref).
 - `max_failure_attempts::Int`: How many terminal failures a project may
   accumulate before the dynamic feature stops launching child processes for it
   (`0` or less disables the bound). Defaults to
@@ -489,22 +602,27 @@ Create an empty workspace. To build one directly from folders on disc, use
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
-    dynamic_feature::Union{Nothing,DynamicFeature}
+    dynamic_feature::DynamicFeature
 
-    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true)
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, max_alive_djps::Int=DEFAULT_MAX_ALIVE_DJPS, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true, launcher::Function=_launch_process!)
         if store_path === nothing
             # Tie the local scratch store to the cache format version so a format
             # bump starts fresh instead of reading stale-format caches.
             scratch_key = "store_path_$(SymbolServer.CACHE_STORE_VERSION)"
             store_path = get_scratch_rate_limited(scratch_key)
         end
-        need_dynamic_feature = dynamic != DynamicOff || symbolcache_download
-        dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, max_concurrent_djps=max_concurrent_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds) : nothing
-        dynamic_feature === nothing || start(dynamic_feature)
+        # The dynamic feature always exists and its reactor always runs, even
+        # under `DynamicOff` (where it launches no children and settles work
+        # best-effort): the mode can be switched at any time with
+        # `set_dynamic_mode!`, so "off" must not mean "absent". An idle
+        # reactor costs one task and two channels.
+        dynamic_feature = DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, max_concurrent_djps=max_concurrent_djps, max_alive_djps=max_alive_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds, launcher=launcher)
+        start(dynamic_feature)
 
         rt = Salsa.Runtime{SContext}(SContext(dynamic_feature, indirect_file_watch_callback))
 
         set_input_files!(rt, Set{URI}())
+        set_input_dynamic_mode!(rt, dynamic)
         set_input_active_project!(rt, nothing)
         set_input_env_ready!(rt, false)
         set_input_resolve_workspace_environments!(rt, resolve_workspace_environments)
@@ -512,8 +630,10 @@ struct JuliaWorkspace
         set_input_ready_test_environments!(rt, Dict{WatchTestEnvironmentKey,URI}())
         set_input_standalone_projects!(rt, Dict{CreateStandaloneProjectKey,URI}())
         set_input_resolved_environments!(rt, Dict{ResolveEnvironmentKey,URI}())
+        set_input_extension_environments!(rt, Dict{ResolveExtensionEnvironmentKey,URI}())
         set_input_failed_dynamic_keys!(rt, Set{DJPKey}())
         set_input_dynamic_failure_messages!(rt, Dict{DJPKey,String}())
+        set_input_macro_expansions!(rt, Dict{ExpansionKey,ExpansionOutcome}())
 
         new(rt, dynamic_feature)
     end
@@ -652,7 +772,6 @@ function _load_missing_package_metadata!(jw::JuliaWorkspace)
 end
 
 function process_from_dynamic(jw::JuliaWorkspace)
-    jw.dynamic_feature === nothing && return
     df = jw.dynamic_feature
     isready(df.out_channel) || return
 
@@ -663,14 +782,18 @@ function process_from_dynamic(jw::JuliaWorkspace)
     ready_test_envs = copy(input_ready_test_environments(jw.runtime))
     standalone_projects = copy(input_standalone_projects(jw.runtime))
     resolved_envs = copy(input_resolved_environments(jw.runtime))
+    extension_envs = copy(input_extension_environments(jw.runtime))
     failed_keys = copy(input_failed_dynamic_keys(jw.runtime))
     failure_messages = copy(input_dynamic_failure_messages(jw.runtime))
+    expansions = copy(input_macro_expansions(jw.runtime))
     envs_dirty = false
     test_envs_dirty = false
     standalone_dirty = false
     resolved_dirty = false
+    extension_dirty = false
     failed_dirty = false
     messages_dirty = false
+    expansions_dirty = false
     saw_result = false
 
     while isready(df.out_channel)
@@ -754,6 +877,31 @@ function process_from_dynamic(jw::JuliaWorkspace)
             resolved_proj_hash = resolved_proj === nothing ? UInt64(0) : resolved_proj.content_hash
             push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), resolved_proj_hash))
             envs_dirty = true
+
+        elseif msg isa ExtensionEnvironmentReadyResult
+            @info "Processing extension environment" msg.package_folder_uri msg.project_uri
+
+            extension_envs[ResolveExtensionEnvironmentKey(uri2filepath(msg.package_folder_uri), msg.content_hash)] = msg.project_uri
+            extension_dirty = true
+
+            # Preload package caches and mark the scratch project's own
+            # environment ready, so the next get_diagnostics won't trigger
+            # another round.
+            _load_package_caches_for_project!(jw, msg.project_uri)
+            ext_proj = derived_project(jw.runtime, msg.project_uri)
+            ext_proj_hash = ext_proj === nothing ? UInt64(0) : ext_proj.content_hash
+            push!(ready_envs, WatchEnvironmentKey(uri2filepath(msg.project_uri), ext_proj_hash))
+            envs_dirty = true
+
+        elseif msg isa MacroExpansionsResult
+            @debug "Processing macro expansion batch results" n=length(msg.entries)
+            for e in msg.entries
+                # First writer wins: a `:failed` settlement must not clobber an
+                # `:ok` that a racing batch already delivered for the same key.
+                haskey(expansions, e.key) && expansions[e.key].status == :ok && continue
+                expansions[e.key] = (status=e.status, text=e.text)
+                expansions_dirty = true
+            end
         else
             error("Unknown message: $msg")
         end
@@ -763,8 +911,10 @@ function process_from_dynamic(jw::JuliaWorkspace)
     test_envs_dirty && set_input_ready_test_environments!(jw.runtime, ready_test_envs)
     standalone_dirty && set_input_standalone_projects!(jw.runtime, standalone_projects)
     resolved_dirty && set_input_resolved_environments!(jw.runtime, resolved_envs)
+    extension_dirty && set_input_extension_environments!(jw.runtime, extension_envs)
     failed_dirty && set_input_failed_dynamic_keys!(jw.runtime, failed_keys)
     messages_dirty && set_input_dynamic_failure_messages!(jw.runtime, failure_messages)
+    expansions_dirty && set_input_macro_expansions!(jw.runtime, expansions)
     saw_result && (df.saw_result[] = true)
 
     return

@@ -7,9 +7,23 @@ include("../../../shared/julia_dynamic_analysis_process_protocol.jl")
 include("symbolserver.jl")
 include("scratch_env.jl")
 
+include("workspace_members.jl")
+include("expansion_text.jl")
 struct JuliaDynamicAnalysisProcessState
     endpoint::JSONRPC.JSONRPCEndpoint
+    # Module-context cache for macro expansion, keyed by the parent's ctxId.
+    # Each entry pairs the PRIMARY expansion module (the real package module
+    # when the ctx path resolved, where internal macros live) with the scratch
+    # fallback holding the eval'd import statements — an expansion is tried in
+    # the primary first, then the fallback, so a wrong module guess can never
+    # lose what the imports alone would have expanded. The packages behind the
+    # imports are already loaded in this session (get_store imported every
+    # manifest package), so building a context is cheap.
+    ctx_modules::Dict{String,Tuple{Module,Union{Nothing,Module}}}
 end
+
+JuliaDynamicAnalysisProcessState(endpoint::JSONRPC.JSONRPCEndpoint) =
+    JuliaDynamicAnalysisProcessState(endpoint, Dict{String,Tuple{Module,Union{Nothing,Module}}}())
 
 # Progress callback for SymbolServer.get_store that forwards each report to the
 # parent process as an `indexProgress` notification.
@@ -128,10 +142,156 @@ function resolve_environment_request(params::JuliaDynamicAnalysisProtocol.Resolv
     end
 end
 
+function resolve_extension_environment_request(params::JuliaDynamicAnalysisProtocol.ResolveExtensionEnvironmentParams, state::JuliaDynamicAnalysisProcessState, token)
+    write_extension_env_project(params.packagePath, params.projectDir)
+    Pkg.activate(params.projectDir)
+
+    try
+        # `develop` makes the package itself (and through it, the extensions'
+        # parent module) part of the environment; `instantiate` installs the
+        # weakdep triggers so SymbolServer can load them. A failed resolve
+        # degrades to whatever symbol caches exist rather than blocking the
+        # environment forever.
+        Pkg.develop(path=params.packagePath)
+        Pkg.instantiate()
+    catch err
+        @warn "Failed to resolve extension environment" params.packagePath exception=(err, catch_backtrace())
+    end
+
+    try
+        SymbolServer.get_store(params.storePath, progress_reporter(state))
+
+        return dirname(Base.active_project())
+    catch err
+        err isa InterruptException && rethrow()
+        _index_failure(err, catch_backtrace(), "extension environment for package at $(params.packagePath)")
+    end
+end
+
+# ── Macro expansion ─────────────────────────────────────────────────────────
+
+# Bounds ctx-module memory. Dropping the whole cache on overflow is deliberate:
+# rebuilding a context is cheap (packages stay loaded), and drop-all needs no
+# bookkeeping.
+const MAX_CTX_MODULES = 64
+
+function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id::AbstractString,
+                                imports::Vector{String}, ctx_module::Vector{String})
+    return get!(state.ctx_modules, ctx_id) do
+        length(state.ctx_modules) >= MAX_CTX_MODULES && empty!(state.ctx_modules)
+        # Scratch module: Base is in scope, as it is in any user file.
+        m = Module(Symbol(:ExpansionCtx_, ctx_id))
+        for stmt in imports
+            try
+                Core.eval(m, Meta.parse(stmt))
+            catch err
+                err isa InterruptException && rethrow()
+                # A failing import degrades this context: macros from it error
+                # per entry below instead of blocking the whole batch — except
+                # a bare `using Member` of a workspace member, which the root
+                # project cannot name but its manifest locates (Plots'
+                # `PlotsBase`): bind it by identity, so the real-module walk
+                # below still reaches the module whose macros the sites use.
+                name = _bare_import_name(stmt)
+                if name !== nothing
+                    try
+                        mod = _require_from_manifest(name)
+                        mod === nothing || Core.eval(m, :(const $(Symbol(name)) = $mod))
+                    catch err2
+                        err2 isa InterruptException && rethrow()
+                    end
+                end
+            end
+        end
+        # When the sites live inside a package module, prefer the REAL module:
+        # only there do internal, unexported macros
+        # (`Distributions.@check_args`) resolve. The imports above loaded the
+        # package (`using <Pkg>`), so its root module is a name in `m` and
+        # submodules chain by getfield — pure navigation of loaded modules,
+        # nothing from the workspace is ever evaluated. The scratch module
+        # stays as the per-entry fallback (see `expand_macros_request`): a
+        # wrong module guess — a test helper whose macros come from `using
+        # Test`, an orphan that really lives elsewhere — must never lose what
+        # the imports alone would have expanded.
+        if !isempty(ctx_module)
+            try
+                # `invokelatest`: the `using` bindings eval'd above only exist
+                # in a NEWER world than this function activation — a plain
+                # `getfield` here cannot see them yet.
+                real = Base.invokelatest(getfield, m, Symbol(ctx_module[1]))
+                for seg in ctx_module[2:end]
+                    nxt = try
+                        Base.invokelatest(getfield, real, Symbol(seg))
+                    catch err
+                        err isa InterruptException && rethrow()
+                        nothing
+                    end
+                    # A package extension is not a field of its parent:
+                    # `get_extension` finds it once parent and triggers are
+                    # loaded (the host sends `[Parent, ParentBarExt]`).
+                    if !(nxt isa Module) && real isa Module
+                        nxt = Base.invokelatest(Base.get_extension, real, Symbol(seg))
+                    end
+                    nxt isa Module || error("no module `$seg` under $(real)")
+                    real = nxt
+                end
+                if real isa Module
+                    _bind_real_macros!(m, real)
+                    return (real, m)
+                end
+            catch err
+                err isa InterruptException && rethrow()
+            end
+        end
+        (m, nothing)
+    end
+end
+
+
+function expand_macros_request(params::JuliaDynamicAnalysisProtocol.ExpandMacrosParams, state::JuliaDynamicAnalysisProcessState, token)
+    # Pick up on-disk edits to tracked (deved) packages, so re-expansions
+    # requested after a macro-definition edit see the new definition.
+    try
+        Revise.revise()
+    catch err
+        err isa InterruptException && rethrow()
+        @warn "Revise failed before macro expansion" exception=(err, catch_backtrace())
+    end
+
+    ctx, fallback = _expansion_ctx_module!(state, params.ctxId, params.imports, params.ctxModule)
+
+    entries = map(params.entries) do e
+        try
+            expr = Meta.parse(e.text)
+            if expr isa Expr && expr.head in (:incomplete, :error)
+                error("macrocall text did not parse")
+            end
+            expanded = try
+                _expand_fully(ctx, expr)
+            catch err
+                err isa InterruptException && rethrow()
+                # The real-module guess can miss macros that come from the
+                # file's own imports (`using Test` in a test helper): retry in
+                # the scratch module before giving up.
+                fallback === nothing && rethrow()
+                _expand_fully(fallback, expr)
+            end
+            JuliaDynamicAnalysisProtocol.ExpandMacroResultEntry(e.key, "ok", string(expanded))
+        catch err
+            err isa InterruptException && rethrow()
+            JuliaDynamicAnalysisProtocol.ExpandMacroResultEntry(e.key, "error", sprint(showerror, err))
+        end
+    end
+
+    return JuliaDynamicAnalysisProtocol.ExpandMacrosResult(entries, UInt64(Base.get_world_counter()))
+end
+
 JSONRPC.@message_dispatcher dispatch_msg begin
     JuliaDynamicAnalysisProtocol.index_project_request_type => index_project_request
     JuliaDynamicAnalysisProtocol.create_standalone_project_request_type => create_standalone_project_request
     JuliaDynamicAnalysisProtocol.resolve_environment_request_type => resolve_environment_request
+    JuliaDynamicAnalysisProtocol.resolve_extension_environment_request_type => resolve_extension_environment_request
+    JuliaDynamicAnalysisProtocol.expand_macros_request_type => expand_macros_request
 end
 
 # Executed precompile workload: every dynamic-analysis child process pays at

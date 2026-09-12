@@ -249,7 +249,12 @@ A rule usually groups several internal `StaticLint.LintCodes` members that a use
 would want to configure together — `nothing_comparison` covers both
 `NothingEquality` and `NothingNotEq`. The mapping is declared once in
 [`src/lint_rules.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/lint_rules.jl)
-as `LINT_RULES`; `LINTCODE_TO_RULE` inverts it.
+as `LINT_RULES`; `LINTCODE_TO_RULE` inverts it. That v1 registry is frozen;
+the v2 stack (`set_v2_enabled!`) carries its own, fully independent registry
+in `src/v2/bridge/lint_rules_v2.jl` (`LINT_RULES_V2`), which today matches v1 on
+every shared rule and adds the rules marked "v2 only" below. A rule id that
+exists only in the v2 registry is recognized in `JuliaLint.toml` only while
+v2 is enabled; otherwise it is reported as an unknown rule.
 
 Not every rule is backed by the semantic StaticLint pass. Purely syntactic
 rules run on the JuliaSyntax tree of a single file alone
@@ -365,8 +370,14 @@ govern it; such buffers always lint under `default` and cannot opt back in.
 | --- | --- | --- |
 | `syntax_errors` | `error` | Julia syntax errors |
 | `syntax_warnings` | `off` | Julia syntax warnings |
+| `lowering_errors` | `error` | Shapes Julia's lowering rejects (invalid assignment targets, malformed signatures, duplicate struct fields, …) — the file will not load. v2 only (`set_v2_enabled!`); when active it supersedes `duplicate_function_argument`/`break_continue`/`global_const_decl` |
+| `soft_scope_ambiguity` | `information` | Julia's soft-scope ambiguity warning, statically: an un-annotated assignment in a top-level `for`/`while`/`try` to a name that is also a plain module global (Julia warns at run time and treats it as a new local). v2 only (`set_v2_enabled!`) |
+| `analysis_boundary` | `off` | Opt-in: one notice per construct the linter cannot see through (a computed or function-body `include`, an interpolated `@eval`, a runtime `eval`, a `using`/`import` inside `try`/`if`, a macro whose expansion failed) naming the rules it silences in that module. v2 only (`set_v2_enabled!`); see [Analysis boundaries](@ref) |
 | `testitem_errors` | `error` | Malformed `@testitem` blocks |
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml`, `Manifest.toml` |
+| `project_file_errors` | `error` | Structure in a `Project.toml` that Pkg rejects (a malformed uuid, an extension trigger that is no declared weakdep, a `[sources]` entry with neither url nor path). v2 only (`set_v2_enabled!`) |
+| `project_file_warnings` | `warning` | Inconsistencies Pkg tolerates until the section is used (a target dep missing from `[extras]`, a stale manifest, a dangling `[sources]`/`[workspace]` path). v2 only (`set_v2_enabled!`) |
+| `manifest_errors` | `info` | A `Manifest.toml` shape the tooling cannot interpret. v2 only (`set_v2_enabled!`) |
 | `config_errors` | `error` | Invalid keys/values in any of the three config files |
 | `shadowed_config` | `info` | A config file that supersedes another of the same kind in an enclosing directory |
 | `environment_errors` | `info` | A project/test environment that could not be resolved, reported on its `Project.toml` |
@@ -388,10 +399,97 @@ govern it; such buffers always lint under `default` and cannot opt back in.
 | `global_const_decl` | `info` | Type declarations on globals; `const` on locals |
 | `const_decl` | `info` | Invalid `const` declarations and redefinitions |
 | `unused_binding` | `hint` | Variables assigned but never used |
-| `relative_import` | `info` | A relative import with more dots than available nesting |
+| `relative_import` | `off` | A relative import with more dots than available nesting |
 | `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
 | `missing_reference` | `off` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default). Off by default; see “Rules that are off by default” below |
 | `unresolved_import` | `off` | Imports whose target could not be resolved. Off by default; see “Rules that are off by default” below |
+| `missing_compat` | `off` | A package `[deps]`/`[extras]`/`[weakdeps]` entry (stdlibs included) or `julia` without a `[compat]` entry. Options: `check_julia`, `check_extras`, `check_weakdeps` (booleans, default `true`), `ignore` (array of names). v2 only (`set_v2_enabled!`) |
+| `unused_dependency` | `off` | A package `[deps]` entry that no `using`/`import` in the package's source (or its extensions) references. Option: `ignore` (array of names). v2 only (`set_v2_enabled!`) |
+| `unbound_type_parameter` | `off` | A method `where` parameter no argument type binds (undefined at run time). v2 only (`set_v2_enabled!`) |
+| `undocumented_public_name` | `off` | An exported/`public` name a workspace package declares without a docstring; a submodule without a module docstring. v2 only (`set_v2_enabled!`) |
+
+### Package-quality rules (Aqua.jl parity)
+
+!!! note "v2 only"
+    All four rules in this section are produced by the v2 analysis stack, i.e.
+    a workspace with `set_v2_enabled!(jw, true)`. With the flag off (the
+    default) they emit nothing, whatever their configured severity.
+
+Four rules port the statically-checkable parts of
+[Aqua.jl](https://github.com/JuliaTesting/Aqua.jl)'s package-quality test
+suite into the linter, so they run continuously in the editor and in
+`julialint` instead of only at test time. All four ship `"off"` outside the
+`strict` preset.
+
+| Aqua check | Rule | Notes |
+| --- | --- | --- |
+| `deps_compat` | `missing_compat` | Same semantics: `[compat]` entries required for `julia` and every `[deps]`/`[extras]`/`[weakdeps]` entry, standard libraries included. The `check_julia`/`check_extras`/`check_weakdeps` options mirror Aqua's keyword arguments; `ignore` exempts named dependencies. Only packages (`name` + `uuid`) are checked. |
+| `stale_deps` | `unused_dependency` | The static face of the check: a `[deps]` entry that no `using`/`import` in `src/` or `ext/` references. Aqua instead loads the package and accepts dependencies that get loaded *transitively*; a static analysis cannot see loads, so a dependency needed only for side effects belongs on the rule's `ignore` list. An `include` the analyzer cannot resolve silences the whole check for that package — the unseen file could contain the import. |
+| `unbound_args` | `unbound_type_parameter` | Mirrors `Test.detect_unbound_args` semantics on the method signature: bound through invariant type parameters at any depth, `Type{T}`, every branch of a `Union`, covariant upper bounds, and the `N` of `Vararg{T,N}`; never through return types, lower bounds, or a trailing vararg's element type. Keyword argument types bind (they reach the keyword-body method positionally). A parameter that is never mentioned again is `unused_type_parameter`'s finding instead. |
+| `undocumented_names` | `undocumented_public_name` | Every exported/`public` name a workspace package declares needs a docstring, and every submodule needs a module docstring; the package's root module is exempt (the README is its docstring). Re-exported names are skipped — their docstrings live upstream. Works on every Julia version (Aqua's check needs ≥ 1.11 at test time). |
+
+The remaining Aqua checks have no static counterpart here: `undefined_exports`
+is already covered by `missing_reference` (an `export`/`public` of an
+undefined name is an unresolved reference), `piracies` by `type_piracy`, and
+`ambiguities`, `persistent_tasks` and `project_extras` are inherently
+run-time checks (method-table intersection, precompilation-process behavior,
+and a `test/Project.toml` comparison that only matters for packages
+supporting Julia ≤ 1.1).
+
+### Analysis boundaries
+
+!!! note "v2 only"
+    Everything in this section describes the v2 analysis stack, i.e. a
+    workspace with `set_v2_enabled!(jw, true)`. With the flag off (the
+    default) the behaviour is the legacy one: a computed include is an
+    `include_errors` warning, no `analysis_boundary` notice exists, and an
+    unresolved import is always reported as `unresolved_import`.
+
+Some constructs put part of a program beyond static analysis: an `include`
+whose path is computed or that runs inside a function body, an `@eval` with
+`$` interpolation or a bare `eval(...)` call, a `using`/`import` guarded by
+`try` or `if`, and a top-level macro the linter does not model whose expansion
+could not be obtained (the dynamic analysis process is off, the file has no
+environment, or the macro raised an error when expanded). Whatever such a
+construct defines or brings into scope is invisible, so any rule that would
+otherwise report false positives — `missing_reference`, `incorrect_call_args`,
+`type_piracy`, `invalid_type_declaration`, `kw_default_mismatch` and
+`incorrect_iter_spec` — is silently switched off in the smallest scope that
+contains the construct, its module. A macro the dynamic analysis process
+*did* expand successfully is not a boundary: the names its expansion defines
+are analyzed like ordinary code.
+
+The `default` and `minimal` presets say nothing about this. The linter never
+reports on code merely because it cannot analyze it. To find out what is
+holding analysis back, opt in:
+
+```toml
+[rules]
+analysis_boundary = "warning"   # or "error" for CI
+```
+
+(`preset = "strict"` includes it at `warning`.) Each boundary construct then
+gets one diagnostic naming the rules it suppresses; rewrite it — a literal
+`include` path, an explicit list of definitions instead of an interpolated
+`@eval`, an unconditional import — and the full diagnostic set comes back for
+that module.
+
+Environments are boundaries too. An `ext/` file whose weak-dependency
+triggers resolve in no reachable environment, and any file whose owning
+environment could not be resolved at all (a failed test-environment or
+scratch-project resolution — see the `environment_errors` diagnostic on the
+project file), has its `unresolved_import` findings reported as
+`analysis_boundary` notices instead: the imports were checked against a
+fallback environment, which says nothing about the code.
+
+Which environment a file is checked against follows how Julia would load it:
+package code (`src/`, `ext/`, `deps/`) against the package's own project (an
+extension against a project that also holds its triggers), test files against
+the test environment, a folder with its own `Project.toml` against that
+project, and every other file — scripts under `perf/`, `benchmark/`,
+`examples/`, a `docs/` without a project — against the active project, with
+the standard libraries visible as they are on Julia's default load path.
+Only package code has to declare a standard library it imports.
 
 ### Rules and code actions
 
