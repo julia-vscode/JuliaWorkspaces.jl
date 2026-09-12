@@ -25,6 +25,16 @@
     option_skip::Union{Bool,UnitRange{Int64}}   # range = source of a non-literal skip expression
 end
 
+# `our_range` yields `UnitRange{Int}`, which is `UnitRange{Int32}` on a 32-bit
+# build. The plain `UnitRange{Int64}` fields above widen through `convert` on
+# their own, but a `Union`-typed field has no `convert` method, so the skip
+# range has to be widened explicitly or construction throws a `MethodError`.
+_raw_test_item_detail(ti) = RawTestItemDetail(
+    string(ti.name), ti.range, ti.code_range,
+    ti.option_default_imports, ti.option_tags, ti.option_setup,
+    ti.option_skip isa Bool ? ti.option_skip : UnitRange{Int64}(ti.option_skip),
+)
+
 @auto_hash_equals struct RawTestSetupDetail
     name::Symbol
     kind::Symbol            # :module | :snippet
@@ -78,9 +88,7 @@ Salsa.@derived function derived_julia_parse_products(rt, uri)
     TestItemDetection.find_test_detail!(tree, testitems, testsetups, testerrors)
 
     raw_test_details = RawTestDetails(
-        [RawTestItemDetail(string(ti.name), ti.range, ti.code_range,
-                           ti.option_default_imports, ti.option_tags,
-                           ti.option_setup, ti.option_skip) for ti in testitems],
+        [_raw_test_item_detail(ti) for ti in testitems],
         [RawTestSetupDetail(ts.name, ts.kind, ts.range, ts.code_range) for ts in testsetups],
         [RawTestErrorDetail(string(te.name), te.message, te.range) for te in testerrors],
     )

@@ -828,6 +828,27 @@ end
     @test test_results.testitems[1].option_skip == "VERSION < v\"1.11\""
 end
 
+@testitem "raw test detail widens 32-bit index ranges" begin
+    import JuliaWorkspaces as JW
+
+    # `TestItemDetection.our_range` returns `UnitRange{Int}`, so on a 32-bit build
+    # every range arriving here is a `UnitRange{Int32}`. Driving the constructor
+    # with `Int32` ranges reproduces that path on any platform.
+    d = JW._raw_test_item_detail((
+        name="foo",
+        range=Int32(1):Int32(10),
+        code_range=Int32(3):Int32(8),
+        option_default_imports=true,
+        option_tags=Symbol[],
+        option_setup=Symbol[],
+        option_skip=Int32(5):Int32(9),
+    ))
+
+    @test d.range === 1:10
+    @test d.code_range === 3:8
+    @test d.option_skip === 5:9
+end
+
 @testitem "test item ids are package qualified, package relative and label based" setup=[TestItemPackage] begin
     jw, uri = workspace_with("""@testitem "foo" begin end\n@testitem "bar" begin end""")
 
