@@ -62,6 +62,19 @@ end
     end
 end
 
+@testitem "collect_workspace_paths skips non-regular files" begin
+    using JuliaWorkspaces: collect_workspace_paths
+
+    if Sys.isunix()
+        mktempdir() do dir
+            write(joinpath(dir, "a.jl"), "a() = 1\n")
+            Libc.mkfifo(joinpath(dir, "pipe.jl"), 0o600)
+
+            @test basename.(collect_workspace_paths(dir)) == ["a.jl"]
+        end
+    end
+end
+
 @testitem "read_path_into_textdocuments skips .git and other VCS/dependency dirs" begin
     using JuliaWorkspaces: read_path_into_textdocuments
     using JuliaWorkspaces.URIs2: filepath2uri
