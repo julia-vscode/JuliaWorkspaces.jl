@@ -249,7 +249,12 @@ Salsa.@derived function derived_project(rt, uri)
             version_of_deved_package = get(v_entry[1], "version", "")
 
             deved_packages[k_entry] = JuliaProjectEntryDevedPackage(k_entry, uuid_of_deved_package, uri_of_deved_package, version_of_deved_package)
-        elseif haskey(v_entry[1], "git-tree-sha1") && haskey(v_entry[1], "uuid") && haskey(v_entry[1], "version")
+        elseif haskey(v_entry[1], "git-tree-sha1")
+            if !(haskey(v_entry[1], "uuid") && haskey(v_entry[1], "version"))
+                @debug "Skipping incomplete git-tree-sha1 manifest entry" entry_name=k_entry entry_keys=collect(keys(v_entry[1]))
+                continue
+            end
+
             uuid_of_regular_package = tryparse(UUID, v_entry[1]["uuid"])
             uuid_of_regular_package !== nothing || continue
 
@@ -279,7 +284,11 @@ Salsa.@derived function derived_project(rt, uri)
 
             stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_stdlib_package, version_of_stdlib_package)
         else
-            error("Unknown manifest entry type $(keys(v_entry[1]))")
+            # Manifest entry shapes evolve with Pkg. An entry shape we do not
+            # recognise should mean only that one entry is not indexed, never
+            # that the whole project becomes unusable.
+            @debug "Skipping unrecognized manifest entry" entry_name=k_entry entry_keys=collect(keys(v_entry[1]))
+            continue
         end
     end
 
