@@ -56,6 +56,86 @@ Salsa.@derived function derived_project_toml_files(rt, folder_uri)
     return (project_file=project_file, manifest_file=manifest_file)
 end
 
+"""
+    derived_workspace_parents(rt) -> Dict{URI,URI}
+
+Every folder a known project file declares as a `[workspace]` member, mapped to
+the declaring folder (member paths are relative to the declaring project's
+folder, as in Pkg). The membership behind manifest borrowing in
+`derived_potential_project_folders` and behind the root's content hash in
+`derived_project`.
+"""
+Salsa.@derived function derived_workspace_parents(rt)
+    parent_of = Dict{URI,URI}()
+    for (folder_uri, project_file) in _project_folder_files(rt)
+        toml = derived_toml_syntax_tree(rt, project_file)
+        toml isa AbstractDict || continue
+        workspace_section = get(toml, "workspace", nothing)
+        workspace_section isa AbstractDict || continue
+        member_paths = get(workspace_section, "projects", nothing)
+        member_paths isa AbstractVector || continue
+
+        folder_path = uri2filepath(folder_uri)
+        for member in member_paths
+            member isa AbstractString || continue
+            member_path = normpath(joinpath(folder_path, member))
+            if endswith(member_path, '/') || endswith(member_path, '\\')
+                member_path = member_path[1:end-1]
+            end
+            parent_of[filepath2uri(member_path)] = folder_uri
+        end
+    end
+    return parent_of
+end
+
+"""
+    derived_workspace_members(rt, folder_uri) -> Vector{URI}
+
+The folders whose declaring `[workspace]` parent is `folder_uri`, and their
+members in turn: everything the root's manifest covers. Sorted, so a fold over
+it is deterministic.
+"""
+Salsa.@derived function derived_workspace_members(rt, folder_uri)
+    parent_of = derived_workspace_parents(rt)
+    members = URI[]
+    queue = URI[folder_uri]
+    while !isempty(queue)
+        parent = pop!(queue)
+        for (member, declaring) in parent_of
+            (declaring == parent && !(member in members) && member != folder_uri) || continue
+            push!(members, member)
+            push!(queue, member)
+        end
+    end
+    return sort!(members; by=string)
+end
+
+# The project file of every folder that has one, `JuliaProject.toml` winning
+# over `Project.toml` (the `pf` half of `derived_potential_project_folders`).
+function _project_folder_files(rt)
+    pf = Dict{URI,URI}()
+    for file_uri in derived_project_files(rt)
+        file_path = uri2filepath(file_uri)
+        is_path_project_file(file_path) || continue
+        folder_uri = filepath2uri(dirname(file_path))
+        if !haskey(pf, folder_uri) || endswith(lowercase(file_path), "juliaproject.toml")
+            pf[folder_uri] = file_uri
+        end
+    end
+    return pf
+end
+
+function resolve_manifest_through_workspace(folder_uri::URI, mf::Dict{URI,URI}, parent_of::Dict{URI,URI})
+    seen = Set{URI}()
+    current = folder_uri
+    while current !== nothing && !(current in seen)
+        push!(seen, current)
+        haskey(mf, current) && return mf[current]
+        current = get(parent_of, current, nothing)
+    end
+    return nothing
+end
+
 Salsa.@derived function derived_potential_project_folders(rt)
     project_files = derived_project_files(rt)
 
@@ -85,8 +165,12 @@ Salsa.@derived function derived_potential_project_folders(rt)
         end
     end
 
+    # A manifest-less `[workspace]` member borrows the manifest of the folder
+    # that declares it (resolved up the parent chain, like Pkg does).
+    parent_of = derived_workspace_parents(rt)
+
     result = Dict{URI,@NamedTuple{project_file::Union{URI,Nothing}, manifest_file::Union{URI,Nothing}}}(
-        k => (project_file=v, manifest_file=get(mf, k, nothing)) for (k, v) in pf
+        k => (project_file=v, manifest_file=resolve_manifest_through_workspace(k, mf, parent_of)) for (k, v) in pf
     )
 
     # Include the active project folder even if its files are not in the
@@ -220,7 +304,12 @@ Salsa.@derived function derived_project(rt, uri)
             version_of_deved_package = get(v_entry[1], "version", "")
 
             deved_packages[k_entry] = JuliaProjectEntryDevedPackage(k_entry, uuid_of_deved_package, uri_of_deved_package, version_of_deved_package)
-        elseif haskey(v_entry[1], "git-tree-sha1") && haskey(v_entry[1], "uuid") && haskey(v_entry[1], "version")
+        elseif haskey(v_entry[1], "git-tree-sha1")
+            if !(haskey(v_entry[1], "uuid") && haskey(v_entry[1], "version"))
+                @debug "Skipping incomplete git-tree-sha1 manifest entry" entry_name=k_entry entry_keys=collect(keys(v_entry[1]))
+                continue
+            end
+
             uuid_of_regular_package = tryparse(UUID, v_entry[1]["uuid"])
             uuid_of_regular_package !== nothing || continue
 
@@ -250,7 +339,11 @@ Salsa.@derived function derived_project(rt, uri)
 
             stdlib_packages[k_entry] = JuliaProjectEntryStdlibPackage(k_entry, uuid_of_stdlib_package, version_of_stdlib_package)
         else
-            error("Unknown manifest entry type $(keys(v_entry[1]))")
+            # Manifest entry shapes evolve with Pkg. An entry shape we do not
+            # recognise should mean only that one entry is not indexed, never
+            # that the whole project becomes unusable.
+            @debug "Skipping unrecognized manifest entry" entry_name=k_entry entry_keys=collect(keys(v_entry[1]))
+            continue
         end
     end
 
@@ -259,7 +352,35 @@ Salsa.@derived function derived_project(rt, uri)
     (manifest_text_content === nothing || project_text_content === nothing) && return nothing
     project_content_hash = hash(project_text_content.content.content, hash(manifest_text_content.content.content))
 
+    # A workspace root's environment covers its members (they borrow this
+    # manifest, see `derived_potential_project_folders`) and has the only
+    # watch item: fold every member's Project.toml text into the hash so a
+    # member dep change re-keys that item and the shared manifest and index
+    # are refreshed. Only a folder that owns its manifest folds — a member is
+    # covered by the root's item, which folds it already.
+    if filepath2uri(dirname(uri2filepath(manifest_file))) == uri
+        for member_uri in derived_workspace_members(rt, uri)
+            member_files = get(derived_potential_project_folders(rt), member_uri, nothing)
+            (member_files === nothing || member_files.project_file === nothing) && continue
+            member_text = derived_text_file_content(rt, member_files.project_file)
+            member_text === nothing && continue
+            project_content_hash = hash(member_text.content.content, project_content_hash)
+        end
+    end
+
     JuliaProject(project_file, manifest_file, julia_version, project_content_hash, deved_packages, regular_packages, stdlib_packages)
+end
+
+"""
+    _is_workspace_member_project(project::JuliaProject, folder_uri) -> Bool
+
+Whether `project` is a `[workspace]` member — its manifest is the borrowed root
+manifest, not one in its own folder. Such a project has no watch item of its
+own: the root's `WatchEnvironmentKey` covers it (see
+`_watch_target_for_project`).
+"""
+function _is_workspace_member_project(project::JuliaProject, folder_uri)
+    return filepath2uri(dirname(uri2filepath(project.manifest_file_uri))) != folder_uri
 end
 
 """

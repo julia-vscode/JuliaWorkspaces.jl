@@ -2,6 +2,7 @@ module StaticLint
 
 import ..derived_has_file
 import ..derived_julia_legacy_syntax_tree
+import .._is_julia_uri
 import ..derived_include_dict
 import ..derived_computed_include_ids
 import ..derived_testitem_segments
@@ -691,7 +692,10 @@ function followinclude(x, state::Toplevel)
     # end
 
     # TODO DA FIX
-    if derived_has_file(rt, target_uri)
+    # `_is_julia_uri` because `include` takes a path, not a language: a workspace
+    # can hold the target of `include("README.md")`, and the legacy parser must
+    # never be handed it.
+    if derived_has_file(rt, target_uri) && _is_julia_uri(rt, target_uri)
         # Circular- and duplicate-include detection (and the corresponding
         # diagnostics) is handled structurally in `derived_all_include_diagnostics`,
         # independently of the semantic pass. Here we only use the same checks as

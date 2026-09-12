@@ -1465,9 +1465,10 @@ end
     """
 
     jw = JuliaWorkspace()
-    # These three rules are off in the `default` preset (measured false-positive
-    # rates); this suite tests the rules themselves, so it asks for them back.
-    add_file!(jw, TextFile(URI("file:///unresdots/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\n", "toml")))
+    # These rules are off in the `default` preset (measured false-positive
+    # rates; relative_import cannot know runtime nesting); this suite tests the
+    # rules themselves, so it asks for them back.
+    add_file!(jw, TextFile(URI("file:///unresdots/JuliaLint.toml"), SourceText("[rules]\nincorrect_call_args = \"info\"\nmissing_reference = \"warning\"\nunresolved_import = \"warning\"\nrelative_import = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/Project.toml"), SourceText(project_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/Manifest.toml"), SourceText(manifest_toml, "toml")))
     add_file!(jw, TextFile(URI("file:///unresdots/src/UnresDots.jl"), SourceText(source, "julia")))
@@ -2617,4 +2618,60 @@ end
     # ...and every test-env item in the required set is one of those keys.
     @test Set(k for k in required if k isa WatchTestEnvironmentKey) ==
         Set(key_of(dir) for dir in (own_dir, bare_dir, deved_dir))
+end
+
+@testitem "environment_errors: a failed test env lands on the deved package's own Project.toml" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, process_from_dynamic, get_diagnostic,
+        WatchTestEnvironmentKey, FailedResult, input_dynamic_failure_messages
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
+
+    # A monorepo root whose manifest devs `lib/Sub`; Sub's test env is
+    # materialized in the root (`_test_environment_key`), so the failure key
+    # names the root — but the diagnostic belongs to Sub's project file, not
+    # to the root's and not to the other deved package's.
+    dir = uri2filepath(filepath2uri(mktempdir()))
+    sub = joinpath(dir, "lib", "Sub")
+    other = joinpath(dir, "lib", "Other")
+    mkpath(joinpath(dir, "src")); mkpath(joinpath(sub, "src")); mkpath(joinpath(other, "src"))
+    files = [
+        joinpath(dir, "Project.toml") => ("name = \"Root\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d1\"\nversion = \"1.0.0\"\n", "toml"),
+        joinpath(dir, "Manifest.toml") => ("""
+        julia_version = "1.12.0"
+        manifest_format = "2.0"
+        project_hash = "x"
+
+        [[deps.Other]]
+        path = "lib/Other"
+        uuid = "6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d3"
+        version = "0.1.0"
+
+        [[deps.Sub]]
+        path = "lib/Sub"
+        uuid = "6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d2"
+        version = "0.1.0"
+        """, "toml"),
+        joinpath(dir, "src", "Root.jl") => ("module Root end\n", "julia"),
+        joinpath(sub, "Project.toml") => ("name = \"Sub\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d2\"\nversion = \"0.1.0\"\n", "toml"),
+        joinpath(sub, "src", "Sub.jl") => ("module Sub end\n", "julia"),
+        joinpath(other, "Project.toml") => ("name = \"Other\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d3\"\nversion = \"0.1.0\"\n", "toml"),
+        joinpath(other, "src", "Other.jl") => ("module Other end\n", "julia"),
+    ]
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    for (path, (content, lang)) in files
+        write(path, content)
+        _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+
+    key = WatchTestEnvironmentKey(dir, "Sub", UInt64(1))
+    message = "Failed to resolve the test environment of package 'Sub' at $dir: Cannot locate the source of package Sub."
+    put!(jw.dynamic_feature.out_channel, FailedResult(key, message))
+    process_from_dynamic(jw)
+    @test input_dynamic_failure_messages(jw.runtime)[key] == message
+
+    env_msgs(path) = [d.message for d in get_diagnostic(jw, filepath2uri(path)) if d.code === :environment_errors]
+    @test env_msgs(joinpath(sub, "Project.toml")) == [message]
+    @test isempty(env_msgs(joinpath(dir, "Project.toml")))
+    @test isempty(env_msgs(joinpath(other, "Project.toml")))
 end

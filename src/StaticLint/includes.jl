@@ -66,9 +66,11 @@ end
 
 # Whether `x` is a call to one of the TestItems.jl macros that run their body in
 # a fresh module at runtime (`@testitem`, `@testmodule`, `@testsnippet`), in
-# either the bare or the qualified `Mod.@testitem` form. `@testset`/
-# `@safetestset` are deliberately not included: they do not introduce a module,
-# so includes inside them share the enclosing file structure.
+# either the bare or the qualified `Mod.@testitem` form. `@testset` is
+# deliberately not included (it does not introduce a module), and neither are
+# third-party module-wrapping macros such as SafeTestsets' `@safetestset`: the
+# include analysis models the language and our own test-item framework, not
+# other packages, so includes inside those share the enclosing file structure.
 function _is_testitem_family_macrocall(x::EXPR)
     CSTParser.ismacrocall(x) || return false
     (x.args === nothing || isempty(x.args)) && return false
@@ -83,10 +85,11 @@ end
 # `URI` or `nothing`, and `guarded` whether the call sits under an
 # existence-guarded conditional (see below). `testitem_ctx` is `nothing` for
 # ordinary calls, or the byte offset of the enclosing testitem-family macrocall
-# for a call inside one — each such body is its own module at runtime, so
-# duplicate-include detection scopes to it instead of to the include graph as a
-# whole. `file_dir` may be `nothing` (a file without a filesystem path, e.g. an
-# unsaved buffer), in which case only absolute include paths resolve.
+# or `module` block for a call inside one — each such body is its own module at
+# runtime, so duplicate-include detection scopes to it instead of to the include
+# graph as a whole. `file_dir` may be `nothing` (a file without a filesystem
+# path, e.g. an unsaved buffer), in which case only absolute include paths
+# resolve.
 #
 # Calls inside function/macro bodies are reported with `in_function = true` and
 # always `target = nothing`: a runtime `include` splices into whichever module
@@ -99,19 +102,27 @@ function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false,
     x === skip && return nothing
 
     if (CSTParser.fcall_name(x) == "include" || CSTParser.fcall_name(x) == "includet") && length(x.args) == 2
-        target = nothing
-        if !in_function
-            path = get_path(x, file_dir, nothing)
-            if path !== nothing
-                if isabspath(path)
-                    target = filepath2uri(path)
-                elseif file_dir !== nothing
-                    target = filepath2uri(joinpath(file_dir, path))
-                end
+        resolved = nothing
+        path = get_path(x, file_dir, nothing)
+        if path !== nothing
+            if isabspath(path)
+                resolved = filepath2uri(path)
+            elseif file_dir !== nothing
+                resolved = filepath2uri(joinpath(file_dir, path))
             end
         end
-
-        f(x, pos, target, in_function, guarded, testitem_ctx)
+        # A function-body include splices at run time: it never becomes an
+        # include-graph edge (`target` stays `nothing`), but its resolved
+        # literal target still travels as `runtime_target` so the diagnostics
+        # pass can existence-check it and report it as a runtime boundary
+        # rather than a "path could not be determined" computed include.
+        target = in_function ? nothing : resolved
+        f(x, pos, target, in_function, guarded, testitem_ctx, in_function ? resolved : nothing)
+    elseif quoted(x)
+        # Quoted code is data: an `include` inside `quote … end` / `:( … )`
+        # runs elsewhere (if at all) and must not become an edge, a duplicate,
+        # or a boundary of THIS file.
+        return nothing
     elseif CSTParser.defines_function(x) || CSTParser.defines_macro(x)
         sig = try
             CSTParser.get_sig(x)
@@ -147,11 +158,15 @@ function _walk_include_calls(f, x::EXPR, file_dir, pos, in_function::Bool=false,
             cond = x.args[1]
         end
 
-        # Each testitem-family body is evaluated in a fresh module, so includes
-        # below this point belong to that module rather than to the enclosing
-        # file. Nested testitems keep the outermost context: the inner body is
-        # part of the same runtime module.
-        child_ctx = testitem_ctx === nothing && _is_testitem_family_macrocall(x) ? pos : testitem_ctx
+        # Each testitem-family body and `module` block is evaluated in a fresh
+        # module, so includes below this point belong to that module rather
+        # than to the enclosing file — including one file into two different
+        # modules is legitimate, not a duplicate. Nested contexts keep the
+        # outermost one: the inner body is part of the same runtime module for
+        # duplicate-detection purposes.
+        child_ctx = testitem_ctx === nothing &&
+            (_is_testitem_family_macrocall(x) || headof(x) === :module) ?
+            pos : testitem_ctx
 
         p = pos
         for i in 1:length(x)
@@ -182,7 +197,7 @@ e.g. an unsaved buffer) still resolves absolute include paths.
 """
 function collect_include_calls(cst::EXPR, file_path::Union{Nothing,String})
     results = Tuple{Int,Int,Union{URI,Nothing}}[]
-    _walk_include_calls(cst, _include_file_dir(file_path), 0) do x, pos, target, in_function, _, _
+    _walk_include_calls(cst, _include_file_dir(file_path), 0) do x, pos, target, in_function, _, _, _
         # Top-level calls only, matching this function's historical contract;
         # function-body (runtime) includes are an analysis signal, not part of
         # the include graph.
@@ -221,12 +236,17 @@ function collect_include_analysis(cst::EXPR, file_path::Union{Nothing,String})
     include_dict = Dict{UInt64,URI}()
     records = Tuple{Int,Int,Union{URI,Nothing},Bool,Union{Nothing,Int}}[]
     computed_ids = Set{UInt64}()
-    _walk_include_calls(cst, _include_file_dir(file_path), 0) do x, pos, target, _, guarded, testitem_ctx
+    # Function-body includes, keyed by offset: the resolved literal target (for
+    # the diagnostics pass to existence-check and report as a runtime boundary)
+    # or `nothing` when the path was computed as well.
+    runtime_targets = Dict{Int,Union{Nothing,URI}}()
+    _walk_include_calls(cst, _include_file_dir(file_path), 0) do x, pos, target, in_function, guarded, testitem_ctx, runtime_target
         # Function-body includes carry `target === nothing` by construction
         # (see `_walk_include_calls`), so they land in `records` as computed
-        # includes — ComputedInclude diagnostics + suppression signals — but
-        # never become include-graph edges.
+        # includes — boundary diagnostics + suppression signals — but never
+        # become include-graph edges.
         push!(records, (pos, x.span, target, guarded, testitem_ctx))
+        in_function && (runtime_targets[pos] = runtime_target)
         if target !== nothing
             push!(edges, target)
             include_dict[UInt64(objectid(x))] = target
@@ -234,6 +254,6 @@ function collect_include_analysis(cst::EXPR, file_path::Union{Nothing,String})
             push!(computed_ids, UInt64(objectid(x)))
         end
     end
-    return (; edges, include_dict, records, computed_ids)
+    return (; edges, include_dict, records, computed_ids, runtime_targets)
 end
 

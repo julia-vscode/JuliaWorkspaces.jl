@@ -95,6 +95,31 @@ Salsa.@derived function derived_project_requires_indexing(rt, project_uri, conte
 end
 
 """
+    _watch_target_for_project(rt, project_uri) -> (uri, content_hash)
+
+The `(project_uri, content_hash)` pair whose `WatchEnvironmentKey` covers the
+environment of `project_uri`: the project's own folder normally; for a
+`[workspace]` member (a project whose manifest is the borrowed root manifest)
+the root's folder and hash — a member has no watch item of its own, the root's
+covers it, and the root's hash folds every member's Project.toml.
+
+Single source of truth for that identity: the required set (which schedules
+the item via the root's `derived_project`), the readiness gates and every
+other consumer must derive the same pair, or a recorded result is looked up
+under a key nobody ever produced.
+"""
+function _watch_target_for_project(rt, project_uri)
+    project = derived_project(rt, project_uri)
+    project === nothing && return (project_uri, UInt64(0))
+    if _is_workspace_member_project(project, project_uri)
+        root_uri = filepath2uri(dirname(uri2filepath(project.manifest_file_uri)))
+        root_project = derived_project(rt, root_uri)
+        root_project === nothing || return (root_uri, root_project.content_hash)
+    end
+    return (project_uri, project.content_hash)
+end
+
+"""
     derived_test_environment_pending(rt, key::WatchTestEnvironmentKey) -> Bool
 
 Whether the test-environment work item `key` is scheduled and can still produce
@@ -412,13 +437,14 @@ Salsa.@derived function derived_file_env_ready(rt, uri)
     input_env_ready(rt) && return true
 
     # Determine the file's effective project URI and require its env to be
-    # settled.
+    # settled. For a workspace member the watch item lives at the root — gate
+    # on that (`_watch_target_for_project` is the single source of truth for
+    # the translation).
     project_uri = derived_project_uri_for_root(rt, uri)
     if project_uri !== nothing
-        project = derived_project(rt, project_uri)
-        project_hash = project === nothing ? UInt64(0) : project.content_hash
-        if !derived_project_environment_ready(rt, project_uri, project_hash) &&
-                derived_project_requires_indexing(rt, project_uri, project_hash)
+        watch_uri, watch_hash = _watch_target_for_project(rt, project_uri)
+        if !derived_project_environment_ready(rt, watch_uri, watch_hash) &&
+                derived_project_requires_indexing(rt, watch_uri, watch_hash)
             return false
         end
     end
@@ -515,10 +541,13 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
 
     required = Set{DJPKey}()
 
-    # Every project folder needs a :watch_environment DJP
+    # Every project folder needs a :watch_environment DJP — except a
+    # `[workspace]` member, whose environment the root's item covers (this is
+    # where a workspace needs one child process, not one per member).
     for project_uri in derived_project_folders(rt)
         project = derived_project(rt, project_uri)
         project === nothing && continue
+        _is_workspace_member_project(project, project_uri) && continue
         push!(required, WatchEnvironmentKey(
             uri2filepath(project_uri),
             project.content_hash,

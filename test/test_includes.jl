@@ -806,9 +806,81 @@ end
     @test count(contains("can not be found"), msgs) == 1
 end
 
-# The v2 include walker (behind `input_v2_enabled`): runtime and computed
-# includes are analysis-boundary notices, quoted includes are data, `module`
-# and `@safetestset` bodies scope duplicate detection.
+@testitem "runtime include: a literal include inside a function body is existence-checked" begin
+    using JuliaWorkspaces: set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    # A literal include inside a 0-arg thunk. The path is plain, but the
+    # include is still a computed include for analysis purposes (it splices
+    # at run time, so it is no include-graph edge and the target stays a
+    # root) ...
+    root_uri = URI("file:///rti/src/RtI.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module RtI
+    function load()
+        include("lu_test.jl")
+    end
+    end
+    """, "julia")))
+    add_file!(jw, TextFile(URI("file:///rti/src/lu_test.jl"), SourceText("x = 1\n", "julia")))
+    set_input_env_ready!(jw.runtime, true)
+    diags = get_diagnostic(jw, root_uri)
+    @test count(d -> contains(d.message, "could not be determined statically"), diags) == 1
+    @test !any(d -> contains(d.message, "can not be found"), diags)
+    @test URI("file:///rti/src/lu_test.jl") in JuliaWorkspaces.derived_roots(jw.runtime)
+
+    # ... but a literal target that does not exist is a real MissingFile.
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(root_uri, SourceText("function load()\n    include(\"nope.jl\")\nend\n", "julia")))
+    set_input_env_ready!(jw2.runtime, true)
+    diags2 = get_diagnostic(jw2, root_uri)
+    @test count(d -> contains(d.message, "can not be found"), diags2) == 1
+    @test !any(d -> contains(d.message, "could not be determined statically"), diags2)
+end
+
+@testitem "include diagnostics: quoted includes are data, module bodies scope duplicates" begin
+    using JuliaWorkspaces: set_input_env_ready!
+    using JuliaWorkspaces.URIs2: URI
+
+    # An include inside `quote … end` runs elsewhere: no edge, no MissingFile,
+    # no duplicate, no boundary notice.
+    q_uri = URI("file:///qi/src/Q.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(q_uri, SourceText("""
+    init_code() = quote
+        include("helpers.jl")
+    end
+    include("helpers.jl")
+    """, "julia")))
+    add_file!(jw, TextFile(URI("file:///qi/src/helpers.jl"), SourceText("h() = 1\n", "julia")))
+    set_input_env_ready!(jw.runtime, true)
+    msgs = [d.message for d in get_diagnostic(jw, q_uri)]
+    @test !any(contains("already been included"), msgs)
+    @test !any(contains("runs inside a function body"), msgs)
+    @test !any(contains("can not be found"), msgs)
+
+    # The same file included into two `module` blocks is two legitimate
+    # inclusions (MPIPreferences' preloads.jl into a submodule), not a
+    # duplicate.
+    m_uri = URI("file:///mi/src/M.jl")
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(m_uri, SourceText("""
+    module A
+    include("shared.jl")
+    end
+    module B
+    include("shared.jl")
+    end
+    """, "julia")))
+    add_file!(jw2, TextFile(URI("file:///mi/src/shared.jl"), SourceText("s() = 1\n", "julia")))
+    set_input_env_ready!(jw2.runtime, true)
+    @test !any(d -> contains(d.message, "already been included"), get_diagnostic(jw2, m_uri))
+end
+
+# The v2 include diagnostics (behind `input_v2_enabled`): the include walker is
+# v1's, but runtime and computed includes are analysis-boundary notices under
+# the flag instead of include_errors warnings.
 @testitem "runtime include: a literal include inside a function body is a boundary notice" begin
     using JuliaWorkspaces: set_input_env_ready!
     using JuliaWorkspaces.URIs2: URI
@@ -882,61 +954,4 @@ end
     @test d.code === :analysis_boundary
     @test d.severity === :warning
     @test occursin("missing_reference", d.message)
-end
-
-@testitem "include diagnostics: quoted includes are data, module and @safetestset bodies scope duplicates" begin
-    using JuliaWorkspaces: set_input_env_ready!
-    using JuliaWorkspaces.URIs2: URI
-
-    # An include inside `quote … end` runs elsewhere: no edge, no MissingFile,
-    # no duplicate, no boundary notice.
-    q_uri = URI("file:///qi/src/Q.jl")
-    jw = JuliaWorkspace()
-    set_v2_enabled!(jw, true)
-    add_file!(jw, TextFile(q_uri, SourceText("""
-    init_code() = quote
-        include("helpers.jl")
-    end
-    include("helpers.jl")
-    """, "julia")))
-    add_file!(jw, TextFile(URI("file:///qi/src/helpers.jl"), SourceText("h() = 1\n", "julia")))
-    set_input_env_ready!(jw.runtime, true)
-    msgs = [d.message for d in get_diagnostic(jw, q_uri)]
-    @test !any(contains("already been included"), msgs)
-    @test !any(contains("runs inside a function body"), msgs)
-    @test !any(contains("can not be found"), msgs)
-
-    # The same file included into two `module` blocks is two legitimate
-    # inclusions (MPIPreferences' preloads.jl into a submodule), not a
-    # duplicate — and likewise into two `@safetestset` bodies.
-    m_uri = URI("file:///mi/src/M.jl")
-    jw2 = JuliaWorkspace()
-    set_v2_enabled!(jw2, true)
-    add_file!(jw2, TextFile(m_uri, SourceText("""
-    module A
-    include("shared.jl")
-    end
-    module B
-    include("shared.jl")
-    end
-    """, "julia")))
-    add_file!(jw2, TextFile(URI("file:///mi/src/shared.jl"), SourceText("s() = 1\n", "julia")))
-    set_input_env_ready!(jw2.runtime, true)
-    @test !any(d -> contains(d.message, "already been included"), get_diagnostic(jw2, m_uri))
-
-    t_uri = URI("file:///si/test/runtests.jl")
-    jw3 = JuliaWorkspace()
-    set_v2_enabled!(jw3, true)
-    add_file!(jw3, TextFile(t_uri, SourceText("""
-    using SafeTestsets
-    @safetestset "one" begin
-        include("common.jl")
-    end
-    @safetestset "two" begin
-        include("common.jl")
-    end
-    """, "julia")))
-    add_file!(jw3, TextFile(URI("file:///si/test/common.jl"), SourceText("c() = 1\n", "julia")))
-    set_input_env_ready!(jw3.runtime, true)
-    @test !any(d -> contains(d.message, "already been included"), get_diagnostic(jw3, t_uri))
 end

@@ -1524,8 +1524,7 @@ function _get_completions(rt, uri, offset, completion_mode, workspace)
     cst = derived_julia_legacy_syntax_tree(rt, uri)
     cst === nothing && return CompletionResult(true, CompletionResultItem[])
 
-    text_file = input_text_file(rt, uri)
-    st = text_file.content
+    st = derived_text_file_content(rt, uri).content
 
     root = derived_best_root_for_uri(rt, uri)
     if root !== nothing
