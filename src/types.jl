@@ -472,6 +472,10 @@ Create an empty workspace. To build one directly from folders on disc, use
   (each concurrently running operation — downloading caches for a project,
   indexing a project, loading caches — is its own progress bar with the full
   0–100 range); a report with `percentage >= 100` ends that operation's bar.
+- `err_handler::Union{Nothing,Function}`: Invoked as `(err, bt)` when an
+  internal background task of the dynamic feature fails in a way that would
+  otherwise only be printed to stderr (most importantly the reactor task
+  itself). Intended for a host's crash reporting.
 - `max_concurrent_djps::Int`: Maximum number of concurrently working dynamic
   child processes (`0` disables the limit). Defaults to 4.
 - `max_failure_attempts::Int`: How many terminal failures a project may
@@ -491,7 +495,7 @@ struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}
     dynamic_feature::Union{Nothing,DynamicFeature}
 
-    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true)
+    function JuliaWorkspace(;dynamic::DynamicMode=DynamicOff, store_path::Union{Nothing,String}=nothing, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, indirect_file_watch_callback::Union{Nothing,Function}=nothing, progress_callback::Union{Nothing,Function}=nothing, err_handler::Union{Nothing,Function}=nothing, max_concurrent_djps::Int=4, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true)
         if store_path === nothing
             # Tie the local scratch store to the cache format version so a format
             # bump starts fresh instead of reading stale-format caches.
@@ -499,7 +503,7 @@ struct JuliaWorkspace
             store_path = get_scratch_rate_limited(scratch_key)
         end
         need_dynamic_feature = dynamic != DynamicOff || symbolcache_download
-        dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, max_concurrent_djps=max_concurrent_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds) : nothing
+        dynamic_feature = need_dynamic_feature ? DynamicFeature(dynamic, store_path; download_enabled=symbolcache_download, upstream_url=symbolcache_upstream, progress_callback=progress_callback, err_handler=err_handler, max_concurrent_djps=max_concurrent_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds) : nothing
         dynamic_feature === nothing || start(dynamic_feature)
 
         rt = Salsa.Runtime{SContext}(SContext(dynamic_feature, indirect_file_watch_callback))

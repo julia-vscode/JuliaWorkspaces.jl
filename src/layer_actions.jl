@@ -846,12 +846,11 @@ function _get_code_actions(runtime, uri::URI, offset::Int, diagnostic_messages::
     for (_, ad) in _JW_ACTIONS
         # A fix for a rule the user turned off is not offered (see `_ActionDef.rule`).
         ad.rule === nothing || rule_enabled(lint_config, ad.rule) || continue
-        try
-            if ad.when(x, meta_dict, ctx)
-                push!(actions, CodeActionInfo(ad.id, ad.title, ad.kind, ad.is_preferred))
-            end
-        catch
-            # Skip actions whose predicates fail
+        # Predicates are package code operating on our own CST, so a throwing
+        # predicate is a bug; let it propagate to the host's crash reporting
+        # instead of silently hiding the action.
+        if ad.when(x, meta_dict, ctx)
+            push!(actions, CodeActionInfo(ad.id, ad.title, ad.kind, ad.is_preferred))
         end
     end
 

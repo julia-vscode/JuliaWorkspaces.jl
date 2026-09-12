@@ -496,6 +496,11 @@ struct DynamicFeature
     reconciled_once::Threads.Atomic{Bool}
     update_channel::Channel{Symbol}
     progress_callback::Union{Nothing,Function}
+    # Crash-reporting callback `(err, bt)` for internal failures that would
+    # otherwise die silently with a background task — most importantly the
+    # reactor task itself (see `start(::DynamicFeature)`). `nothing` keeps the
+    # previous behavior of printing to stderr.
+    err_handler::Union{Nothing,Function}
     # Last child-reported indexing percentage per work item (reactor-owned).
     # Used to keep each item's progress bar monotone across late/duplicate
     # child reports and to re-use the last percentage for reports without one.
@@ -532,6 +537,7 @@ struct DynamicFeature
     function DynamicFeature(djp_mode::DynamicMode, store_path::String;
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
             progress_callback::Union{Nothing,Function}=nothing,
+            err_handler::Union{Nothing,Function}=nothing,
             max_concurrent_djps::Int=4, launcher::Function=_launch_process!,
             max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS,
             djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
@@ -556,6 +562,7 @@ struct DynamicFeature
             Threads.Atomic{Bool}(false),
             Channel{Symbol}(1),   # coalesced wakeup signal (see _complete_work_item!)
             progress_callback,
+            err_handler,
             Dict{DJPKey,Int}(),
             dynamic_controller_fsm("dynamic_controller"),
             max_concurrent_djps,
@@ -1221,10 +1228,14 @@ function start(df::DynamicFeature)
     @async try
         Base.run(df)
     catch err
+        # The reactor is the dynamic feature's single event loop: if it dies,
+        # every environment index silently stops. That is a bug worth a crash
+        # report, not just a line on stderr.
         flush(stderr)
         bt = catch_backtrace()
         Base.display_error(err, bt)
         flush(stderr)
+        df.err_handler === nothing || df.err_handler(err, bt)
     end
 end
 
