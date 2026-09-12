@@ -18,7 +18,7 @@ Salsa.@derived function derived_file_include_data(rt, uri)
     @debug "derived_file_include_data" uri=uri
 
     tf = derived_text_file_content(rt, uri)
-    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing},Bool,Union{Nothing,Int}}[], computed_ids=Set{UInt64}())
+    tf === nothing && return (edges=Set{URI}(), include_dict=Dict{UInt64,URI}(), records=Tuple{Int,Int,Union{URI,Nothing},Bool,Union{Nothing,Int}}[], computed_ids=Set{UInt64}(), runtime_targets=Dict{Int,Union{Nothing,URI}}())
 
     cst = derived_julia_legacy_syntax_tree(rt, uri)
 
@@ -263,8 +263,8 @@ resolved include target (or `nothing` when the path could not be determined
 statically);
 `guarded` marks calls under an existence/definedness-test conditional, for which
 the include diagnostics abstain from MissingFile/DuplicateInclude/ComputedInclude.
-`testitem_ctx` identifies the enclosing testitem-family macrocall for calls
-inside one, which scopes duplicate detection to that body.
+`testitem_ctx` identifies the enclosing testitem-family macrocall or `module`
+block for calls inside one, which scopes duplicate detection to that body.
 The records
 are in source order, which the include-graph diagnostics rely on to flag the
 *repeated* `include` rather than the first one.
@@ -282,13 +282,15 @@ end
 function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited, result)
     push!(stack, uri)
 
-    # A `@testitem`/`@testmodule`/`@testsnippet` body runs in a module of its
-    # own, so including a file there says nothing about whether the same file
-    # was included elsewhere: each body gets its own visited sets, keyed by the
-    # macrocall offset. Including the same file twice *within* one body is
+    # A `@testitem`/`@testmodule`/`@testsnippet` body or a `module` block runs
+    # in a module of its own, so including a file there says nothing about
+    # whether the same file was included elsewhere: each body gets its own
+    # visited sets, keyed by the macrocall or `module` offset. Including the
+    # same file twice *within* one body is
     # still a duplicate, and so is a repeat further down that body's include
     # subtree, which inherits these sets.
     testitem_visited = Dict{Int,Tuple{Set{URI},Set{URI}}}()
+    runtime_targets = derived_file_include_data(rt, uri).runtime_targets
 
     for (offset, span, target, guarded, testitem_ctx) in derived_file_include_records(rt, uri)
         seen, guarded_seen = testitem_ctx === nothing ?
@@ -305,7 +307,18 @@ function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited,
             # includes (`const depsjl = joinpath(...); isfile(depsjl) &&
             # include(depsjl)`) abstain like the rest; the missing-reference
             # relaxation applies either way.
-            guarded || push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, StaticLint.ComputedInclude))
+            #
+            # A LITERAL path inside a function body is spliced at run time —
+            # no static splice context, so still a computed include for
+            # analysis purposes — but its target can be existence-checked:
+            # a missing file is a MissingFile, not a "path could not be
+            # determined" (a `load() = include("x.jl")` thunk).
+            rtarget = get(runtime_targets, offset, nothing)
+            if !guarded
+                code = rtarget !== nothing && derived_text_file_content(rt, rtarget) === nothing ?
+                    StaticLint.MissingFile : StaticLint.ComputedInclude
+                push!(get!(result, uri, Diagnostic[]), _include_diagnostic(offset, span, code))
+            end
             continue
         end
 
