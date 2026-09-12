@@ -45,3 +45,16 @@ end
 
 Full documentation is hosted at <https://julia-vscode.github.io/JuliaWorkspaces.jl/dev>. Start with
 the architecture page if you intend to work on the package.
+
+## Repository scripts
+
+| Script | Purpose |
+|:-------|:--------|
+| `scripts/update_vendored_packages.jl` | Reconcile the vendored `packages/` trees with `scripts/vendored_packages.jl`. |
+| `scripts/install_julia_versions.jl` | Install every supported Julia via juliaup. |
+| `scripts/update_app_environments.jl` | Regenerate the per-version dynamic analysis process environments. |
+
+`scripts/vendored_packages.jl` is the list the first of those works from: add a package
+there and run it with `--apply` to vendor it. Nothing records which version is vendored —
+that is read back from each tree's own `Project.toml`, and `--verify` audits it against the
+commit `git subtree` recorded.
