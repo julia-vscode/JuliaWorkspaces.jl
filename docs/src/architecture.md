@@ -123,8 +123,10 @@ From the bottom up:
 | `v2/layer_environment_v2.jl` | v2 twin of the environment selection: extension files, deeper env folders, workspace members (a `test/` project included, gating on and resolving through the root's single watch item), package scripts against the active project, extension-environment work items. |
 | `layer_testitems.jl` | `@testitem` / test-setup detection. |
 | `v2/layer_testitems_v2.jl` | v2 twin: detection off the v2 skeleton, the same assembly below it over the fused parse's `RawTest*Detail` records. |
+| `v2/bridge/layer_undocumented_names_v2.jl` | v2 only: the `undocumented_public_name` inventory (Aqua parity) — per-file documented names, per-root undocumented public names, and the last-mile range reattachment. In bridge/ because it reads the v1 module tree. |
+| `v2/bridge/lint_unbound_type_parameter_v2.jl` | v2 only: the `unbound_type_parameter` check (Aqua parity) — a syntax-tier rule kept out of the shared `SYNTAX_CHECKS` tuple so flag-off behaviour stays main's; its producer is joined only in the v2 diagnostics twin. |
 | `layer_diagnostics.jl` | Aggregating syntax, lint, test, and TOML diagnostics, gated by configuration (see [Configuration](configuration.md)). |
-| `v2/bridge/layer_diagnostics_v2.jl` | v2 twin of the diagnostics join: the lowering producer's takeover, analysis-boundary notices, project/manifest problems, located environment errors. |
+| `v2/bridge/layer_diagnostics_v2.jl` | v2 twin of the diagnostics join: the lowering producer's takeover, analysis-boundary notices, project/manifest problems, package-quality (Aqua) findings, located environment errors. |
 | `layer_hover.jl`, `layer_completions.jl`, `layer_references.jl`, `layer_signatures.jl`, `layer_symbols.jl`, `layer_navigation.jl`, `layer_actions.jl`, `layer_formatting.jl`, `layer_misc.jl` | LSP-feature query layers. |
 | `v2/bridge/layer_features_v2.jl` | v2-backed answers for the references family, symbols, module-at, document links, selection/block ranges, hover and signature help. |
 

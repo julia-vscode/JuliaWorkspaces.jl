@@ -222,6 +222,11 @@ end
         # default preset never reports on code merely because it cannot be
         # analyzed; strict promotes it to warning.
         :analysis_boundary => :off,
+        # Package-quality rules ported from Aqua.jl; off outside `strict`.
+        :missing_compat => :off,
+        :unused_dependency => :off,
+        :unbound_type_parameter => :off,
+        :undocumented_public_name => :off,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 

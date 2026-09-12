@@ -398,6 +398,38 @@ govern it; such buffers always lint under `default` and cannot opt back in.
 | `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
 | `missing_reference` | `off` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default). Off by default; see “Rules that are off by default” below |
 | `unresolved_import` | `off` | Imports whose target could not be resolved. Off by default; see “Rules that are off by default” below |
+| `missing_compat` | `off` | A package `[deps]`/`[extras]`/`[weakdeps]` entry (stdlibs included) or `julia` without a `[compat]` entry. Options: `check_julia`, `check_extras`, `check_weakdeps` (booleans, default `true`), `ignore` (array of names). v2 only (`set_v2_enabled!`) |
+| `unused_dependency` | `off` | A package `[deps]` entry that no `using`/`import` in the package's source (or its extensions) references. Option: `ignore` (array of names). v2 only (`set_v2_enabled!`) |
+| `unbound_type_parameter` | `off` | A method `where` parameter no argument type binds (undefined at run time). v2 only (`set_v2_enabled!`) |
+| `undocumented_public_name` | `off` | An exported/`public` name a workspace package declares without a docstring; a submodule without a module docstring. v2 only (`set_v2_enabled!`) |
+
+### Package-quality rules (Aqua.jl parity)
+
+!!! note "v2 only"
+    All four rules in this section are produced by the v2 analysis stack, i.e.
+    a workspace with `set_v2_enabled!(jw, true)`. With the flag off (the
+    default) they emit nothing, whatever their configured severity.
+
+Four rules port the statically-checkable parts of
+[Aqua.jl](https://github.com/JuliaTesting/Aqua.jl)'s package-quality test
+suite into the linter, so they run continuously in the editor and in
+`julialint` instead of only at test time. All four ship `"off"` outside the
+`strict` preset.
+
+| Aqua check | Rule | Notes |
+| --- | --- | --- |
+| `deps_compat` | `missing_compat` | Same semantics: `[compat]` entries required for `julia` and every `[deps]`/`[extras]`/`[weakdeps]` entry, standard libraries included. The `check_julia`/`check_extras`/`check_weakdeps` options mirror Aqua's keyword arguments; `ignore` exempts named dependencies. Only packages (`name` + `uuid`) are checked. |
+| `stale_deps` | `unused_dependency` | The static face of the check: a `[deps]` entry that no `using`/`import` in `src/` or `ext/` references. Aqua instead loads the package and accepts dependencies that get loaded *transitively*; a static analysis cannot see loads, so a dependency needed only for side effects belongs on the rule's `ignore` list. An `include` the analyzer cannot resolve silences the whole check for that package — the unseen file could contain the import. |
+| `unbound_args` | `unbound_type_parameter` | Mirrors `Test.detect_unbound_args` semantics on the method signature: bound through invariant type parameters at any depth, `Type{T}`, every branch of a `Union`, covariant upper bounds, and the `N` of `Vararg{T,N}`; never through return types, lower bounds, or a trailing vararg's element type. Keyword argument types bind (they reach the keyword-body method positionally). A parameter that is never mentioned again is `unused_type_parameter`'s finding instead. |
+| `undocumented_names` | `undocumented_public_name` | Every exported/`public` name a workspace package declares needs a docstring, and every submodule needs a module docstring; the package's root module is exempt (the README is its docstring). Re-exported names are skipped — their docstrings live upstream. Works on every Julia version (Aqua's check needs ≥ 1.11 at test time). |
+
+The remaining Aqua checks have no static counterpart here: `undefined_exports`
+is already covered by `missing_reference` (an `export`/`public` of an
+undefined name is an unresolved reference), `piracies` by `type_piracy`, and
+`ambiguities`, `persistent_tasks` and `project_extras` are inherently
+run-time checks (method-table intersection, precompilation-process behavior,
+and a `test/Project.toml` comparison that only matters for packages
+supporting Julia ≤ 1.1).
 
 ### Analysis boundaries
 

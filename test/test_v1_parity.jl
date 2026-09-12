@@ -79,7 +79,7 @@ end
 
     for uri in (project, manifest)
         codes = Set(d.code for d in get_diagnostic(jw, uri))
-        @test isempty(intersect(codes, Set([:project_file_errors, :project_file_warnings, :manifest_errors, :analysis_boundary])))
+        @test isempty(intersect(codes, Set([:project_file_errors, :project_file_warnings, :manifest_errors, :analysis_boundary, :missing_compat, :unused_dependency])))
     end
 
     # The TOML parser is Pkg.TOML: one diagnostic at a point, its source string.

@@ -278,6 +278,37 @@ const LINT_RULES = LintRule[
     # diagnostic set back by avoiding those constructs.
     LintRule(id = :analysis_boundary, tier = TierWorkspace,
         severity_minimal = :off, severity_default = :off, severity_strict = :warning),
+
+    # ── Package-quality rules (ported from Aqua.jl) ──────────────────────────
+    # All four are v2-only producers (their queries are reached only through
+    # `derived_diagnostics_v2`, like `project_file_errors`), and like the
+    # syntactic rules they ship `:off` outside `strict` so an upgrade never
+    # switches them on for existing projects.
+    # Aqua's `test_deps_compat`: a package should have a `[compat]` entry for
+    # `julia` and for every `[deps]`/`[extras]`/`[weakdeps]` entry, stdlibs
+    # included. Options gate the julia/extras/weakdeps checks and exempt
+    # named dependencies.
+    LintRule(id = :missing_compat, tier = TierProject,
+        severity_default = :off, severity_strict = :warning,
+        option_keys = [:check_julia, :check_extras, :check_weakdeps, :ignore]),
+    # The static face of Aqua's `test_stale_deps`: a `[deps]` entry no
+    # `using`/`import` in the package's source (src/ or extensions) references.
+    # Aqua accepts transitively-loaded deps at run time; a static check cannot,
+    # so such deps go on the `ignore` option.
+    LintRule(id = :unused_dependency, tier = TierWorkspace,
+        severity_default = :off, severity_strict = :warning,
+        option_keys = [:ignore]),
+    # Aqua's `test_unbound_args`, statically: a method `where` parameter no
+    # argument type binds, so it is undefined when the method runs (e.g.
+    # `f(::T...) where T` called with zero arguments).
+    LintRule(id = :unbound_type_parameter, tier = TierSyntax,
+        severity_default = :off, severity_strict = :warning),
+    # Aqua's `test_undocumented_names`, statically: an exported/`public` name a
+    # workspace package declares without a docstring, or a submodule without a
+    # module docstring (the root module falls back to the README). Re-exported
+    # names are skipped — their docstrings live upstream.
+    LintRule(id = :undocumented_public_name, tier = TierWorkspace,
+        severity_default = :off, severity_strict = :warning),
 ]
 
 const LINT_RULES_BY_ID = Dict{Symbol,LintRule}(r.id => r for r in LINT_RULES)

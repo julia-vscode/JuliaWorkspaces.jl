@@ -489,3 +489,113 @@ Salsa.@derived function derived_project_semantic_problems(rt, project_file_uri)
     sort!(problems; by=p -> (p.key_path, p.message))
     return problems
 end
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Package-quality checks (ported from Aqua.jl)
+
+"""
+    derived_missing_compat_problems(rt, project_file_uri) -> Vector{ProjectTomlProblem}
+
+Findings of the `missing_compat` rule (Aqua.jl's `test_deps_compat`): a
+package's Project.toml should declare a `[compat]` entry for `julia` and for
+every entry in `[deps]`, `[extras]` and `[weakdeps]` — stdlibs included. Only
+packages (name and uuid present) are checked. Config-independent: every
+potential finding is produced; the emission join filters by the rule's
+`check_julia`/`check_extras`/`check_weakdeps`/`ignore` options, recognizing
+the section as the key path's first segment.
+"""
+Salsa.@derived function derived_missing_compat_problems(rt, project_file_uri)
+    @debug "derived_missing_compat_problems" uri=project_file_uri
+
+    pf = derived_project_file(rt, project_file_uri)
+    pf === nothing && return ProjectTomlProblem[]
+    (pf.name === nothing || pf.uuid === nothing) && return ProjectTomlProblem[]
+
+    problems = ProjectTomlProblem[]
+
+    if !haskey(pf.compat, "julia")
+        _ptoml_problem!(problems, :missing_compat, String["compat"], :key,
+            "`[compat]` has no `julia` entry.")
+    end
+
+    for (section, entries) in (("deps", pf.deps), ("extras", pf.extras), ("weakdeps", pf.weakdeps))
+        for name in keys(entries)
+            haskey(pf.compat, name) && continue
+            _ptoml_problem!(problems, :missing_compat, String[section, name], :key,
+                "`$name` in `[$section]` has no `[compat]` entry.")
+        end
+    end
+
+    sort!(problems; by=p -> (p.key_path, p.message))
+    return problems
+end
+
+"""
+    derived_unused_dependency_problems(rt, project_file_uri) -> Vector{ProjectTomlProblem}
+
+Findings of the `unused_dependency` rule (the static face of Aqua.jl's
+`test_stale_deps`): a `[deps]` entry of a package that no `using`/`import`
+anywhere in the package's source — the `src/` tree or any extension —
+references. `[weakdeps]` never count (they are extension triggers). Where
+Aqua accepts a dependency that gets loaded transitively at run time, a static
+check cannot see loads, so such deps go on the rule's `ignore` option (the
+emission join applies it).
+
+An include the analyzer cannot see through (a computed path, a missing file)
+could contain the very import that uses a dependency, so any such include in
+the scanned trees silences the whole check for the package.
+"""
+Salsa.@derived function derived_unused_dependency_problems(rt, project_file_uri)
+    @debug "derived_unused_dependency_problems" uri=project_file_uri
+
+    pf = derived_project_file(rt, project_file_uri)
+    pf === nothing && return ProjectTomlProblem[]
+    (pf.name === nothing || pf.uuid === nothing) && return ProjectTomlProblem[]
+    isempty(pf.deps) && return ProjectTomlProblem[]
+
+    folder_path = dirname(uri2filepath(project_file_uri))
+    entry_uri = filepath2uri(joinpath(folder_path, "src", "$(pf.name).jl"))
+    derived_has_file(rt, entry_uri) || return ProjectTomlProblem[]
+
+    roots = URI[entry_uri]
+    for ext_name in sort!(collect(keys(pf.extensions)))
+        for candidate in (joinpath(folder_path, "ext", "$(ext_name).jl"),
+                          joinpath(folder_path, "ext", ext_name, "$(ext_name).jl"))
+            ext_uri = filepath2uri(candidate)
+            if derived_has_file(rt, ext_uri)
+                push!(roots, ext_uri)
+                break
+            end
+        end
+    end
+
+    used = Set{String}()
+    for root in roots
+        tree = derived_module_tree(rt, root)
+        for file_uri in keys(tree.file_modules)
+            for (_, _, target, _, _) in derived_file_include_records(rt, file_uri)
+                if target === nothing || derived_text_file_content(rt, target) === nothing
+                    return ProjectTomlProblem[]
+                end
+            end
+        end
+        for node in tree.modules
+            for ri in node.imports
+                ri.target.sort === :tree && continue
+                isempty(ri.target.path) && continue
+                push!(used, ri.target.path[1])
+            end
+        end
+    end
+
+    problems = ProjectTomlProblem[]
+    for name in keys(pf.deps)
+        name in used && continue
+        haskey(pf.weakdeps, name) && continue
+        _ptoml_problem!(problems, :unused_dependency, String["deps", name], :key,
+            "`$name` is a declared dependency, but no `using`/`import` in this package's source (or its extensions) references it. If it is only needed indirectly, add it to this rule's `ignore` list.")
+    end
+
+    sort!(problems; by=p -> (p.key_path, p.message))
+    return problems
+end

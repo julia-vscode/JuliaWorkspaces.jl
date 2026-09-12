@@ -48,6 +48,10 @@ include("v2/bridge/layer_include_diagnostics_v2.jl")
 include("layer_test_setups.jl")
 include("v2/layer_project_files_v2.jl")
 include("v2/layer_workspaces_v2.jl")
+# Documented-name inventory for `undocumented_public_name` (a v2-only rule); in
+# src/v2/bridge/ because it reads the v1 pipeline's module-tree queries, which
+# the v2 boundary guard forbids in src/v2/ itself.
+include("v2/bridge/layer_undocumented_names_v2.jl")
 include("layer_projects.jl")
 include("v2/layer_projects_v2.jl")
 include("v2/layer_extensions_v2.jl")
@@ -60,6 +64,9 @@ include("v2/bridge/layer_v2_env_seam.jl")
 include("layer_testitems.jl")
 include("v2/layer_testitems_v2.jl")
 include("layer_diagnostics.jl")
+# The v2-only syntax-tier rule (see the file header for why it is not in the
+# shared lint_syntax_rules/ engine).
+include("v2/bridge/lint_unbound_type_parameter_v2.jl")
 include("v2/bridge/layer_diagnostics_v2.jl")
 include("layer_hover.jl")
 include("layer_completions.jl")

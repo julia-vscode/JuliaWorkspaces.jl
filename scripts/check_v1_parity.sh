@@ -51,7 +51,6 @@ gated=(
   src/layer_projects.jl
   src/layer_environment.jl
   src/layer_includes.jl
-  src/layer_diagnostics.jl
   src/layer_file_analysis.jl
   src/layer_testitems.jl
   src/layer_hover.jl
@@ -65,6 +64,10 @@ gated=(
 additive=(
   src/JuliaWorkspaces.jl
   src/packagedef.jl
+  # layer_diagnostics.jl is main + its derived_diagnostics gate + the option
+  # validation for the v2-only Aqua rules in _validate_lint_rules! (rule
+  # registration and config validation are shared; only emission is v2-gated).
+  src/layer_diagnostics.jl
   src/inputs.jl
   src/public.jl
   src/lint_rules.jl

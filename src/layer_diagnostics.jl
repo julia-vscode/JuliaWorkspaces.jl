@@ -102,6 +102,23 @@ function _validate_lint_rules!(res::Vector{Diagnostic}, table, into::Dict{Symbol
                 delete!(options, :scope)
             end
         end
+        if rule.id === :missing_compat
+            for bool_key in (:check_julia, :check_extras, :check_weakdeps)
+                if haskey(options, bool_key) && !(options[bool_key] isa Bool)
+                    push!(res, config_diagnostic(
+                        "Invalid `$bool_key` for rule `$k`, expected a boolean."))
+                    delete!(options, bool_key)
+                end
+            end
+        end
+        if rule.id in (:missing_compat, :unused_dependency) && haskey(options, :ignore)
+            ig = options[:ignore]
+            if !(ig isa Vector) || !all(x -> x isa AbstractString, ig)
+                push!(res, config_diagnostic(
+                    "Invalid `ignore` for rule `$k`, expected an array of dependency names."))
+                delete!(options, :ignore)
+            end
+        end
 
         into[rule.id] = (severity, options)
     end
@@ -364,6 +381,7 @@ Salsa.@derived function derived_diagnostics(rt, uri)
                 emit!(d.range, :include_errors, d.message, d.uri, d.source)
             end
         end
+
     end
 
     # Config/TOML diagnostics are filesystem-file only.
