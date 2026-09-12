@@ -92,10 +92,10 @@ construction, so docstring-content and position edits backdate.
 Salsa.@derived function derived_documented_names(rt, uri)
     @debug "derived_documented_names" uri=uri
 
-    tf = derived_text_file_content(rt, uri)
-    tf === nothing && return String[]
+    content = derived_julia_source_view(rt, uri)
+    content === nothing && return String[]
 
-    tree, _ = parse_julia_syntax_tree(tf.content.content)
+    tree, _ = parse_julia_syntax_tree(content)
     names = Set{String}()
     _collect_documented_names!(names, tree)
     return sort!(collect(names))
@@ -252,8 +252,8 @@ function collect_undocumented_public_findings(rt, uri)
     relevant = sort!([r for r in derived_roots_for_uri(rt, uri) if r in root_set]; by=string)
     isempty(relevant) && return findings
 
-    tf = derived_text_file_content(rt, uri)
-    tf === nothing && return findings
+    content = derived_julia_source_view(rt, uri)
+    content === nothing && return findings
     tree = nothing
 
     for root in relevant
@@ -261,7 +261,7 @@ function collect_undocumented_public_findings(rt, uri)
         isempty(undoc.exports) && isempty(undoc.modules) && continue
         splice = derived_file_module_path(rt, root, uri)
         splice === nothing && continue
-        tree === nothing && (tree = parse_julia_syntax_tree(tf.content.content)[1])
+        tree === nothing && (tree = parse_julia_syntax_tree(content)[1])
         _walk_undocumented!(findings, tree, splice, undoc)
     end
 

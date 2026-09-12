@@ -30,30 +30,30 @@ end
 """
     derived_julia_legacy_syntax_tree(rt, uri)
 
-The CSTParser tree for the Julia document `uri`.
+The CSTParser tree for the Julia document `uri` — or, for a markdown document,
+of its Julia view (`derived_julia_source_view`: fence contents verbatim, prose
+blanked, so tree offsets are document offsets).
 
-**Only ever call this for a Julia document.** The legacy parser reads a whole
-file as Julia source, so handing it Markdown or TOML produces garbage at best —
-and, as seen in the wild, can trip CSTParser's own infinite-loop guard. Callers
-must gate on [`_is_julia_uri`](@ref) first; the public API does this at its
-entry points in `public.jl`, and the internal walks only ever reach files
-admitted by `derived_julia_files` / `derived_all_julia_files`.
+**Only ever call this for a Julia or markdown document.** The legacy parser
+reads a whole text as Julia source, so handing it TOML produces garbage at
+best — and, as seen in the wild, can trip CSTParser's own infinite-loop guard.
+Callers must gate on [`_is_julia_analysis_uri`](@ref) first; the public API
+does this at its entry points in `public.jl`, and the internal walks only ever
+reach files admitted by `derived_julia_files` / `derived_all_julia_files`.
 
 Throws `JWUnknownFile` if `uri` has no content, and `JWNotAJuliaFile` if it is
-not a Julia document. Both are contract violations: a missed gate should surface
-as a crash report naming the caller, not as a silently empty tree that makes
-every CST-derived feature disappear without explanation.
+not a Julia or markdown document. Both are contract violations: a missed gate
+should surface as a crash report naming the caller, not as a silently empty
+tree that makes every CST-derived feature disappear without explanation.
 """
 Salsa.@derived function derived_julia_legacy_syntax_tree(rt, uri)
     @debug "derived_julia_legacy_syntax_tree" uri=uri
 
-    tf = derived_text_file_content(rt, uri)
+    content = derived_julia_source_view(rt, uri)
 
-    tf === nothing && throw(JWUnknownFile("Requested a legacy syntax tree for $uri, which has no content."))
+    content === nothing && throw(JWUnknownFile("Requested a legacy syntax tree for $uri, which has no content."))
 
-    _is_julia_uri(rt, uri) || throw(JWNotAJuliaFile("Requested a legacy syntax tree for $uri, which is not a Julia document."))
-
-    content = tf.content.content
+    _is_julia_analysis_uri(rt, uri) || throw(JWNotAJuliaFile("Requested a legacy syntax tree for $uri, which is not a Julia document."))
 
     cst = CSTParser.parse(content, true)
 

@@ -165,8 +165,9 @@ Salsa.@derived function derived_testitems_v2(rt, uri)
         return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
     end
 
-    text_file = derived_text_file_content(rt, uri)
-    text = text_file.content.content
+    # The Julia view, not the raw content: code slices for a markdown document
+    # must be the blanked view the parse saw (see derived_testitems).
+    text = derived_julia_source_view(rt, uri)
     maps = derived_v2_file_maps(rt, uri)
     bodies = derived_v2_file_bodies(rt, uri)
 

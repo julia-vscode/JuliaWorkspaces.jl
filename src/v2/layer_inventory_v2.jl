@@ -1381,11 +1381,13 @@ Salsa.@derived function derived_v2_file_walk(rt, uri)
     @debug "derived_v2_file_walk" uri=uri
 
     derived_has_content(rt, uri) || return EMPTY_V2_FILE_WALK
-    tf = derived_text_file_content(rt, uri)
-    tf === nothing && return EMPTY_V2_FILE_WALK
+    # The Julia view: raw content for a Julia document, the offset-preserving
+    # shadow source for a markdown document (see layer_markdown.jl).
+    content = derived_julia_source_view(rt, uri)
+    content === nothing && return EMPTY_V2_FILE_WALK
 
     root = try
-        JS2.parseall(JS2.SyntaxTree, tf.content.content; filename=string(uri), ignore_errors=true)
+        JS2.parseall(JS2.SyntaxTree, content; filename=string(uri), ignore_errors=true)
     catch err
         err isa InterruptException && rethrow()
         return EMPTY_V2_FILE_WALK

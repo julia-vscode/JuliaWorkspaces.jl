@@ -56,8 +56,9 @@ end
 Salsa.@derived function derived_julia_parse_products(rt, uri)
     @debug "derived_julia_parse_products" uri=uri
 
-    tf = derived_text_file_content(rt, uri)
-    content = tf.content.content
+    # The Julia view: raw content for a Julia document, the offset-preserving
+    # shadow source for a markdown document (see layer_markdown.jl).
+    content = derived_julia_source_view(rt, uri)
 
     tree, syntax_diagnostics = parse_julia_syntax_tree(content)
 

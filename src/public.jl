@@ -181,9 +181,8 @@ function _reconcile_expansions!(jw::JuliaWorkspace)
         maps = derived_v2_file_maps(jw.runtime, r.file)
         rngs = get(maps, r.item_id, nothing)
         (rngs === nothing || !(1 <= r.addr <= length(rngs))) && continue
-        tf = derived_text_file_content(jw.runtime, r.file)
-        tf === nothing && continue
-        text = tf.content.content
+        text = derived_julia_source_view(jw.runtime, r.file)
+        text === nothing && continue
         rng = rngs[r.addr]
         last(rng) - 1 <= ncodeunits(text) || continue
         macro_text = text[first(rng):prevind(text, last(rng))]
@@ -653,20 +652,22 @@ on demand and not cached.
 
 - The `JuliaSyntax.SyntaxNode` root of the parsed file.
 
-Throws `JWNotAJuliaFile` if `uri` is not a Julia document, and `JWUnknownFile` if it has no content.
+Throws `JWNotAJuliaFile` if `uri` is not a Julia or markdown document (a markdown
+document is parsed through its Julia view, see `derived_julia_source_view`),
+and `JWUnknownFile` if it has no content.
 """
 function get_julia_syntax_tree(jw::JuliaWorkspace, uri::URI)
     @debug "get_julia_syntax_tree" uri=uri
 
     process_from_dynamic(jw)
 
-    tf = derived_text_file_content(jw.runtime, uri)
+    content = derived_julia_source_view(jw.runtime, uri)
 
-    tf === nothing && throw(JWUnknownFile("Requested a syntax tree for $uri, which has no content."))
+    content === nothing && throw(JWUnknownFile("Requested a syntax tree for $uri, which has no content."))
 
-    _is_julia_uri(jw.runtime, uri) || throw(JWNotAJuliaFile("Requested a syntax tree for $uri, which is not a Julia document."))
+    _is_julia_analysis_uri(jw.runtime, uri) || throw(JWNotAJuliaFile("Requested a syntax tree for $uri, which is not a Julia document."))
 
-    return parse_julia_syntax_tree(tf.content.content)[1]
+    return parse_julia_syntax_tree(content)[1]
 end
 
 """
@@ -1027,7 +1028,9 @@ Get the CSTParser legacy syntax tree for a Julia file.
 # Returns
 - An `EXPR` (CSTParser expression tree).
 
-Throws `JWNotAJuliaFile` if `uri` is not a Julia document, and `JWUnknownFile` if it has no content.
+Throws `JWNotAJuliaFile` if `uri` is not a Julia or markdown document (a markdown
+document is parsed through its Julia view, see `derived_julia_source_view`),
+and `JWUnknownFile` if it has no content.
 """
 function get_legacy_cst(jw::JuliaWorkspace, uri::URI)
     @debug "get_legacy_cst" uri=uri
@@ -1093,14 +1096,14 @@ needed by LS request handlers.
     request-time through the module tree). Deletion candidate for M5.
   - `root::URI` — the root file that was used
 
-Returns `nothing` when `uri` is not a Julia document.
+Returns `nothing` when `uri` is not a Julia or markdown document.
 """
 function get_static_lint_data(jw::JuliaWorkspace, uri::URI)
     @debug "get_static_lint_data" uri=uri
 
     process_from_dynamic(jw)
 
-    _is_julia_uri(jw.runtime, uri) || return nothing
+    _is_julia_analysis_uri(jw.runtime, uri) || return nothing
 
     root = derived_best_root_for_uri(jw.runtime, uri)
     root === nothing && return nothing
@@ -1200,13 +1203,13 @@ Return a Markdown documentation string for the expression at `index` (1-based
 Julia string index) in the file identified by `uri`, or `nothing` if there is
 no hover information for that position.
 
-Returns `nothing` when `uri` is not a Julia document.
+Returns `nothing` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_hover_text(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_hover_text" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return nothing
+    _julia_position_admitted(jw.runtime, uri, index) || return nothing
     return _get_hover_text(jw.runtime, uri, index)
 end
 
@@ -1235,13 +1238,13 @@ Return a `CompletionResult` with completion items at the given `index`
 `completion_mode` may be `:import` (default) or `:qualify` to control whether
 additional `using` statements are inserted for out-of-scope symbols.
 
-Returns an empty, complete result when `uri` is not a Julia document.
+Returns an empty, complete result when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_completions(jw::JuliaWorkspace, uri::URI, index::Integer, completion_mode::Symbol=:import)
     @debug "get_completions" uri=uri index=index mode=completion_mode
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return CompletionResult(false, CompletionResultItem[])
+    _julia_position_admitted(jw.runtime, uri, index) || return CompletionResult(false, CompletionResultItem[])
     offset = index - 1  # Convert 1-based string index to 0-based CSTParser offset
     return _get_completions(jw.runtime, uri, offset, completion_mode, jw)
 end
@@ -1254,13 +1257,13 @@ end
 Return a vector of `DefinitionResult` for the symbol at `index` (1-based
 Julia string index) in the file identified by `uri`.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_definitions(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_definitions" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return DefinitionResult[]
+    _julia_position_admitted(jw.runtime, uri, index) || return DefinitionResult[]
     offset = index - 1
     return _get_definitions(jw.runtime, uri, offset)
 end
@@ -1271,13 +1274,13 @@ end
 Return a vector of `ReferenceResult` for all references to the symbol at
 `index` (1-based Julia string index) in the file identified by `uri`.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_references(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_references" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return ReferenceResult[]
+    _julia_position_admitted(jw.runtime, uri, index) || return ReferenceResult[]
     offset = index - 1
     return _get_references(jw.runtime, uri, offset)
 end
@@ -1288,13 +1291,13 @@ end
 Return a vector of `RenameEdit` for renaming the symbol at `index` (1-based
 Julia string index) in `uri` to `new_name`.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_rename_edits(jw::JuliaWorkspace, uri::URI, index::Integer, new_name::String)
     @debug "get_rename_edits" uri=uri index=index new_name=new_name
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return RenameEdit[]
+    _julia_position_admitted(jw.runtime, uri, index) || return RenameEdit[]
     offset = index - 1
     return _get_rename_edits(jw.runtime, uri, offset, new_name)
 end
@@ -1305,13 +1308,13 @@ end
 Return a vector of `HighlightResult` for highlighted occurrences of the
 symbol at `index` (1-based Julia string index) in the same file.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_highlights(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_highlights" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return HighlightResult[]
+    _julia_position_admitted(jw.runtime, uri, index) || return HighlightResult[]
     offset = index - 1
     return _get_highlights(jw.runtime, uri, offset)
 end
@@ -1324,13 +1327,13 @@ renamed. Returns a named tuple `(; start::Position, stop::Position)`
 describing the range of the renamable symbol (both positions use 1-based
 `line` and `column`), or `nothing` if the symbol cannot be renamed.
 
-Returns `nothing` when `uri` is not a Julia document.
+Returns `nothing` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function can_rename(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "can_rename" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return nothing
+    _julia_position_admitted(jw.runtime, uri, index) || return nothing
     offset = index - 1
     return _can_rename(jw.runtime, uri, offset)
 end
@@ -1343,13 +1346,13 @@ end
 Return a `SignatureResult` with signature information for the function call
 at `index` (1-based Julia string index) in the file identified by `uri`.
 
-Returns an empty result when `uri` is not a Julia document.
+Returns an empty result when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_signature_help(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_signature_help" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return SignatureResult(SignatureInfo[], 0, 0)
+    _julia_position_admitted(jw.runtime, uri, index) || return SignatureResult(SignatureInfo[], 0, 0)
     offset = index - 1
     return _get_signature_help(jw.runtime, uri, offset)
 end
@@ -1364,13 +1367,13 @@ for the file identified by `uri`. Each result has `start_offset` and
 `end_offset` as 0-based byte offsets, plus `name`, `kind` (LSP SymbolKind
 integer), and `children`.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia or markdown document. Markdown documents are answered from their Julia code chunks.
 """
 function get_document_symbols(jw::JuliaWorkspace, uri::URI)
     @debug "get_document_symbols" uri=uri
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return DocumentSymbolResult[]
+    _is_julia_analysis_uri(jw.runtime, uri) || return DocumentSymbolResult[]
     return _get_document_symbols(jw.runtime, uri)
 end
 
@@ -1395,15 +1398,21 @@ end
 For each 1-based string index in `indices`, compute a nested selection range.
 Returns a vector of `Union{Nothing, SelectionRangeResult}`.
 
-Returns all-`nothing` when `uri` is not a Julia document.
+Returns all-`nothing` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_selection_ranges(jw::JuliaWorkspace, uri::URI, indices::Vector{Int})
     @debug "get_selection_ranges" uri=uri count=length(indices)
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return Union{Nothing,SelectionRangeResult}[nothing for _ in indices]
+    admitted = Bool[_julia_position_admitted(jw.runtime, uri, idx) for idx in indices]
+    any(admitted) || return Union{Nothing,SelectionRangeResult}[nothing for _ in indices]
     offsets = [idx - 1 for idx in indices]
-    return _get_selection_ranges(jw.runtime, uri, offsets)
+    results = _get_selection_ranges(jw.runtime, uri, offsets)
+    # In a markdown document, positions outside a Julia chunk get no range.
+    for (i, ok) in enumerate(admitted)
+        ok || (results[i] = nothing)
+    end
+    return results
 end
 
 """
@@ -1412,13 +1421,13 @@ end
 Find the current top-level block at `index` (1-based Julia string index).
 Returns a `BlockRangeResult` with 0-based byte offsets, or `nothing`.
 
-Returns `nothing` when `uri` is not a Julia document.
+Returns `nothing` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_current_block_range(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_current_block_range" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return nothing
+    _julia_position_admitted(jw.runtime, uri, index) || return nothing
     offset = index - 1
     return _get_current_block_range(jw.runtime, uri, offset)
 end
@@ -1429,13 +1438,13 @@ end
 Return the fully qualified module name at `index` (1-based Julia string index),
 or "Main" if no module scope is found.
 
-Returns `"Main"` when `uri` is not a Julia document.
+Returns `"Main"` when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_module_at(jw::JuliaWorkspace, uri::URI, index::Integer)
     @debug "get_module_at" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return "Main"
+    _julia_position_admitted(jw.runtime, uri, index) || return "Main"
     offset = index - 1
     return _get_module_at(jw.runtime, uri, offset)
 end
@@ -1450,13 +1459,13 @@ end
 Return clickable document links (string literals that resolve to files).
 Offsets in results are 0-based byte offsets for direct use with CST spans.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia or markdown document. Markdown documents are answered from their Julia code chunks.
 """
 function get_document_links(jw::JuliaWorkspace, uri::URI)
     @debug "get_document_links" uri=uri
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return DocumentLinkResult[]
+    _is_julia_analysis_uri(jw.runtime, uri) || return DocumentLinkResult[]
     return _get_document_links(jw.runtime, uri)
 end
 
@@ -1470,13 +1479,13 @@ end
 Return inlay hints (parameter names, variable types) for the given range.
 `start_index` and `end_index` are 1-based Julia string indices.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia or markdown document. Markdown documents are answered from their Julia code chunks.
 """
 function get_inlay_hints(jw::JuliaWorkspace, uri::URI, start_index::Integer, end_index::Integer, config::InlayHintConfig)
     @debug "get_inlay_hints" uri=uri start_index=start_index end_index=end_index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return InlayHintResult[]
+    _is_julia_analysis_uri(jw.runtime, uri) || return InlayHintResult[]
     start_offset = start_index - 1
     end_offset = end_index - 1
     return _get_inlay_hints(jw.runtime, uri, start_offset, end_offset, config)
@@ -1493,13 +1502,13 @@ Return the list of applicable code actions at `index` (1-based Julia string inde
 `diagnostic_messages` should contain the text of any diagnostics overlapping the cursor.
 `workspace_folders` is an optional list of workspace folder paths (used by license actions).
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function get_code_actions(jw::JuliaWorkspace, uri::URI, index::Integer, diagnostic_messages::Vector{String}, workspace_folders::Vector{String}=String[])
     @debug "get_code_actions" uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return CodeActionInfo[]
+    _julia_position_admitted(jw.runtime, uri, index) || return CodeActionInfo[]
     offset = index - 1
     return _get_code_actions(jw.runtime, uri, offset, diagnostic_messages, workspace_folders)
 end
@@ -1511,13 +1520,13 @@ Execute the code action identified by `action_id` at `index` (1-based Julia stri
 Returns a vector of workspace file edits. Each edit contains a URI and a vector of
 `TextEditResult`s with 0-based byte offsets.
 
-Returns an empty vector when `uri` is not a Julia document.
+Returns an empty vector when `uri` is not a Julia document. In a markdown document, only positions inside a Julia code chunk are answered.
 """
 function execute_code_action(jw::JuliaWorkspace, action_id::String, uri::URI, index::Integer, workspace_folders::Vector{String}=String[])
     @debug "execute_code_action" action_id=action_id uri=uri index=index
 
     process_from_dynamic(jw)
-    _is_julia_uri(jw.runtime, uri) || return WorkspaceFileEdit[]
+    _julia_position_admitted(jw.runtime, uri, index) || return WorkspaceFileEdit[]
     offset = index - 1
     return _execute_code_action(jw.runtime, action_id, uri, offset, workspace_folders)
 end
