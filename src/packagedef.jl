@@ -37,6 +37,7 @@ include("layer_scope_modules.jl")
 include("StaticLint/StaticLint.jl")
 
 include("lint_rules.jl")
+include("v2/bridge/lint_rules_v2.jl")
 include("lint_syntax_rules/engine.jl")
 include("layer_parse_products.jl")
 include("config_common.jl")
@@ -64,6 +65,7 @@ include("v2/bridge/layer_v2_env_seam.jl")
 include("layer_testitems.jl")
 include("v2/layer_testitems_v2.jl")
 include("layer_diagnostics.jl")
+include("v2/bridge/lint_config_v2.jl")
 # The v2-only syntax-tier rule (see the file header for why it is not in the
 # shared lint_syntax_rules/ engine).
 include("v2/bridge/lint_unbound_type_parameter_v2.jl")

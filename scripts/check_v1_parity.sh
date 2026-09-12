@@ -40,6 +40,7 @@ identical=(
   src/lint_emission.jl
   src/config_common.jl
   src/layer_static_lint.jl
+  src/lint_rules.jl
   src/layer_test_setups.jl
   src/layer_completions.jl
   src/layer_actions.jl
@@ -59,18 +60,14 @@ gated=(
   src/layer_references.jl
   src/layer_signatures.jl
   src/layer_symbols.jl
+  src/layer_diagnostics.jl
 )
 
 additive=(
   src/JuliaWorkspaces.jl
   src/packagedef.jl
-  # layer_diagnostics.jl is main + its derived_diagnostics gate + the option
-  # validation for the v2-only Aqua rules in _validate_lint_rules! (rule
-  # registration and config validation are shared; only emission is v2-gated).
-  src/layer_diagnostics.jl
   src/inputs.jl
   src/public.jl
-  src/lint_rules.jl
   src/precompile.jl
   src/dynamic_feature/dynamic_fsm.jl
   juliadynamicanalysisprocess

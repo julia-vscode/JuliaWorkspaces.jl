@@ -198,12 +198,6 @@ end
         :config_errors => :error,
         :shadowed_config => :information,
         :environment_errors => :information,
-        # Project/manifest file validation (Pkg feature support): structure Pkg
-        # rejects is an error; tolerated inconsistencies warn; manifest shapes
-        # we cannot interpret stay informational (machine-written files).
-        :project_file_errors => :error,
-        :project_file_warnings => :warning,
-        :manifest_errors => :information,
         # Syntactic rules added with the rule registry; off outside `strict`,
         # except `detached_docstring` (see its LintRule entry).
         :nan_comparison => :off,
@@ -213,20 +207,6 @@ end
         :debug_statement => :off,
         :async_task => :off,
         :detached_docstring => :warning,
-        # Lowering-backed rule (Harvest JuliaLowering): shapes Julia will not
-        # load — same class and treatment as syntax_errors.
-        :lowering_errors => :error,
-        # Small rule batch: Julia's soft-scope ambiguity warning, statically.
-        :soft_scope_ambiguity => :information,
-        # The analysis-boundary notice is OPT-IN (maintainer direction): the
-        # default preset never reports on code merely because it cannot be
-        # analyzed; strict promotes it to warning.
-        :analysis_boundary => :off,
-        # Package-quality rules ported from Aqua.jl; off outside `strict`.
-        :missing_compat => :off,
-        :unused_dependency => :off,
-        :unbound_type_parameter => :off,
-        :undocumented_public_name => :off,
     )
     @test JuliaWorkspaces.LINT_PRESETS["default"] == expected_default
 
@@ -235,10 +215,8 @@ end
         r.id => get(
             Dict{Symbol,Symbol}(
                 :syntax_errors => :error,
-                :lowering_errors => :error,
                 :testitem_errors => :error,
                 :toml_syntax_errors => :error,
-                :project_file_errors => :error,
                 :config_errors => :error,
                 :include_errors => :warning,
                 :const_decl => :warning,

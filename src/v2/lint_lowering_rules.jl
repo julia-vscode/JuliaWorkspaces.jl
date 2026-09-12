@@ -41,7 +41,7 @@ const LOWERING_OWN_RULES = Set([:lowering_errors, :soft_scope_ambiguity])
 Salsa.@derived function derived_lowering_lint_active(rt, uri)
     input_v2_enabled(rt) || return false
     config = derived_effective_lint_config(rt, uri)
-    return any(rule_enabled(config, id)
+    return any(rule_enabled_v2(config, id)
                for id in Iterators.flatten((LOWERING_TAKEOVER_RULES, LOWERING_OWN_RULES)))
 end
 
@@ -2408,18 +2408,18 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     config = derived_effective_lint_config(rt, uri)
     missing_refs_on = missingrefs_from_config(config) !== :none &&
         !_derived_v2_missing_ref_file_suppressed(rt, uri)
-    soft_scope_on = rule_enabled(config, :soft_scope_ambiguity)
-    call_args_on = rule_enabled(config, :incorrect_call_args)
+    soft_scope_on = rule_enabled_v2(config, :soft_scope_ambiguity)
+    call_args_on = rule_enabled_v2(config, :incorrect_call_args)
     # Materialization filters disabled rules anyway; this gate only avoids
     # demanding the signature machinery when both are off.
-    sig_rules_on = rule_enabled(config, :type_piracy) ||
-        rule_enabled(config, :invalid_type_declaration) ||
-        rule_enabled(config, :kw_default_mismatch)
-    iter_spec_on = rule_enabled(config, :incorrect_iter_spec)
-    shape_rules_on = rule_enabled(config, :pointless_boolean) ||
-        rule_enabled(config, :const_if_condition) ||
-        rule_enabled(config, :literal_use)
-    boundary_on = rule_enabled(config, :analysis_boundary)
+    sig_rules_on = rule_enabled_v2(config, :type_piracy) ||
+        rule_enabled_v2(config, :invalid_type_declaration) ||
+        rule_enabled_v2(config, :kw_default_mismatch)
+    iter_spec_on = rule_enabled_v2(config, :incorrect_iter_spec)
+    shape_rules_on = rule_enabled_v2(config, :pointless_boolean) ||
+        rule_enabled_v2(config, :const_if_condition) ||
+        rule_enabled_v2(config, :literal_use)
+    boundary_on = rule_enabled_v2(config, :analysis_boundary)
 
     for row in derived_v2_file_skeleton(rt, uri).items
         ref = V2ItemRef(uri, row.id)
@@ -2475,7 +2475,7 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
     # walks whole-module decl streams — each producer runs only when its rule
     # is actually on (materialize would filter anyway; this skips demanding
     # the machinery at all).
-    if rule_enabled(config, :unresolved_import)
+    if rule_enabled_v2(config, :unresolved_import)
         for f in derived_v2_unresolved_import_findings(rt, uri)
             ranges = get(maps, f.id, nothing)
             ranges === nothing && continue
@@ -2483,7 +2483,7 @@ Salsa.@derived function derived_semantic_lint_findings(rt, uri)
             push!(result, LintFinding(ranges[f.addr], f.rule_id, f.msg, nothing, "JuliaWorkspaces.jl"))
         end
     end
-    if rule_enabled(config, :const_decl)
+    if rule_enabled_v2(config, :const_decl)
         for f in derived_v2_const_decl_findings(rt, uri)
             ranges = get(maps, f.id, nothing)
             ranges === nothing && continue

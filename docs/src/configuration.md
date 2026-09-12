@@ -249,7 +249,12 @@ A rule usually groups several internal `StaticLint.LintCodes` members that a use
 would want to configure together — `nothing_comparison` covers both
 `NothingEquality` and `NothingNotEq`. The mapping is declared once in
 [`src/lint_rules.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/lint_rules.jl)
-as `LINT_RULES`; `LINTCODE_TO_RULE` inverts it.
+as `LINT_RULES`; `LINTCODE_TO_RULE` inverts it. That v1 registry is frozen;
+the v2 stack (`set_v2_enabled!`) carries its own, fully independent registry
+in `src/v2/bridge/lint_rules_v2.jl` (`LINT_RULES_V2`), which today matches v1 on
+every shared rule and adds the rules marked "v2 only" below. A rule id that
+exists only in the v2 registry is recognized in `JuliaLint.toml` only while
+v2 is enabled; otherwise it is reported as an unknown rule.
 
 Not every rule is backed by the semantic StaticLint pass. Purely syntactic
 rules run on the JuliaSyntax tree of a single file alone
