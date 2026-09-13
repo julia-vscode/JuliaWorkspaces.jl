@@ -2096,6 +2096,49 @@ function handle!(df::DynamicFeature, msg::SetMaxAliveDjpsMsg)
     return false
 end
 
+function handle!(df::DynamicFeature, msg::SetMaxConcurrentDjpsMsg)
+    df.max_concurrent_djps[] == msg.n && return false
+    @info "Concurrent indexing process cap set to $(msg.n <= 0 ? "unlimited" : string(msg.n))"
+    df.max_concurrent_djps[] = msg.n
+    _drain_launch_queue!(df)   # a raised cap launches queued keys immediately
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::SetSymbolcacheMsg)
+    new_download = something(msg.download, df.download_enabled[])
+    new_upstream = something(msg.upstream, df.upstream_url[])
+    new_download == df.download_enabled[] && new_upstream == df.upstream_url[] && return false
+    # Downloads newly effective: off→on, or a new upstream while on.
+    reprep = new_download && (!df.download_enabled[] || new_upstream != df.upstream_url[])
+    df.download_enabled[] = new_download
+    df.upstream_url[] = new_upstream
+    if reprep
+        @info "Symbol cache downloads newly effective; re-checking settled environments" upstream=new_upstream
+        # Only watch-env keys: downloads happen exclusively in their prep
+        # (`WatchEnvironmentMsg`). Scratch/test-env `done` entries are kept so
+        # a policy flip does not respawn children whose work never downloads.
+        # An env whose caches already exist re-preps through the cheap fast
+        # lane (no missing packages → ready re-emitted idempotently). Failure
+        # bookkeeping is kept: those failures were real, unlike the Off-parked
+        # state `SetDynamicModeMsg` forgets.
+        filter!(k -> !(k isa WatchEnvironmentKey), df.done)
+    end
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::SetMaxFailureAttemptsMsg)
+    df.max_failure_attempts[] == msg.n && return false
+    @info "Dynamic failure budget set to $(msg.n <= 0 ? "unlimited" : string(msg.n))"
+    df.max_failure_attempts[] = msg.n
+    return false
+end
+
+function handle!(df::DynamicFeature, msg::SetDjpRequestTimeoutMsg)
+    df.djp_request_timeout_seconds[] == msg.seconds && return false
+    df.djp_request_timeout_seconds[] = msg.seconds
+    return false
+end
+
 function handle!(df::DynamicFeature, msg::SetV2LifecycleMsg)
     df.v2_lifecycle[] == msg.enabled && return false
     @debug "v2 lifecycle" enabled=msg.enabled

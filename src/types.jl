@@ -626,6 +626,8 @@ struct JuliaWorkspace
         set_input_active_project!(rt, nothing)
         set_input_env_ready!(rt, false)
         set_input_resolve_workspace_environments!(rt, resolve_workspace_environments)
+        set_input_symbolcache_download!(rt, symbolcache_download)
+        set_input_symbolcache_upstream!(rt, symbolcache_upstream)
         set_input_ready_project_environments!(rt, Set{WatchEnvironmentKey}())
         set_input_ready_test_environments!(rt, Dict{WatchTestEnvironmentKey,URI}())
         set_input_standalone_projects!(rt, Dict{CreateStandaloneProjectKey,URI}())

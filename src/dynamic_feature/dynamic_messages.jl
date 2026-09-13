@@ -224,6 +224,56 @@ struct SetMaxAliveDjpsMsg <: DynamicReactorMessage
 end
 
 """
+Change the cap on concurrently *working* child processes (`<= 0`: unlimited)
+and drain the launch queue into any newly free slots at once. Lowering it
+kills nothing — the cap gates admission only, so it applies as slots free up.
+Queued because the reactor task owns `max_concurrent_djps` and `launching`.
+See [`set_max_concurrent_djps!`](@ref).
+"""
+struct SetMaxConcurrentDjpsMsg <: DynamicReactorMessage
+    n::Int
+end
+
+"""
+    SetSymbolcacheMsg(download, upstream)
+
+Change the symbol-cache download policy: `download` enables/disables cloud
+downloads, `upstream` changes the upstream URL; `nothing` leaves a value
+unchanged. When the change makes downloads newly effective (off→on, or a new
+upstream while on), the handler forgets `done` watch-environment keys so the
+host's forced reconcile re-preps them through the download path —
+scratch-project and test-environment completions are kept (their prep never
+downloads), and failure bookkeeping is kept
+([`retry_failed_dynamic_projects!`](@ref) is the lever). Queued because the
+reactor task owns `download_enabled`/`upstream_url` and `done`. See
+[`set_symbolcache!`](@ref).
+"""
+struct SetSymbolcacheMsg <: DynamicReactorMessage
+    download::Union{Nothing,Bool}
+    upstream::Union{Nothing,String}
+end
+
+"""
+Change the per-identity terminal-failure budget (`<= 0`: unlimited). Applies
+at the next exhaustion check; nothing is enforced retroactively. Queued
+because the reactor task owns `max_failure_attempts`/`failure_attempts`.
+See [`set_max_failure_attempts!`](@ref).
+"""
+struct SetMaxFailureAttemptsMsg <: DynamicReactorMessage
+    n::Int
+end
+
+"""
+Change the per-request child-index deadline in seconds (`<= 0`: unbounded).
+Read per request, so it applies to requests sent from then on; a request
+already in flight keeps its old deadline. See
+[`set_djp_request_timeout!`](@ref).
+"""
+struct SetDjpRequestTimeoutMsg <: DynamicReactorMessage
+    seconds::Int
+end
+
+"""
     SetV2LifecycleMsg(enabled)
 
 Switch the reactor's v2 lifecycle rules — the live-children cap and the
