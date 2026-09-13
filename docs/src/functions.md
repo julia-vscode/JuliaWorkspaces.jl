@@ -88,6 +88,11 @@ set_dynamic_mode!
 get_dynamic_mode
 retry_failed_dynamic_projects!
 set_max_alive_djps!
+set_max_concurrent_djps!
+set_resolve_workspace_environments!
+set_symbolcache!
+set_max_failure_attempts!
+set_djp_request_timeout!
 ```
 
 ## Language features

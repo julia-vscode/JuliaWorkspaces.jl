@@ -36,6 +36,11 @@ export JuliaWorkspace,
     wait_until_ready,
     retry_failed_dynamic_projects!,
     set_max_alive_djps!,
+    set_max_concurrent_djps!,
+    set_resolve_workspace_environments!,
+    set_symbolcache!,
+    set_max_failure_attempts!,
+    set_djp_request_timeout!,
     get_update_channel,
     get_legacy_cst,
     get_roots_for_uri,
@@ -962,6 +967,165 @@ function set_max_alive_djps!(jw::JuliaWorkspace, n::Int)
 
     # `max_alive_djps`/`procs` are owned by the reactor task.
     put!(jw.dynamic_feature.in_channel, SetMaxAliveDjpsMsg(n))
+    return
+end
+
+"""
+    set_max_concurrent_djps!(jw::JuliaWorkspace, n::Int)
+
+Bound the number of concurrently *working* dynamic child processes to `n`
+(`n <= 0`: unlimited), effective immediately: raising the cap launches queued
+work into the new slots at once; lowering it kills nothing — the cap gates
+admission only, so work already launched finishes and the queue drains as
+slots free up (the live count may transiently exceed a lowered cap). Settled
+children kept alive to serve expansions come on top of this cap (they are
+bounded separately by [`set_max_alive_djps!`](@ref)).
+
+The constructor's `max_concurrent_djps` sets the initial value. Maps to the
+language server setting `julia.maxConcurrentIndexingProcesses`.
+"""
+function set_max_concurrent_djps!(jw::JuliaWorkspace, n::Int)
+    @debug "set_max_concurrent_djps!" n=n
+
+    # `max_concurrent_djps`/`launching`/`launch_queue` are owned by the
+    # reactor task.
+    put!(jw.dynamic_feature.in_channel, SetMaxConcurrentDjpsMsg(n))
+    return
+end
+
+"""
+    set_resolve_workspace_environments!(jw::JuliaWorkspace, enabled::Bool)
+
+Switch workspace-environment fabrication on or off at runtime. When `false`,
+no fabricated environments are scheduled — standalone projects for
+manifest-less packages, resolved projects for manifest-less non-package
+environments, merged test environments, and extension environments — and only
+real project environments are watched.
+
+Disabling kills the now-unneeded child processes and forgets their
+completions on the next reconcile; enabling re-dispatches the fabrication
+work, un-settling [`is_ready`](@ref) until it completes. Failure bookkeeping
+is kept in both directions — failures recorded while the flag was on were
+real; [`retry_failed_dynamic_projects!`](@ref) is the escape hatch.
+
+The constructor's `resolve_workspace_environments` sets the initial value.
+Maps to the language server setting
+`julia.enableWorkspaceEnvironmentResolution`. A same-value call is a no-op.
+"""
+function set_resolve_workspace_environments!(jw::JuliaWorkspace, enabled::Bool)
+    @debug "set_resolve_workspace_environments!" enabled=enabled
+
+    process_from_dynamic(jw)
+    input_resolve_workspace_environments(jw.runtime) == enabled && return
+    set_input_resolve_workspace_environments!(jw.runtime, enabled)
+    if enabled
+        df = jw.dynamic_feature
+        # New fabricated work is coming: force the reconcile through even when
+        # the required set happens not to change (a workspace with nothing to
+        # fabricate), and un-settle readiness so `is_ready` cannot report a
+        # stale `true` in the window before the reactor processes it — the
+        # same treatment as `set_dynamic_mode!`'s Off→on upgrade.
+        empty!(df.last_required)
+        df.reconciled_once[] = false
+        df.saw_result[] = false
+    end
+    _reconcile!(jw)
+    return
+end
+
+"""
+    set_symbolcache!(jw::JuliaWorkspace; download::Union{Nothing,Bool}=nothing,
+                     upstream::Union{Nothing,AbstractString}=nothing)
+
+Change the symbol-cache download policy at runtime: `download` enables or
+disables downloading precomputed symbol caches instead of indexing locally,
+`upstream` changes the upstream URL. `nothing` leaves a value unchanged, so
+one call applies a whole config event.
+
+When the change makes downloads newly effective — enabling them, or changing
+the upstream while enabled — already-settled project environments are
+re-checked so an open workspace gets caches without a restart: their prep
+re-runs through the download path, which is cheap for environments whose
+caches already exist. Environments that previously *failed* are not retried
+([`retry_failed_dynamic_projects!`](@ref) is the lever), and disabling only
+affects future preps. [`is_ready`](@ref) un-settles until the re-checks
+complete.
+
+The constructor's `symbolcache_download`/`symbolcache_upstream` set the
+initial values. Maps to the language server settings
+`julia.symbolCacheDownload` and `julia.symbolserverUpstream`. A call that
+changes nothing is a no-op.
+"""
+function set_symbolcache!(jw::JuliaWorkspace;
+        download::Union{Nothing,Bool}=nothing,
+        upstream::Union{Nothing,AbstractString}=nothing)
+    @debug "set_symbolcache!" download=download upstream=upstream
+
+    process_from_dynamic(jw)
+    old_download = input_symbolcache_download(jw.runtime)
+    old_upstream = input_symbolcache_upstream(jw.runtime)
+    new_download = something(download, old_download)
+    new_upstream = upstream === nothing ? old_upstream : String(upstream)
+    new_download == old_download && new_upstream == old_upstream && return
+    set_input_symbolcache_download!(jw.runtime, new_download)
+    set_input_symbolcache_upstream!(jw.runtime, new_upstream)
+
+    df = jw.dynamic_feature
+    # The reactor owns the Refs and `done`; tell it before the reconcile
+    # (channel order), so the reconcile already sees the cleared keys.
+    put!(df.in_channel, SetSymbolcacheMsg(download, upstream === nothing ? nothing : String(upstream)))
+
+    if new_download && (!old_download || new_upstream != old_upstream)
+        # The reactor is about to forget `done` watch-env keys; force a
+        # reconcile through (the required set is unchanged) and un-settle
+        # readiness until the re-preps settle — the same triple as
+        # `set_dynamic_mode!`'s Off→on upgrade.
+        empty!(df.last_required)
+        df.reconciled_once[] = false
+        df.saw_result[] = false
+    end
+    _reconcile!(jw)
+    return
+end
+
+"""
+    set_max_failure_attempts!(jw::JuliaWorkspace, n::Int)
+
+Change how many terminal failures a project identity may accumulate before
+the dynamic feature stops launching child processes for it (`n <= 0` disables
+the bound). Applies at the next exhaustion check: lowering the bound below an
+identity's recorded count makes its future work short-circuit immediately,
+replaying the original failure message; raising it un-exhausts identities
+below the new bound, taking effect when work for them is next dispatched.
+Exact keys that already failed terminally stay barred either way —
+[`retry_failed_dynamic_projects!`](@ref) is the lever for an immediate retry.
+
+The constructor's `max_failure_attempts` sets the initial value.
+"""
+function set_max_failure_attempts!(jw::JuliaWorkspace, n::Int)
+    @debug "set_max_failure_attempts!" n=n
+
+    # `max_failure_attempts`/`failure_attempts` are owned by the reactor task.
+    put!(jw.dynamic_feature.in_channel, SetMaxFailureAttemptsMsg(n))
+    return
+end
+
+"""
+    set_djp_request_timeout!(jw::JuliaWorkspace, seconds::Int)
+
+Change how long a dynamic child process may take to answer one indexing
+request before the work item is failed (`seconds <= 0` means no deadline; the
+constructor's `djp_request_timeout_seconds` sets the initial value). The
+value is read per request, so it applies to requests issued after the reactor
+processes the change; a request already in flight keeps its old deadline.
+The macro-expansion batch timeouts are separate constants and deliberately
+unaffected.
+"""
+function set_djp_request_timeout!(jw::JuliaWorkspace, seconds::Int)
+    @debug "set_djp_request_timeout!" seconds=seconds
+
+    # `djp_request_timeout_seconds` is owned by the reactor task.
+    put!(jw.dynamic_feature.in_channel, SetDjpRequestTimeoutMsg(seconds))
     return
 end
 

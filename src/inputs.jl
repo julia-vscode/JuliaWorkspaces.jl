@@ -39,6 +39,14 @@ Salsa.@declare_input input_resolve_workspace_environments(rt)::Bool
 # source of truth and the invalidation point for future derived use.
 Salsa.@declare_input input_dynamic_mode(rt)::DynamicMode
 
+# The symbol-cache download policy. Eager (seeded from the constructor's
+# `symbolcache_download`/`symbolcache_upstream` kwargs); changed at runtime
+# via `set_symbolcache!`, which mirrors both into the reactor-owned
+# `DynamicFeature.download_enabled`/`upstream_url` Refs. No derived query
+# reads them — host-readable source of truth, like `input_dynamic_mode`.
+Salsa.@declare_input input_symbolcache_download(rt)::Bool
+Salsa.@declare_input input_symbolcache_upstream(rt)::String
+
 # Lazy input for files that are pulled in via `include(...)` from a regular
 # JW file but are not themselves regular files. Initial content is read
 # synchronously from disc; the watcher callback (if any) is invoked once per
