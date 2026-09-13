@@ -48,6 +48,19 @@
     @test failed_item.path == failed_key.project_path
     @test failed_item.failure_message !== nothing
     @test occursin("boom", failed_item.failure_message)
+    @test !snap.indexing_done
+
+    # The last item settles: with the initial reconcile recorded (production
+    # sets this flag before sending the ReconcileMsg), the snapshot reports
+    # indexing done right on the reactor. is_ready's saw_result cannot back
+    # this field - it flips only when results are consumed, which happens
+    # after the last reactor message, so the final snapshot would stay busy.
+    df.reconciled_once[] = true
+    last_key = only(collect(df.launching))
+    handle!(df, ProcessIndexedMsg(last_key, "/tmp/y"))
+    snap = dynamic_status_snapshot(df)
+    @test snap.indexing_done
+    @test snap.pending_count == 0
 end
 
 @testitem "Dynamic status: failed keys leave the snapshot when no longer required" begin

@@ -625,8 +625,12 @@ end
 A point-in-time description of everything the dynamic feature is doing,
 delivered through the `status_callback` seam (see [`DynamicFeature`](@ref)).
 
-- `indexing_done`: same condition as [`is_ready`](@ref) — every required work
-  item has settled.
+- `indexing_done`: every required dynamic work item has settled. The
+  reactor-side analogue of [`is_ready`](@ref): it flips as soon as the last
+  work item completes on the reactor, whereas `is_ready` additionally waits
+  for the results to be consumed. `is_ready`'s `saw_result` cannot be used
+  here — it is set off-reactor when results are consumed, after the last
+  reactor message, so a snapshot gated on it would report busy forever.
 - `pending_count`: work items still pending.
 - `max_concurrent_djps`: the launch concurrency cap (`<= 0`: unlimited).
 - `items`: one [`DJPStatusItem`](@ref) per known work item, sorted by path.
@@ -698,7 +702,7 @@ function dynamic_status_snapshot(df::DynamicFeature)
     sort!(items, by=item -> (item.path, item.kind, something(item.package, "")))
 
     return DynamicStatusSnapshot(
-        df.saw_result[] && df.pending_count[] == 0,
+        df.reconciled_once[] && df.pending_count[] == 0 && isempty(df.inflight),
         df.pending_count[],
         df.max_concurrent_djps,
         items,
