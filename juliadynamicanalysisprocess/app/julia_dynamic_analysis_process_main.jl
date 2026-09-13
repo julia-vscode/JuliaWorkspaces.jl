@@ -43,5 +43,12 @@ let
         else
             Base.display_error(err, bt)
         end
+
+        # Exit non-zero. A child that dies before connecting back is reported by
+        # `JuliaWorkspaces.start(::DynamicJuliaProcess, ...)` as a
+        # `DynamicProcessCrashException` carrying this exit code, so exiting 0 here
+        # made a hard startup failure indistinguishable from a normal exit: the
+        # parent logged a crash whose only detail was `exitcode = 0`.
+        exit(1)
     end
 end

@@ -275,7 +275,7 @@ end
 end
 
 @testitem "Dynamic failures: a depot lock collision is classed as infrastructure" begin
-    using JuliaWorkspaces: _is_infra_failure
+    using JuliaWorkspaces: _is_infra_failure, DynamicProcessCrashException, WatchEnvironmentKey
     using JuliaWorkspaces: JSONRPC
 
     # Raised by the parent's own store work, so the exception itself is
@@ -300,4 +300,33 @@ end
     # it must take the retry+silent path, not become an `environment_errors`
     # diagnostic (the top-500 sweep surfaced 7 of these on project files).
     @test _is_infra_failure(JSONRPC.TransportError("Write task IOError", nothing))
+
+    # A child that exits before it ever connects back has not been told which
+    # project to look at, so its death says nothing about any of them. This used
+    # to take the project-blaming path, which is how one unstartable analysis
+    # process put an `environment_errors` diagnostic on every Project.toml in the
+    # workspace at once.
+    @test _is_infra_failure(DynamicProcessCrashException(WatchEnvironmentKey("/ws/P", UInt64(1)), 0))
+end
+
+@testitem "Dynamic failures: a crashed child reports its exit code and its output" begin
+    using JuliaWorkspaces: DynamicProcessCrashException, WatchEnvironmentKey, _humanize_djp_failure
+
+    key = WatchEnvironmentKey("/ws/P", UInt64(1))
+    err = DynamicProcessCrashException(
+        key, 1, "ERROR: LoadError: ArgumentError: Cannot load CRC32c\nStacktrace:")
+
+    rendered = sprint(showerror, err)
+    @test occursin("exited with code 1 before connecting", rendered)
+    @test occursin("Cannot load CRC32c", rendered)
+
+    # The user-facing sentence keeps only the first line of the cause, so the
+    # summary has to lead and the child's output rides along on the
+    # `@info ... exception=` path instead. Rendering the struct itself — which is
+    # what happened before `showerror` — put a `DynamicProcessCrashException(...)`
+    # dump in front of the user and the exit code nowhere useful.
+    message = _humanize_djp_failure(key, err)
+    @test occursin("the environment at /ws/P", message)
+    @test occursin("exited with code 1 before connecting", message)
+    @test !occursin("Stacktrace", message)
 end

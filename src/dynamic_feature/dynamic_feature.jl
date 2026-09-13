@@ -160,11 +160,39 @@ function resolve_environment(djp::DynamicJuliaProcess, store_path::String, proje
     )
 end
 
-# Exception thrown when the child process exits before establishing a connection.
+# Exception thrown when the child process exits before establishing a
+# connection. `output` carries the tail of what the child printed on its way
+# out. That text is the only account of a startup failure — a missing
+# dependency, a precompile error — and forwarding it to `@debug` alone (as the
+# output task in `start` does) left the user-facing report with nothing but an
+# exit code to show for a child that never ran.
 struct DynamicProcessCrashException <: Exception
     key::DJPKey
     exitcode::Union{Int,Nothing}
+    output::String
 end
+
+DynamicProcessCrashException(key::DJPKey, exitcode::Union{Int,Nothing}) =
+    DynamicProcessCrashException(key, exitcode, "")
+
+# `_failure_reason` keeps only the first line for the one-sentence user-facing
+# report, so lead with the summary and let the captured output follow it.
+function Base.showerror(io::IO, err::DynamicProcessCrashException)
+    code = err.exitcode === nothing ? "an unknown code" : "code $(err.exitcode)"
+    print(io, "the indexing child process exited with $code before connecting.")
+    isempty(err.output) ||
+        print(io, "\nLast output from the child process:\n", err.output)
+    return nothing
+end
+
+"""
+    MAX_CAPTURED_CHILD_OUTPUT_LINES
+
+Lines of a child's own output kept for crash reporting. Enough for a Julia
+error line plus the head of its stacktrace, and bounded because a healthy child
+logs for the whole length of an index.
+"""
+const MAX_CAPTURED_CHILD_OUTPUT_LINES = 40
 
 # ─── Launch prioritization ───────────────────────────────────────────────────
 #
@@ -278,10 +306,21 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
             end
 
             try # This try/finally block closes the `proc_kill_registration`.
+                # The tail of the child's own output, kept for a crash that
+                # happens before the connection is established — at that point
+                # this is the only account of what went wrong.
+                recent_output = String[]
+                record_output = function (line)
+                    @debug "Output from DynamicJuliaProcess" project_path=djp.project_path package=djp.package line=line
+                    push!(recent_output, line)
+                    length(recent_output) > MAX_CAPTURED_CHILD_OUTPUT_LINES && popfirst!(recent_output)
+                    return nothing
+                end
+
                 # Async task: forward the child's stdout/stderr to the logger. We
                 # don't need to distinguish per-test-item output here, so this is
                 # a simple line-buffered logger (unlike TestItemControllers).
-                @async try
+                output_task = @async try
                     buffer = ""
                     while !eof(pipe_out)
                         data = readavailable(pipe_out, token)
@@ -295,7 +334,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                             if buffer[i] == '\n'
                                 line = strip(buffer[current_line_start:prevind(buffer,i)])
                                 if length(line) > 0
-                                    @debug "Output from DynamicJuliaProcess" project_path=djp.project_path package=djp.package line=line
+                                    record_output(line)
                                 end
                                 current_line_start = nextind(buffer, i)
                             end
@@ -304,6 +343,11 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
 
                         buffer = buffer[current_line_start:end]
                     end
+
+                    # A process that dies mid-line still owes us that line, and
+                    # on a crash it is usually the interesting one.
+                    last_line = strip(buffer)
+                    length(last_line) > 0 && record_output(last_line)
                 catch err
                     if err isa CancellationTokens.OperationCanceledException
                         @debug "Output reading cancelled by token" project_path=djp.project_path
@@ -371,7 +415,11 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                     end
                 catch err
                     if err isa CancellationTokens.OperationCanceledException && CancellationTokens.is_cancellation_requested(abort_accept_due_to_startup_failure_token)
-                        throw(DynamicProcessCrashException(djp.key, jl_process.exitcode))
+                        # The child has already exited, so `pipe_out` reaches eof
+                        # promptly; give the reader task a bounded moment to drain
+                        # the output that explains the exit before reporting it.
+                        timedwait(() -> istaskdone(output_task), 2.0)
+                        throw(DynamicProcessCrashException(djp.key, jl_process.exitcode, join(recent_output, "\n")))
                     else
                         rethrow(err)
                     end
@@ -1001,10 +1049,14 @@ end
 # Infra failures are logged, get one free retry, and never surface as
 # `environment_errors` diagnostics on the user's project files. A dropped
 # child pipe (`TransportError`) is the same class: the transport died, not
-# the project (the top-500 sweep surfaced 7 of these as user diagnostics).
+# the project (the top-500 sweep surfaced 7 of these as user diagnostics). So is
+# a `DynamicProcessCrashException`: that one is thrown when the child exits
+# before it ever connects back, which is *before* it has been told which project
+# to look at — a broken analysis process, blamed on whatever project happened to
+# be next in the queue.
 _is_infra_failure(err) =
     err isa DJPRequestTimeoutException || err isa JSONRPC.TransportError ||
-    _is_depot_lock_failure(err)
+    err isa DynamicProcessCrashException || _is_depot_lock_failure(err)
 
 # A depot file-lock collision (`IOError: stat(...manifest_usage.toml.pid...):
 # permission denied (EACCES)` during concurrent Pkg operations) says nothing
