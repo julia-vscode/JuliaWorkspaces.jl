@@ -13,7 +13,7 @@ _is_nan_identifier(node) = kind(node) === K"Identifier" && node.val isa Symbol &
 const _NAN_COMPARISON_MESSAGE = "Comparing with `NaN` using `==` or `!=` always yields the same result. Use `isnan` instead."
 
 function _check_nan_comparison(emit!, node, _ctx)
-    cs = children(node)
+    cs = _children(node)
     if kind(node) === K"comparison"
         # Chained comparison: operands at odd indices, operators at even ones.
         for i in 2:2:length(cs)-1

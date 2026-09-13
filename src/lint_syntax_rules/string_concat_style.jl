@@ -9,7 +9,7 @@ const _STRING_CONCAT_MESSAGE = "Prefer string interpolation (`\"\$(x)…\"`) or 
 _is_string_literal(node) = kind(node) === K"string"
 
 function _check_string_concat_style(emit!, node, _ctx)
-    cs = children(node)
+    cs = _children(node)
     length(cs) >= 3 || return nothing
     if JuliaSyntax.is_infix_op_call(node)
         # `a * "b" * c` parses as one flattened infix call: the operator sits at

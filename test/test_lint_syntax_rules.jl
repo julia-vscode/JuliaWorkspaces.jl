@@ -328,3 +328,37 @@ end
     raw = JW.derived_raw_test_details(jw.runtime, uri)
     @test isempty(raw.testitems) && isempty(raw.testsetups) && isempty(raw.testerrors)
 end
+
+@testitem "Syntax rules: leaf nodes from error recovery do not crash the walk" begin
+    using JuliaWorkspaces.URIs2: URI
+    const JW = JuliaWorkspaces
+
+    # Error recovery can produce LEAF nodes of kinds the rules register on:
+    # prose parsed as Julia (e.g. a Markdown file fed through the fused parse)
+    # yields childless `K"using"` / `K"if"` nodes, and `children(node)` on a
+    # leaf is `nothing`. Every rule used to iterate that unguarded, crashing
+    # the language server on files like a CHANGELOG.md (seen in crash
+    # telemetry for 1.240.1).
+    prose = [
+        "- fixed using of things\n",         # childless K"using"
+        "it checks if things are\n",         # childless K"if"
+        "- item using\n- item if\n",         # both in one tree
+        "world if",
+    ]
+    for source in prose
+        tree, _ = JW.parse_julia_syntax_tree(source)
+        findings = JW.run_syntax_rules(tree, JW.SYNTAX_CHECK_RULE_IDS, JW.SyntaxRuleContext(URI("file:///pr/CHANGELOG.md")))
+        # A leaf `using`/`if` has no name list / condition to inspect, so no
+        # findings — the point is that the walk completes.
+        @test findings isa Vector{JW.LintFinding}
+    end
+
+    # The same content through the workspace path (all rules enabled) also
+    # completes and reports nothing.
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///pr/JuliaLint.toml"),
+        SourceText("preset = \"strict\"\n", "toml")))
+    uri = URI("file:///pr/src/a.jl")
+    add_file!(jw, TextFile(uri, SourceText("- fixed using of things\nit checks if things are\n", "julia")))
+    @test get_diagnostic(jw, uri) isa Vector
+end
