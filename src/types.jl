@@ -565,9 +565,11 @@ Create an empty workspace. To build one directly from folders on disc, use
 - `store_path::Union{Nothing,String}`: Directory used to cache package symbol
   data (`.jstore` files). Defaults to a managed scratch space.
 - `symbolcache_download::Bool`: If `true`, allow downloading precomputed symbol
-  caches from `symbolcache_upstream` rather than indexing locally.
+  caches from `symbolcache_upstream` rather than indexing locally; changeable
+  at runtime with [`set_symbolcache!`](@ref).
 - `symbolcache_upstream::String`: Upstream URL for symbol-cache downloads.
-  Defaults to [`DEFAULT_SYMBOLCACHE_UPSTREAM`](@ref).
+  Defaults to [`DEFAULT_SYMBOLCACHE_UPSTREAM`](@ref); changeable at runtime
+  with [`set_symbolcache!`](@ref).
 - `indirect_file_watch_callback::Union{Nothing,Function}`: Invoked once with a
   `URI` the first time an *indirect* file (a file pulled in via `include` but
   not explicitly added) is requested. Intended for a host to register a file
@@ -579,7 +581,8 @@ Create an empty workspace. To build one directly from folders on disc, use
   indexing a project, loading caches — is its own progress bar with the full
   0–100 range); a report with `percentage >= 100` ends that operation's bar.
 - `max_concurrent_djps::Int`: Maximum number of concurrently working dynamic
-  child processes (`0` disables the limit). Defaults to 4.
+  child processes (`0` disables the limit). Defaults to 4; changeable at
+  runtime with [`set_max_concurrent_djps!`](@ref).
 - `max_alive_djps::Int`: Maximum number of settled dynamic child processes
   kept alive under `DynamicPersistent` to serve macro expansion (`0` disables
   the limit; children still indexing come on top). Idle children beyond it
@@ -590,15 +593,18 @@ Create an empty workspace. To build one directly from folders on disc, use
 - `max_failure_attempts::Int`: How many terminal failures a project may
   accumulate before the dynamic feature stops launching child processes for it
   (`0` or less disables the bound). Defaults to
-  [`DEFAULT_MAX_FAILURE_ATTEMPTS`](@ref). See
+  [`DEFAULT_MAX_FAILURE_ATTEMPTS`](@ref); changeable at runtime with
+  [`set_max_failure_attempts!`](@ref). See
   [`retry_failed_dynamic_projects!`](@ref) to clear the budget.
 - `djp_request_timeout_seconds::Int`: How long a child process may take to
   answer one indexing request before the work item is failed (`0` or less means
   no deadline). Defaults to
-  [`DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS`](@ref).
+  [`DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS`](@ref); changeable at runtime with
+  [`set_djp_request_timeout!`](@ref).
 - `resolve_workspace_environments::Bool`: When `false`, no standalone package
   projects or test environments are created; only real project environments
-  are watched. Defaults to `true`.
+  are watched. Defaults to `true`; changeable at runtime with
+  [`set_resolve_workspace_environments!`](@ref).
 """
 struct JuliaWorkspace
     runtime::Salsa.Runtime{SContext,Salsa.DefaultStorage}

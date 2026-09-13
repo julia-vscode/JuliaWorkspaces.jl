@@ -28,15 +28,45 @@ Two established patterns cover everything below:
 |---|---|---|
 | `dynamic` | **done** | `set_dynamic_mode!` / `get_dynamic_mode`, this change. |
 | `max_alive_djps` | **done** (pre-existing) | `set_max_alive_djps!`. The LS never calls it yet. |
-| `max_concurrent_djps` | **do next** | Pattern 1, an exact `SetMaxAliveDjpsMsg` clone: make `DynamicFeature.max_concurrent_djps` a `RefValue{Int}`, add `SetMaxConcurrentDjpsMsg` whose handler sets the value and calls `_drain_launch_queue!` (raising the cap launches queued keys immediately; lowering it applies as slots free up — no child needs killing). Maps to the LS setting `julia.maxConcurrentIndexingProcesses`, currently stored but inert (`workspace.jl:178`). Highest-value follow-up. |
-| `resolve_workspace_environments` | **do next** | Already a Salsa input (`input_resolve_workspace_environments`) consulted by `derived_required_dynamic_projects`; it only lacks a public setter. Pattern 2: `set_resolve_workspace_environments!` = `process_from_dynamic` → `set_input_…!` → `_reconcile!`. The reconcile itself starts/kills DJPs as the required set grows/shrinks, and prunes `done` for departing keys — on/off both work without extra reactor support. Maps to `julia.enableWorkspaceEnvironmentResolution`. |
-| `symbolcache_download` | worth doing | Pattern 1: `download_enabled` is read only inside the environment-prep closure, so a `RefValue{Bool}` + message applies to every future prep. For *immediate* effect on environments already settled best-effort without caches, reuse the wholesale reset that `set_dynamic_mode!` does on an Off→on upgrade (clear `done` + failure bookkeeping + force a reconcile). Maps to `julia.symbolCacheDownload`. |
-| `symbolcache_upstream` | worth doing | Same shape as `symbolcache_download` (`upstream_url`, read in the same closure); the two should share one message. Maps to `julia.symbolserverUpstream`. |
-| `max_failure_attempts` | cheap, low value | Pattern 1; read at exhaustion checks and the two failure handlers. No lifecycle enforcement needed — the new bound simply applies to future failures. No LS setting maps to it today. |
-| `djp_request_timeout_seconds` | cheap, low value | Pattern 1; read per index request, so a new value applies to future requests. No LS setting maps to it today. |
+| `max_concurrent_djps` | **done** | `set_max_concurrent_djps!` → `SetMaxConcurrentDjpsMsg`; the handler sets the `RefValue` and calls `_drain_launch_queue!` (raising the cap launches queued keys immediately; lowering it applies as slots free up — no child needs killing). Maps to the LS setting `julia.maxConcurrentIndexingProcesses`. |
+| `resolve_workspace_environments` | **done** | `set_resolve_workspace_environments!`, pattern 2 (input + reconcile; the reconcile itself starts/kills DJPs and prunes `done` for departing keys). Enabling additionally forces the reconcile through and un-settles readiness (see decisions below). Also now forwarded by `workspace_from_folders`, which had missed it. Maps to `julia.enableWorkspaceEnvironmentResolution`. |
+| `symbolcache_download` | **done** | `set_symbolcache!(jw; download, upstream)` — one setter and one `SetSymbolcacheMsg` for both values (they are read at a single prep site and change in one config event). Maps to `julia.symbolCacheDownload`. |
+| `symbolcache_upstream` | **done** | Covered by `set_symbolcache!` (see above). Maps to `julia.symbolserverUpstream`. |
+| `max_failure_attempts` | **done** | `set_max_failure_attempts!` → `SetMaxFailureAttemptsMsg`; applies at the next exhaustion check, no lifecycle enforcement. No LS setting maps to it today. |
+| `djp_request_timeout_seconds` | **done** | `set_djp_request_timeout!` → `SetDjpRequestTimeoutMsg`; read per index request, so it applies to the next request. No LS setting maps to it today. |
 | `store_path` | **keep construction-only** | The store path is baked into every loaded `input_package_metadata` entry, the `loaded_pkg_metadata`/`missing_pkg_metadata` bookkeeping, and every child's cache paths. Changing it means flushing all symbol state — that is restart territory, and no host wants it hot. |
 | `progress_callback` | keep construction-only | Read from both the reactor and host tasks; hosts set it once at startup and no user setting maps to it. |
 | `indirect_file_watch_callback` | keep construction-only | Immutable inside `SContext` inside the Salsa runtime; same reasoning. |
+
+## Decisions recorded with the setters change
+
+- **One symbolcache setter, one message.** `set_symbolcache!(jw; download,
+  upstream)` with `nothing` meaning "unchanged": both values are read at a
+  single prep site, hosts change them in one config event, and one message
+  means one atomic re-prep decision instead of two racing ones.
+- **Selective symbolcache re-prep, not the wholesale reset** this document
+  originally sketched. When downloads become newly effective (off→on, or a
+  new upstream while on), the handler drops only `done ∩ WatchEnvironmentKey`
+  — the one key kind whose prep downloads. The wholesale Off→on-style reset
+  would respawn scratch/test children whose prep never downloads and forgive
+  real failures. Failure bookkeeping is kept in all cases;
+  `retry_failed_dynamic_projects!` stays the lever.
+- **Readiness un-settles on enable** for `set_resolve_workspace_environments!`
+  and the effective-download flip of `set_symbolcache!`: `is_ready` reads
+  `saw_result`/`pending_count`, which only the reactor updates, so between
+  the host's `_reconcile!` and the reactor's `handle!` it would report a
+  stale `true` — the exact window `set_dynamic_mode!` closes on its Off→on
+  upgrade. The forced reconcile (`empty!(last_required)` +
+  `reconciled_once=false`) and `saw_result=false` travel together: the reset
+  alone would deadlock `wait_until_ready` on a workspace where the required
+  set does not change, since nothing would re-settle readiness. Disabling
+  directions need neither.
+- **Idempotence guards** on every new handler (the `SetV2LifecycleMsg`
+  style); `SetMaxAliveDjpsMsg` keeps its guard-free shape (its body is
+  idempotent) rather than being retrofitted.
+- **`set_djp_request_timeout!`** drops the `_seconds` suffix of its kwarg;
+  the unit lives in the argument name and docstring, which cross-reference
+  the `djp_request_timeout_seconds` constructor kwarg.
 
 ## LanguageServer wiring (separate PR, after the JW side lands)
 
@@ -47,16 +77,19 @@ and stores them on the server, but explicitly does not reconfigure the running
 
 - `julia.enableDynamicIndexing` → on change, call
   `JuliaWorkspaces.set_dynamic_mode!(server.workspace, enabled ? DynamicIndexingOnly : DynamicOff)`.
-- `julia.maxConcurrentIndexingProcesses` → `set_max_concurrent_djps!` (once it
-  exists).
+- `julia.maxConcurrentIndexingProcesses` → `set_max_concurrent_djps!`.
 - `julia.enableWorkspaceEnvironmentResolution` →
-  `set_resolve_workspace_environments!` (once it exists).
-- `julia.symbolCacheDownload` / `julia.symbolserverUpstream` → the symbolcache
-  setters (once they exist).
+  `set_resolve_workspace_environments!`.
+- `julia.symbolCacheDownload` / `julia.symbolserverUpstream` → a *single*
+  `set_symbolcache!(server.workspace; download=..., upstream=...)` call per
+  config event.
 
-Only call the setters when the value actually changed (compare against
-`get_dynamic_mode` / the stored server fields) — every setter is a cheap no-op
-for an unchanged value, but skipping avoids reconcile churn on unrelated
-config updates. The existing `julia/setEnvironmentPath` →
-`set_active_project!` notification path (`workspace.jl:129-145`) is the
+`set_dynamic_mode!`, `set_resolve_workspace_environments!` and
+`set_symbolcache!` early-return on unchanged values themselves, so calling
+them unconditionally is safe; for the message-posting setters
+(`set_max_concurrent_djps!`, `set_max_failure_attempts!`,
+`set_djp_request_timeout!`) the unchanged-value guard lives reactor-side and
+merely skips work, so comparing against the stored server fields before
+calling only saves a queued message. The existing `julia/setEnvironmentPath`
+→ `set_active_project!` notification path (`workspace.jl:129-145`) is the
 template for how a pushed change flows into a live workspace.

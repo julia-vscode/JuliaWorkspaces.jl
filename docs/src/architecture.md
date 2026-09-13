@@ -279,7 +279,14 @@ Its behavior is controlled by [`DynamicMode`](@ref). The feature and its
 reactor exist under every mode; the constructor's `dynamic` keyword sets the
 initial mode (mirrored in the `input_dynamic_mode` Salsa input), and
 [`set_dynamic_mode!`](@ref) switches it at any time, with the set of running
-child processes adjusting immediately.
+child processes adjusting immediately. The same holds for every other
+runtime-relevant knob — the concurrency cap
+([`set_max_concurrent_djps!`](@ref)), environment fabrication
+([`set_resolve_workspace_environments!`](@ref)), the symbol-cache download
+policy ([`set_symbolcache!`](@ref)), the failure budget
+([`set_max_failure_attempts!`](@ref)) and the per-request deadline
+([`set_djp_request_timeout!`](@ref)): reactor-owned knobs change via a queued
+message, Salsa-owned ones via their input plus a reconcile.
 
 - `DynamicOff` — no child processes are launched; work that would need one
   settles best-effort and environment-dependent diagnostics are suppressed.
