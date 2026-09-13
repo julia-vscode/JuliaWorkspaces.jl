@@ -513,8 +513,8 @@ end
 
 The test-environment work item that already covers the non-package env folder
 at `env_uri`, i.e. the key of the enclosing package's test env when `env_uri`
-is that package's `test/` folder and a `test/runtests.jl` exists. `nothing`
-when no test-env item covers the folder.
+is that package's `test/` folder and `test/runtests.jl` is a workspace file.
+`nothing` when no test-env item covers the folder.
 """
 function _covering_test_env_key(rt, env_uri)
     env_path = uri2filepath(env_uri)
@@ -523,7 +523,7 @@ function _covering_test_env_key(rt, env_uri)
     package_path = dirname(env_path)
     package_uri = filepath2uri(package_path)
     package_uri in derived_package_folders(rt) || return nothing
-    isfile(joinpath(env_path, "runtests.jl")) || return nothing
+    derived_has_file(rt, filepath2uri(joinpath(env_path, "runtests.jl"))) || return nothing
 
     pkg = derived_package(rt, package_uri)
     pkg === nothing && return nothing
@@ -588,11 +588,16 @@ Salsa.@derived function derived_required_dynamic_projects(rt)
         ))
     end
 
-    # Test environments: for each package folder with a test/runtests.jl, the test env DJP
+    # Test environments: for each package folder whose test/runtests.jl is a
+    # workspace file, the test env DJP. Asking the workspace rather than the
+    # file system keeps this query a pure function of its inputs: a probe would
+    # neither invalidate when the file appears, nor respect a caller that
+    # deliberately kept `test/` out of the workspace (`scope` on the folder
+    # walk, say), which would spawn an indexer for a subtree nobody asked for.
     for package_uri in derived_package_folders(rt)
         package_folder = uri2filepath(package_uri)
-        runtests_path = joinpath(package_folder, "test", "runtests.jl")
-        isfile(runtests_path) || continue
+        runtests_uri = filepath2uri(joinpath(package_folder, "test", "runtests.jl"))
+        derived_has_file(rt, runtests_uri) || continue
 
         pkg = derived_package(rt, package_uri)
         pkg === nothing && continue

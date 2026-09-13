@@ -2425,10 +2425,10 @@ end
         _test_environment_key, WatchTestEnvironmentKey, derived_project
     using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
 
-    # Three shapes of package folder, all with a `test/runtests.jl` on disc (the
-    # required set only fabricates a test-env item for those): the package is its
-    # own project, the package has no manifest and no project devs it, and the
-    # package is deved by an enclosing project.
+    # Three shapes of package folder, all with a `test/runtests.jl` in the
+    # workspace (the required set only fabricates a test-env item for those): the
+    # package is its own project, the package has no manifest and no project devs
+    # it, and the package is deved by an enclosing project.
     root = uri2filepath(filepath2uri(mktempdir()))  # round-trip: drive-letter casing must match production-derived keys on Windows
     manifest_toml = """
     julia_version = "1.11.0"
