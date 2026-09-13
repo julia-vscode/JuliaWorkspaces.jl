@@ -478,6 +478,11 @@ struct DynamicFeature
     # The `required` set from the most recent reconcile, used by `_reconcile!`
     # to skip sending a `ReconcileMsg` when nothing changed.
     last_required::Set{DJPKey}
+    # Reactor-owned copy of the most recent `ReconcileMsg.required` set, kept by
+    # its handler for status-snapshot building. `last_required` above looks like
+    # the same thing but is mutated *off*-reactor by `_reconcile!` (before the
+    # message is even delivered), so the reactor must not read it.
+    reactor_required::Set{DJPKey}
     missing_pkg_metadata::Set{PkgCacheKey}
     # Package caches whose metadata input is already populated; guards against
     # re-reading (and re-`set_input`ing) multi-MB cache files.
@@ -496,6 +501,10 @@ struct DynamicFeature
     reconciled_once::Threads.Atomic{Bool}
     update_channel::Channel{Symbol}
     progress_callback::Union{Nothing,Function}
+    # Snapshot consumer `(snapshot::DynamicStatusSnapshot)`, invoked from the
+    # reactor after any message that changed the observable dynamic state.
+    # Same seam pattern as `progress_callback`; must never block.
+    status_callback::Union{Nothing,Function}
     # Crash-reporting callback `(err, bt)` for internal failures that would
     # otherwise die silently with a background task — most importantly the
     # reactor task itself (see `start(::DynamicFeature)`). `nothing` keeps the
@@ -537,6 +546,7 @@ struct DynamicFeature
     function DynamicFeature(djp_mode::DynamicMode, store_path::String;
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
             progress_callback::Union{Nothing,Function}=nothing,
+            status_callback::Union{Nothing,Function}=nothing,
             err_handler::Union{Nothing,Function}=nothing,
             max_concurrent_djps::Int=4, launcher::Function=_launch_process!,
             max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS,
@@ -555,6 +565,7 @@ struct DynamicFeature
             Set{DJPKey}(),          # inflight
             Set{DJPKey}(),          # done
             Set{DJPKey}(),          # last_required
+            Set{DJPKey}(),          # reactor_required
             Set{PkgCacheKey}(),
             Set{PkgCacheKey}(),
             Threads.Atomic{Int}(0),
@@ -562,6 +573,7 @@ struct DynamicFeature
             Threads.Atomic{Bool}(false),
             Channel{Symbol}(1),   # coalesced wakeup signal (see _complete_work_item!)
             progress_callback,
+            status_callback,
             err_handler,
             Dict{DJPKey,Int}(),
             dynamic_controller_fsm("dynamic_controller"),
@@ -575,6 +587,137 @@ struct DynamicFeature
             Set{DJPKey}(),
         )
     end
+end
+
+# ─── Dynamic status snapshots ───────────────────────────────────────────────
+
+"""
+    DJPStatusItem
+
+One dynamic work item in a [`DynamicStatusSnapshot`](@ref).
+
+- `kind`: `:watch_environment`, `:watch_test_environment`,
+  `:create_standalone_project` or `:resolve_environment`.
+- `path`: the project/package path the item targets.
+- `package`: the package name for test-environment items, otherwise `nothing`.
+- `status`: `:queued` (waiting for a free launch slot), `:preparing` (cache
+  check/download before deciding whether a child is needed), `:running` (child
+  process working), `:refresh_queued`/`:refreshing` (background refresh of an
+  already-served environment), `:done`, or `:failed`.
+- `progress`: last child-reported indexing percentage, when one exists.
+- `failure_message`: the user-facing failure sentence for `:failed` items,
+  when one exists (infra failures are logged instead and carry none).
+- `alive`: whether a child process for this item is currently alive.
+"""
+@auto_hash_equals struct DJPStatusItem
+    kind::Symbol
+    path::String
+    package::Union{Nothing,String}
+    status::Symbol
+    progress::Union{Nothing,Int}
+    failure_message::Union{Nothing,String}
+    alive::Bool
+end
+
+"""
+    DynamicStatusSnapshot
+
+A point-in-time description of everything the dynamic feature is doing,
+delivered through the `status_callback` seam (see [`DynamicFeature`](@ref)).
+
+- `indexing_done`: same condition as [`is_ready`](@ref) — every required work
+  item has settled.
+- `pending_count`: work items still pending.
+- `max_concurrent_djps`: the launch concurrency cap (`<= 0`: unlimited).
+- `items`: one [`DJPStatusItem`](@ref) per known work item, sorted by path.
+"""
+@auto_hash_equals struct DynamicStatusSnapshot
+    indexing_done::Bool
+    pending_count::Int
+    max_concurrent_djps::Int
+    items::Vector{DJPStatusItem}
+end
+
+# Reactor-only (reads reactor-owned state). Statuses are derived by precedence:
+# an item both `done` and refreshing (fast-lane serve + background refresh)
+# reports the refresh, and a launched key (still in `inflight` until terminal)
+# reports `running`, not `preparing`.
+function _key_status(df::DynamicFeature, key::DJPKey)
+    key in df.refreshing && return :refreshing
+    key in df.refresh_queue && return :refresh_queued
+    key in df.launching && return :running
+    key in df.launch_queue && return :queued
+    key in df.inflight && return :preparing
+    key in df.failed_projects && return :failed
+    return :done
+end
+
+"""
+    dynamic_status_snapshot(df::DynamicFeature) -> DynamicStatusSnapshot
+
+Build a [`DynamicStatusSnapshot`](@ref) of the reactor's current state. MUST
+run on the reactor task: every collection it reads is reactor-owned.
+
+Failed keys are only included while still required (`reactor_required`):
+`failed_projects` is never pruned by design, so without the filter every
+re-keying edit of a broken project would leave one more stale entry in the
+snapshot forever.
+"""
+function dynamic_status_snapshot(df::DynamicFeature)
+    all_keys = Set{DJPKey}()
+    union!(all_keys, df.inflight)
+    union!(all_keys, df.launching)
+    union!(all_keys, df.launch_queue)
+    union!(all_keys, df.refreshing)
+    union!(all_keys, df.refresh_queue)
+    union!(all_keys, df.done)
+    union!(all_keys, keys(df.procs))
+    for key in df.failed_projects
+        key in df.reactor_required && push!(all_keys, key)
+    end
+
+    items = Vector{DJPStatusItem}()
+    for key in all_keys
+        id = _djp_identity(key)
+        status = _key_status(df, key)
+        failure_message = nothing
+        if status === :failed
+            msg = get(df.failure_messages, id, "")
+            failure_message = isempty(msg) ? nothing : msg
+        end
+        push!(items, DJPStatusItem(
+            id.kind,
+            _key_path(key),
+            isempty(id.package) ? nothing : id.package,
+            status,
+            get(df.child_progress, key, nothing),
+            failure_message,
+            haskey(df.procs, key),
+        ))
+    end
+    sort!(items, by=item -> (item.path, item.kind, something(item.package, "")))
+
+    return DynamicStatusSnapshot(
+        df.saw_result[] && df.pending_count[] == 0,
+        df.pending_count[],
+        df.max_concurrent_djps,
+        items,
+    )
+end
+
+# Deliver the current snapshot through `status_callback` when it differs from
+# `last`; returns the snapshot that is now current. Like `_report_progress`,
+# a throwing callback must never take down the reactor.
+function _report_status(df::DynamicFeature, last::Union{Nothing,DynamicStatusSnapshot})
+    df.status_callback === nothing && return last
+    snapshot = dynamic_status_snapshot(df)
+    snapshot == last && return last
+    try
+        df.status_callback(snapshot)
+    catch err
+        @warn "status_callback threw" exception=(err, catch_backtrace())
+    end
+    return snapshot
 end
 
 # Persistent, deterministic project dir for a standalone package: reused
@@ -1215,11 +1358,16 @@ each to a type-specialized `handle!` method. A handler returning `true` stops
 the loop.
 """
 function Base.run(df::DynamicFeature)
+    # The one snapshot-equality cache: `_report_status` only calls out when the
+    # observable state actually changed, so chatty messages (progress reports,
+    # stale drops) cost one snapshot build and no delivery.
+    last_status = nothing
     while true
         msg = take!(df.in_channel)
         @debug "Reactor msg" msg_type=typeof(msg).name.name
 
         should_stop = handle!(df, msg)
+        last_status = _report_status(df, last_status)
         should_stop === true && break
     end
 end
@@ -1738,6 +1886,9 @@ triggered as a side effect of Salsa input reads any more.
 """
 function handle!(df::DynamicFeature, msg::ReconcileMsg)
     required = msg.required
+    # Reactor-owned copy for status snapshots; see the field comment.
+    empty!(df.reactor_required)
+    union!(df.reactor_required, required)
 
     # ── Cancel processes that are no longer required ───────────────────────
     for (key, djp) in collect(df.procs)
