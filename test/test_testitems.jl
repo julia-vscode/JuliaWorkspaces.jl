@@ -2,7 +2,7 @@
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem
     """
 
@@ -16,14 +16,14 @@
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "Test definition error", "Your @testitem is missing a name and code block.", 1:9)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "Test definition error", "Your @testitem is missing a name and code block.", 1:9)
 end
 
 @testitem "Wrong type for name" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem :foo
     """
 
@@ -37,14 +37,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "Test definition error", "Your @testitem must have a first argument that is of type String for the name.", 1:14)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "Test definition error", "Your @testitem must have a first argument that is of type String for the name.", 1:14)
 end
 
 @testitem "Code block missing" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo"
     """
 
@@ -58,14 +58,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "Your @testitem is missing a code block argument.", 1:15)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "Your @testitem is missing a code block argument.", 1:15)
 end
 
 @testitem "Final arg not a code block" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo" 3
     """
 
@@ -79,14 +79,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "The final argument of a @testitem must be a begin end block.", 1:17)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "The final argument of a @testitem must be a begin end block.", 1:17)
 end
 
 @testitem "None kw arg" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo" bar begin end
     """
 
@@ -100,14 +100,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "The arguments to a @testitem must be in keyword format.", 1:29)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "The arguments to a @testitem must be in keyword format.", 1:29)
 end
 
 @testitem "Duplicate kw arg" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo" default_imports=true default_imports=false begin end
     """
 
@@ -121,14 +121,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "The keyword argument default_imports cannot be specified more than once.", 1:68)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "The keyword argument default_imports cannot be specified more than once.", 1:68)
 end
 
 @testitem "Incomplete kw arg" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo" default_imports= begin end
     """
 
@@ -142,14 +142,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "The final argument of a @testitem must be a begin end block.", 1:42)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "The final argument of a @testitem must be a begin end block.", 1:42)
 end
 
 @testitem "Wrong default_imports type kw arg" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo" default_imports=4 begin end
     """
 
@@ -163,14 +163,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "The keyword argument default_imports only accepts bool values.", 1:43)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "The keyword argument default_imports only accepts bool values.", 1:43)
 end
 
 @testitem "non vector arg for tags kw" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo" tags=4 begin end
     """
 
@@ -184,14 +184,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "The keyword argument tags only accepts a vector of symbols.", 1:32)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "The keyword argument tags only accepts a vector of symbols.", 1:32)
 end
 
 @testitem "Wrong types in tags kw arg" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo" tags=[4, 8] begin end
     """
 
@@ -205,14 +205,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "The keyword argument tags only accepts a vector of symbols.", 1:37)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "The keyword argument tags only accepts a vector of symbols.", 1:37)
 end
 
 @testitem "Unknown keyword arg" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testitem "foo" bar=true begin end
     """
 
@@ -226,7 +226,7 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "foo", "Unknown keyword argument.", 1:34)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "foo", "Unknown keyword argument.", 1:34)
 end
 
 @testitem "All parts correctly there" begin
@@ -306,7 +306,7 @@ end
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testmodule
     """
 
@@ -320,14 +320,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "Test definition error", "Your @testmodule is missing a name and code block.", 1:length(content)-1)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "Test definition error", "Your @testmodule is missing a name and code block.", 1:length(content)-1)
 end
 
 @testitem "@testsnippet macro missing begin end block" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testsnippet
     """
 
@@ -341,14 +341,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "Test definition error", "Your @testsnippet is missing a name and code block.", 1:length(content)-1)
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "Test definition error", "Your @testsnippet is missing a name and code block.", 1:length(content)-1)
 end
 
 @testitem "@testmodule macro extra args" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testmodule "Foo" begin end"""
 
     jw = JuliaWorkspace()
@@ -361,14 +361,14 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "Test definition error", "Your @testmodule must have a first argument that is an identifier for the name.", 1:length(content))
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "Test definition error", "Your @testmodule must have a first argument that is an identifier for the name.", 1:length(content))
 end
 
 @testitem "@testsnippet macro extra args" begin
     using JuliaWorkspaces: JuliaWorkspace, TestErrorDetail, add_file!, TextFile, SourceText, get_test_items
     using JuliaWorkspaces.URIs2: @uri_str
 
-    uri = uri"file://src/foo.jl"
+    uri = uri"file:///src/foo.jl"
     content = """@testsnippet "Foo" begin end"""
 
     jw = JuliaWorkspace()
@@ -381,7 +381,7 @@ end
     @test length(test_results.testsetups) == 0
     @test length(test_results.testerrors) == 1
 
-    @test test_results.testerrors[1] == TestErrorDetail(uri"file://src/foo.jl", "file://src/foo.jl:error1", "Test definition error", "Your @testsnippet must have a first argument that is an identifier for the name.", 1:length(content))
+    @test test_results.testerrors[1] == TestErrorDetail(uri"file:///src/foo.jl", "file:///src/foo.jl:error1", "Test definition error", "Your @testsnippet must have a first argument that is an identifier for the name.", 1:length(content))
 end
 
 @testitem "@testmodule all correct" begin
