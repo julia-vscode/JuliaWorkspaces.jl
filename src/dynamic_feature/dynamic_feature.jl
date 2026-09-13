@@ -547,8 +547,12 @@ struct DynamicFeature
     # `max_alive_djps`/`v2_lifecycle` below. Mirrors `input_dynamic_mode`.
     djp_mode::Base.RefValue{DynamicMode}
     store_path::String
-    download_enabled::Bool
-    upstream_url::String
+    # Whether missing symbol caches may be downloaded from `upstream_url`
+    # instead of indexed locally. `Ref`s because hosts change them at runtime
+    # (`set_symbolcache!` posts `SetSymbolcacheMsg`); reactor-owned. Mirror
+    # `input_symbolcache_download`/`input_symbolcache_upstream`.
+    download_enabled::Base.RefValue{Bool}
+    upstream_url::Base.RefValue{String}
     in_channel::Channel{DynamicReactorMessage}
     out_channel::Channel{DynamicResultMessage}
     procs::Dict{DJPKey,DynamicJuliaProcess}
@@ -598,8 +602,10 @@ struct DynamicFeature
     child_progress::Dict{DJPKey,Int}
     controller_fsm::FSM{DynamicControllerPhase}
     # ── Launch concurrency cap ──
-    # Maximum number of concurrently *working* child processes (<= 0: unlimited).
-    max_concurrent_djps::Int
+    # Maximum number of concurrently *working* child processes (<= 0:
+    # unlimited). A `Ref` because hosts change it at runtime
+    # (`SetMaxConcurrentDjpsMsg`); reactor-owned.
+    max_concurrent_djps::Base.RefValue{Int}
     # ── Live-children cap ──
     # Maximum number of SETTLED child processes kept alive (<= 0: unlimited):
     # see "The live-children cap" below. A `Ref` because hosts change it at
@@ -616,10 +622,14 @@ struct DynamicFeature
     # short-circuited without launching a child (<= 0: unlimited). The default
     # leaves room for exactly one genuine "I fixed my Project.toml" retry;
     # `retry_failed_dynamic_projects!` clears the budget for anything beyond.
-    max_failure_attempts::Int
+    # A `Ref` because hosts change it at runtime (`SetMaxFailureAttemptsMsg`);
+    # reactor-owned.
+    max_failure_attempts::Base.RefValue{Int}
     # Seconds a child may take to answer one index request before the work item
-    # is failed (<= 0: no deadline). See `_send_djp_request`.
-    djp_request_timeout_seconds::Int
+    # is failed (<= 0: no deadline). See `_send_djp_request`. A `Ref` because
+    # hosts change it at runtime (`SetDjpRequestTimeoutMsg`); reactor-owned,
+    # read per request.
+    djp_request_timeout_seconds::Base.RefValue{Int}
     # Keys ready to launch but over the cap; drained best-`_launch_priority`
     # first, insertion order as the final tiebreak.
     launch_queue::Vector{DJPKey}
@@ -664,8 +674,8 @@ struct DynamicFeature
         return new(
             Ref(djp_mode),
             store_path,
-            download_enabled,
-            upstream_url,
+            Ref(download_enabled),
+            Ref(upstream_url),
             Channel{DynamicReactorMessage}(Inf),
             Channel{DynamicResultMessage}(Inf),
             Dict{DJPKey,DynamicJuliaProcess}(),
@@ -684,11 +694,11 @@ struct DynamicFeature
             progress_callback,
             Dict{DJPKey,Int}(),
             dynamic_controller_fsm("dynamic_controller"),
-            max_concurrent_djps,
+            Ref(max_concurrent_djps),
             Ref(max_alive_djps),
             Ref(v2_lifecycle),
-            max_failure_attempts,
-            djp_request_timeout_seconds,
+            Ref(max_failure_attempts),
+            Ref(djp_request_timeout_seconds),
             Vector{DJPKey}(),
             Set{DJPKey}(),
             launcher,
@@ -1176,8 +1186,8 @@ end
 # Whether work for `key` must not be attempted again.
 function _is_exhausted(df::DynamicFeature, key::DJPKey)
     key in df.failed_projects && return true
-    df.max_failure_attempts <= 0 && return false
-    return get(df.failure_attempts, _djp_identity(key), 0) >= df.max_failure_attempts
+    df.max_failure_attempts[] <= 0 && return false
+    return get(df.failure_attempts, _djp_identity(key), 0) >= df.max_failure_attempts[]
 end
 
 # Record one terminal failure against both gates, keeping the user-facing
@@ -1229,7 +1239,7 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
 end
 
 _has_free_slot(df::DynamicFeature) =
-    df.max_concurrent_djps <= 0 || length(df.launching) < df.max_concurrent_djps
+    df.max_concurrent_djps[] <= 0 || length(df.launching) < df.max_concurrent_djps[]
 
 # Construct the DJP for `key` and launch it, occupying a slot. The DJP is
 # derived from the key alone so queued keys carry no state that can go stale.
@@ -1501,12 +1511,12 @@ function handle!(df::DynamicFeature, msg::WatchEnvironmentMsg)
     @async try
         missing_pkgs = _get_missing_packages(project_path, df.store_path)
 
-        if !isempty(missing_pkgs) && df.download_enabled
+        if !isempty(missing_pkgs) && df.download_enabled[]
             # Progress is routed through the reactor as `PrepProgressMsg`s
             # carrying the download phase's own completion fraction; the
             # reactor reports them onto the item's dedicated download bar.
             put!(df.in_channel, PrepProgressMsg(key, "Downloading caches for $(basename(project_path))...", 0.0))
-            missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url;
+            missing_pkgs = _download_missing_caches(missing_pkgs, df.store_path, df.upstream_url[];
                 report = (message, fraction) -> put!(df.in_channel, PrepProgressMsg(key, message, fraction)))
             put!(df.in_channel, PrepProgressMsg(key, "Downloaded caches for $(basename(project_path))", 1.0))
         end
@@ -1719,18 +1729,18 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
             # this dir in `CreateStandaloneProjectMsg`. Recomputing the
             # destructive prepare here — off the reactor — could `rm` a sibling
             # content-hash's dir that another child is resolving into.
-            create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
+            create_standalone_project(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds[])
         elseif key isa ResolveEnvironmentKey
-            resolve_environment(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
+            resolve_environment(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds[])
         elseif key isa ResolveExtensionEnvironmentKey
-            resolve_extension_environment(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds)
+            resolve_extension_environment(djp, df.store_path, _standalone_project_dir_path(df, key), df.djp_request_timeout_seconds[])
         elseif key isa WatchTestEnvironmentKey
             # Persist the materialized test env: TestEnv activates a
             # child-local temp dir, so the child copies the result into this
             # parent-owned dir (prepared by the WatchTestEnvironmentMsg handler).
-            index_project(djp, df.store_path, df.djp_request_timeout_seconds, _standalone_project_dir_path(df, key))
+            index_project(djp, df.store_path, df.djp_request_timeout_seconds[], _standalone_project_dir_path(df, key))
         else
-            index_project(djp, df.store_path, df.djp_request_timeout_seconds)
+            index_project(djp, df.store_path, df.djp_request_timeout_seconds[])
         end
         put!(df.in_channel, ProcessIndexedMsg(key, result_dir))
     catch err
@@ -1880,7 +1890,7 @@ function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
         df.failure_messages[id] = ""
         # Exactly one retry — even with an unlimited failure budget, looping
         # 300 s timeouts would wedge readiness indefinitely.
-        if attempts == 1 && (df.max_failure_attempts <= 0 || df.max_failure_attempts >= 2)
+        if attempts == 1 && (df.max_failure_attempts[] <= 0 || df.max_failure_attempts[] >= 2)
             @warn "$message Retrying."
             _free_slot!(df, key)
             _request_launch!(df, key)
@@ -1936,7 +1946,7 @@ function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
         attempts = get(df.failure_attempts, id, 0) + 1
         df.failure_attempts[id] = attempts
         df.failure_messages[id] = ""
-        if attempts == 1 && (df.max_failure_attempts <= 0 || df.max_failure_attempts >= 2)
+        if attempts == 1 && (df.max_failure_attempts[] <= 0 || df.max_failure_attempts[] >= 2)
             @warn "$message Retrying." key
             _free_slot!(df, key)
             _request_launch!(df, key)
