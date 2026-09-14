@@ -137,6 +137,16 @@ end
 Salsa.@derived function derived_testitems(rt, uri)
     @debug "derived_testitems" uri=uri
 
+    # Only Julia documents carry test items. This per-file query can be handed
+    # any workspace URI (the LS publishes for every changed file), so gate here
+    # as `derived_diagnostics` does; `derived_all_testitems` already iterates
+    # `derived_julia_files` only. Without this a Markdown file goes through the
+    # fused Julia parse, and prose that happens to parse (`# Heading` is a
+    # comment) can even yield test items the whole-workspace query never reports.
+    if !_is_julia_uri(rt, uri)
+        return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
+    end
+
     # Gating the per-file query covers every consumer at once — the whole
     # workspace sweep, the LS publish path and the test runner all read
     # through here.
