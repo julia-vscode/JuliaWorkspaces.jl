@@ -156,6 +156,15 @@ not touch.
 Salsa.@derived function derived_testitems_v2(rt, uri)
     @debug "derived_testitems_v2" uri=uri
 
+    # Only Julia analysis sources carry test items — the same gate as the v1
+    # query this twins (see derived_testitems): without it a TOML or
+    # plain-text URI handed to the per-file query goes through the v2 parse
+    # (derived_v2_file_walk reads the source view of any uri) and can report
+    # items the whole-workspace query never does.
+    if !_is_julia_analysis_uri(rt, uri)
+        return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
+    end
+
     if !derived_testitems_selected(rt, uri)
         return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
     end
@@ -199,6 +208,10 @@ Salsa.@derived function derived_testitems_v2(rt, uri)
             else
                 t.option_skip
             end
+            # `incl` yields `UnitRange{Int}` — `Int32` on a 32-bit build — and
+            # the Union-typed `option_skip` field has no `convert`, so widen
+            # explicitly (mirrors `_raw_test_item_detail`).
+            skip isa Bool || (skip = UnitRange{Int64}(skip))
             push!(testitems, RawTestItemDetail(
                 t.label, range, code_range, t.option_default_imports,
                 t.option_tags, t.option_setup, skip))
