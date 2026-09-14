@@ -116,7 +116,7 @@ function read_text_file_from_uri(uri::URI; return_nothing_on_io_error=false)
 end
 
 # Directory names that are never worth descending into. See issue #1415 for details.
-const SKIPPED_DIRNAMES = Set([".git", ".svn", ".hg", "node_modules"])
+const SKIPPED_DIRNAMES = Set([".git", ".svn", ".hg", ".pixi", ".venv", "node_modules"])
 
 # ── Scoped walking ──────────────────────────────────────────────────────────
 #
