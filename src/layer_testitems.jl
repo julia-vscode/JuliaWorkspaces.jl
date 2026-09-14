@@ -138,6 +138,18 @@ Salsa.@derived function derived_testitems(rt, uri)
     @debug "derived_testitems" uri=uri
     input_v2_enabled(rt) && return derived_testitems_v2(rt, uri)
 
+    # Only Julia analysis sources carry test items: Julia documents, plus
+    # markdown documents, whose Julia view (prose blanked, fences verbatim) is
+    # what parses here. This per-file query can be handed any workspace URI
+    # (the LS publishes for every changed file), so gate as
+    # `derived_diagnostics` does; `derived_all_testitems` already iterates
+    # `derived_julia_files` only. Without this a TOML or plain-text file goes
+    # through the fused Julia parse and can even yield test items the
+    # whole-workspace query never reports.
+    if !_is_julia_analysis_uri(rt, uri)
+        return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
+    end
+
     # Gating the per-file query covers every consumer at once — the whole
     # workspace sweep, the LS publish path and the test runner all read
     # through here.

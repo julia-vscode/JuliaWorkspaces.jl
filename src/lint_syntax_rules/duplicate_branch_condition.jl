@@ -40,7 +40,7 @@ function _check_duplicate_branch_condition(emit!, node, _ctx)
     conditions = SyntaxNode[]
     current = node
     while true
-        cs = children(current)
+        cs = _children(current)
         isempty(cs) && return nothing
         condition = cs[1]
         for earlier in conditions

@@ -90,7 +90,16 @@ end
 # The return value is a boolean that is false if x should point to something but
 # can't be resolved.
 
-function resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
+function resolve_ref(x::EXPR, target, state::TraverseState)::Bool
+    _enter_resolution!(state) || return false
+    try
+        return _resolve_ref(x, target, state)
+    finally
+        _leave_resolution!(state)
+    end
+end
+
+function _resolve_ref(x::EXPR, scope::Scope, state::TraverseState)::Bool
     meta_dict = state.meta_dict
     # if the current scope is a soft scope we should check the parent scope first
     # before trying to resolve the ref locally
@@ -300,7 +309,7 @@ function initial_pass_on_exports(x::EXPR, name, state)
 end
 
 # Fallback method
-function resolve_ref(x::EXPR, m, state::TraverseState)::Bool
+function _resolve_ref(x::EXPR, m, state::TraverseState)::Bool
     meta_dict = state.meta_dict
     return hasref(x, meta_dict)::Bool
 end
@@ -316,7 +325,16 @@ called with `parent::EXPR` resolves the reference for `parent`, other methods
 then check whether the Binding/Scope/ModuleStore to which `parent` points has
 a field matching `x`.
 """
-function resolve_getfield(x::EXPR, scope::Scope, state::TraverseState)::Bool
+function resolve_getfield(x::EXPR, parent, state::TraverseState)::Bool
+    _enter_resolution!(state) || return false
+    try
+        return _resolve_getfield(x, parent, state)
+    finally
+        _leave_resolution!(state)
+    end
+end
+
+function _resolve_getfield(x::EXPR, scope::Scope, state::TraverseState)::Bool
     meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     resolved = resolve_ref(x.args[1], scope, state)
@@ -334,7 +352,7 @@ function resolve_getfield(x::EXPR, scope::Scope, state::TraverseState)::Bool
 end
 
 
-function resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Bool
+function _resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Bool
     meta_dict = state.meta_dict
 
     hasref(x, meta_dict) && return true
@@ -353,7 +371,7 @@ function resolve_getfield(x::EXPR, parent_type::EXPR, state::TraverseState)::Boo
 end
 
 
-function resolve_getfield(x::EXPR, b::Binding, state::TraverseState)::Bool
+function _resolve_getfield(x::EXPR, b::Binding, state::TraverseState)::Bool
     meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     resolved = false
@@ -376,7 +394,7 @@ function resolve_getfield(x::EXPR, b::Binding, state::TraverseState)::Bool
     return resolved
 end
 
-function resolve_getfield(x::EXPR, parent_type, state::TraverseState)::Bool
+function _resolve_getfield(x::EXPR, parent_type, state::TraverseState)::Bool
     hasref(x, state.meta_dict)
 end
 
@@ -400,7 +418,7 @@ in per-file mode, and the lookup additionally requires a seeded `:__tree__`
 scope context (gone even in per-file mode's post-pass steps, which strip the
 handles — those steps then no-op here via the `nothing` context).
 """
-function resolve_getfield(x::EXPR, tr::TreeRef, state::TraverseState)::Bool
+function _resolve_getfield(x::EXPR, tr::TreeRef, state::TraverseState)::Bool
     meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     CSTParser.is_id_or_macroname(x) || return false
@@ -419,7 +437,7 @@ function resolve_getfield(x::EXPR, tr::TreeRef, state::TraverseState)::Bool
     return true
 end
 
-function resolve_getfield(x::EXPR, tm::TestSetupModuleRef, state::TraverseState)::Bool
+function _resolve_getfield(x::EXPR, tm::TestSetupModuleRef, state::TraverseState)::Bool
     meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     CSTParser.is_id_or_macroname(x) || return false
@@ -436,7 +454,7 @@ function is_overloaded(val::SymbolServer.SymStore, scope::Scope)
     haskey(scope.overloaded, vr)
 end
 
-function resolve_getfield(x::EXPR, m::SymbolServer.ModuleStore, state::TraverseState)::Bool
+function _resolve_getfield(x::EXPR, m::SymbolServer.ModuleStore, state::TraverseState)::Bool
     meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     resolved = false
@@ -465,7 +483,7 @@ function resolve_getfield(x::EXPR, m::SymbolServer.ModuleStore, state::TraverseS
     return resolved
 end
 
-function resolve_getfield(x::EXPR, parent::SymbolServer.DataTypeStore, state::TraverseState)::Bool
+function _resolve_getfield(x::EXPR, parent::SymbolServer.DataTypeStore, state::TraverseState)::Bool
     meta_dict = state.meta_dict
     hasref(x, meta_dict) && return true
     resolved = false

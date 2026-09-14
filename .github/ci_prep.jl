@@ -6,12 +6,20 @@
 # linux is covered: the scripts are bash, so Windows is out, and they assume a
 # GNU userland (`nproc`, for one), so macOS is out too.
 #
-# Base only: this runs under the default environment, with nothing instantiated.
+# Those same scripts spawn `julia --project=<repo root>` children, and since the
+# workflow dropped julia-buildpkg nothing else resolves the checkout in place --
+# the test processes instantiate a sandbox, not this tree -- so a child finds a
+# Project.toml with no Manifest.toml and dies with "Package X is required but
+# does not seem to be installed". Instantiating here restores exactly what
+# buildpkg provided, on the one platform where the children actually run.
 
 if Sys.islinux()
     run(`sudo apt-get update`)
     run(`sudo apt-get install -y rclone`)
     run(`rclone version`)
+    import Pkg
+    Pkg.activate(joinpath(@__DIR__, ".."))
+    Pkg.instantiate()
 else
     @info "ci_prep: no rclone install for this platform, cache-infra items will skip" Sys.KERNEL
 end

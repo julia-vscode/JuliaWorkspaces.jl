@@ -1,39 +1,42 @@
-julia_versions = [
-    "1.0",
-    "1.1",
-    "1.2",
-    "1.3",
-    "1.4",
-    "1.5",
-    "1.6",
-    "1.7",
-    "1.8",
-    "1.9",
-    "1.10",
-    "1.11",
-    "1.12",
-    "1.13",
-]
+# Regenerate the private environments the worker processes activate, one per supported
+# Julia version. Requires juliaup with every listed version installed
+# (see `install_julia_versions.jl`).
+#
+#     julia scripts/update_app_environments.jl                 # every version, plus fallback
+#     julia scripts/update_app_environments.jl 1.12 1.13       # only those
+#     julia scripts/update_app_environments.jl fallback        # only the nightly fallback
 
-for i in julia_versions
-    version_path = normpath(joinpath(@__DIR__, "../juliadynamicanalysisprocess/environments/v$i"))
-    mkpath(version_path)
+include("repo_common.jl")
 
-    run(Cmd(`julia +$i --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../JuliaDynamicAnalysisProcess"))'`, dir=version_path))
+const DEVELOP = "using Pkg; Pkg.develop(PackageSpec(path=\"../../$SERVER_PACKAGE\"))"
+
+"""
+    normalize_manifest_separators(path)
+
+Julia 1.0 and 1.1 write Windows path separators into the manifest, which then fails to
+resolve on other platforms. Rewrite them to forward slashes.
+"""
+function normalize_manifest_separators(path::AbstractString)
+    filename = joinpath(path, "Manifest.toml")
+    isfile(filename) || return
+    write(filename, replace(read(filename, String), "\\\\" => '/'))
 end
 
-version_path = normpath(joinpath(@__DIR__, "../juliadynamicanalysisprocess/environments/fallback"))
-mkpath(version_path)
-run(Cmd(`julia +nightly --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../JuliaDynamicAnalysisProcess"))'`, dir=version_path))
+function build_environment(version::AbstractString)
+    fallback = version == "fallback"
+    path = joinpath(ENVIRONMENTS_DIR, fallback ? "fallback" : "v$version")
+    mkpath(path)
 
-function replace_backslash_in_manifest(version)
-    filename = joinpath(@__DIR__, "../juliadynamicanalysisprocess/environments/v$version/Manifest.toml")
-    manifest_content = read(filename, String)
+    @info "Building environment" version path
+    run(Cmd(`julia +$(fallback ? FALLBACK_JULIA : version) --project=. -e $DEVELOP`, dir=path))
 
-    new_content = replace(manifest_content, "\\\\"=>'/')
-
-    write(filename, new_content)
+    version in ("1.0", "1.1") && normalize_manifest_separators(path)
+    return nothing
 end
 
-replace_backslash_in_manifest("1.0")
-replace_backslash_in_manifest("1.1")
+for version in (isempty(ARGS) ? JULIA_VERSIONS : ARGS)
+    build_environment(version)
+end
+
+# The fallback environment covers Julia versions newer than anything listed above.
+isempty(ARGS) && build_environment("fallback")

@@ -149,7 +149,7 @@ end
 @testitem "Dynamic reconcile: resolve_workspace_environments=false keeps only real envs" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText,
         derived_required_dynamic_projects, derived_nonpackage_env, WatchEnvironmentKey,
-        ResolveEnvironmentKey
+        ResolveEnvironmentKey, WatchTestEnvironmentKey
     using JuliaWorkspaces.URIs2: URI, uri2filepath
 
     project_toml = """
@@ -191,6 +191,9 @@ end
     docs_env = derived_nonpackage_env(jw_on.runtime, URI("file:///ws/Bare/docs"))
     @test docs_env !== nothing
     @test ResolveEnvironmentKey(uri2filepath(URI("file:///ws/Bare/docs")), docs_env.content_hash) in req_on
+    # the manifest-less package's runtests.jl is a workspace file, so its test env
+    # is scheduled too — keyed on the package folder, hash 0 (no project to hash)
+    @test WatchTestEnvironmentKey(uri2filepath(URI("file:///ws/Bare")), "Bare", UInt64(0)) in req_on
     @test all(k -> k isa WatchEnvironmentKey, req_off)        # ...and is fully disabled
     @test !isempty(req_off)                                   # real projects still watched
 end
@@ -611,4 +614,41 @@ end
     rev2 = apply("/ws/B", 2)
     @test rev2 > rev1
     @test derived_all_diagnostics(jw.runtime) === diags
+end
+
+@testitem "Dynamic reconcile: a test folder kept out of the workspace needs no test env" begin
+    using JuliaWorkspaces: workspace_from_folders, derived_required_dynamic_projects,
+        WatchTestEnvironmentKey, CreateStandaloneProjectKey
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
+
+    # Round-trip through a URI so drive-letter casing matches the keys the
+    # production path derives on Windows.
+    root = uri2filepath(filepath2uri(mktempdir()))
+    mkpath(joinpath(root, "src"))
+    mkpath(joinpath(root, "test"))
+    write(joinpath(root, "Project.toml"), """
+    name = "Excluded"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee50"
+    version = "0.1.0"
+    """)
+    write(joinpath(root, "src", "Excluded.jl"), "module Excluded\nend\n")
+    write(joinpath(root, "test", "runtests.jl"), "using Test\n")
+    write(joinpath(root, "JuliaLint.toml"), """
+    exclude = ["test/**"]
+    """)
+
+    # `scope=:lint` prunes `test/` from the walk, so runtests.jl never becomes a
+    # workspace file even though it sits right there on disc. The required set
+    # follows the workspace, so no indexer is scheduled for a subtree the caller
+    # deliberately left out.
+    required = derived_required_dynamic_projects(workspace_from_folders([root]; scope=:lint).runtime)
+    @test !any(k -> k isa WatchTestEnvironmentKey, required)
+
+    # The pruning is targeted, not blanket: the package itself still gets one.
+    @test any(k -> k isa CreateStandaloneProjectKey && k.package_path == root, required)
+
+    # Same tree, same disc, no exclusion: the test env is scheduled.
+    rm(joinpath(root, "JuliaLint.toml"))
+    required = derived_required_dynamic_projects(workspace_from_folders([root]; scope=:lint).runtime)
+    @test any(k -> k isa WatchTestEnvironmentKey, required)
 end

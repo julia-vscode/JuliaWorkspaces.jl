@@ -110,6 +110,9 @@ end
     @test isempty(JuliaWorkspaces.get_signature_help(jw, uri, 1).signatures)
 
     @test JuliaWorkspaces.get_selection_ranges(jw, uri, [1, 2]) == [nothing, nothing]
+
+    ti = JuliaWorkspaces.get_test_items(jw, uri)
+    @test isempty(ti.testitems) && isempty(ti.testsetups) && isempty(ti.testerrors)
 end
 
 @testitem "Language gate: tree accessors serve a Markdown document's Julia view" begin
@@ -178,4 +181,55 @@ end
     add_file!(jw, TextFile(uri, SourceText("x = 1\n", "markdown")))
 
     @test_throws Exception get_format_edits(jw, uri)
+end
+
+@testitem "Language gate: test items are not detected in Markdown prose" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items
+    using JuliaWorkspaces.URIs2: URI
+
+    # A Markdown heading is a Julia comment, so a README that quotes a
+    # `@testitem` would parse as one — but only the markdown document's Julia
+    # view (prose blanked, fences verbatim) reaches the parser, so a quoted
+    # item in prose is never detected. The per-file query is what the LS
+    # publishes from for every changed file; it agrees with the
+    # whole-workspace query, which iterates every Julia analysis source
+    # (Julia AND markdown documents), so the markdown file appears there
+    # with empty details.
+    body = "# Notes\n\n@testitem \"from prose\" begin\n    @test true\nend\n"
+    md = URI("file:///gatepkg/NOTES.md")
+    jl = URI("file:///gatepkg/src/notes.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///gatepkg/Project.toml"),
+        SourceText("name = \"GatePkg\"\nuuid = \"7c1f0a4e-5b2d-4c8e-9f3a-1d2e3f4a5b6c\"\nversion = \"0.1.0\"\n", "toml")))
+    add_file!(jw, TextFile(md, SourceText(body, "markdown")))
+    add_file!(jw, TextFile(jl, SourceText(body, "julia")))
+
+    ti = get_test_items(jw, md)
+    @test isempty(ti.testitems) && isempty(ti.testsetups) && isempty(ti.testerrors)
+    all_items = get_test_items(jw)
+    @test haskey(all_items, md)
+    @test isempty(all_items[md].testitems) && isempty(all_items[md].testsetups) && isempty(all_items[md].testerrors)
+
+    # The same body in a Julia file does report the item, so the fixture is sound.
+    @test length(get_test_items(jw, jl).testitems) == 1
+    @test haskey(get_test_items(jw), jl)
+end
+
+@testitem "Language gate: prose in a Markdown document never reaches the Julia parser" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_test_items, get_diagnostic
+    using JuliaWorkspaces.URIs2: URI
+
+    # Parsed as Julia, prose like this yields a leaf `K"if"` node from error
+    # recovery, which crashed the syntax lint rules (#322). Here the prose
+    # itself never reaches the fused parse: a markdown document parses through
+    # its Julia view, which blanks everything outside a Julia fence — so this
+    # holds independently of that fix.
+    uri = URI("file:///gating/AGENTS.md")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText("- Add or update tests for the code you change, even if nobody asked.\n- Prefer using explicit names.\n", "markdown")))
+
+    ti = get_test_items(jw, uri)
+    @test isempty(ti.testitems) && isempty(ti.testsetups) && isempty(ti.testerrors)
+    @test isempty(get_diagnostic(jw, uri))
 end

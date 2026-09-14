@@ -475,16 +475,16 @@ point for analysing a project that lives on the local file system.
   everything.
 - `store_path`, `max_concurrent_djps`, `max_alive_djps`, `max_failure_attempts`,
   `djp_request_timeout_seconds`, `resolve_workspace_environments`,
-  `progress_callback`: forwarded verbatim to [`JuliaWorkspace`](@ref), which
-  documents them.
+  `progress_callback`, `status_callback`: forwarded verbatim to
+  [`JuliaWorkspace`](@ref), which documents them.
 
 # Returns
 - A [`JuliaWorkspace`](@ref) containing all files found under the given folders.
 """
-function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, store_path::Union{Nothing,String}=nothing, max_concurrent_djps::Int=4, max_alive_djps::Int=DEFAULT_MAX_ALIVE_DJPS, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true, progress_callback::Union{Nothing,Function}=nothing, launcher::Function=_launch_process!, scope=nothing)
+function workspace_from_folders(workspace_folders::Vector{String}; dynamic::DynamicMode=DynamicOff, symbolcache_download::Bool=false, symbolcache_upstream::String=DEFAULT_SYMBOLCACHE_UPSTREAM, store_path::Union{Nothing,String}=nothing, max_concurrent_djps::Int=4, max_alive_djps::Int=DEFAULT_MAX_ALIVE_DJPS, max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS, djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS, resolve_workspace_environments::Bool=true, progress_callback::Union{Nothing,Function}=nothing, status_callback::Union{Nothing,Function}=nothing, launcher::Function=_launch_process!, scope=nothing)
     @debug "workspace_from_folders" folders=workspace_folders dynamic=dynamic symbolcache_download=symbolcache_download
 
-    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream, store_path=store_path, max_concurrent_djps=max_concurrent_djps, max_alive_djps=max_alive_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds, resolve_workspace_environments=resolve_workspace_environments, progress_callback=progress_callback, launcher=launcher)
+    jw = JuliaWorkspace(;dynamic=dynamic, symbolcache_download=symbolcache_download, symbolcache_upstream=symbolcache_upstream, store_path=store_path, max_concurrent_djps=max_concurrent_djps, max_alive_djps=max_alive_djps, max_failure_attempts=max_failure_attempts, djp_request_timeout_seconds=djp_request_timeout_seconds, resolve_workspace_environments=resolve_workspace_environments, progress_callback=progress_callback, status_callback=status_callback, launcher=launcher)
 
     for folder in workspace_folders
         add_folder_from_disc!(jw, folder; scope=scope)
