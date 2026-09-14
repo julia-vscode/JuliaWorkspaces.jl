@@ -437,11 +437,15 @@ Salsa.@derived function derived_required_dynamic_projects_v2(rt)
         ))
     end
 
-    # Test environments: for each package folder with a test/runtests.jl, the test env DJP
+    # Test environments: for each package folder whose test/runtests.jl is a
+    # workspace file, the test env DJP. Asking the workspace rather than the
+    # file system keeps this query a pure function of its inputs: a probe would
+    # neither invalidate when the file appears, nor respect a caller that
+    # deliberately kept `test/` out of the workspace (`scope` on the folder
+    # walk, say), which would spawn an indexer for a subtree nobody asked for.
     for package_uri in derived_package_folders(rt)
-        package_folder = uri2filepath(package_uri)
-        runtests_path = joinpath(package_folder, "test", "runtests.jl")
-        isfile(runtests_path) || continue
+        runtests_uri = filepath2uri(joinpath(uri2filepath(package_uri), "test", "runtests.jl"))
+        derived_has_file(rt, runtests_uri) || continue
 
         pkg = derived_package(rt, package_uri)
         pkg === nothing && continue
