@@ -894,7 +894,7 @@ function dynamic_status_snapshot(df::DynamicFeature)
     return DynamicStatusSnapshot(
         df.reconciled_once[] && df.pending_count[] == 0 && isempty(df.inflight),
         df.pending_count[],
-        df.max_concurrent_djps,
+        df.max_concurrent_djps[],
         items,
     )
 end
