@@ -127,6 +127,13 @@ end
 
 # ── Shared helpers ──────────────────────────────────────────────────────────
 
+# `children` on a leaf `SyntaxNode` is `nothing`, and error recovery can
+# produce leaf nodes of any kind a rule registers on (prose in a Markdown
+# file parsed as Julia yields e.g. a childless `K"using"`). Rules read
+# children through this helper so a leaf comes back as "no children" instead
+# of a `MethodError` on `nothing`.
+_children(node::SyntaxNode) = something(children(node), ())
+
 _op_symbol(node) = kind(node) === K"Identifier" && node.val isa Symbol ? node.val : nothing
 
 # `_range(node)`, minus leading whitespace. JuliaSyntax attributes the trivia
@@ -148,7 +155,7 @@ end
 # form (`@show x` — first child is the `MacroName`) and the qualified form
 # (`Base.@show x` — first child is a `K"."` whose last child is the name).
 function _macro_name(node::SyntaxNode)
-    cs = children(node)
+    cs = _children(node)
     isempty(cs) && return nothing
     c = cs[1]
     if kind(c) === K"." && !JuliaSyntax.is_leaf(c)

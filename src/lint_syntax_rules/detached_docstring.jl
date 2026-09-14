@@ -40,7 +40,7 @@ end
 # `$` can make the text anything, so an interpolated string is never classified.
 function _literal_value(node::SyntaxNode)
     io = IOBuffer()
-    for c in children(node)
+    for c in _children(node)
         kind(c) === K"String" && c.val isa AbstractString || return nothing
         print(io, c.val)
     end
@@ -58,7 +58,7 @@ const _DETACHED_DOCSTRING_MESSAGE = "A docstring must be immediately followed by
 
 function _check_detached_docstring(emit!, node, _ctx)
     _is_docable_container(node) || return nothing
-    for c in children(node)
+    for c in _children(node)
         kind(c) === K"string" && _looks_like_docstring(c) &&
             emit!(_node_range(c), _DETACHED_DOCSTRING_MESSAGE)
     end
