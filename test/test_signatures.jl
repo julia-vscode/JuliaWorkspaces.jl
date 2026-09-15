@@ -746,3 +746,52 @@ end
     result = get_signature_help(jw, uri, idx)
     @test length(result.signatures) > 62
 end
+
+@testitem "Signatures: active parameter follows the cursor" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    src = """
+    f(aaa, bbb, ccc) = aaa
+    g(x) = x
+    f(111, 222, 333)
+    f(g(1), 222, 333)
+    """
+
+    uri = URI("file:///sigactive/s.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+
+    # `get_signature_help` takes a 1-based string index, which names the
+    # character AFTER the cursor - so `call_start + n` puts the cursor right
+    # after the n-th character of the call.
+    call = first(findfirst("f(111, 222, 333)", src))
+    at(n) = get_signature_help(jw, uri, call + n)
+
+    # Every position within one argument reports that argument, and a position
+    # on a comma has already moved on to the next one. Counting all of the
+    # call's commas instead made every one of these report the last parameter.
+    @test at(2).active_parameter == 0   # f(|111, 222, 333)
+    @test at(3).active_parameter == 0   # f(1|11, 222, 333)
+    @test at(5).active_parameter == 0   # f(111|, 222, 333)
+    @test at(6).active_parameter == 1   # f(111,| 222, 333)
+    @test at(7).active_parameter == 1   # f(111, |222, 333)
+    @test at(10).active_parameter == 1  # f(111, 222|, 333)
+    @test at(11).active_parameter == 2  # f(111, 222,| 333)
+    @test at(15).active_parameter == 2  # f(111, 222, 333|)
+
+    # Each of them offers the one signature, rather than filtering it out.
+    for n in (2, 3, 5, 6, 7, 10, 11, 15)
+        @test only(at(n).signatures).label == "f(aaa, bbb, ccc)"
+    end
+
+    # A nested call owns the positions inside it: the cursor in `g(1)` is at
+    # `g`'s only argument, and the position after that argument is back at `f`'s
+    # second one.
+    nested = first(findfirst("f(g(1), 222, 333)", src))
+    nested_at(n) = get_signature_help(jw, uri, nested + n)
+    @test only(nested_at(4).signatures).label == "g(x)"   # f(g(|1), 222, 333)
+    @test nested_at(4).active_parameter == 0
+    @test only(nested_at(8).signatures).label == "f(aaa, bbb, ccc)"  # f(g(1), |222, …)
+    @test nested_at(8).active_parameter == 1
+end
