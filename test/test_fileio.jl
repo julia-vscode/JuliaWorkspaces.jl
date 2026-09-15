@@ -82,7 +82,7 @@ end
     mktempdir() do dir
         write(joinpath(dir, "a.jl"), "a() = 1\n")
 
-        for skipped in (".git", ".svn", ".hg", "node_modules")
+        for skipped in (".git", ".svn", ".hg", ".pixi", ".venv", "node_modules")
             skipped_dir = joinpath(dir, skipped, "nested")
             mkpath(skipped_dir)
             write(joinpath(skipped_dir, "b.jl"), "b() = 2\n")
