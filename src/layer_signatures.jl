@@ -60,14 +60,29 @@ end
 """
     _fcall_arg_number(x)
 
-Count which argument position the cursor is at within a function call.
+Which argument position the cursor is at within a function call, as a 0-based
+index. `x` is the call child the cursor sits in (`_get_expr`), so the position is
+the number of the call's commas that come BEFORE `x` in source order - plus `x`
+itself when it is a comma, since a cursor sitting on the comma of `f(a,| b)` has
+already moved on to the second argument.
+
+Counting every comma of the call instead - as this once did - reported the LAST
+parameter as active wherever the cursor was (#327).
 """
 function _fcall_arg_number(x)
-    if CSTParser.headof(x) === :LPAREN
-        0
-    else
-        sum(CSTParser.headof(a) === :COMMA for a in CSTParser.parentof(x).trivia)
+    parent = CSTParser.parentof(x)
+    parent isa CSTParser.EXPR || return 0
+    n = 0
+    # Iterating an EXPR yields args and trivia interleaved in source order, so
+    # the commas seen before `x` are exactly the ones the cursor has passed.
+    for a in parent
+        CSTParser.headof(a) === :COMMA && (n += 1)
+        a === x && return n
     end
+    # `x` is not among the call's children - it always should be, since the
+    # caller resolved the call as its parent. No position can be attributed, so
+    # stay at the first parameter rather than guessing the last.
+    return 0
 end
 
 """
