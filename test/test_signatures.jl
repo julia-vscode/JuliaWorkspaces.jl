@@ -795,3 +795,43 @@ end
     @test only(nested_at(8).signatures).label == "f(aaa, bbb, ccc)"  # f(g(1), |222, …)
     @test nested_at(8).active_parameter == 1
 end
+
+@testitem "Signatures: a `using`-imported external callee resolves to its store" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    # An unqualified name brought in from another module resolves to an
+    # `:external_symbol` TreeRef, which the tree path looked up in the WORKSPACE
+    # inventory - empty for a module the workspace does not define, so signature
+    # help came up blank. The qualified spelling, which resolves straight to the
+    # store, worked, and that asymmetry is what users saw
+    # (julia-vscode/julia-vscode#4210).
+    src = """
+    module Foo
+    using Base.Iterators
+    partition([1, 2], 1)
+    end
+    """
+    uri = URI("file:///sigusing/Foo.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(src, "julia")))
+    result = get_signature_help(jw, uri, findfirst("partition(", src)[end])
+    @test !isempty(result.signatures)
+    @test any(s -> occursin("partition(c, n::Integer)", s.label), result.signatures)
+
+    # A callee the WORKSPACE defines in a sibling file is a genuine tree item and
+    # must keep taking the inventory path.
+    entry = """
+    module Bar
+    include("a.jl")
+    include("b.jl")
+    end
+    """
+    b_src = "helper(1, 2)\n"
+    jw2 = JuliaWorkspace()
+    add_file!(jw2, TextFile(URI("file:///sigusing2/src/Bar.jl"), SourceText(entry, "julia")))
+    add_file!(jw2, TextFile(URI("file:///sigusing2/src/a.jl"), SourceText("helper(alpha, beta) = alpha\n", "julia")))
+    add_file!(jw2, TextFile(URI("file:///sigusing2/src/b.jl"), SourceText(b_src, "julia")))
+    tree_result = get_signature_help(jw2, URI("file:///sigusing2/src/b.jl"), findfirst("helper(", b_src)[end])
+    @test only(tree_result.signatures).label == "helper(alpha, beta)"
+end
