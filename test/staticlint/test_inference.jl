@@ -704,6 +704,55 @@ end
     end
 end
 
+@testitem "tuple-destructure arg never takes the whole tuple type (#288)" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: bindingof, headof, Binding
+    CSTParser = JuliaWorkspaces.CSTParser
+    walk(f, x) = (f(x); x.args !== nothing && foreach(a -> walk(f, a), x.args))
+
+    function arg_types(src)
+        (cst, meta_dict) = parse_and_pass(src)
+        types = Dict{String,Any}()
+        walk(cst) do x
+            if headof(x) === :IDENTIFIER
+                b = bindingof(x, meta_dict)
+                b isa Binding && (types[CSTParser.valof(x)] = b.type)
+            end
+        end
+        return types
+    end
+
+    # `NTuple{N,T}` gives EVERY element a `T`, whatever its position. Falling
+    # through to the plain declaration path instead stamped the whole
+    # `NTuple{2,Vector}` onto `a` and `b`, so `pop!(a)` was reported as
+    # `No method matching pop!(::Tuple{Vararg{T,N}})` (#288).
+    types = arg_types("foo!((a, b)::NTuple{2,Vector}) = pop!(a) + pop!(b)")
+    @test types["a"].name.name.name == :Array
+    @test types["b"].name.name.name == :Array
+
+    types = arg_types("bar((a, b)::NTuple{2,Vector{Float64}}) = pop!(a) + pop!(b)")
+    @test types["a"].name.name.name == :Array
+    @test types["b"].name.name.name == :Array
+
+    # An annotation whose components can't be read off the syntax - an alias
+    # here - leaves the elements UNTYPED. The whole tuple type is never a
+    # correct answer for an element, so a wrong type is worse than none.
+    types = arg_types("const MyPair = NTuple{2,Vector}
+qux((a, b)::MyPair) = pop!(a) + pop!(b)")
+    @test types["a"] === nothing
+    @test types["b"] === nothing
+
+    # A `Vararg` param can't be mapped by position either.
+    types = arg_types("vrg((a, b)::Tuple{Vararg{Vector}}) = pop!(a) + pop!(b)")
+    @test types["a"] === nothing
+    @test types["b"] === nothing
+
+    # ... while a plain positional `Tuple{...}` keeps mapping as before.
+    # (`Float64` rather than `Int`, whose store name is `Int32` on 32-bit.)
+    types = arg_types("baz((a, b)::Tuple{Vector,Float64}) = pop!(a) + b")
+    @test types["a"].name.name.name == :Array
+    @test types["b"].name.name.name == :Float64
+end
+
 @testitem "bounded Vararg{T,N} matching (#422)" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: func_nargs, match_method, ExternalEnv, errorof, IncorrectCallArgs
     using JuliaWorkspaces.SymbolServer: MethodStore, FakeTypeName, FakeTypeofVararg, VarRef, EnvStore

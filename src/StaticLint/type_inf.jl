@@ -20,24 +20,37 @@ function settype!(b::Binding, tr::TreeRef, state=nothing)
     return
 end
 
-# `(a, b, …)::Tuple{T1, T2, …}` (a typed positional destructure, e.g. a function
-# arg `(file, line)::Tuple{AbstractString, Any}`): each element must take its
-# POSITIONAL parameter type, not the whole tuple type. Without this, every
-# element was assigned `Tuple{...}` itself. Returns true when it set a type;
-# falls back (returns false) for anything not a plain positional `Tuple{...}`
-# match — `Vararg`/`NTuple` params, an out-of-range index, or a non-identifier
-# element (e.g. a nested tuple) — leaving the caller's normal path to run.
+# `(a, b, …)::Tuple{T1, T2, …}` / `::NTuple{N, T}` (a typed positional
+# destructure, e.g. a function arg `(file, line)::Tuple{AbstractString, Any}`):
+# each element must take ITS OWN component type, not the whole tuple type.
+# Without this, every element was assigned the `Tuple{...}` itself. Returns true
+# when it set a type; falls back (returns false) for anything it cannot map — a
+# `Vararg` param, an out-of-range index, an annotation that is not a literal
+# `Tuple`/`NTuple` curly, or a non-identifier element (e.g. a nested tuple) — in
+# which case the caller leaves the element untyped.
 function _infer_tuple_decl_element!(binding, lhs, ann, state, scope)
-    (iscurly(ann) && isidentifier(ann.args[1]) && valofid(ann.args[1]) == "Tuple") || return false
+    (iscurly(ann) && isidentifier(ann.args[1])) || return false
+    lhs.args === nothing && return false
     name = binding.name
     isidentifier(name) || return false
     nm = valofid(name)
     idx = findfirst(a -> isidentifier(a) && valofid(a) == nm, lhs.args)
     idx === nothing && return false
-    # curly args are [Tuple, T1, T2, …], so the i-th element's param is ann.args[i+1]
-    pidx = idx + 1
-    pidx <= length(ann.args) || return false
-    t = ann.args[pidx]
+
+    head = valofid(ann.args[1])
+    t = if head == "Tuple"
+        # curly args are [Tuple, T1, T2, …], so the i-th element's param is ann.args[i+1]
+        pidx = idx + 1
+        pidx <= length(ann.args) || return false
+        ann.args[pidx]
+    elseif head == "NTuple"
+        # curly args are [NTuple, N, T] and every element is a `T`, so the
+        # element's position does not matter — only that it IS an element.
+        length(ann.args) == 3 || return false
+        ann.args[3]
+    else
+        return false
+    end
     # a `Vararg{…}` param spans a variable number of elements — can't map by position
     (iscurly(t) && isidentifier(t.args[1]) && valofid(t.args[1]) == "Vararg") && return false
     infer_type_decl(binding, t, state, scope)
@@ -67,8 +80,15 @@ function infer_type(binding::Binding, scope, state)
                 end
             elseif binding.val.head isa EXPR && valof(binding.val.head) == "::"
                 lhs = binding.val.args[1]
-                if CSTParser.istuple(lhs) && _infer_tuple_decl_element!(binding, lhs, binding.val.args[2], state, scope)
-                    # `(a, b, …)::Tuple{T1, T2, …}` positional destructure handled below
+                if CSTParser.istuple(lhs)
+                    # `(a, b, …)::T` destructures, so an element's type is a
+                    # COMPONENT of `T` and never `T` itself.
+                    # `_infer_tuple_decl_element!` maps the components it can; for
+                    # everything else the element stays UNTYPED, because stamping
+                    # the whole annotation on it is always wrong — it made the `a`
+                    # of `foo!((a, b)::NTuple{2,Vector})` look like a tuple and
+                    # false-flagged `pop!(a)` as a method error (#288).
+                    _infer_tuple_decl_element!(binding, lhs, binding.val.args[2], state, scope)
                 else
                     infer_type_decl(binding, state, scope)
                 end
