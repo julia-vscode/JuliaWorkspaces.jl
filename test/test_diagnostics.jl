@@ -1346,6 +1346,57 @@ end
     @test !any(d -> occursin("could not be indexed", d.message) && occursin("Inner", d.message), diags)
 end
 
+@testitem "unresolved import: a submodule the cache records as a reference to another package resolves" begin
+    using JuliaWorkspaces.URIs2: URI
+    using JuliaWorkspaces.SymbolServer: Package, ModuleStore, VarRef, FunctionStore, MethodStore
+
+    # CUDA's cache holds `CUSPARSE => VarRef(cuSPARSE)`: the submodule is
+    # another package of the environment. `using CUDA.CUSPARSE` must follow
+    # the reference instead of reporting `CUSPARSE` unresolved.
+    cuda_uuid = Base.UUID("33333333-3333-3333-3333-333333333333")
+    sparse_uuid = Base.UUID("44444444-4444-4444-4444-444444444444")
+    cuda_tree = "3333333333333333333333333333333333333333"
+    sparse_tree = "4444444444444444444444444444444444444444"
+    sparse_ms = ModuleStore(VarRef(nothing, :CuSparse), Dict{Symbol,Any}(), "", true, [:spmv], Symbol[])
+    sparse_ms.vals[:spmv] = FunctionStore(VarRef(VarRef(nothing, :CuSparse), :spmv), MethodStore[], "", VarRef(VarRef(nothing, :CuSparse), :spmv), true)
+    cuda_ms = ModuleStore(VarRef(nothing, :Cuda), Dict{Symbol,Any}(), "", true, Symbol[], Symbol[])
+    cuda_ms.vals[:Sparse] = VarRef(nothing, :CuSparse)
+
+    project = """
+    [deps]
+    Cuda = "33333333-3333-3333-3333-333333333333"
+    """
+    manifest = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [[deps.Cuda]]
+    deps = ["CuSparse"]
+    uuid = "33333333-3333-3333-3333-333333333333"
+    git-tree-sha1 = "$cuda_tree"
+    version = "1.0.0"
+
+    [[deps.CuSparse]]
+    uuid = "44444444-4444-4444-4444-444444444444"
+    git-tree-sha1 = "$sparse_tree"
+    version = "1.0.0"
+    """
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///gpu/Project.toml"), SourceText(project, "toml")))
+    add_file!(jw, TextFile(URI("file:///gpu/Manifest.toml"), SourceText(manifest, "toml")))
+    fileuri = URI("file:///gpu/gputests.jl")
+    add_file!(jw, TextFile(fileuri, SourceText("using Cuda.Sparse\nusing Cuda.Sparse: spmv\nf() = spmv()\n", "julia")))
+    JuliaWorkspaces.set_v2_enabled!(jw, true)
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+    JuliaWorkspaces.set_input_package_metadata!(jw.runtime, :Cuda, cuda_uuid, v"1.0.0", cuda_tree, Package("Cuda", cuda_ms, cuda_uuid, nothing))
+    JuliaWorkspaces.set_input_package_metadata!(jw.runtime, :CuSparse, sparse_uuid, v"1.0.0", sparse_tree, Package("CuSparse", sparse_ms, sparse_uuid, nothing))
+
+    diags = get_diagnostic(jw, fileuri)
+    @test !any(d -> d.code === :unresolved_import, diags)
+    @test !any(d -> d.code === :missing_reference, diags)
+end
+
 @testitem "unresolved import: as-aliased imports are flagged" begin
     using JuliaWorkspaces.URIs2: URI
 
@@ -1912,20 +1963,24 @@ end
     @test any(d -> occursin("JSON", d.message), new)  # the real-package import now flags
 end
 
-@testitem "derived_julia_files admits untitled Julia buffers, not markdown" begin
+@testitem "derived_julia_files admits untitled Julia buffers and markdown buffers" begin
     using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText
     using JuliaWorkspaces.URIs2: URI
 
     jw = JuliaWorkspace()
     jl = URI("untitled:Untitled-1")
     md = URI("untitled:Untitled-2")
+    toml = URI("untitled:Untitled-3")
     add_file!(jw, TextFile(jl, SourceText("x = 1\n", "julia")))
     add_file!(jw, TextFile(md, SourceText("# hi\n", "markdown")))
+    add_file!(jw, TextFile(toml, SourceText("a = 1\n", "toml")))
 
     julia_files = JuliaWorkspaces.derived_julia_files(jw.runtime)
 
     @test jl in julia_files
-    @test !(md in julia_files)
+    # Markdown buffers are analyzed through their Julia view (layer_markdown.jl).
+    @test md in julia_files
+    @test !(toml in julia_files)
 
     # value-stable language query
     @test JuliaWorkspaces.derived_file_language_id(jw.runtime, jl) == "julia"
@@ -1946,10 +2001,11 @@ end
 
     julia_files = JuliaWorkspaces.derived_julia_files(jw.runtime)
 
-    # Root admission agrees with `_is_julia_uri` (the diagnostics gate): the raw
-    # `.jl`-suffix no longer decides it.
+    # Root admission agrees with `_is_julia_analysis_uri` (the diagnostics
+    # gate): the raw `.jl`-suffix no longer decides it. A `.jl`-suffixed buffer
+    # tagged markdown is not *Julia*, but it is admitted as a markdown root.
     @test upper in julia_files
-    @test !(untitled_jl_md in julia_files)
+    @test untitled_jl_md in julia_files
     @test untitled_julia in julia_files
     @test JuliaWorkspaces._is_julia_uri(jw.runtime, upper)
     @test !JuliaWorkspaces._is_julia_uri(jw.runtime, untitled_jl_md)
@@ -1977,8 +2033,9 @@ end
 
     uri = URI("untitled:Untitled-2")
     jw = JuliaWorkspace()
-    # Content that is a Julia syntax error but the buffer is markdown: it must
-    # not be parsed as Julia, so no diagnostics.
+    # Content that is a Julia syntax error but the buffer is markdown: only
+    # fenced Julia chunks are parsed as Julia, and prose is blanked in the
+    # Julia view, so no diagnostics.
     add_file!(jw, TextFile(uri, SourceText("function foo() end begin", "markdown")))
 
     diags = get_diagnostic(jw, uri)
@@ -2419,6 +2476,63 @@ end
     @test !any(d -> d.code === :environment_errors, pkg_diags)
 end
 
+@testitem "environment_errors: a failed test env lands on the deved package's own Project.toml (v2)" begin
+    using JuliaWorkspaces: JuliaWorkspace, DynamicIndexingOnly, TextFile, SourceText,
+        _add_file!, process_from_dynamic, get_diagnostic,
+        WatchTestEnvironmentKey, FailedResult, input_dynamic_failure_messages
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
+
+    # A monorepo root whose manifest devs `lib/Sub`; Sub's test env is
+    # materialized in the root (`_test_environment_key`), so the failure key
+    # names the root — but the diagnostic belongs to Sub's project file, not
+    # to the root's and not to the other deved package's.
+    dir = uri2filepath(filepath2uri(mktempdir()))
+    sub = joinpath(dir, "lib", "Sub")
+    other = joinpath(dir, "lib", "Other")
+    mkpath(joinpath(dir, "src")); mkpath(joinpath(sub, "src")); mkpath(joinpath(other, "src"))
+    files = [
+        joinpath(dir, "Project.toml") => ("name = \"Root\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d1\"\nversion = \"1.0.0\"\n", "toml"),
+        joinpath(dir, "Manifest.toml") => ("""
+        julia_version = "1.12.0"
+        manifest_format = "2.0"
+        project_hash = "x"
+
+        [[deps.Other]]
+        path = "lib/Other"
+        uuid = "6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d3"
+        version = "0.1.0"
+
+        [[deps.Sub]]
+        path = "lib/Sub"
+        uuid = "6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d2"
+        version = "0.1.0"
+        """, "toml"),
+        joinpath(dir, "src", "Root.jl") => ("module Root end\n", "julia"),
+        joinpath(sub, "Project.toml") => ("name = \"Sub\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d2\"\nversion = \"0.1.0\"\n", "toml"),
+        joinpath(sub, "src", "Sub.jl") => ("module Sub end\n", "julia"),
+        joinpath(other, "Project.toml") => ("name = \"Other\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9d3\"\nversion = \"0.1.0\"\n", "toml"),
+        joinpath(other, "src", "Other.jl") => ("module Other end\n", "julia"),
+    ]
+
+    jw = JuliaWorkspace(dynamic=DynamicIndexingOnly, store_path=mktempdir())
+    set_v2_enabled!(jw, true)
+    for (path, (content, lang)) in files
+        write(path, content)
+        _add_file!(jw, TextFile(filepath2uri(path), SourceText(content, lang)))
+    end
+
+    key = WatchTestEnvironmentKey(dir, "Sub", UInt64(1))
+    message = "Failed to resolve the test environment of package 'Sub' at $dir: Cannot locate the source of package Sub."
+    put!(jw.dynamic_feature.out_channel, FailedResult(key, message))
+    process_from_dynamic(jw)
+    @test input_dynamic_failure_messages(jw.runtime)[key] == message
+
+    env_msgs(path) = [d.message for d in get_diagnostic(jw, filepath2uri(path)) if d.code === :environment_errors]
+    @test env_msgs(joinpath(sub, "Project.toml")) == [message]
+    @test isempty(env_msgs(joinpath(dir, "Project.toml")))
+    @test isempty(env_msgs(joinpath(other, "Project.toml")))
+end
+
 @testitem "env gating: test-environment keys agree between producer and consumers" begin
     using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, _add_file!,
         _set_active_project!, derived_package, derived_required_dynamic_projects,
@@ -2510,6 +2624,99 @@ end
     # ...and every test-env item in the required set is one of those keys.
     @test Set(k for k in required if k isa WatchTestEnvironmentKey) ==
         Set(key_of(dir) for dir in (own_dir, bare_dir, deved_dir))
+end
+
+# ──────────────────────────────────────────────────────────────────────
+# Undefined exports (Aqua.jl `test_undefined_exports` parity): an
+# `export`/`public` of a name that is defined nowhere is a missing reference.
+# ──────────────────────────────────────────────────────────────────────
+
+@testitem "missing_reference covers undefined exports and publics" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "UndefExports"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee1234"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    # `missing_reference` is off in the default preset (false-positive-driven
+    # demotion); this item is about coverage, not the preset, so switch it on.
+    lint_toml = """
+    [rules]
+    missing_reference = "warning"
+    """
+
+    function export_diags(source)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///ue/Project.toml"), SourceText(project_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///ue/Manifest.toml"), SourceText(manifest_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///ue/JuliaLint.toml"), SourceText(lint_toml, "toml")))
+        uri = URI("file:///ue/src/UndefExports.jl")
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+        JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)
+        return get_diagnostic(jw, uri), source
+    end
+
+    # Aqua's PkgWithUndefinedExports fixture: `export undefined_name`.
+    diags, source = export_diags("""
+    module UndefExports
+
+    export undefined_name
+
+    end
+    """)
+    ds = filter(d -> d.code === :missing_reference, diags)
+    @test length(ds) == 1
+    @test source[first(ds[1].range):last(ds[1].range)-1] == "undefined_name"
+
+    # `public` of an undefined name is flagged the same way.
+    diags, source = export_diags("""
+    module UndefExports
+
+    public undefined_name
+
+    end
+    """)
+    ds = filter(d -> d.code === :missing_reference, diags)
+    @test length(ds) == 1
+    @test source[first(ds[1].range):last(ds[1].range)-1] == "undefined_name"
+
+    # Exports of defined names (including from a submodule) are fine.
+    diags, _ = export_diags("""
+    module UndefExports
+
+    f() = 1
+    export f
+
+    module Sub
+    g() = 1
+    export g
+    end
+
+    end
+    """)
+    @test !any(d -> d.code === :missing_reference, diags)
+
+    # An undefined export in a submodule is caught too.
+    diags, source = export_diags("""
+    module UndefExports
+
+    module Sub
+    export missing_in_sub
+    end
+
+    end
+    """)
+    ds = filter(d -> d.code === :missing_reference, diags)
+    @test length(ds) == 1
+    @test source[first(ds[1].range):last(ds[1].range)-1] == "missing_in_sub"
 end
 
 @testitem "environment_errors: a failed test env lands on the deved package's own Project.toml" begin

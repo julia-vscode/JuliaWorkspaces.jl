@@ -136,14 +136,17 @@ end
 
 Salsa.@derived function derived_testitems(rt, uri)
     @debug "derived_testitems" uri=uri
+    input_v2_enabled(rt) && return derived_testitems_v2(rt, uri)
 
-    # Only Julia documents carry test items. This per-file query can be handed
-    # any workspace URI (the LS publishes for every changed file), so gate here
-    # as `derived_diagnostics` does; `derived_all_testitems` already iterates
-    # `derived_julia_files` only. Without this a Markdown file goes through the
-    # fused Julia parse, and prose that happens to parse (`# Heading` is a
-    # comment) can even yield test items the whole-workspace query never reports.
-    if !_is_julia_uri(rt, uri)
+    # Only Julia analysis sources carry test items: Julia documents, plus
+    # markdown documents, whose Julia view (prose blanked, fences verbatim) is
+    # what parses here. This per-file query can be handed any workspace URI
+    # (the LS publishes for every changed file), so gate as
+    # `derived_diagnostics` does; `derived_all_testitems` already iterates
+    # `derived_julia_files` only. Without this a TOML or plain-text file goes
+    # through the fused Julia parse and can even yield test items the
+    # whole-workspace query never reports.
+    if !_is_julia_analysis_uri(rt, uri)
         return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
     end
 
@@ -154,7 +157,11 @@ Salsa.@derived function derived_testitems(rt, uri)
         return TestDetails(TestItemDetail[], TestSetupDetail[], TestErrorDetail[])
     end
 
-    text_file = derived_text_file_content(rt, uri)
+    # Code slices come from the Julia view, not the raw content: for a
+    # markdown document the two only differ when an unterminated test item
+    # swallows the prose between two fences, and the code sent to the test
+    # process must be the blanked view the parse saw, never raw prose.
+    text = derived_julia_source_view(rt, uri)
 
     # Detection comes out of the fused parse (layer_parse_products.jl); the
     # parse is shared with syntax diagnostics and the syntax lint tier.
@@ -269,19 +276,19 @@ Salsa.@derived function derived_testitems(rt, uri)
             uri,
             item_ids[i],
             ti.name,
-            text_file.content.content[ti.code_range],
+            text[ti.code_range],
             ti.range,
             ti.code_range,
             ti.option_default_imports,
             ti.option_tags,
             ti.option_setup,
-            ti.option_skip isa Bool ? ti.option_skip : text_file.content.content[ti.option_skip]
+            ti.option_skip isa Bool ? ti.option_skip : text[ti.option_skip]
             ) for (i,ti) in enumerate(testitems)],
         [TestSetupDetail(
             uri,
             i.name,
             i.kind,
-            text_file.content.content[i.code_range],
+            text[i.code_range],
             i.range,
             i.code_range
             ) for i in testsetups],

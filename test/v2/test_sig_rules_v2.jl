@@ -1,0 +1,253 @@
+# The signature rules takeover: `type_piracy` (NotEqDef + import-then-extend)
+# and `invalid_type_declaration` (lint_lowering_rules.jl). Projectless
+# workspaces are env-ready and resolve against the core-only env.
+
+@testsnippet SigRulesWS begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!,
+        set_v2_enabled!
+    using JuliaWorkspaces.URIs2: URI
+
+    const SR_URI = URI("file:///sr/src/Root.jl")
+
+    function sr_workspace(src::String; flag=true)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(SR_URI, SourceText(src, "julia")))
+        flag && set_v2_enabled!(jw, true)
+        return jw
+    end
+
+    sr_diags(src, code; flag=true) =
+        filter(d -> d.code === code, get_diagnostic(sr_workspace(src; flag), SR_URI))
+end
+
+@testitem "sig rules: NotEqDef" setup=[SigRulesWS] begin
+    for src in ("!=(a, b) = true\n", "Base.:!=(a, b) = true\n",
+                "function !=(a, b)\n    true\nend\n")
+        ds = sr_diags(src, :type_piracy)
+        @test length(ds) == 1
+        @test occursin("Overload `==` instead", only(ds).message)
+    end
+    @test isempty(sr_diags("==(a, b) = true\n", :type_piracy))
+end
+
+@testitem "sig rules: type piracy" setup=[SigRulesWS] begin
+    # Extending an imported external function with only external types.
+    src = "import Base: push!\npush!(x::Vector, y::Int, z::Int) = x\n"
+    d = only(sr_diags(src, :type_piracy))
+    @test d.message ==
+        "An imported function has been extended without using module defined typed arguments."
+    @test d.source == "JuliaWorkspaces.jl"
+    # Untyped arguments are piracy too (v1 parity).
+    @test !isempty(sr_diags("import Base: push!\npush!(v, x, y, z) = v\n", :type_piracy))
+    # The `import Base.push!` whole-path form counts as an import binding.
+    @test !isempty(sr_diags("import Base.push!\npush!(v, x, y, z) = v\n", :type_piracy))
+
+    # A workspace-owned argument type exempts the method.
+    @test isempty(sr_diags(
+        "import Base: push!\nstruct T end\npush!(x::Vector, y::T) = x\n", :type_piracy))
+    # ...also inside curly parameters.
+    @test isempty(sr_diags(
+        "import Base: push!\nstruct T end\npush!(x::Vector{T}, y) = x\n", :type_piracy))
+    # A where-bound typevar counts as owned (v1's Binding test).
+    @test isempty(sr_diags(
+        "import Base: push!\npush!(x::Vector, y::T) where T = x\n", :type_piracy))
+    # An unresolvable type name declines the whole definition.
+    @test isempty(sr_diags(
+        "import Base: push!\npush!(x::Vector, y::Unknowable) = x\n", :type_piracy))
+    # A plain new function (nothing imported) is not piracy.
+    @test isempty(sr_diags("mine(x::Vector, y::Int) = x\n", :type_piracy))
+    # Flag off: nothing.
+    @test isempty(sr_diags("import Base: push!\npush!(v, x, y, z) = v\n", :type_piracy;
+                           flag=false))
+end
+
+@testitem "sig rules: invalid type declaration" setup=[SigRulesWS] begin
+    msg = "A non-DataType has been used in a type declaration statement."
+    # A literal in type position.
+    @test only(sr_diags("f(x::1) = x\n", :invalid_type_declaration)).message == msg
+    # A workspace function used as a type.
+    @test !isempty(sr_diags("g() = 1\nf(x::g) = x\n", :invalid_type_declaration))
+    # A struct declared inside a top-level assignment's `begin` block (a
+    # Pluto cell, PlutoUI's `local result = begin … struct Slider … end`) is a
+    # module-level type: its later constructor method must not make `::Slider`
+    # a "non-DataType", and assignments inside such a block are globals.
+    src = "begin\n    local result = begin\n        struct Slider{T}\n            v::T\n        end\n        Slider(; v=1) = Slider(v)\n    end\nend\n" *
+          "r2 = begin\n    a2 = 5\n    struct S3 end\n    S3\nend\n" *
+          "f(s::Slider, t::S3) = (s, t, a2)\n"
+    @test isempty(sr_diags(src, :invalid_type_declaration))
+    @test isempty(sr_diags(src, :missing_reference))
+    names = JW.derived_v2_module_names(sr_workspace(src).runtime, SR_URI, String[])
+    @test names["Slider"] === :struct
+    @test names["S3"] === :struct
+    @test haskey(names, "a2")
+    @test !haskey(names, "result")   # `local` at the top level binds no global
+    # An external non-datatype (Base function; the seam's `:datatype` widening
+    # is what keeps `Int` silent).
+    @test !isempty(sr_diags("f(x::sin) = x\n", :invalid_type_declaration))
+    @test !isempty(sr_diags("f(x::Base.sin) = x\n", :invalid_type_declaration))
+    # Real types — workspace and external, qualified included — are silent.
+    @test isempty(sr_diags("""
+    struct T end
+    abstract type A end
+    f(x::T, y::A, z::Int, w::Base.Int, v::AbstractString) = x
+    g(x::Vector{Int}) = x
+    h(x::T2) where T2 = x
+    """, :invalid_type_declaration))
+    # Keyword arguments are covered.
+    @test !isempty(sr_diags("g() = 1\nf(; x::g = 1) = x\n", :invalid_type_declaration))
+    @test isempty(sr_diags("f(; x::Int = 1) = x\n", :invalid_type_declaration))
+    # Alias chains decline.
+    @test isempty(sr_diags("const MyInt = Int\nf(x::MyInt) = x\n", :invalid_type_declaration))
+    # Base Union aliases and `Union where` aliases are types (GenericStore in
+    # the cache; the seam widens them to :datatype).
+    @test isempty(sr_diags("f(x::Base.Callable) = x\n", :invalid_type_declaration))
+    @test isempty(sr_diags("f(x::AbstractVecOrMat) = x\n", :invalid_type_declaration))
+    @test isempty(sr_diags("f(x::StridedMatrix) = x\n", :invalid_type_declaration))
+    @test isempty(sr_diags("f(x::Type) = x\n", :invalid_type_declaration))
+    # Constructor methods on a `const` alias shadow its winner kind with
+    # :function; the raw event stream keeps the alias visible, so the
+    # annotation stays accepted (the FillArrays/Categorical pattern).
+    @test isempty(sr_diags("""
+    const Cat = Int
+    Cat(x, y) = x + y
+    f(v::Cat) = v
+    """, :invalid_type_declaration))
+    # A name this module IMPORTS and then extends with constructor methods
+    # (IJulia's `import IJulia: Comm` + `Comm(target, …) = …`): the local
+    # events are all function-like, but the type lives at the import target.
+    @test isempty(sr_diags("""
+    import Base: Set
+    Set(a, b, c) = Set([a, b, c])
+    f(s::Set) = s
+    """, :invalid_type_declaration))
+    # A name brought in from another workspace module is unknown here — accept.
+    @test isempty(sr_diags("""
+    module Inner
+    g() = 1
+    export g
+    end
+    using .Inner
+    f(x::g) = x
+    """, :invalid_type_declaration))
+    # The range points at the declaration (map ranges may keep trailing
+    # trivia).
+    src = "f(x::1) = x\n"
+    d = only(sr_diags(src, :invalid_type_declaration))
+    @test startswith(src[d.range], "x::1")
+end
+
+# Differential over the repo corpus: both rules' messages match v1's, so the
+# key is (rule, count) per file. Zero-v2-only hard gate; v1-only residue
+# (nested defs, alias-chain arms, unresolvable-name piracy) printed for review.
+@testitem "v2 sig rules agree with v1 across the package corpus" begin
+    using JuliaWorkspaces
+    const JW = JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace, TextFile, SourceText, add_file!
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    const RULES = (:type_piracy, :invalid_type_declaration)
+
+    root_dir = pkgdir(JuliaWorkspaces)
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Project.toml")),
+        SourceText(read(joinpath(root_dir, "Project.toml"), String), "toml")))
+    add_file!(jw, TextFile(filepath2uri(joinpath(root_dir, "Manifest.toml")),
+        SourceText("julia_version = \"1.12.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"0\"\n\n[deps]\n", "toml")))
+    uris = JuliaWorkspaces.URIs2.URI[]
+    for sub in ("src", "test")
+        isdir(joinpath(root_dir, sub)) || continue
+        for (d, _, fs) in walkdir(joinpath(root_dir, sub))
+            any(occursin(x, lowercase(d)) for x in ("staticlint", "symbolserver", "packages")) && continue
+            for f in fs
+                endswith(f, ".jl") || continue
+                p = joinpath(d, f)
+                uri = filepath2uri(p)
+                add_file!(jw, TextFile(uri, SourceText(read(p, String), "julia")))
+                push!(uris, uri)
+            end
+        end
+    end
+    @test length(uris) > 50
+    JW.set_v2_enabled!(jw, true)
+
+    v2_only = String[]
+    v1_only = Ref(0)
+    for uri in uris
+        for rule in RULES
+            n1 = count(f -> f.rule_id === rule,
+                       JW.derived_new_static_lint_diagnostics(jw.runtime, uri))
+            n2 = count(f -> f.rule_id === rule,
+                       JW.derived_semantic_lint_findings(jw.runtime, uri))
+            n2 > n1 && push!(v2_only, "$(uri): $(rule) v2=$(n2) v1=$(n1)")
+            n1 > n2 && (v1_only[] += n1 - n2)
+        end
+    end
+    println("sig-rules differential: v1_only=$(v1_only[])")
+    isempty(v2_only) || println("v2-only findings (false-positive candidates):\n  " *
+        join(first(v2_only, 40), "\n  "))
+    @test v2_only == String[]
+end
+
+@testitem "sig rules: round-2 survivors stay silent" setup=[SigRulesWS] begin
+    # `(::Type{X})(args)` is a callable-TYPE constructor: it must not declare
+    # a function named `Type` that shadows `Core.Type` (JLArrays).
+    @test isempty(sr_diags("""
+    struct JLArray{T,N} end
+    (::Type{JLArray{T,N} where T})(x::AbstractArray{S,N}) where {S,N} = 1
+    f(T::Type) = T
+    """, :invalid_type_declaration))
+    # `x::Vararg` is legal even though `Core.Vararg` is not a DataType.
+    @test isempty(sr_diags("f(content::Vararg) = content\n", :invalid_type_declaration))
+    # A definition inside a version-gated branch owns its name on the Julia
+    # it targets: no import-then-extend piracy across branches (DataDeps,
+    # ProgressLogging).
+    @test isempty(sr_diags("""
+    @static if isdefined(Base, :url_filename)
+        using Base: url_filename
+    else
+        url_filename(u::AbstractString) = basename(u)
+    end
+    """, :type_piracy))
+end
+
+@testitem "sig rules: typeof(own function) is an owned type" setup=[SigRulesWS] begin
+    # The ChainRulesCore idiom: `rrule(::typeof(f), x)` for a function `f`
+    # this module defines extends an imported function on a singleton type
+    # the module owns (MLUtils).
+    src = "import ChainRulesCore: rrule\nchunk(x) = x\nrrule(::typeof(chunk), x) = (x, identity)\nrrule(::Type{typeof(chunk)}, x) = (x, identity)\n"
+    @test isempty(sr_diags(src, :type_piracy))
+    # …also nested in a parameter: `Vector{typeof(chunk)}` is a type this
+    # module has a stake in (Mooncake's `CoDual{typeof(f)}` rules).
+    @test isempty(sr_diags("import ChainRulesCore: rrule\nchunk(x) = x\nrrule(::Vector{typeof(chunk)}, x) = (x, identity)\n", :type_piracy))
+    # …but `typeof` of an external function is still piracy.
+    src2 = "import ChainRulesCore: rrule\nrrule(::typeof(Base.sum), x) = (x, identity)\n"
+    @test length(sr_diags(src2, :type_piracy)) == 1
+end
+
+@testitem "sig rules: a string macro in type position is a type" setup=[SigRulesWS] begin
+    # `MIME"text/html"` (PlutoUI ×61 in the corpus) expands to a type.
+    src = "struct Slider end\nBase.show(io::IO, m::MIME\"text/html\", s::Slider) = nothing\n"
+    @test isempty(sr_diags(src, :invalid_type_declaration))
+    @test !isempty(sr_diags("f(x::1) = x\n", :invalid_type_declaration))
+end
+
+@testitem "sig rules: the parent package's names are owned inside an extension" setup=[SigRulesWS] begin
+    project = "name = \"SrPkg\"\nuuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9e1\"\nversion = \"1.0.0\"\n\n[weakdeps]\nBar = \"6b0e2f31-8d55-4f2a-9d10-2b6c5e8f9a22\"\n\n[extensions]\nSrPkgBarExt = \"Bar\"\n"
+    # `Thing` arrives through the parent's exports, `chunk` through a colon
+    # import — both the parent's, both owned here.
+    ext_src = "module SrPkgBarExt\nusing SrPkg\nusing SrPkg: chunk\nimport Base: show, sum\nshow(io::IO, x::Thing) = nothing\nsum(::typeof(chunk), x::Vector{Int}) = 1\nsum(x::Vector{Int}, y::Vector{Int}) = 2\nsum(::Vector{typeof(SrPkg.chunk)}, x::Vector{Int}) = 3\nend\n"
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///srx/Project.toml"), SourceText(project, "toml")))
+    add_file!(jw, TextFile(URI("file:///srx/src/SrPkg.jl"), SourceText("module SrPkg\nexport Thing\nstruct Thing end\nchunk(x) = x\nend\n", "julia")))
+    ext = URI("file:///srx/ext/SrPkgBarExt.jl")
+    add_file!(jw, TextFile(ext, SourceText(ext_src, "julia")))
+    set_v2_enabled!(jw, true)
+    JuliaWorkspaces.set_input_env_ready!(jw.runtime, true)   # the ext-env item would gate otherwise
+    ds = filter(d -> d.code === :type_piracy, get_diagnostic(jw, ext))
+    # `Thing` and `typeof(chunk)` are the parent's: owned. The all-Base
+    # signature is the one piracy.
+    @test length(ds) == 1
+    @test ext_src[first(only(ds).range):last(only(ds).range)-1] == "sum(x::Vector{Int}, y::Vector{Int}) = 2"
+end

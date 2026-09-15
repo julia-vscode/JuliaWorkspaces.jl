@@ -951,6 +951,7 @@ project is active, `new == old` again.
 """
 Salsa.@derived function derived_new_static_lint_diagnostics(rt, uri)
     @debug "derived_new_static_lint_diagnostics" uri=uri
+    input_v2_enabled(rt) && return derived_new_static_lint_diagnostics_v2(rt, uri)
 
     res = Set{LintFinding}()
     for root in derived_roots_for_uri(rt, uri)

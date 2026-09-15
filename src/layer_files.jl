@@ -17,10 +17,11 @@ end
 # is value-stable, so a keystroke in an untitled buffer never invalidates the
 # root set, and a well-formed path answers without querying it at all.
 #
-# Single source of truth for: root admission (`derived_julia_files`), the
-# diagnostics gate, include-target admission, formatting, and the contract
+# Single source of truth for "is pure Julia": include-target admission,
+# formatting, and (widened by `_is_julia_analysis_uri` to markdown documents,
+# see layer_markdown.jl) root admission, the diagnostics gate and the contract
 # `derived_julia_legacy_syntax_tree` enforces. Every entry point that can be
-# handed an arbitrary URI goes through here.
+# handed an arbitrary URI goes through one of the two.
 function _is_julia_uri(rt, uri)
     if uri.scheme == "file"
         path = uri2filepath(uri)
@@ -35,10 +36,15 @@ function _is_julia_uri(rt, uri)
     end
 end
 
+# Julia documents AND markdown documents: a markdown file's Julia view (see
+# layer_markdown.jl) is analyzed exactly like a Julia file, and admitting
+# every markdown file unconditionally — not just those that currently contain
+# a Julia fence — keeps the root set stable under edits (a chunk-less file's
+# view is all whitespace, which parses to an empty file, cheaply).
 Salsa.@derived function derived_julia_files(rt)
     files = derived_text_files(rt)
 
-    return Set{URI}(file for file in files if _is_julia_uri(rt, file))
+    return Set{URI}(file for file in files if _is_julia_analysis_uri(rt, file))
 end
 
 Salsa.@derived function derived_has_file(rt, uri)

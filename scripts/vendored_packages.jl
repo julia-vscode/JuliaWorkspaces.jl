@@ -16,6 +16,10 @@ Every vendored tree: repository-relative prefix => GitHub location.
 between. Adding an entry here and running `update_vendored_packages.jl --apply` vendors
 it.
 """
+# NOT in this list: packages/JuliaSyntax and packages/JuliaLowering, the julia-monorepo
+# subdirectory vendors of the v2 stack. They come from JuliaLang/julia, not a package
+# repository with releases, so `git subtree`/latest-release reconciliation does not apply;
+# packages/VENDOR_JuliaLowering.md documents their refresh procedure and pin.
 const VENDORED = [
     "packages/CancellationTokens"            => "davidanthoff/CancellationTokens.jl",
     "packages/CodeTracking"                  => "timholy/CodeTracking.jl",

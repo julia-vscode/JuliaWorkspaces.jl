@@ -401,6 +401,7 @@ Salsa.@derived function derived_all_include_diagnostics(rt)
 end
 
 Salsa.@derived function derived_include_diagnostics(rt, uri)
+    input_v2_enabled(rt) && return derived_include_diagnostics_v2(rt, uri)
     all_diags = derived_all_include_diagnostics(rt)
 
     return get(all_diags, uri, Diagnostic[])

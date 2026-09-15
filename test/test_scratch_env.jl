@@ -469,3 +469,157 @@ end
 
     @test _snapshot(dir) == before
 end
+
+@testitem "scratch env: the extension env wrapper carries weakdeps and their compat" begin
+    include(joinpath(@__DIR__, "test_scratch_env_helpers.jl"))
+    import Pkg
+
+    uuid = "aaaaaaaa-9999-aaaa-bbbb-cccccccccccc"
+    dir = mktempdir()
+    mkpath(joinpath(dir, "src"))
+    write(joinpath(dir, "Project.toml"), """
+    name = "HasExt"
+    uuid = "$uuid"
+    version = "0.1.0"
+
+    [deps]
+    Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+
+    [weakdeps]
+    Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+    [extensions]
+    HasExtPrintfExt = "Printf"
+
+    [compat]
+    julia = "1.6"
+    Printf = "1"
+    Dates = "1"
+    """)
+    write(joinpath(dir, "src", "HasExt.jl"), "module HasExt end\n")
+    before = _snapshot(dir)
+
+    project_dir = mktempdir()
+    write_extension_env_project(dir, project_dir)
+
+    project = Pkg.Types.read_project(joinpath(project_dir, "Project.toml"))
+
+    if hasfield(Pkg.Types.Project, :weakdeps)
+        # The wrapper's deps are the WEAKDEPS (the triggers to resolve); the
+        # package itself and its regular deps arrive later via `Pkg.develop`.
+        @test project.deps == Dict("Printf" => Base.UUID("de0858da-6303-5e67-8744-51eddeeeb8d7"))
+        # Trigger and julia compat carry over; the regular dep's does not (it
+        # is not part of this wrapper's dep set).
+        @test haskey(project.compat, "Printf")
+        @test haskey(project.compat, "julia")
+        @test !haskey(project.compat, "Dates")
+        # Nameless, like every scratch wrapper.
+        @test project.name === nothing
+        @test project.uuid === nothing
+    else
+        @test isempty(project.deps)
+    end
+
+    # The package folder is only ever read.
+    @test _snapshot(dir) == before
+end
+
+@testitem "child: the scratch fallback sees the real module's unexported macros" begin
+    mod = Module(:ExpansionTextUnderTest2)
+    Base.include(mod, normpath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "expansion_text.jl")))
+    # A package whose unexported macro refuses to run where its type exists
+    # (IrrationalConstants' `@irrational`): the real module fails, the scratch
+    # module — given the macro — succeeds.
+    real = Module(:RealPkg)
+    Core.eval(real, :(macro defconst(name)
+        isdefined(__module__, name) && error("already defined")
+        :(const $(esc(name)) = 1)
+    end))
+    Core.eval(real, :(const twoπ = 1))
+    scratch = Module(:Scratch)
+    @test !isdefined(scratch, Symbol("@defconst"))
+    Base.invokelatest(mod._bind_real_macros!, scratch, real)
+    @test isdefined(scratch, Symbol("@defconst"))
+    @test_throws Exception Base.invokelatest(mod._expand_fully, real, Meta.parse("@defconst twoπ"))
+    ex = Base.invokelatest(mod._expand_fully, scratch, Meta.parse("@defconst twoπ"))
+    @test occursin("const twoπ = 1", string(ex))
+end
+
+@testitem "child: an expansion prints without line nodes so the host can parse it" begin
+    # Base's logging macros leave a LineNumberNode first in an `if` condition;
+    # `string` prints it as `if #= … =#, try`, which does not parse back.
+    mod = Module(:ExpansionTextUnderTest)
+    Base.include(mod, normpath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "expansion_text.jl")))
+    ex = Meta.parse("function f(x)\n    @warn \"careful\" x\n    x\nend")
+    expanded = Base.invokelatest(mod._expand_fully, mod, ex)
+    text = string(expanded)
+    @test !occursin("#=", text)
+    # The logging expansion's `Expr(:isdefined, …)` prints as a `$(Expr(…))`
+    # splice unless rewritten to `@isdefined`.
+    @test !occursin("\$(Expr", text)
+    @test occursin("@isdefined", text)
+    parsed = Meta.parse(text)
+    @test parsed isa Expr && !(parsed.head in (:error, :incomplete))
+    # Inert lowered markers vanish: `@inbounds` leaves no `Expr(:inbounds, …)`.
+    inb = string(Base.invokelatest(mod._expand_fully, mod, Meta.parse("g(a) = @inbounds a[1]")))
+    @test !occursin("\$(Expr", inb)
+    @test Meta.parse(inb) isa Expr
+    # `@test`'s expansion carries `QuoteNode`s of the original expression:
+    # printed as quotes, so the whole expansion parses (and lowers).
+    Core.eval(mod, :(using Test))
+    t = string(Base.invokelatest(mod._expand_fully, mod, Meta.parse("h(T) = @test T == 1")))
+    @test !occursin("QuoteNode", t)
+    @test Meta.parse(t) isa Expr
+    # A `toplevel` result is flattened into a block of expanded statements.
+    Core.eval(mod, :(macro two() Expr(:toplevel, :(a() = 1), :(b() = 2)) end))
+    flat = Base.invokelatest(mod._expand_fully, mod, Meta.parse("@two"))
+    @test flat isa Expr && flat.head === :block && length(flat.args) == 2
+end
+
+@testitem "child: a workspace member loads by identity from the root project" begin
+    # `using Member` from a `[workspace]` root fails (`[deps]` does not name
+    # the member) although the manifest locates it — the expansion context
+    # binds it by PkgId instead, so the real module (and its macros) is found.
+    mod = Module(:WorkspaceMembersUnderTest)
+    Base.include(mod, normpath(joinpath(@__DIR__, "..", "juliadynamicanalysisprocess",
+        "JuliaDynamicAnalysisProcess", "src", "workspace_members.jl")))
+
+    @test Base.invokelatest(mod._bare_import_name, "using Mem") == "Mem"
+    @test Base.invokelatest(mod._bare_import_name, "import Mem") == "Mem"
+    @test Base.invokelatest(mod._bare_import_name, "using Mem: f") === nothing
+    @test Base.invokelatest(mod._bare_import_name, "using ..Mem") === nothing
+
+    root = mktempdir()
+    uuid = "aaaaaaaa-9999-0000-1111-444444444444"
+    write(joinpath(root, "Project.toml"), "[workspace]\nprojects = [\"Mem\"]\n")
+    write(joinpath(root, "Manifest.toml"), """
+    julia_version = "$(VERSION)"
+    manifest_format = "2.0"
+    project_hash = "x"
+
+    [[deps.MemWsMember]]
+    path = "Mem"
+    uuid = "$uuid"
+    version = "0.1.0"
+    """)
+    mkpath(joinpath(root, "Mem", "src"))
+    write(joinpath(root, "Mem", "Project.toml"), "name = \"MemWsMember\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+    write(joinpath(root, "Mem", "src", "MemWsMember.jl"),
+        "module MemWsMember\nmacro twice(x)\n    :(\$(esc(x)) * 2)\nend\nend\n")
+
+    prev = Base.ACTIVE_PROJECT[]
+    Base.ACTIVE_PROJECT[] = joinpath(root, "Project.toml")
+    try
+        @test Base.identify_package("MemWsMember") === nothing
+        id = Base.invokelatest(mod._manifest_pkgid, "MemWsMember")
+        @test id == Base.PkgId(Base.UUID(uuid), "MemWsMember")
+        @test Base.invokelatest(mod._manifest_pkgid, "NoSuchMember") === nothing
+        member = Base.invokelatest(mod._require_from_manifest, "MemWsMember")
+        @test member isa Module && nameof(member) === :MemWsMember
+        @test Base.invokelatest(Core.eval, member, :(@twice 3)) == 6
+    finally
+        Base.ACTIVE_PROJECT[] = prev
+    end
+end

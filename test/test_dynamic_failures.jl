@@ -202,6 +202,25 @@ end
     @test length(launches) == 2
 end
 
+@testitem "Dynamic failures: the first expansion batch of a context gets the loading budget" begin
+    using JuliaWorkspaces: DynamicJuliaProcess, WatchEnvironmentKey, _expansion_batch_timeout!,
+        FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS, DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS
+
+    # Building a context loads its packages (a workspace member may even
+    # precompile), so the first batch per context and child is generous; the
+    # later ones keep the tight budget that contains a hanging macro.
+    @test FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS > DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS
+    key = WatchEnvironmentKey(raw"c:\ws\P", UInt64(1))
+    djp = DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
+    @test _expansion_batch_timeout!(djp, "ctx-a") == FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS
+    @test _expansion_batch_timeout!(djp, "ctx-a") == DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS
+    @test _expansion_batch_timeout!(djp, "ctx-b") == FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS
+    @test _expansion_batch_timeout!(djp, "ctx-b") == DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS
+    # A fresh child (respawned after a kill or a re-key) rebuilds its contexts.
+    djp2 = DynamicJuliaProcess(key, key.project_path, nothing, :watch_environment)
+    @test _expansion_batch_timeout!(djp2, "ctx-a") == FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS
+end
+
 @testitem "Dynamic failures: a Pkg failure is reported as one readable line" begin
     using JuliaWorkspaces: WatchTestEnvironmentKey, WatchEnvironmentKey,
         CreateStandaloneProjectKey, DJPRequestTimeoutException, _humanize_djp_failure

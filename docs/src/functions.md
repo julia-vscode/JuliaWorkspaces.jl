@@ -35,6 +35,8 @@ add_file!
 remove_file!
 remove_all_children!
 set_active_project!
+set_v2_enabled!
+set_macro_expansion!
 set_indirect_file_content!
 clear_indirect_file!
 ```
@@ -82,7 +84,15 @@ get_test_env
 is_ready
 wait_until_ready
 get_update_channel
+set_dynamic_mode!
+get_dynamic_mode
 retry_failed_dynamic_projects!
+set_max_alive_djps!
+set_max_concurrent_djps!
+set_resolve_workspace_environments!
+set_symbolcache!
+set_max_failure_attempts!
+set_djp_request_timeout!
 ```
 
 ## Language features

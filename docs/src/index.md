@@ -69,6 +69,10 @@ wait_until_ready(jw)            # block until background indexing finishes
 diags = get_diagnostics(jw)    # now environment-aware
 ```
 
+The mode can also be switched at any time on a live workspace with
+[`set_dynamic_mode!`](@ref) — the running child processes adjust immediately,
+so hosts can wire it to a user setting without a restart.
+
 ## Documentation map
 
 - [Architecture](architecture.md) — the Salsa query model, the layer structure,
