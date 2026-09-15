@@ -747,9 +747,10 @@ qux((a, b)::MyPair) = pop!(a) + pop!(b)")
     @test types["b"] === nothing
 
     # ... while a plain positional `Tuple{...}` keeps mapping as before.
-    types = arg_types("baz((a, b)::Tuple{Vector,Int}) = pop!(a) + b")
+    # (`Float64` rather than `Int`, whose store name is `Int32` on 32-bit.)
+    types = arg_types("baz((a, b)::Tuple{Vector,Float64}) = pop!(a) + b")
     @test types["a"].name.name.name == :Array
-    @test types["b"].name.name.name == :Int64
+    @test types["b"].name.name.name == :Float64
 end
 
 @testitem "bounded Vararg{T,N} matching (#422)" setup=[shared_static_lint] begin
