@@ -108,13 +108,19 @@ function infer_type(binding::Binding, scope, state)
     end
 end
 
-# Resolve a datatype-denoting external `TreeRef` to its `SymStore` via the env.
-# In the per-file traversal mode a `using`'d name from a sibling file (e.g.
-# `using Base: PkgId`) resolves through the module tree to a `TreeRef`, not to a
-# local `Binding`/store. Walk `getsymbols(env)` by `origin_module` to the
-# `ModuleStore`, then look up `name` (following a `VarRef`). Mirrors hover's
-# external-symbol resolution (`_get_tree_ref_hover`) but stays inside StaticLint.
-# Returns the store (ideally a `DataTypeStore`) or `nothing`.
+# Resolve an external `TreeRef` to its `SymStore` via the env.
+# In the per-file traversal mode a `using`'d name from a sibling file or a
+# dependency (e.g. `using Base: PkgId`, `using Statistics` then `mean`) resolves
+# through the module tree to a `TreeRef`, not to a local `Binding`/store. Walk
+# `getsymbols(env)` by `origin_module` to the `ModuleStore`, then look up `name`
+# (following a `VarRef`). Mirrors hover's external-symbol resolution
+# (`_get_tree_ref_hover`) but stays inside StaticLint. Returns the store (a
+# `DataTypeStore` for type inference, a `FunctionStore` for signature help) or
+# `nothing`.
+#
+# `state` may be a `TraverseState` or a bare `ExternalEnv`: both answer
+# `getsymbols` and `maybe_lookup`, so request-time callers outside a traversal
+# (signature help) can pass the env they already resolved.
 function resolve_treeref_store(tr::TreeRef, state)
     tr.kind === :external_symbol || return nothing
     isempty(tr.origin_module) && return nothing

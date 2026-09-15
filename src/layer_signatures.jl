@@ -119,6 +119,21 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime, root::URI)
     # the old per-file/env path unchanged.
     tr = f_ref isa StaticLint.TreeRef ? f_ref :
         (f_ref isa StaticLint.Binding && f_ref.val isa StaticLint.TreeRef) ? f_ref.val : nothing
+
+    # An `:external_symbol` TreeRef is not a workspace item at all: it is how an
+    # unqualified name brought in from a DEPENDENCY resolves (`using Statistics`,
+    # then `mean(`). Its methods live in the env store, not in the workspace
+    # inventory, so `derived_method_items` finds nothing and signature help came
+    # up empty - while the qualified `Statistics.mean(`, which resolves straight
+    # to the store, worked (julia-vscode#4210). Resolve it to its store and let
+    # the store path below handle it, exactly as the qualified spelling does.
+    if tr !== nothing
+        store = StaticLint.resolve_treeref_store(tr, env)
+        if store isa Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
+            f_ref, tr = store, nothing
+        end
+    end
+
     if tr !== nothing
         _collect_tree_signatures!(sigs, tr, runtime, root)
     else
