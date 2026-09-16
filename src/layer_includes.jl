@@ -276,7 +276,11 @@ end
 function _include_diagnostic(offset, span, code)
     rng = (offset + 1):(offset + span + 1)
     description = StaticLint.LintCodeDescriptions[code]
-    return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl")
+    # The rule id travels on `code` because these findings do not all belong to
+    # the same rule (`ComputedInclude` is `computed_include`, the rest are
+    # `include_errors`), and `derived_diagnostics` has to know which severity to
+    # apply. The `:warning` here is a placeholder that `materialize` replaces.
+    return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl", LINTCODE_TO_RULE[code])
 end
 
 function _collect_include_diagnostics!(rt, uri, stack, visited, guarded_visited, result)

@@ -90,6 +90,11 @@ end
 # in `strict`, and a project can restore any of them with a one-line `[rules]`
 # entry. Re-promote only on sweep evidence, and changelog it: a preset floats,
 # so the change reaches every project that names it.
+#
+# `computed_include` is `:off` in `default` for a different reason: not a
+# measured false-positive rate, but that its finding is not about the user's
+# code at all. `include(srcdir("f.jl"))` is correct Julia; the diagnostic
+# reports that the analyzer cannot follow the include. See its entry below.
 const LINT_RULES = LintRule[
     # ── StaticLint rules gated by a `LintOptions` field ──────────────────────
     # Off in `default`: 93% of sampled findings were false positives (2026-08-12
@@ -176,8 +181,18 @@ const LINT_RULES = LintRule[
             StaticLint.IncludePathContainsNULL,
             StaticLint.FileTooBig,
             StaticLint.FileNotAvailable,
-            StaticLint.ComputedInclude,
         ]),
+    # A computed include path (`include(srcdir("f.jl"))`) is correct Julia: the
+    # finding reports a limit of the analyzer, not a defect in the code. That is
+    # why it is its own rule rather than part of `include_errors` — silencing it
+    # must not cost a project its circular/duplicate/missing-include checking
+    # (julia-vscode#4215). Off outside `strict` because its only consequence is
+    # that `missing_reference` is relaxed in the module, and that rule is itself
+    # `:off` in `default`: by default the message would explain the loss of a
+    # check the project does not have on.
+    LintRule(id = :computed_include, tier = TierWorkspace,
+        severity_default = :off, severity_strict = :warning,
+        codes = [StaticLint.ComputedInclude]),
     # Off in `default`: 78% of sampled findings were false positives, chiefly
     # names minted by `@eval` loops that no static pass can see.
     LintRule(id = :missing_reference, tier = TierSemantic,
