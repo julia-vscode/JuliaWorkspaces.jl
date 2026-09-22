@@ -337,10 +337,11 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         end
 
         # This only skips the semantic pass entirely when every rule it can
-        # emit is off. `include_errors` is excluded from the test — its
-        # findings come from the separate structural pass below, so leaving it
-        # on is no reason to run the (much more expensive) semantic one.
-        if any(enabled(r.id) for r in LINT_RULES if !isempty(r.codes) && r.id !== :include_errors)
+        # emit is off. Only `TierSemantic` rules come from this pass —
+        # `include_errors` and `computed_include` are `TierWorkspace`, produced
+        # by the separate structural pass below, so leaving either on is no
+        # reason to run the (much more expensive) semantic one.
+        if any(enabled(r.id) for r in LINT_RULES if !isempty(r.codes) && r.tier === TierSemantic)
             env_ready = derived_file_env_ready(rt, uri)
             for f in derived_new_static_lint_diagnostics(rt, uri)
                 if !env_ready && _is_env_dependent_finding(f)
@@ -355,12 +356,15 @@ Salsa.@derived function derived_diagnostics(rt, uri)
         foreach(emit_finding!, derived_syntax_lint_findings(rt, uri))
 
         # Include-graph diagnostics (DuplicateInclude / IncludeLoop /
-        # MissingFile) are a purely structural analysis that does not depend on
-        # a project/environment, so they are reported independently of the
-        # semantic static-lint pass above.
-        if enabled(:include_errors)
+        # MissingFile / ComputedInclude) are a purely structural analysis that
+        # does not depend on a project/environment, so they are reported
+        # independently of the semantic static-lint pass above. They span two
+        # rules — each finding carries its own rule id on `code` — so the guard
+        # asks whether EITHER is on and `materialize` drops the findings of the
+        # other.
+        if enabled(:include_errors) || enabled(:computed_include)
             for d in derived_include_diagnostics(rt, uri)
-                emit!(d.range, :include_errors, d.message, d.uri, d.source)
+                emit!(d.range, d.code, d.message, d.uri, d.source)
             end
         end
     end

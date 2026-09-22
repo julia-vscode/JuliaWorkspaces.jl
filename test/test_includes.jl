@@ -424,6 +424,9 @@ end
     root_uri = URI("file:///computedincl/src/CompIncl.jl")
 
     jw = JuliaWorkspace()
+    # `computed_include` is off in the `default` preset (the code it flags is
+    # correct Julia); this suite tests the rule itself, so it asks for it back.
+    add_file!(jw, TextFile(URI("file:///computedincl/JuliaLint.toml"), SourceText("[rules]\ncomputed_include = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///computedincl/Project.toml"), SourceText("""
     name = "CompIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef01"
@@ -446,6 +449,84 @@ end
 
     diags = get_diagnostic(jw, root_uri)
     @test count(d -> contains(d.message, "could not be determined statically"), diags) == 1
+    # The rule id reaches the diagnostic, so the Problems pane names the rule a
+    # user has to configure to silence it (julia-vscode#4215).
+    @test only(filter(d -> contains(d.message, "could not be determined statically"), diags)).code === :computed_include
+end
+
+@testitem "computed include: silent under the default preset, relaxation unaffected" begin
+    using JuliaWorkspaces: derived_module_has_computed_include
+    using JuliaWorkspaces.URIs2: URI
+
+    # `include(srcdir("f.jl"))` (DrWatson) is correct Julia, so out of the box it
+    # says nothing — `computed_include` is `:off` in `default`. The module still
+    # gets the missing-reference relaxation, which does not depend on whether the
+    # explanatory diagnostic is reported (julia-vscode#4215).
+    root_uri = URI("file:///quietincl/src/QuietIncl.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///quietincl/Project.toml"), SourceText("""
+    name = "QuietIncl"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef30"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///quietincl/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module QuietIncl
+    srcdir(parts...) = joinpath(@__DIR__, parts...)
+    include(srcdir("folder", "file.jl"))
+    end
+    """, "julia")))
+
+    @test !any(d -> contains(d.message, "could not be determined statically"), get_diagnostic(jw, root_uri))
+    @test derived_module_has_computed_include(jw.runtime, root_uri, ["QuietIncl"])
+end
+
+@testitem "computed include: silencing it keeps the other include checks" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # The point of giving `ComputedInclude` its own rule: a project can turn the
+    # computed-include notice off without giving up missing/duplicate/circular
+    # include reporting, which used to share the `include_errors` rule
+    # (julia-vscode#4215).
+    root_uri = URI("file:///splitincl/src/SplitIncl.jl")
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///splitincl/JuliaLint.toml"), SourceText("[rules]\ninclude_errors = \"warning\"\ncomputed_include = \"off\"\n", "toml")))
+    add_file!(jw, TextFile(URI("file:///splitincl/Project.toml"), SourceText("""
+    name = "SplitIncl"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef31"
+    version = "0.1.0"
+    """, "toml")))
+    add_file!(jw, TextFile(URI("file:///splitincl/Manifest.toml"), SourceText("""
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """, "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText("""
+    module SplitIncl
+    for f in readdir(@__DIR__)
+        include(f)
+    end
+    include("helper.jl")
+    include("helper.jl")
+    include("really_missing.jl")
+    end
+    """, "julia")))
+    add_file!(jw, TextFile(URI("file:///splitincl/src/helper.jl"), SourceText("const H = 1\n", "julia")))
+
+    msgs = [d.message for d in get_diagnostic(jw, root_uri)]
+    @test !any(contains("could not be determined statically"), msgs)
+    @test count(contains("can not be found"), msgs) == 1
+    @test count(contains("already been included"), msgs) == 1
 end
 
 @testitem "computed include: custom include method definitions are not flagged" begin
@@ -454,6 +535,7 @@ end
     root_uri = URI("file:///customincl/src/CustIncl.jl")
 
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///customincl/JuliaLint.toml"), SourceText("[rules]\ncomputed_include = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///customincl/Project.toml"), SourceText("""
     name = "CustIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef02"
@@ -493,6 +575,7 @@ end
     root_uri = URI("file:///fnincl/src/FnIncl.jl")
 
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///fnincl/JuliaLint.toml"), SourceText("[rules]\ncomputed_include = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///fnincl/Project.toml"), SourceText("""
     name = "FnIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef06"
@@ -628,6 +711,7 @@ end
     root_uri = URI("file:///guardincl/src/GuardIncl.jl")
 
     jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///guardincl/JuliaLint.toml"), SourceText("[rules]\ncomputed_include = \"warning\"\n", "toml")))
     add_file!(jw, TextFile(URI("file:///guardincl/Project.toml"), SourceText("""
     name = "GuardIncl"
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeef20"
@@ -815,7 +899,9 @@ end
     # at run time, so it is no include-graph edge and the target stays a
     # root) ...
     root_uri = URI("file:///rti/src/RtI.jl")
+    lintconfig = TextFile(URI("file:///rti/JuliaLint.toml"), SourceText("[rules]\ncomputed_include = \"warning\"\n", "toml"))
     jw = JuliaWorkspace()
+    add_file!(jw, lintconfig)
     add_file!(jw, TextFile(root_uri, SourceText("""
     module RtI
     function load()
@@ -832,6 +918,7 @@ end
 
     # ... but a literal target that does not exist is a real MissingFile.
     jw2 = JuliaWorkspace()
+    add_file!(jw2, lintconfig)
     add_file!(jw2, TextFile(root_uri, SourceText("function load()\n    include(\"nope.jl\")\nend\n", "julia")))
     set_input_env_ready!(jw2.runtime, true)
     diags2 = get_diagnostic(jw2, root_uri)

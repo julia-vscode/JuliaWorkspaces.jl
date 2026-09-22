@@ -170,16 +170,35 @@ struct DynamicProcessCrashException <: Exception
     key::DJPKey
     exitcode::Union{Int,Nothing}
     output::String
+    termsignal::Union{Int,Nothing}
 end
 
+DynamicProcessCrashException(key::DJPKey, exitcode::Union{Int,Nothing}, output::String) =
+    DynamicProcessCrashException(key, exitcode, output, nothing)
+
 DynamicProcessCrashException(key::DJPKey, exitcode::Union{Int,Nothing}) =
-    DynamicProcessCrashException(key, exitcode, "")
+    DynamicProcessCrashException(key, exitcode, "", nothing)
+
+# Signals that mean the operating system, not the child, ended it. An indexing
+# child instantiates and loads the user's environment, so the memory that gets
+# it killed is the user's project rather than anything here — which is why this
+# never becomes crash telemetry and only changes what the user is told.
+_is_os_kill_signal(termsignal::Union{Int,Nothing}) = termsignal === 9 || termsignal === 15
 
 # `_failure_reason` keeps only the first line for the one-sentence user-facing
 # report, so lead with the summary and let the captured output follow it.
 function Base.showerror(io::IO, err::DynamicProcessCrashException)
-    code = err.exitcode === nothing ? "an unknown code" : "code $(err.exitcode)"
-    print(io, "the indexing child process exited with $code before connecting.")
+    if _is_os_kill_signal(err.termsignal)
+        # Without this the same death read as "exited with code 0", which told
+        # the user nothing and looked like a clean exit that simply failed to
+        # connect.
+        name = err.termsignal === 9 ? "SIGKILL" : "SIGTERM"
+        print(io, "the indexing child process was stopped by the operating system ($name), ",
+            "most likely because it ran out of memory while loading this environment.")
+    else
+        code = err.exitcode === nothing ? "an unknown code" : "code $(err.exitcode)"
+        print(io, "the indexing child process exited with $code before connecting.")
+    end
     isempty(err.output) ||
         print(io, "\nLast output from the child process:\n", err.output)
     return nothing
@@ -419,7 +438,8 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                         # promptly; give the reader task a bounded moment to drain
                         # the output that explains the exit before reporting it.
                         timedwait(() -> istaskdone(output_task), 2.0)
-                        throw(DynamicProcessCrashException(djp.key, jl_process.exitcode, join(recent_output, "\n")))
+                        throw(DynamicProcessCrashException(djp.key, jl_process.exitcode,
+                            join(recent_output, "\n"), jl_process.termsignal))
                     else
                         rethrow(err)
                     end
