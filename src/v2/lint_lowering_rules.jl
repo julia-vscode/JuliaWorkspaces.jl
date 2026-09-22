@@ -2292,9 +2292,10 @@ end
 # ── analysis_boundary ───────────────────────────────────────────────────────
 #
 # One notice per construct the linter cannot see through, so silence about the
-# suppressed rules is never mistaken for a clean bill. Computed includes keep
-# their existing `include_errors`/ComputedInclude notice (v1 machinery, emitted
-# under v2 too); this rule covers the `@eval`/`eval` boundaries, which had none.
+# suppressed rules is never mistaken for a clean bill. Include boundaries are
+# emitted by `layer_include_diagnostics_v2.jl` (a computed include under
+# `computed_include`, else this rule); this producer covers the `@eval`/`eval`
+# boundaries.
 
 # The semantic rules that early-return on the module blindness flags —
 # keep in sync with the `derived_v2_module_has_*` gates in this file.

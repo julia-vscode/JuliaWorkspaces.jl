@@ -3,17 +3,19 @@
 # walk itself is v1's (`derived_file_include_data`: runtime targets, quoted
 # code skipped, `module` bodies scoping duplicates); what differs is the
 # emission: a computed include, or a function-body include whose literal
-# target exists, is an analysis-boundary NOTICE routed to the
-# `analysis_boundary` rule through the diagnostic's `code`, while the
-# include-graph errors stay `include_errors` with StaticLint's codes.
+# target exists, is an analysis-boundary NOTICE carrying its rule id on the
+# diagnostic's `code`, while the include-graph errors stay `include_errors`
+# with StaticLint's codes.
 #
 # `_collect_include_diagnostics_v2!` is `_collect_include_diagnostics!`
 # verbatim except for that code selection.
 
 # The analysis-boundary notices of the v2 include diagnostics. Not StaticLint
-# codes: they are v2's own, routed to the `analysis_boundary` rule by the
-# diagnostic's `code`, while the include-graph errors keep StaticLint's codes
-# and descriptions under `include_errors`.
+# codes: they are v2's own. A runtime include is `analysis_boundary`; a
+# computed include is `computed_include` (v1's rule for it), which
+# `derived_diagnostics_v2` falls back to `analysis_boundary` when only the
+# umbrella rule is on. The include-graph errors keep StaticLint's codes and
+# descriptions under `include_errors`.
 const _INCLUDE_BOUNDARY_NOTICES_V2 = Dict{Symbol,String}(
     :computed => "The include path could not be determined statically. The included file is analyzed without this module's context, and missing_reference, incorrect_call_args, type_piracy, invalid_type_declaration, kw_default_mismatch and incorrect_iter_spec are not applied in this module.",
     :runtime => "This `include` runs inside a function body, so its target is spliced at run time rather than analyzed in this module's context; missing_reference, incorrect_call_args, type_piracy, invalid_type_declaration, kw_default_mismatch and incorrect_iter_spec are not applied in this module.",
@@ -22,7 +24,8 @@ const _INCLUDE_BOUNDARY_NOTICES_V2 = Dict{Symbol,String}(
 function _include_diagnostic_v2(offset, span, code)
     rng = (offset + 1):(offset + span + 1)
     if code isa Symbol
-        return Diagnostic(rng, :warning, _INCLUDE_BOUNDARY_NOTICES_V2[code], nothing, Symbol[], "StaticLint.jl", :analysis_boundary)
+        rule = code === :computed ? :computed_include : :analysis_boundary
+        return Diagnostic(rng, :warning, _INCLUDE_BOUNDARY_NOTICES_V2[code], nothing, Symbol[], "StaticLint.jl", rule)
     end
     description = StaticLint.LintCodeDescriptions[code]
     return Diagnostic(rng, :warning, description, nothing, Symbol[], "StaticLint.jl", :include_errors)
@@ -64,8 +67,8 @@ function _collect_include_diagnostics_v2!(rt, uri, stack, visited, guarded_visit
             # determined" (a `load() = include("x.jl")` thunk).
             #
             # v2: a runtime include whose target exists and a computed include are
-            # analysis-boundary NOTICES (`:runtime` / `:computed`, routed to the
-            # `analysis_boundary` rule by `_include_diagnostic_v2`), not
+            # analysis-boundary NOTICES (`:runtime` / `:computed`, given their
+            # rule ids by `_include_diagnostic_v2`), not
             # include_errors warnings; a missing literal target stays a MissingFile.
             rtarget = get(runtime_targets, offset, nothing)
             if !guarded

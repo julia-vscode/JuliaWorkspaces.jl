@@ -1041,4 +1041,30 @@ end
     @test d.code === :analysis_boundary
     @test d.severity === :warning
     @test occursin("missing_reference", d.message)
+
+    # v1's own rule for it works under v2 too: a valid key (no config error),
+    # and the notice is reported under `computed_include`, once, whether or
+    # not the `analysis_boundary` umbrella is also on.
+    for rules in ("computed_include = \"error\"\n",
+                  "computed_include = \"error\"\nanalysis_boundary = \"warning\"\n")
+        jwc = JuliaWorkspace()
+        set_v2_enabled!(jwc, true)
+        cfg_uri = URI("file:///cin/JuliaLint.toml")
+        add_file!(jwc, TextFile(cfg_uri, SourceText("[rules]\n" * rules, "toml")))
+        add_file!(jwc, TextFile(root_uri, SourceText(src, "julia")))
+        set_input_env_ready!(jwc.runtime, true)
+        @test isempty(get_diagnostic(jwc, cfg_uri))
+        dc = only(filter(x -> contains(x.message, "could not be determined statically"), get_diagnostic(jwc, root_uri)))
+        @test dc.code === :computed_include
+        @test dc.severity === :error
+    end
+
+    # Turning `include_errors` off does not touch it (julia-vscode#4215).
+    jw = JuliaWorkspace()
+    set_v2_enabled!(jw, true)
+    add_file!(jw, TextFile(URI("file:///cin/JuliaLint.toml"),
+        SourceText("[rules]\ninclude_errors = \"off\"\ncomputed_include = \"warning\"\n", "toml")))
+    add_file!(jw, TextFile(root_uri, SourceText(src, "julia")))
+    set_input_env_ready!(jw.runtime, true)
+    @test count(d -> contains(d.message, "could not be determined statically"), get_diagnostic(jw, root_uri)) == 1
 end

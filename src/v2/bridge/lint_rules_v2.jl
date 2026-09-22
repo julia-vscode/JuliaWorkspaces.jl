@@ -106,8 +106,16 @@ const LINT_RULES_V2 = LintRule[
             StaticLint.IncludePathContainsNULL,
             StaticLint.FileTooBig,
             StaticLint.FileNotAvailable,
-            StaticLint.ComputedInclude,
         ]),
+    # Identical to v1's entry (see the comment there, julia-vscode#4215). v2
+    # never emits `StaticLint.ComputedInclude` itself: its computed-include
+    # notice is an analysis boundary (`layer_include_diagnostics_v2.jl`),
+    # reported under this rule when it is on and under `analysis_boundary`
+    # otherwise, so a v1 config that asks for `computed_include` keeps getting
+    # the notice under v2 and `analysis_boundary` still shows every boundary.
+    LintRule(id = :computed_include, tier = TierWorkspace,
+        severity_default = :off, severity_strict = :warning,
+        codes = [StaticLint.ComputedInclude]),
     # Off in `default`: 78% of sampled findings were false positives, chiefly
     # names minted by `@eval` loops that no static pass can see.
     LintRule(id = :missing_reference, tier = TierSemantic,

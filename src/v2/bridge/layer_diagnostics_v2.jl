@@ -270,10 +270,11 @@ Salsa.@derived function derived_diagnostics_v2(rt, uri)
         end
 
         # This only skips the semantic pass entirely when every rule it can
-        # emit is off. `include_errors` is excluded from the test — its
-        # findings come from the separate structural pass below, so leaving it
-        # on is no reason to run the (much more expensive) semantic one.
-        if any(enabled(r.id) for r in LINT_RULES_V2 if !isempty(r.codes) && r.id !== :include_errors)
+        # emit is off. Only `TierSemantic` rules come from this pass —
+        # `include_errors` and `computed_include` are `TierWorkspace`, produced
+        # by the separate structural pass below, so leaving either on is no
+        # reason to run the (much more expensive) semantic one.
+        if any(enabled(r.id) for r in LINT_RULES_V2 if !isempty(r.codes) && r.tier === TierSemantic)
             env_ready = derived_file_env_ready(rt, uri)
             # Experiment flag: when the lowering-backed producer is active it
             # takes over these rule ids, so StaticLint's findings for them are
@@ -322,10 +323,16 @@ Salsa.@derived function derived_diagnostics_v2(rt, uri)
         # a project/environment, so they are reported independently of the
         # semantic static-lint pass above.
         # ComputedInclude / RuntimeInclude are analysis-boundary notices and
-        # carry that rule id on the diagnostic; the rest stay include_errors.
-        if enabled(:include_errors) || enabled(:analysis_boundary)
+        # carry their rule id on the diagnostic; the rest stay include_errors.
+        # A computed include is tagged `computed_include` (v1's rule for it)
+        # but falls back to the umbrella `analysis_boundary` when only that
+        # one is on, so either rule shows it, once.
+        if enabled(:include_errors) || enabled(:analysis_boundary) || enabled(:computed_include)
             for d in derived_include_diagnostics_v2(rt, uri)
                 rule = d.code === nothing ? :include_errors : d.code
+                if rule === :computed_include && !enabled(rule)
+                    rule = :analysis_boundary
+                end
                 enabled(rule) && emit!(d.range, rule, d.message, d.uri, d.source)
             end
         end

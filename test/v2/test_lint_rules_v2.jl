@@ -47,6 +47,7 @@ end
         :const_decl => :information,
         :relative_import => :off,   # runtime nesting of included helpers is unknowable; dots saturate at Main
         :include_errors => :warning,
+        :computed_include => :off,      # the analyzer's limit, not a code defect
         :missing_reference => :off,     # demoted: 78% sampled FP
         :unresolved_import => :off,     # demoted: 77% sampled FP
         :syntax_errors => :error,

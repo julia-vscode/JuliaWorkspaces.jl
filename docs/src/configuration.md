@@ -455,8 +455,8 @@ supporting Julia ≤ 1.1).
 !!! note "v2 only"
     Everything in this section describes the v2 analysis stack, i.e. a
     workspace with `set_v2_enabled!(jw, true)`. With the flag off (the
-    default) the behaviour is the legacy one: a computed include is an
-    `include_errors` warning, no `analysis_boundary` notice exists, and an
+    default) the behaviour is the legacy one: a computed include is a
+    `computed_include` notice, no `analysis_boundary` notice exists, and an
     unresolved import is always reported as `unresolved_import`.
 
 Some constructs put part of a program beyond static analysis: an `include`
@@ -487,6 +487,11 @@ gets one diagnostic naming the rules it suppresses; rewrite it — a literal
 `include` path, an explicit list of definitions instead of an interpolated
 `@eval`, an unconditional import — and the full diagnostic set comes back for
 that module.
+
+A computed include is also what `computed_include` reports, so its notice
+appears when either rule is on — once, under `computed_include` when that rule
+is on and under `analysis_boundary` otherwise. A `computed_include = "warning"`
+written for the legacy stack therefore keeps working under v2.
 
 Environments are boundaries too. An `ext/` file whose weak-dependency
 triggers resolve in no reachable environment, and any file whose owning
