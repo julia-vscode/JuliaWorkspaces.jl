@@ -1317,9 +1317,11 @@ as v1). Store/external callees, locally-shadowed callees, store-extending
 names, definition signatures, do-blocks and macro/quote contexts decline; a
 cursor on the closing paren declines too (v1 answers empty there).
 
-The active parameter mirrors v1's shipped rule exactly: 0 while the cursor
-sits at/before the opening paren, else the call's total top-level comma count
-(v1 counts the call node's COMMA trivia, cursor-independent).
+The active parameter mirrors v1's rule (`_fcall_arg_number`): 0 while the
+cursor sits at/before the opening paren, else the number of the call's
+top-level commas left of the cursor — a cursor right after a comma has moved on
+to the next argument. Counting all of them reported the last parameter
+wherever the cursor was (#327).
 """
 function _get_signature_help_v2(runtime, uri::URI, offset0::Int)
     root = derived_v2_best_root_for_uri(runtime, uri)
@@ -1417,9 +1419,10 @@ function _get_signature_help_v2(runtime, uri::URI, offset0::Int)
     end
     isempty(sigs) && return nothing
 
-    # v1's active-parameter rule: LPAREN → 0, else the call's comma count.
-    # Scanned on the Julia view, so commas in a markdown document's prose
-    # (blanked there) can never be counted.
+    # v1's active-parameter rule: LPAREN → 0, else the call's top-level commas
+    # at or before the cursor (1-based byte `i` is left of 0-based `offset0`
+    # iff `i <= offset0`). Scanned on the Julia view, so commas in a markdown
+    # document's prose (blanked there) can never be counted.
     text = derived_julia_source_view(runtime, uri)
     text === nothing && return nothing
     call_range = view.ranges[call_addr]
@@ -1427,6 +1430,7 @@ function _get_signature_help_v2(runtime, uri::URI, offset0::Int)
     child_ranges = [view.ranges[a] for a in child_addrs if 1 <= a <= length(view.ranges)]
     commas = 0
     for i in first(call_range):(last(call_range) - 1)
+        i <= offset0 || break
         i <= ncodeunits(text) || break
         codeunit(text, i) == UInt8(',') || continue
         any(r -> first(r) <= i <= last(r) - 1, child_ranges) && continue

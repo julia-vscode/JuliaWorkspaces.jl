@@ -76,8 +76,8 @@ end
     end
     """
     jw = sgv_workspace("SigV.jl" => src)
-    # Cursor after the second comma: v1's rule reports the call's comma count.
-    r = JW._get_signature_help_v2(jw.runtime, SGV_URI, at0(src, "f(1, 2,"))
+    # Cursor after the second comma: the third parameter.
+    r = JW._get_signature_help_v2(jw.runtime, SGV_URI, at0(src, "f(1, 2, "))
     @test r !== nothing
     @test r.active_parameter == 2
     # Only the 3-parameter method still fits.
@@ -93,8 +93,49 @@ end
     end
     """
     jw2 = sgv_workspace("SigV.jl" => src2)
-    r2 = JW._get_signature_help_v2(jw2.runtime, SGV_URI, at0(src2, "g(h([1, 2]),"))
+    r2 = JW._get_signature_help_v2(jw2.runtime, SGV_URI, at0(src2, "g(h([1, 2]), "))
     @test r2 !== nothing && r2.active_parameter == 1
+end
+
+@testitem "signature help v2: active parameter follows the cursor, as in v1" setup=[SigV2WS] begin
+    # The v2 twin of v1's "Signatures: active parameter follows the cursor"
+    # (#327): every cursor position inside the call reports the same active
+    # parameter and signatures in both stacks.
+    src = """
+    module SigV
+    f(aaa, bbb, ccc) = aaa
+    g(x) = x
+    c1() = f(111, 222, 333)
+    c2() = f(g(1), 222, 333)
+    end
+    """
+    jw_on = sgv_workspace("SigV.jl" => src)
+    jw_off = sgv_workspace("SigV.jl" => src; flag=false)
+
+    call = first(findfirst("f(111, 222, 333)", src))
+    # The v2 arm itself answers (the public API would fall back to v1 if not).
+    @test JW._get_signature_help_v2(jw_on.runtime, SGV_URI, call + 5).active_parameter == 1
+    for n in 2:15   # f(|111 … 333|)
+        r_on = get_signature_help(jw_on, SGV_URI, call + n)
+        r_off = get_signature_help(jw_off, SGV_URI, call + n)
+        @test r_on.active_parameter == r_off.active_parameter
+        @test [s.label for s in r_on.signatures] == [s.label for s in r_off.signatures]
+    end
+    @test get_signature_help(jw_on, SGV_URI, call + 5).active_parameter == 0   # f(111|, …
+    @test get_signature_help(jw_on, SGV_URI, call + 6).active_parameter == 1   # f(111,| …
+    @test get_signature_help(jw_on, SGV_URI, call + 11).active_parameter == 2  # f(111, 222,| …
+
+    # Nested: `g`'s argument, then back at `f`'s second. (A cursor on `g`'s
+    # closing paren is a known v1/v2 divergence and not compared.)
+    nested = first(findfirst("f(g(1), 222, 333)", src))
+    for n in (4, 7, 8, 12)
+        r_on = get_signature_help(jw_on, SGV_URI, nested + n)
+        r_off = get_signature_help(jw_off, SGV_URI, nested + n)
+        @test r_on.active_parameter == r_off.active_parameter
+        @test [s.label for s in r_on.signatures] == [s.label for s in r_off.signatures]
+    end
+    @test only(get_signature_help(jw_on, SGV_URI, nested + 8).signatures).label == "f(aaa, bbb, ccc)"
+    @test get_signature_help(jw_on, SGV_URI, nested + 8).active_parameter == 1
 end
 
 @testitem "signature help v2: structs and qualified callees" setup=[SigV2WS] begin
