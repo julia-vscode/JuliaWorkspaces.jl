@@ -65,7 +65,7 @@ end
 
     mktempdir() do root
         store = joinpath(root, "store")
-        path = _djp_stamp_path(store, 0xdeadbeefcafe1234)
+        path = _djp_stamp_path(store, UInt(0xcafe1234))
 
         @test _read_djp_stamp(path) === nothing
 
@@ -76,7 +76,7 @@ end
         @test _read_djp_stamp(path) == (v"1.9.4", false)
 
         # One stamp would otherwise accumulate per extension update.
-        other = _djp_stamp_path(store, 0x1111111111111111)
+        other = _djp_stamp_path(store, UInt(0x11111111))
         _write_djp_stamp(other, v"1.0.0", false)
         _write_djp_stamp(path, v"1.12.7", true)
         @test filter(f -> endswith(f, ".stamp"), readdir(_djp_runtime_dir(store))) ==
@@ -100,6 +100,10 @@ end
     exe = default_djp_julia_exe()
     baseline = _djp_runtime_fingerprint(exe)
 
+    # `hash` only has a method for the platform-native seed width, so a
+    # fingerprint typed `UInt64` is a MethodError on every 32-bit build.
+    @test baseline isa UInt
+
     # Deterministic, or every restart would redo the preparation it is meant
     # to skip.
     @test _djp_runtime_fingerprint(exe) == baseline
@@ -113,19 +117,19 @@ end
         tree = joinpath(root, "tree")
         mkpath(joinpath(tree, "nested"))
         write(joinpath(tree, "nested", "a.jl"), "x = 1")
-        before = _fingerprint_tree(UInt64(0), tree)
-        @test _fingerprint_tree(UInt64(0), tree) == before
+        before = _fingerprint_tree(zero(UInt), tree)
+        @test _fingerprint_tree(zero(UInt), tree) == before
 
         write(joinpath(tree, "nested", "a.jl"), "x = 1234567")
-        @test _fingerprint_tree(UInt64(0), tree) != before
+        @test _fingerprint_tree(zero(UInt), tree) != before
 
         write(joinpath(tree, "nested", "b.jl"), "y = 2")
-        @test _fingerprint_tree(UInt64(0), tree) != before
+        @test _fingerprint_tree(zero(UInt), tree) != before
 
         # A missing tree is stable rather than an error, so a partial install
         # degrades to "prepare again" instead of taking down the reactor.
-        @test _fingerprint_tree(UInt64(0), joinpath(root, "absent")) ==
-            _fingerprint_tree(UInt64(0), joinpath(root, "also-absent"))
+        @test _fingerprint_tree(zero(UInt), joinpath(root, "absent")) ==
+            _fingerprint_tree(zero(UInt), joinpath(root, "also-absent"))
     end
 end
 

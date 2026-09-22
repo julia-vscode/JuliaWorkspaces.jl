@@ -110,13 +110,14 @@ const _DJP_STAMP_FORMAT = "1"
 
 _djp_runtime_dir(store_path::AbstractString) = joinpath(dirname(store_path), "djp-runtime")
 
-_djp_stamp_path(store_path::AbstractString, fingerprint::UInt64) =
-    joinpath(_djp_runtime_dir(store_path), string(string(fingerprint, base=16, pad=16), ".stamp"))
+_djp_stamp_path(store_path::AbstractString, fingerprint::UInt) =
+    joinpath(_djp_runtime_dir(store_path),
+        string(string(fingerprint, base=16, pad=2 * sizeof(UInt)), ".stamp"))
 
 # Fold every file under `root` into `h`. Sorted by path so the hash does not
 # depend on directory iteration order, and tolerant of IO errors: an unreadable
 # tree yields a different-but-stable hash rather than throwing.
-function _fingerprint_tree(h::UInt64, root::AbstractString)
+function _fingerprint_tree(h::UInt, root::AbstractString)
     isdir(root) || return hash(:missing, h)
     entries = Tuple{String,Int64,Float64}[]
     try
@@ -141,8 +142,10 @@ function _fingerprint_tree(h::UInt64, root::AbstractString)
     return h
 end
 
+# Returns the platform-native `UInt`: `hash` has no method for any other seed
+# width, so a hardcoded `UInt64` is a `MethodError` on every 32-bit build.
 function _djp_runtime_fingerprint(exe::AbstractString)
-    h = hash(_DJP_STAMP_FORMAT, hash("djp-runtime"))
+    h::UInt = hash(_DJP_STAMP_FORMAT, hash("djp-runtime"))
     h = hash(exe, h)
     h = try
         st = stat(exe)
