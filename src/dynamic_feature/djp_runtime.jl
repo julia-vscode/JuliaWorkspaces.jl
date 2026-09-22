@@ -72,9 +72,10 @@ default_djp_julia_exe() = joinpath(Sys.BINDIR, Base.julia_exename())
 _djp_root() = normpath(joinpath(@__DIR__, "..", "..", "juliadynamicanalysisprocess"))
 _djp_environments_dir() = joinpath(_djp_root(), "environments")
 _djp_main_script() = joinpath(_djp_root(), "app", "julia_dynamic_analysis_process_main.jl")
-# `symbolserver.jl` in the child package includes these, so they are part of
-# what its compile cache is built from.
-_djp_shared_dir() = normpath(joinpath(@__DIR__, "..", "..", "shared", "symbolserver"))
+# The child package includes files from here (`shared/symbolserver/` and the
+# protocol definitions in `shared/julia_dynamic_analysis_process_protocol.jl`),
+# so they are part of what its compile cache is built from.
+_djp_shared_dir() = normpath(joinpath(@__DIR__, "..", "..", "shared"))
 
 """
     _djp_project_for_version(version) -> String

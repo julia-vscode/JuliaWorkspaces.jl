@@ -111,6 +111,24 @@ end
     # recorded version and flag support describe that executable only.
     @test _djp_runtime_fingerprint(joinpath("some", "other", "julia")) != baseline
 
+    # Every file the child `include`s from `shared/` is tracked (the protocol
+    # definitions as well as the symbol server): an edit there changes its
+    # compile cache just the same.
+    shared = JuliaWorkspaces._djp_shared_dir()
+    child_src = joinpath(JuliaWorkspaces._djp_root(), "JuliaDynamicAnalysisProcess", "src")
+    shared_includes = String[]
+    for (dir, _, files) in walkdir(child_src), f in files
+        endswith(f, ".jl") || continue
+        for m in eachmatch(r"include\(\"((?:\.\./)+shared/[^\"]+)\"\)", read(joinpath(dir, f), String))
+            push!(shared_includes, normpath(joinpath(dir, m.captures[1])))
+        end
+    end
+    @test any(endswith("julia_dynamic_analysis_process_protocol.jl"), shared_includes)
+    for path in shared_includes
+        @test isfile(path)
+        @test startswith(path, shared)
+    end
+
     # An edit anywhere under a tracked tree has to change the hash, because a
     # stale stamp means children load their own package from source forever.
     mktempdir() do root

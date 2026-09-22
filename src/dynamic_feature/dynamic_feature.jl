@@ -572,8 +572,9 @@ const DEFAULT_MAX_ALIVE_DJPS = 8
 
 The budget for the FIRST batch a child answers for a given expansion context.
 Building the context loads the packages its imports name — a workspace
-member the child has to `require` by identity, possibly precompiling it
-(PlotsBase: ~1 min) — so the tight per-batch budget would time out on the
+member the child has to `require` by identity, from source when it has no
+compile cache, since children never precompile (`djp_runtime.jl`; PlotsBase:
+~1 min) — so the tight per-batch budget would time out on the
 load, kill the child and negative-cache every entry of the batch (1,484 of
 the Plots monorepo's 1,888 sites). Loading is a one-time cost per child and
 context; the later batches keep `DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS`.
