@@ -849,7 +849,10 @@ function _import_completions(ppt, pt, t, is_at_end, x, state::_CompletionState)
         (t.kind in (Tokens.COMMA, Tokens.COLON))
         member_source = _import_root_member_source(state, import_root)
         if member_source !== nothing
-            _import_member_completions(member_source, t.val, state)
+            # nothing has been typed yet here — `t` is `,`/`:` or the whitespace
+            # after one, and a whitespace token's `val` is the whitespace itself,
+            # which would match no name at all (#336)
+            _import_member_completions(member_source, "", state)
         else
             for (n, m) in symbols
                 n = String(n)

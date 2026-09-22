@@ -338,10 +338,11 @@ in everyone's `default` at whatever severity a fallback happened to pick.
 
 ### Rules that are off by default
 
-Three rules are classified `off` in `default` despite being long-standing
-checks: `incorrect_call_args`, `missing_reference` and `unresolved_import`.
+Four rules are classified `off` in `default` despite being long-standing checks:
+`incorrect_call_args`, `missing_reference`, `unresolved_import` and
+`computed_include`.
 
-They share a limitation. Each needs a complete picture of something the
+The first three share a limitation. Each needs a complete picture of something the
 analysis often cannot see in full — the method set of a callee, every name a
 module actually defines, the environment an import resolves against. Where that
 picture is incomplete the rule reports anyway, and on a corpus sweep of the 100
@@ -360,6 +361,18 @@ missing_reference = "warning"
 They are worth turning on deliberately — they find real bugs, and the sweep that
 measured their false positives also turned up genuine `UndefVarError`s and
 `MethodError`s through them. Expect to spend time tuning around the noise.
+
+`computed_include` is `off` for a different reason: its finding is not about the
+user's code. `include(srcdir("folder", "file.jl"))` — DrWatson's idiom — is
+correct Julia that does exactly what it says; the diagnostic reports that the
+*analyzer* cannot work out which file that is. The consequence it announces,
+that missing-reference checking is relaxed in the enclosing module, only matters
+when `missing_reference` is on, which in the shipped presets means `strict`. So
+the two are on together in `strict` and off together in `default`, and a project
+that wants the notice without the rest of `strict` writes
+`computed_include = "warning"`. The relaxation itself is not configurable and
+applies either way — turning the rule off silences the explanation, not the
+behaviour it explains.
 
 Note that an untitled/unsaved buffer has no path, so no `JuliaLint.toml` can
 govern it; such buffers always lint under `default` and cannot opt back in.
@@ -400,7 +413,8 @@ govern it; such buffers always lint under `default` and cannot opt back in.
 | `const_decl` | `info` | Invalid `const` declarations and redefinitions |
 | `unused_binding` | `hint` | Variables assigned but never used |
 | `relative_import` | `off` | A relative import with more dots than available nesting |
-| `include_errors` | `warning` | Circular, duplicate, missing, unreadable, or statically unresolvable (computed-path) `include`s. A computed include also disables missing-reference checks in the module it appears in, since the included file's contents are unknown to the analyzer |
+| `include_errors` | `warning` | Circular, duplicate, missing or unreadable `include`s |
+| `computed_include` | `off` | An `include` whose path cannot be determined statically (`include(srcdir("f.jl"))`). The code is correct; the finding is that the analyzer cannot follow the include, which also disables missing-reference checks in that module. Off by default; see “Rules that are off by default” above |
 | `missing_reference` | `off` | Unresolved references. Option `scope`: `"none"`, `"symbols"`, `"all"` (default). Off by default; see “Rules that are off by default” below |
 | `unresolved_import` | `off` | Imports whose target could not be resolved. Off by default; see “Rules that are off by default” below |
 | `missing_compat` | `off` | A package `[deps]`/`[extras]`/`[weakdeps]` entry (stdlibs included) or `julia` without a `[compat]` entry. Options: `check_julia`, `check_extras`, `check_weakdeps` (booleans, default `true`), `ignore` (array of names). v2 only (`set_v2_enabled!`) |

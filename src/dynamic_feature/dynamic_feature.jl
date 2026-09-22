@@ -217,16 +217,35 @@ struct DynamicProcessCrashException <: Exception
     key::DJPKey
     exitcode::Union{Int,Nothing}
     output::String
+    termsignal::Union{Int,Nothing}
 end
 
+DynamicProcessCrashException(key::DJPKey, exitcode::Union{Int,Nothing}, output::String) =
+    DynamicProcessCrashException(key, exitcode, output, nothing)
+
 DynamicProcessCrashException(key::DJPKey, exitcode::Union{Int,Nothing}) =
-    DynamicProcessCrashException(key, exitcode, "")
+    DynamicProcessCrashException(key, exitcode, "", nothing)
+
+# Signals that mean the operating system, not the child, ended it. An indexing
+# child instantiates and loads the user's environment, so the memory that gets
+# it killed is the user's project rather than anything here — which is why this
+# never becomes crash telemetry and only changes what the user is told.
+_is_os_kill_signal(termsignal::Union{Int,Nothing}) = termsignal === 9 || termsignal === 15
 
 # `_failure_reason` keeps only the first line for the one-sentence user-facing
 # report, so lead with the summary and let the captured output follow it.
 function Base.showerror(io::IO, err::DynamicProcessCrashException)
-    code = err.exitcode === nothing ? "an unknown code" : "code $(err.exitcode)"
-    print(io, "the indexing child process exited with $code before connecting.")
+    if _is_os_kill_signal(err.termsignal)
+        # Without this the same death read as "exited with code 0", which told
+        # the user nothing and looked like a clean exit that simply failed to
+        # connect.
+        name = err.termsignal === 9 ? "SIGKILL" : "SIGTERM"
+        print(io, "the indexing child process was stopped by the operating system ($name), ",
+            "most likely because it ran out of memory while loading this environment.")
+    else
+        code = err.exitcode === nothing ? "an unknown code" : "code $(err.exitcode)"
+        print(io, "the indexing child process exited with $code before connecting.")
+    end
     isempty(err.output) ||
         print(io, "\nLast output from the child process:\n", err.output)
     return nothing
@@ -305,12 +324,12 @@ end
 # blocks to guarantee resource cleanup, drives cancellation via a
 # `CancellationToken`, and runs a message loop that reads messages from the
 # child. Lifecycle events are reported back to the reactor via `reactor_channel`.
-function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::CancellationTokens.CancellationToken)
+function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::CancellationTokens.CancellationToken, runtime::DjpRuntime)
     # The reactor's `_launch_now!` already logged the categorized spawn reason.
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
     try
-        julia_dynamic_analysis_process_script = joinpath(@__DIR__, "../../juliadynamicanalysisprocess/app/julia_dynamic_analysis_process_main.jl")
+        julia_dynamic_analysis_process_script = _djp_main_script()
 
         pipe_out = Pipe()
         try
@@ -320,32 +339,14 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
             error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
             crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
 
-            env_to_use = copy(ENV)
-
-            if haskey(env_to_use, "JULIA_DEPOT_PATH")
-                delete!(env_to_use, "JULIA_DEPOT_PATH")
-            end
-
-            # An inherited JULIA_LOAD_PATH (e.g. from a Pkg app shim) would
-            # replace the default load path in the child, so `@` no longer
-            # resolves and loading JuliaDynamicAnalysisProcess fails.
-            delete!(env_to_use, "JULIA_LOAD_PATH")
-            delete!(env_to_use, "JULIA_PROJECT")
-
-            # Ephemeral analysis workers must not run depot auto-gc: Pkg.gc
-            # rewrites ~/.julia/logs/*_usage.toml non-atomically and races
-            # other processes writing those files.
-            env_to_use["JULIA_PKG_GC_AUTO"] = "false"
-
-            # Use the same binary as the current process: `julia` from PATH may
-            # not resolve at all inside an editor-launched language server (which
-            # is started with an explicit executable path), or may resolve to a
-            # different Julia version than the one this process runs on.
-            julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
-
+            # Indexing reads package metadata; it never needs compiled code,
+            # so the child neither precompiles the environments it instantiates
+            # nor writes caches of its own. See `djp_runtime.jl` for why, and
+            # for what that bounds.
             jl_process = open(
                 pipeline(
-                    Cmd(`$julia_exe --startup-file=no --history-file=no --depwarn=no $julia_dynamic_analysis_process_script $pipe_name $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=env_to_use),
+                    _djp_child_cmd(runtime, julia_dynamic_analysis_process_script, pipe_name,
+                        String[error_handler_file...; crash_reporting_pipename...]),
                     stdout = pipe_out,
                     stderr = pipe_out
                 )
@@ -470,7 +471,8 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                         # promptly; give the reader task a bounded moment to drain
                         # the output that explains the exit before reporting it.
                         timedwait(() -> istaskdone(output_task), 2.0)
-                        throw(DynamicProcessCrashException(djp.key, jl_process.exitcode, join(recent_output, "\n")))
+                        throw(DynamicProcessCrashException(djp.key, jl_process.exitcode,
+                            join(recent_output, "\n"), jl_process.termsignal))
                     else
                         rethrow(err)
                     end
@@ -1431,7 +1433,15 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     transition!(djp.fsm, DynamicProcessStarting; reason="launching")
     token = CancellationTokens.get_token(djp.cancellation_source)
     djp.task = @async try
-        start(djp, df.in_channel, token)
+        # Resolving the runtime may have to prepare the child environment,
+        # which is slow. It happens at most once per session — usually never,
+        # because the on-disc stamp survives restarts — but it must not run on
+        # the reactor, so it runs here, inside the child's own task. Concurrent
+        # children queue behind the first one rather than each preparing.
+        runtime = djp_runtime(default_djp_julia_exe(), df.store_path;
+            on_prepare = () -> put!(df.in_channel,
+                ProcessProgressMsg(djp.key, "Preparing the Julia indexing runtime...", 0)))
+        start(djp, df.in_channel, token, runtime)
     catch err
         # `start` reports errors from its supervised region itself; this catches
         # failures outside it (e.g. the process spawn throwing because the Julia

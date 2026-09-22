@@ -1580,6 +1580,70 @@ end
     @test "floor" in labels
 end
 
+@testitem "Completions: import member completions after whitespace (#336)" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_completions
+    using JuliaWorkspaces.URIs2: URI
+
+    project_toml = """
+    name = "MainPkg"
+    uuid = "12345678-1234-1234-1234-123456789abc"
+    version = "0.1.0"
+    """
+    manifest_toml = "julia_version = \"1.11.0\"\nmanifest_format = \"2.0\"\nproject_hash = \"abc123\"\n\n[deps]\n"
+    entry = """
+    module MainPkg
+    include("sib.jl")
+    include("leaf.jl")
+    end
+    """
+    sib = """
+    module Sib
+    AAA = 1
+    AAB = 2
+    end
+    """
+
+    # completions at the very end of `leaf` (get_completions takes a 1-based index)
+    function labels_at_end(leaf)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///impws/Project.toml"), SourceText(project_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///impws/Manifest.toml"), SourceText(manifest_toml, "toml")))
+        add_file!(jw, TextFile(URI("file:///impws/src/MainPkg.jl"), SourceText(entry, "julia")))
+        add_file!(jw, TextFile(URI("file:///impws/src/sib.jl"), SourceText(sib, "julia")))
+        add_file!(jw, TextFile(URI("file:///impws/src/leaf.jl"), SourceText(leaf, "julia")))
+        uri = URI("file:///impws/src/leaf.jl")
+        return [i.label for i in get_completions(jw, uri, ncodeunits(leaf) + 1).items]
+    end
+
+    # a workspace module's members: offered with the cursor right after `:`/`,`
+    # and, since #336, right after the whitespace following one
+    for leaf in ("using .Sib:", "using .Sib: ", "using .Sib:  ", "using .Sib :")
+        labels = labels_at_end(leaf)
+        @test "AAA" in labels
+        @test "AAB" in labels
+    end
+    for leaf in ("using .Sib:AAA,", "using .Sib:AAA, ", "using .Sib: AAA, ")
+        @test "AAB" in labels_at_end(leaf)
+    end
+
+    # same for members coming from an external (stdlib) store
+    @test "floor" in labels_at_end("import Base:")
+    @test "floor" in labels_at_end("import Base: ")
+
+    # the shape reported in #336: a bare script including a module file
+    function script_labels(script)
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(URI("file:///impbare/MyModule.jl"), SourceText(sib, "julia")))
+        add_file!(jw, TextFile(URI("file:///impbare/script.jl"), SourceText(script, "julia")))
+        uri = URI("file:///impbare/script.jl")
+        return [i.label for i in get_completions(jw, uri, ncodeunits(script) + 1).items]
+    end
+    prefix = "include(\"MyModule.jl\")\n"
+    for tail in ("using .Sib:", "using .Sib: ", "using .Sib:AAA, ")
+        @test "AAB" in script_labels(prefix * tail)
+    end
+end
+
 @testitem "Completions: public vs internal unexported symbols get distinct import notes" begin
     using JuliaWorkspaces: JuliaWorkspaces
     const SS = JuliaWorkspaces.SymbolServer

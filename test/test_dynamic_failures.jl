@@ -349,3 +349,40 @@ end
     @test occursin("exited with code 1 before connecting", message)
     @test !occursin("Stacktrace", message)
 end
+
+@testitem "Dynamic failures: a child killed by the OS says so instead of showing its exit code" begin
+    using JuliaWorkspaces: DynamicProcessCrashException, WatchEnvironmentKey, _humanize_djp_failure,
+        _is_infra_failure
+
+    key = WatchEnvironmentKey("/ws/P", UInt64(1))
+
+    # An OS kill leaves `exitcode` at 0 on the process object, so without the
+    # signal this read as "exited with code 0 before connecting" -- a clean exit
+    # that inexplicably failed to connect, which is the opposite of what
+    # happened. Loading a large environment is exactly when this occurs.
+    killed = DynamicProcessCrashException(key, 0, "", 9)
+    rendered = sprint(showerror, killed)
+    @test occursin("stopped by the operating system (SIGKILL)", rendered)
+    @test occursin("ran out of memory", rendered)
+    @test !occursin("exited with code", rendered)
+
+    terminated = DynamicProcessCrashException(key, 0, "", 15)
+    @test occursin("(SIGTERM)", sprint(showerror, terminated))
+
+    # A native crash is not an OS kill and keeps the exit-code wording.
+    segv = DynamicProcessCrashException(key, 139, "", 11)
+    @test occursin("exited with code 139", sprint(showerror, segv))
+
+    # No signal at all is the ordinary case and is unchanged.
+    @test occursin("exited with code 1 before connecting",
+        sprint(showerror, DynamicProcessCrashException(key, 1, "")))
+
+    # The one-sentence user-facing form carries it through.
+    message = _humanize_djp_failure(key, killed)
+    @test occursin("the environment at /ws/P", message)
+    @test occursin("stopped by the operating system", message)
+
+    # Still an infra failure: it says nothing about the project, so it must not
+    # become an `environment_errors` diagnostic on the user's Project.toml.
+    @test _is_infra_failure(killed)
+end

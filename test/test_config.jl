@@ -166,8 +166,9 @@ end
     # per-rule severity fields. This pins every value, so any change to a preset
     # severity is a conscious test update rather than a side effect. Values are
     # the original hand-written ones except for the three rules deliberately
-    # demoted to `:off` in `default` on measured false-positive rates — see the
-    # comment above `LINT_RULES`.
+    # demoted to `:off` in `default` on measured false-positive rates, and
+    # `computed_include`, which is `:off` because its finding is about the
+    # analyzer rather than the code — see the comment above `LINT_RULES`.
     expected_default = Dict{Symbol,Symbol}(
         :incorrect_call_args => :off,   # demoted: 93% sampled FP
         :incorrect_iter_spec => :information,
@@ -189,6 +190,7 @@ end
         :const_decl => :information,
         :relative_import => :off,   # runtime nesting of included helpers is unknowable; dots saturate at Main
         :include_errors => :warning,
+        :computed_include => :off,      # correct code; the finding is about the analyzer
         :missing_reference => :off,     # demoted: 78% sampled FP
         :unresolved_import => :off,     # demoted: 77% sampled FP
         :syntax_errors => :error,

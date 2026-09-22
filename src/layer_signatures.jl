@@ -60,14 +60,29 @@ end
 """
     _fcall_arg_number(x)
 
-Count which argument position the cursor is at within a function call.
+Which argument position the cursor is at within a function call, as a 0-based
+index. `x` is the call child the cursor sits in (`_get_expr`), so the position is
+the number of the call's commas that come BEFORE `x` in source order - plus `x`
+itself when it is a comma, since a cursor sitting on the comma of `f(a,| b)` has
+already moved on to the second argument.
+
+Counting every comma of the call instead - as this once did - reported the LAST
+parameter as active wherever the cursor was (#327).
 """
 function _fcall_arg_number(x)
-    if CSTParser.headof(x) === :LPAREN
-        0
-    else
-        sum(CSTParser.headof(a) === :COMMA for a in CSTParser.parentof(x).trivia)
+    parent = CSTParser.parentof(x)
+    parent isa CSTParser.EXPR || return 0
+    n = 0
+    # Iterating an EXPR yields args and trivia interleaved in source order, so
+    # the commas seen before `x` are exactly the ones the cursor has passed.
+    for a in parent
+        CSTParser.headof(a) === :COMMA && (n += 1)
+        a === x && return n
     end
+    # `x` is not among the call's children - it always should be, since the
+    # caller resolved the call as its parent. No position can be attributed, so
+    # stay at the first parameter rather than guessing the last.
+    return 0
 end
 
 """
@@ -104,6 +119,21 @@ function _collect_signatures(x, meta_dict::MetaDict, env, runtime, root::URI)
     # the old per-file/env path unchanged.
     tr = f_ref isa StaticLint.TreeRef ? f_ref :
         (f_ref isa StaticLint.Binding && f_ref.val isa StaticLint.TreeRef) ? f_ref.val : nothing
+
+    # An `:external_symbol` TreeRef is not a workspace item at all: it is how an
+    # unqualified name brought in from a DEPENDENCY resolves (`using Statistics`,
+    # then `mean(`). Its methods live in the env store, not in the workspace
+    # inventory, so `derived_method_items` finds nothing and signature help came
+    # up empty - while the qualified `Statistics.mean(`, which resolves straight
+    # to the store, worked (julia-vscode#4210). Resolve it to its store and let
+    # the store path below handle it, exactly as the qualified spelling does.
+    if tr !== nothing
+        store = StaticLint.resolve_treeref_store(tr, env)
+        if store isa Union{SymbolServer.FunctionStore,SymbolServer.DataTypeStore}
+            f_ref, tr = store, nothing
+        end
+    end
+
     if tr !== nothing
         _collect_tree_signatures!(sigs, tr, runtime, root)
     else
