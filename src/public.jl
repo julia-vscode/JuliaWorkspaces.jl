@@ -759,29 +759,37 @@ function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
 end
 
 """
-    shutdown!(jw::JuliaWorkspace; timeout_seconds=10)
+    shutdown!(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
 
 Stop the workspace's dynamic feature and kill every indexing child process.
 Hosts should call this when they exit (for a language server, on the `exit`
 notification), so children do not outlive them.
 
-Blocks until the reactor has stopped, or `timeout_seconds` pass. Children get
-SIGTERM and, if still alive after a grace period, SIGKILL; that escalation runs
-in this process, so a host that exits right away relies on the children's own
-parent-death handling instead. The workspace does no further dynamic work
-afterwards. No-op when the workspace has no dynamic feature or was already shut
-down.
+Blocks until the reactor has stopped. If `cancel_token` is provided, throws
+`CancellationTokens.OperationCanceledException` when it is cancelled first; the
+shutdown itself still goes ahead. Pass a token from
+`CancellationTokenSource(seconds)` to bound the wait.
+
+Children get SIGTERM and, if still alive after a grace period, SIGKILL; that
+escalation runs in this process, so a host that exits right away relies on the
+children's own parent-death handling instead. The workspace does no further
+dynamic work afterwards. No-op when the workspace has no dynamic feature or was
+already shut down.
 """
-function shutdown!(jw::JuliaWorkspace; timeout_seconds::Real=10)
+function shutdown!(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
     @debug "shutdown!"
 
     df = jw.dynamic_feature
     df === nothing && return
     state(df.controller_fsm) == DynamicControllerRunning || return
 
-    put!(df.in_channel, ShutdownMsg())
-    timedwait(() -> state(df.controller_fsm) == DynamicControllerStopped, float(timeout_seconds)) === :ok ||
-        @warn "Dynamic feature did not shut down within $(timeout_seconds)s"
+    done = Channel{Nothing}(1)
+    put!(df.in_channel, ShutdownMsg(done))
+    if cancel_token !== nothing
+        wait(done, cancel_token)
+    else
+        wait(done)
+    end
 
     return
 end

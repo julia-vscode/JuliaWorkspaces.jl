@@ -1963,7 +1963,7 @@ function handle!(df::DynamicFeature, ::ResetFailuresMsg)
     return false
 end
 
-function handle!(df::DynamicFeature, ::ShutdownMsg)
+function handle!(df::DynamicFeature, msg::ShutdownMsg)
     @info "Shutting down dynamic feature, terminating $(length(df.procs)) process(es)"
     transition!(df.controller_fsm, DynamicControllerShuttingDown; reason="shutdown requested")
 
@@ -1973,6 +1973,7 @@ function handle!(df::DynamicFeature, ::ShutdownMsg)
     end
 
     transition!(df.controller_fsm, DynamicControllerStopped; reason="shutdown complete")
+    msg.done === nothing || put!(msg.done, nothing)
     return true
 end
 

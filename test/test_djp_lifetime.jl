@@ -97,3 +97,22 @@ end
     # Nothing to stop without a dynamic feature.
     @test shutdown!(JuliaWorkspace()) === nothing
 end
+
+@testitem "DJP lifetime: shutdown! stops waiting when its token is cancelled" begin
+    using JuliaWorkspaces: DynamicControllerStopped, state
+    using JuliaWorkspaces.CancellationTokens: CancellationTokenSource, get_token, cancel,
+        OperationCanceledException
+
+    jw = JuliaWorkspace(store_path=mktempdir(), dynamic=DynamicIndexingOnly)
+    src = CancellationTokenSource()
+    cancel(src)
+    @test_throws OperationCanceledException shutdown!(jw; cancel_token=get_token(src))
+
+    # Only the wait was abandoned; the reactor still shuts down.
+    @test timedwait(() -> state(jw.dynamic_feature.controller_fsm) == DynamicControllerStopped, 30.0) === :ok
+
+    # A token that is never cancelled does not get in the way.
+    jw2 = JuliaWorkspace(store_path=mktempdir(), dynamic=DynamicIndexingOnly)
+    shutdown!(jw2; cancel_token=get_token(CancellationTokenSource()))
+    @test state(jw2.dynamic_feature.controller_fsm) == DynamicControllerStopped
+end

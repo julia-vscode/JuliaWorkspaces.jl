@@ -102,8 +102,14 @@ struct CreateStandaloneProjectMsg <: DynamicReactorMessage
     key::ScratchProjectKey
 end
 
-"""Request an orderly shutdown of the reactor."""
-struct ShutdownMsg <: DynamicReactorMessage end
+"""
+Request an orderly shutdown of the reactor. `done`, if given, receives `nothing`
+once every process has been killed and the reactor has stopped.
+"""
+struct ShutdownMsg <: DynamicReactorMessage
+    done::Union{Nothing,Channel{Nothing}}
+end
+ShutdownMsg() = ShutdownMsg(nothing)
 
 """
 Forget all failure bookkeeping, so previously-failed projects are attempted
