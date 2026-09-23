@@ -1,26 +1,3 @@
-@testitem "DJP runtime: child environment selection follows the child script" begin
-    using JuliaWorkspaces: _djp_project_for_version, _djp_environments_dir
-
-    # The child script picks its own environment from its own VERSION; the
-    # parent has to make the identical choice when it prepares that
-    # environment caches, or it would warm one the child never activates.
-    env_dir = _djp_environments_dir()
-    @test isdir(env_dir)
-
-    for entry in readdir(env_dir)
-        startswith(entry, "v") || continue
-        version = tryparse(VersionNumber, entry[2:end])
-        version === nothing && continue
-        @test _djp_project_for_version(version) == joinpath(env_dir, entry)
-    end
-
-    # No versioned directory for a far-future Julia, so it must fall back
-    # rather than hand out a path that does not exist.
-    far_future = _djp_project_for_version(v"99.99.0")
-    @test far_future == joinpath(env_dir, "fallback")
-    @test isdir(far_future)
-end
-
 @testitem "DJP runtime: children never precompile, preparation always may" begin
     using JuliaWorkspaces: _djp_process_env
 
@@ -60,138 +37,6 @@ end
     @test _djp_launch_flags(DjpRuntime("julia", v"1.12.0", "p", false)) == String[]
 end
 
-@testitem "DJP runtime: stamp round-trips, prunes and rejects garbage" begin
-    using JuliaWorkspaces: _djp_stamp_path, _read_djp_stamp, _write_djp_stamp, _djp_runtime_dir
-
-    mktempdir() do root
-        store = joinpath(root, "store")
-        path = _djp_stamp_path(store, UInt(0xcafe1234))
-
-        @test _read_djp_stamp(path) === nothing
-
-        _write_djp_stamp(path, v"1.12.7", true)
-        @test _read_djp_stamp(path) == (v"1.12.7", true)
-
-        _write_djp_stamp(path, v"1.9.4", false)
-        @test _read_djp_stamp(path) == (v"1.9.4", false)
-
-        # One stamp would otherwise accumulate per extension update.
-        other = _djp_stamp_path(store, UInt(0x11111111))
-        _write_djp_stamp(other, v"1.0.0", false)
-        _write_djp_stamp(path, v"1.12.7", true)
-        @test filter(f -> endswith(f, ".stamp"), readdir(_djp_runtime_dir(store))) ==
-            [basename(path)]
-
-        # Anything unparseable must read as "not prepared". Preparing again is
-        # cheap, but trusting a corrupt stamp would launch every child with
-        # --compiled-modules=existing against caches that may not exist.
-        bad = joinpath(_djp_runtime_dir(store), "bad.stamp")
-        for content in ("1\nnot-a-version\nexisting\n", "9\n1.12.7\nexisting\n",
-                        "1\n1.12.7\nweird\n", "1\n1.12.7\n", "")
-            write(bad, content)
-            @test _read_djp_stamp(bad) === nothing
-        end
-    end
-end
-
-@testitem "DJP runtime: the fingerprint tracks the executable and the child sources" begin
-    using JuliaWorkspaces: _djp_runtime_fingerprint, default_djp_julia_exe, _fingerprint_tree
-
-    exe = default_djp_julia_exe()
-    baseline = _djp_runtime_fingerprint(exe)
-
-    # `hash` only has a method for the platform-native seed width, so a
-    # fingerprint typed `UInt64` is a MethodError on every 32-bit build.
-    @test baseline isa UInt
-
-    # Deterministic, or every restart would redo the preparation it is meant
-    # to skip.
-    @test _djp_runtime_fingerprint(exe) == baseline
-    # Pointing children at a different Julia must invalidate the stamp: its
-    # recorded version and flag support describe that executable only.
-    @test _djp_runtime_fingerprint(joinpath("some", "other", "julia")) != baseline
-
-    # An edit anywhere under a tracked tree has to change the hash, because a
-    # stale stamp means children load their own package from source forever.
-    mktempdir() do root
-        tree = joinpath(root, "tree")
-        mkpath(joinpath(tree, "nested"))
-        write(joinpath(tree, "nested", "a.jl"), "x = 1")
-        before = _fingerprint_tree(zero(UInt), tree)
-        @test _fingerprint_tree(zero(UInt), tree) == before
-
-        write(joinpath(tree, "nested", "a.jl"), "x = 1234567")
-        @test _fingerprint_tree(zero(UInt), tree) != before
-
-        write(joinpath(tree, "nested", "b.jl"), "y = 2")
-        @test _fingerprint_tree(zero(UInt), tree) != before
-
-        # A missing tree is stable rather than an error, so a partial install
-        # degrades to "prepare again" instead of taking down the reactor.
-        @test _fingerprint_tree(zero(UInt), joinpath(root, "absent")) ==
-            _fingerprint_tree(zero(UInt), joinpath(root, "also-absent"))
-    end
-end
-
-@testitem "DJP runtime: capability is probed from the executable, not assumed" begin
-    using JuliaWorkspaces: _probe_djp_julia, default_djp_julia_exe
-
-    # Probing rather than comparing against the version that introduced
-    # --compiled-modules=existing is what keeps this correct when children run
-    # on a different Julia than the host, which they will.
-    probed = _probe_djp_julia(default_djp_julia_exe())
-    @test probed !== nothing
-    version, supports_existing = probed
-    @test version == VERSION
-    @test supports_existing == (VERSION >= v"1.11")
-
-    # An executable that cannot answer must not be guessed at.
-    @test _probe_djp_julia(joinpath("nonexistent", "julia-does-not-exist")) === nothing
-end
-
-@testitem "DJP runtime: preparation is skipped once stamped, across processes" begin
-    using JuliaWorkspaces: djp_runtime, default_djp_julia_exe, _reset_djp_runtime_cache!,
-        _read_djp_stamp, _djp_stamp_path, _djp_runtime_fingerprint
-
-    exe = default_djp_julia_exe()
-    mktempdir() do root
-        store = joinpath(root, "store")
-        prepared = Ref(0)
-        count_prepare = () -> (prepared[] += 1)
-
-        _reset_djp_runtime_cache!()
-        try
-            first_result = djp_runtime(exe, store; on_prepare=count_prepare)
-            @test first_result.exe == exe
-            @test first_result.version == VERSION
-            @test prepared[] == 1
-
-            # Same process: the memo answers, nothing is launched.
-            second = djp_runtime(exe, store; on_prepare=count_prepare)
-            @test second == first_result
-            @test prepared[] == 1
-
-            # A restart of the host is the case that matters: dropping the memo
-            # must still cost zero child launches, or every reopened window
-            # would pay for preparation all over again.
-            _reset_djp_runtime_cache!()
-            third = djp_runtime(exe, store; on_prepare=count_prepare)
-            @test third == first_result
-            @test prepared[] == 1
-
-            # Only a definitive outcome is stamped. Preparation can legitimately
-            # fail (a busy depot), and that case must stay unstamped so it is
-            # retried rather than locked in.
-            stamp = _djp_stamp_path(store, _djp_runtime_fingerprint(exe))
-            if first_result.use_existing_caches
-                @test _read_djp_stamp(stamp) == (VERSION, true)
-            end
-        finally
-            _reset_djp_runtime_cache!()
-        end
-    end
-end
-
 @testitem "DJP runtime: the child command carries the cache-free contract" begin
     using JuliaWorkspaces: DjpRuntime, _djp_child_cmd
 
@@ -218,4 +63,99 @@ end
     with_extra = _djp_child_cmd(DjpRuntime("jlx", v"1.12.0", "p", true), script, pipe,
         String["handler.jl", "crashpipe"])
     @test collect(with_extra.exec)[end-2:end] == [pipe, "handler.jl", "crashpipe"]
+end
+
+@testitem "DJP runtime: the check selects the environment the child script selects" begin
+    using JuliaWorkspaces: _check_djp_julia, default_djp_julia_exe, _djp_environments_dir, _djp_main_script
+
+    # The check has to prepare the environment the child will actually run in,
+    # so its selection must match `julia_dynamic_analysis_process_main.jl`.
+    # Guard the child script side against drifting away from that shape.
+    main_script = read(_djp_main_script(), String)
+    @test occursin("\"v\$(VERSION.major).\$(VERSION.minor)\", \"Project.toml\"", main_script)
+    @test occursin("\"fallback\"", main_script)
+
+    checked = _check_djp_julia(default_djp_julia_exe())
+    if VERSION < v"1.11"
+        # This Julia rejects --compiled-modules=existing, which the check
+        # launches with, so it must report that it cannot run cache-free.
+        @test checked === nothing
+    else
+        @test checked !== nothing
+        version, project, precompiled = checked
+        # Reported by the child Julia, not assumed from the host.
+        @test version == VERSION
+        @test precompiled isa Bool
+        env_dir = _djp_environments_dir()
+        versioned = joinpath(env_dir, "v$(VERSION.major).$(VERSION.minor)", "Project.toml")
+        expected = isfile(versioned) ? versioned : joinpath(env_dir, "fallback")
+        @test normpath(project) == normpath(expected)
+    end
+end
+
+@testitem "DJP runtime: an executable that cannot answer is not guessed at" begin
+    using JuliaWorkspaces: _check_djp_julia, djp_runtime, _reset_djp_runtime_cache!
+
+    missing_exe = joinpath("nonexistent", "julia-does-not-exist")
+    @test _check_djp_julia(missing_exe) === nothing
+
+    # Such a runtime still launches children, just the way they always were.
+    _reset_djp_runtime_cache!()
+    try
+        runtime = djp_runtime(missing_exe)
+        @test !runtime.use_existing_caches
+        @test runtime.version === nothing
+        @test runtime.project === nothing
+    finally
+        _reset_djp_runtime_cache!()
+    end
+end
+
+@testitem "DJP runtime: resolution runs once per process and only reports real preparation" begin
+    using JuliaWorkspaces: djp_runtime, default_djp_julia_exe, _reset_djp_runtime_cache!, _DJP_RUNTIME_CACHE
+
+    exe = default_djp_julia_exe()
+    reports = Tuple{String,Int}[]
+    progress = (message, percentage) -> push!(reports, (message, percentage))
+
+    _reset_djp_runtime_cache!()
+    try
+        first_result = djp_runtime(exe; progress)
+        @test first_result.exe == exe
+        @test haskey(_DJP_RUNTIME_CACHE, exe)
+        if VERSION >= v"1.11"
+            @test first_result.version == VERSION
+            @test first_result.project !== nothing
+            # The child environment precompiles cleanly on every supported
+            # version (see test_dynamic_process_precompile.jl), so preparing it
+            # has to succeed and children have to end up cache-free.
+            @test first_result.use_existing_caches
+        else
+            @test !first_result.use_existing_caches
+        end
+
+        # Progress appears only when the environment actually had to be
+        # prepared, and a bar that was started is always ended.
+        @test isempty(reports) || (first(reports)[2] == 0 && last(reports)[2] == 100)
+
+        # Memoized: a second call launches nothing and reports nothing.
+        count_before = length(reports)
+        @test djp_runtime(exe; progress) == first_result
+        @test length(reports) == count_before
+    finally
+        _reset_djp_runtime_cache!()
+    end
+end
+
+@testitem "DJP runtime: reactor start resolves ahead only when it will launch real children" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicIndexingOnly, DynamicPersistent, DynamicOff,
+        _should_prewarm_djp_runtime
+
+    @test _should_prewarm_djp_runtime(DynamicFeature(DynamicIndexingOnly, mktempdir()))
+    @test _should_prewarm_djp_runtime(DynamicFeature(DynamicPersistent, mktempdir()))
+    # A download-only workspace never launches a child.
+    @test !_should_prewarm_djp_runtime(DynamicFeature(DynamicOff, mktempdir()))
+    # Reactor tests inject a launcher and must never spawn a Julia process.
+    @test !_should_prewarm_djp_runtime(
+        DynamicFeature(DynamicIndexingOnly, mktempdir(); launcher=(df, djp) -> nothing))
 end

@@ -4,9 +4,9 @@
 #
 # Indexing children exist to *read* package metadata: `SymbolServer.get_store`
 # imports every package that still lacks a `.jstore` and reflects over the
-# resulting modules. Loading runs a package's top-level code, which is
-# unavoidable — but it does not, on its own, compile method bodies. That cost
-# comes from *cache generation*: `Pkg.precompile` runs PrecompileTools
+# resulting modules. Loading runs the top-level code of a package, which is
+# unavoidable, but it does not by itself compile method bodies. That cost comes
+# from *cache generation*: `Pkg.precompile` runs PrecompileTools
 # `@compile_workload` blocks (gated on `jl_generating_output`, so they only fire
 # while a cache is being written), infers and emits native code for everything
 # they touch, and serializes the result. None of that produces a single extra
@@ -19,7 +19,7 @@
 #     environment, when the indexer only ever imports the handful of packages
 #     that are missing a symbol cache.
 #   * `--compiled-modules=existing` reuses any cache that already exists (the
-#     user's own working environment is normally warm, so those imports stay
+#     working environment of the user is normally warm, so those imports stay
 #     fast) but never writes a new one, so an uncached package is loaded from
 #     source instead of triggering a full precompile.
 #
@@ -27,16 +27,24 @@
 # up to one worker per core, so the `max_concurrent_djps` cap alone did not
 # bound how many Julia processes indexing could put on the machine.
 #
-# The one thing that must stay precompiled is the child's *own* environment —
-# `--compiled-modules=existing` is process-wide, so without a cache for
-# JuliaDynamicAnalysisProcess every child would re-load Revise, JuliaInterpreter
-# and friends from source, on every launch. `djp_runtime` prepares that once and
-# records the outcome in a stamp file, so the preparation process is skipped
-# entirely on later runs — including across restarts of the host process.
+# The one environment that must stay precompiled is the one the child itself
+# runs in: `--compiled-modules=existing` is process-wide, so without a cache for
+# JuliaDynamicAnalysisProcess every child would re-load Revise,
+# JuliaInterpreter and friends from source, on every launch.
+#
+# `djp_runtime` settles that with a single helper launch per host process that
+# asks the child Julia directly. Only the child Julia can answer all of it:
+# which environment it selects, whether it accepts the flag, and whether the
+# caches in its own depot are current (`Base.isprecompiled` checks every include
+# dependency, vendored packages included). The answer costs about a second, is
+# memoized for the lifetime of the host, and is fetched when the reactor starts
+# so that it overlaps with loading the workspace. Nothing is written to disc
+# here; the only cache writes are the ordinary precompilation of the child
+# environment, and only when the check finds it missing or stale.
 #
 # Nothing here assumes the child runs on the same Julia as this process: the
-# version and the `--compiled-modules=existing` capability are *probed* from the
-# child executable, never taken from `VERSION`.
+# version and the `--compiled-modules=existing` capability come from the child
+# executable, never from `VERSION`.
 
 """
     DjpRuntime
@@ -45,161 +53,36 @@ Everything needed to launch a dynamic analysis child process, resolved once per
 child Julia executable by [`djp_runtime`](@ref).
 
 - `exe`: the Julia executable children are launched with.
-- `version`: that executable's version — probed, not assumed.
-- `project`: the child environment matching `version` (only used to prepare the
-  child's own caches; the child script selects its environment itself).
+- `version`: the version of that executable as reported by the check, or
+  `nothing` when the check could not run (for instance because the executable
+  rejects `--compiled-modules=existing`). Informational only.
+- `project`: the child environment that executable selects, or `nothing` in the
+  same cases. Only used to prepare that environment; the child script selects
+  its environment itself.
 - `use_existing_caches`: whether to pass `--compiled-modules=existing`. False
-  when the child Julia is too old to accept it, or when preparing the child's
-  own caches did not succeed.
+  when the child Julia is too old to accept it, or when preparing the child
+  environment did not succeed.
 """
 struct DjpRuntime
     exe::String
-    version::VersionNumber
-    project::String
+    version::Union{Nothing,VersionNumber}
+    project::Union{Nothing,String}
     use_existing_caches::Bool
 end
 
 # The Julia executable used for indexing children. Deliberately a function, and
 # deliberately the only place that choice is made: everything else derives from
-# the *probed* properties of whatever this returns, so pointing children at a
+# what the check reports about whatever this returns, so pointing children at a
 # different Julia than the host later is a change here and nowhere else.
 #
 # `julia` from PATH may not resolve at all inside an editor-launched language
-# server (which is started with an explicit executable path), so use the running
-# process's own binary.
+# server (which is started with an explicit executable path), so use the binary
+# of the running process.
 default_djp_julia_exe() = joinpath(Sys.BINDIR, Base.julia_exename())
 
 _djp_root() = normpath(joinpath(@__DIR__, "..", "..", "juliadynamicanalysisprocess"))
 _djp_environments_dir() = joinpath(_djp_root(), "environments")
 _djp_main_script() = joinpath(_djp_root(), "app", "julia_dynamic_analysis_process_main.jl")
-# `symbolserver.jl` in the child package includes these, so they are part of
-# what its compile cache is built from.
-_djp_shared_dir() = normpath(joinpath(@__DIR__, "..", "..", "shared", "symbolserver"))
-
-"""
-    _djp_project_for_version(version) -> String
-
-The child environment for `version`, mirroring the selection the child script
-makes for itself: a `vMAJOR.MINOR` directory when one exists, else `fallback`.
-"""
-function _djp_project_for_version(version::VersionNumber)
-    env_dir = _djp_environments_dir()
-    versioned = joinpath(env_dir, "v$(version.major).$(version.minor)")
-    isfile(joinpath(versioned, "Project.toml")) && return versioned
-    return joinpath(env_dir, "fallback")
-end
-
-# ─── Stamp ──────────────────────────────────────────────────────────────────
-#
-# Preparation costs two child process launches, so its result is cached on disc
-# under a fingerprint of everything that can invalidate it. A *hit* means zero
-# extra processes, which is the whole point: the common case is an unchanged
-# extension on an unchanged Julia, restarted many times.
-#
-# The fingerprint covers the child executable (path, size, mtime — so a juliaup
-# channel update or an in-place upgrade invalidates it) and the child package's
-# own source tree plus the shared symbolserver sources it includes. It does NOT
-# cover the vendored packages under `scripts/packages/`, which the child package
-# includes: fingerprinting those means stat-ing ~2200 files, which costs tens of
-# seconds on a cold Windows filesystem and would dwarf what the stamp saves. An
-# extension update rewrites the child tree too, so released versions are
-# covered; editing a vendored package in a *development* checkout is the one
-# case that needs the stamp directory deleted by hand.
-
-const _DJP_STAMP_FORMAT = "1"
-
-_djp_runtime_dir(store_path::AbstractString) = joinpath(dirname(store_path), "djp-runtime")
-
-_djp_stamp_path(store_path::AbstractString, fingerprint::UInt) =
-    joinpath(_djp_runtime_dir(store_path),
-        string(string(fingerprint, base=16, pad=2 * sizeof(UInt)), ".stamp"))
-
-# Fold every file under `root` into `h`. Sorted by path so the hash does not
-# depend on directory iteration order, and tolerant of IO errors: an unreadable
-# tree yields a different-but-stable hash rather than throwing.
-function _fingerprint_tree(h::UInt, root::AbstractString)
-    isdir(root) || return hash(:missing, h)
-    entries = Tuple{String,Int64,Float64}[]
-    try
-        for (dir, _, files) in walkdir(root; onerror = _ -> nothing)
-            for f in files
-                path = joinpath(dir, f)
-                st = try
-                    stat(path)
-                catch
-                    continue
-                end
-                push!(entries, (relpath(path, root), st.size, st.mtime))
-            end
-        end
-    catch
-        return hash(:unreadable, h)
-    end
-    sort!(entries)
-    for entry in entries
-        h = hash(entry, h)
-    end
-    return h
-end
-
-# Returns the platform-native `UInt`: `hash` has no method for any other seed
-# width, so a hardcoded `UInt64` is a `MethodError` on every 32-bit build.
-function _djp_runtime_fingerprint(exe::AbstractString)
-    h::UInt = hash(_DJP_STAMP_FORMAT, hash("djp-runtime"))
-    h = hash(exe, h)
-    h = try
-        st = stat(exe)
-        hash((st.size, st.mtime), h)
-    catch
-        hash(:no_exe, h)
-    end
-    h = _fingerprint_tree(h, _djp_root())
-    h = _fingerprint_tree(h, _djp_shared_dir())
-    return h
-end
-
-# Three fixed lines: format tag, child Julia version, launch mode. A plain
-# line-based format because the payload carries no text that would need
-# escaping, and a stamp that cannot be parsed is simply treated as absent.
-function _read_djp_stamp(path::AbstractString)
-    isfile(path) || return nothing
-    lines = try
-        readlines(path)
-    catch
-        return nothing
-    end
-    length(lines) >= 3 || return nothing
-    strip(lines[1]) == _DJP_STAMP_FORMAT || return nothing
-    version = tryparse(VersionNumber, strip(lines[2]))
-    version === nothing && return nothing
-    mode = strip(lines[3])
-    mode in ("existing", "plain") || return nothing
-    return (version, mode == "existing")
-end
-
-# Written only for a *definitive* outcome, so a transient preparation failure
-# retries on the next run instead of locking in the degraded launch mode.
-# Stale siblings are pruned: one stamp would otherwise accumulate per update.
-function _write_djp_stamp(path::AbstractString, version::VersionNumber, use_existing::Bool)
-    try
-        dir = dirname(path)
-        mkpath(dir)
-        for other in readdir(dir; join=true)
-            endswith(other, ".stamp") && other != path && try rm(other; force=true) catch; end
-        end
-        tmp = string(path, ".", getpid(), ".tmp")
-        open(tmp, "w") do io
-            println(io, _DJP_STAMP_FORMAT)
-            println(io, version)
-            println(io, use_existing ? "existing" : "plain")
-        end
-        mv(tmp, path; force=true)
-    catch err
-        # A stamp we cannot write only costs the preparation launches again.
-        @debug "Could not write dynamic analysis runtime stamp" path exception=(err, catch_backtrace())
-    end
-    return nothing
-end
 
 # ─── Child process environment ──────────────────────────────────────────────
 
@@ -267,7 +150,6 @@ function _djp_child_cmd(runtime::DjpRuntime, script::AbstractString, pipe_name::
     )
 end
 
-# ─── Probing and preparation ────────────────────────────────────────────────
 
 # Run a short-lived helper process under a deadline, capturing both streams.
 # A preparation process that hangs would otherwise wedge every indexing child
@@ -297,31 +179,59 @@ function _run_djp_helper(cmd::Cmd, timeout_seconds::Real)
     end
 end
 
-"""
-    _probe_djp_julia(exe) -> Union{Nothing,Tuple{VersionNumber,Bool}}
+# ─── Checking and preparation ───────────────────────────────────────────────
 
-Ask `exe` what version it is and whether it accepts `--compiled-modules=existing`.
+# Runs under `--compiled-modules=existing`, in the environment the child script
+# would activate. The selection below must stay identical to the one in
+# `julia_dynamic_analysis_process_main.jl`; the tests hold the two together.
+# One value per line, because the project path may contain spaces.
+const _DJP_CHECK_CODE = raw"""
+    env_dir = ARGS[1]
+    versioned = joinpath(env_dir, "v$(VERSION.major).$(VERSION.minor)", "Project.toml")
+    project = isfile(versioned) ? versioned : joinpath(env_dir, "fallback")
+    Base.ACTIVE_PROJECT[] = project
+    pkgid = Base.identify_package("JuliaDynamicAnalysisProcess")
+    precompiled = pkgid !== nothing && isdefined(Base, :isprecompiled) && Base.isprecompiled(pkgid)
+    println(VERSION)
+    println(project)
+    println(precompiled)
+    """
 
-Capability is established by *trying* the flag rather than comparing against the
-version that introduced it: an unsupported value makes Julia exit non-zero
-before running anything, so one launch answers both questions and the answer
-stays correct for Julia versions released after this code was written.
 """
-function _probe_djp_julia(exe::AbstractString)
-    for (extra, supports_existing) in ((["--compiled-modules=existing"], true), (String[], false))
-        cmd = `$exe --startup-file=no --history-file=no $extra -e "print(VERSION)"`
-        ok, out, _ = _run_djp_helper(cmd, 120)
-        if ok
-            version = tryparse(VersionNumber, strip(out))
-            version === nothing || return (version, supports_existing)
-        end
+    _check_djp_julia(exe) -> Union{Nothing,Tuple{VersionNumber,String,Bool}}
+
+Ask `exe`, launched exactly the way cache-free children are, which version it
+is, which child environment it selects, and whether that environment is
+precompiled.
+
+`nothing` means the launch did not succeed. The usual reason is that the
+executable does not accept `--compiled-modules=existing` (Julia exits non-zero
+before running anything). That is established by trying rather than by
+comparing against the version that introduced the flag, so the answer stays
+correct for Julia versions released after this code was written.
+"""
+function _check_djp_julia(exe::AbstractString)
+    cmd = Cmd(
+        `$exe --startup-file=no --history-file=no --compiled-modules=existing -e $_DJP_CHECK_CODE $(_djp_environments_dir())`,
+        detach = false,
+        env = _djp_process_env(disable_precompile_auto=true),
+    )
+    ok, out, err = _run_djp_helper(cmd, 120)
+    if !ok
+        @debug "Indexing Julia cannot run cache-free; children launch with default caching" exe stderr=err
+        return nothing
     end
-    return nothing
+    lines = strip.(readlines(IOBuffer(out)))
+    length(lines) >= 3 || return nothing
+    version = tryparse(VersionNumber, lines[end-2])
+    precompiled = tryparse(Bool, lines[end])
+    (version === nothing || precompiled === nothing) && return nothing
+    return (version, String(lines[end-1]), precompiled)
 end
 
 # Runs in the child environment, so `identify_package` resolves against it.
-# `Pkg.precompile` is skipped when the cache is already good, which makes a
-# stamp that was lost (but whose caches survive) cheap to rebuild.
+# `Pkg.precompile` is skipped when the cache is already good, so losing a race
+# with another host process preparing the same environment costs nothing.
 const _DJP_WARMUP_CODE = raw"""
     import Pkg
     pkgid = Base.identify_package("JuliaDynamicAnalysisProcess")
@@ -350,72 +260,46 @@ function _warm_djp_runtime(exe::AbstractString, project::AbstractString)
     return ok
 end
 
-function _resolve_djp_runtime(exe::AbstractString, store_path::AbstractString, on_prepare)
-    fingerprint = _djp_runtime_fingerprint(exe)
-    stamp = _djp_stamp_path(store_path, fingerprint)
+function _resolve_djp_runtime(exe::AbstractString, progress)
+    checked = _check_djp_julia(exe)
+    checked === nothing && return DjpRuntime(exe, nothing, nothing, false)
 
-    stamped = _read_djp_stamp(stamp)
-    if stamped !== nothing
-        version, use_existing = stamped
-        @debug "Reusing prepared dynamic analysis runtime" exe version use_existing
-        return DjpRuntime(exe, version, _djp_project_for_version(version), use_existing)
+    version, project, precompiled = checked
+    precompiled && return DjpRuntime(exe, version, project, true)
+
+    @info "Preparing the Julia indexing runtime (precompiling the indexer environment)..."
+    progress === nothing || progress("Preparing the Julia indexing runtime...", 0)
+    prepared = try
+        _warm_djp_runtime(exe, project)
+    finally
+        progress === nothing || progress("Done", 100)
     end
-
-    on_prepare === nothing || on_prepare()
-
-    probed = _probe_djp_julia(exe)
-    if probed === nothing
-        # Nothing about the child executable could be established. Launch
-        # children the conservative way (they still select their own
-        # environment) and do not stamp, so this is retried next time.
-        @warn "Could not determine the version of the Julia used for indexing; launching indexing processes with conservative settings." exe
-        return DjpRuntime(exe, VERSION, _djp_project_for_version(VERSION), false)
-    end
-
-    version, supports_existing = probed
-    project = _djp_project_for_version(version)
-
-    if !supports_existing
-        # Definitive: this Julia will never accept the flag.
-        @debug "Indexing Julia does not support --compiled-modules=existing" exe version
-        _write_djp_stamp(stamp, version, false)
-        return DjpRuntime(exe, version, project, false)
-    end
-
-    @info "Preparing the Julia indexing runtime (one-time; later sessions reuse it)..."
-    if _warm_djp_runtime(exe, project)
-        _write_djp_stamp(stamp, version, true)
-        return DjpRuntime(exe, version, project, true)
-    end
-
-    # Possibly transient (a busy depot, a killed process), so no stamp: let
-    # children build their own caches this session and try again next time.
-    @warn "Could not prepare the Julia indexing runtime; indexing processes will fall back to building their own caches."
-    return DjpRuntime(exe, version, project, false)
+    prepared || @warn "Could not prepare the Julia indexing runtime; indexing processes will fall back to building their own caches."
+    return DjpRuntime(exe, version, project, prepared)
 end
 
 const _DJP_RUNTIME_LOCK = ReentrantLock()
 const _DJP_RUNTIME_CACHE = Dict{String,DjpRuntime}()
 
 """
-    djp_runtime(exe, store_path; on_prepare=nothing) -> DjpRuntime
+    djp_runtime(exe; progress=nothing) -> DjpRuntime
 
-Resolve — and if necessary prepare — the runtime indexing children launch with.
+Resolve, and if necessary prepare, the runtime indexing children launch with.
 
-Memoized per executable for the lifetime of the process, and persisted across
-restarts by a stamp file under `store_path`, so the steady state costs no extra
-process launches at all.
+Memoized per executable for the lifetime of the process, so the whole cost is
+one helper launch per host session, plus one precompilation of the child
+environment when the check finds it missing or stale.
 
-Called from each child's own launch task, never from the reactor: the first
-caller may block for as long as preparing the child environment takes, and
-concurrent callers queue behind it rather than each preparing the same thing.
-`on_prepare` is invoked (once) only when that slow path is actually taken, so a
-caller can report progress without flashing a message in the common case.
+Never call this on the reactor: the first caller may block for as long as
+preparing the child environment takes, and concurrent callers queue behind it
+rather than each checking and preparing the same thing. `progress`, a
+`(message, percentage)` callback, is only invoked when preparation actually
+runs, so the common case shows nothing.
 """
-function djp_runtime(exe::AbstractString, store_path::AbstractString; on_prepare=nothing)
+function djp_runtime(exe::AbstractString; progress=nothing)
     return lock(_DJP_RUNTIME_LOCK) do
         get!(_DJP_RUNTIME_CACHE, String(exe)) do
-            _resolve_djp_runtime(exe, store_path, on_prepare)
+            _resolve_djp_runtime(exe, progress)
         end
     end
 end
