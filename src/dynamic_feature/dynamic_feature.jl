@@ -1287,14 +1287,11 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     transition!(djp.fsm, DynamicProcessStarting; reason="launching")
     token = CancellationTokens.get_token(djp.cancellation_source)
     djp.task = @async try
-        # Resolving the runtime may have to prepare the child environment,
-        # which is slow. It happens at most once per session — usually never,
-        # because the on-disc stamp survives restarts — but it must not run on
-        # the reactor, so it runs here, inside the child's own task. Concurrent
-        # children queue behind the first one rather than each preparing.
-        runtime = djp_runtime(default_djp_julia_exe(), df.store_path;
-            on_prepare = () -> put!(df.in_channel,
-                ProcessProgressMsg(djp.key, "Preparing the Julia indexing runtime...", 0)))
+        # Normally already resolved: reactor start kicks this off (see
+        # `_prewarm_djp_runtime`). If it is still running, or preparing the
+        # child environment, this waits for it. That must not happen on the
+        # reactor, so it happens here, inside the task of the child.
+        runtime = djp_runtime(default_djp_julia_exe(); progress=_djp_runtime_progress(df))
         start(djp, df.in_channel, token, runtime)
     catch err
         # `start` reports errors from its supervised region itself; this catches
@@ -1306,6 +1303,34 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
         put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err))
     end
     return
+end
+
+# The one-time preparation of the child environment gets its own progress bar:
+# at reactor start there is no work item to report it against.
+_djp_runtime_progress(df::DynamicFeature) =
+    (message, percentage) -> _report_progress(df, "prepare-runtime", message, percentage)
+
+# Whether reactor start should resolve the child runtime ahead of the first
+# launch. Not when dynamic indexing is off (a download-only workspace never
+# launches a child), and not with an injected launcher (reactor tests must not
+# spawn Julia processes).
+_should_prewarm_djp_runtime(df::DynamicFeature) =
+    df.djp_mode != DynamicOff && df.launcher === _launch_process!
+
+# Resolve the child runtime in the background as soon as the reactor starts, so
+# the one helper launch it costs overlaps with loading the workspace instead of
+# delaying the first child. `_launch_process!` picks up the memoized result.
+function _prewarm_djp_runtime(df::DynamicFeature)
+    _should_prewarm_djp_runtime(df) || return nothing
+    @async try
+        djp_runtime(default_djp_julia_exe(); progress=_djp_runtime_progress(df))
+    catch err
+        # Only an early start: nothing is memoized on failure, so the first
+        # launch resolves again and a real problem surfaces through the normal
+        # launch-failure path.
+        @debug "Resolving the dynamic analysis runtime ahead of time failed" exception=(err, catch_backtrace())
+    end
+    return nothing
 end
 
 _has_free_slot(df::DynamicFeature) =
@@ -1439,6 +1464,7 @@ function Base.run(df::DynamicFeature)
 end
 
 function start(df::DynamicFeature)
+    _prewarm_djp_runtime(df)
     @async try
         Base.run(df)
     catch err
