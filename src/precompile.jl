@@ -265,10 +265,7 @@ using PrecompileTools: @setup_workload, @compile_workload
             jw2 = JuliaWorkspace(store_path=mktempdir(), dynamic=DynamicIndexingOnly)
             add_folder_from_disc!(jw2, scripts_dir)
             get_diagnostics_blocking(jw2)
-            put!(jw2.dynamic_feature.in_channel, ShutdownMsg())
-            while state(jw2.dynamic_feature.controller_fsm) != DynamicControllerStopped
-                yield()
-            end
+            shutdown!(jw2)
         end
     end
 end

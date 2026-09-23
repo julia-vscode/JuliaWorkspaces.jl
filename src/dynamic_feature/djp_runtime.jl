@@ -143,10 +143,13 @@ the child and the preparation process cannot drift apart silently.
 function _djp_child_cmd(runtime::DjpRuntime, script::AbstractString, pipe_name::AbstractString,
         extra_args::AbstractVector=String[])
     flags = _djp_launch_flags(runtime)
+    env = _djp_process_env(disable_precompile_auto=true)
+    # Lets the child notice when this process is gone; see the child script.
+    env["JULIA_DJP_PARENT_PID"] = string(getpid())
     return Cmd(
         `$(runtime.exe) --startup-file=no --history-file=no --depwarn=no $flags $script $pipe_name $extra_args`,
         detach = false,
-        env = _djp_process_env(disable_precompile_auto=true),
+        env = env,
     )
 end
 
