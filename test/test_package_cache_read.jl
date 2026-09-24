@@ -78,3 +78,49 @@ end
     @test write_cache_atomic(pkg, out) == out
     @test readdir(dirname(out)) == ["Foo.jstore"]
 end
+
+@testitem "Package cache: out of memory is retried once after a full collection" begin
+    using JuliaWorkspaces: _package_cache_path, _read_package_cache, _read_cache_file
+    using JuliaWorkspaces.SymbolServer: Package, ModuleStore, VarRef, CacheStore
+    using UUIDs: UUID
+
+    store = mktempdir()
+    uuid = UUID("00000000-0000-0000-0000-000000000005")
+    path = _package_cache_path(store, :Qux, uuid, v"1.0.0", nothing)
+    mkpath(dirname(path))
+    pkg = Package("Qux", ModuleStore(VarRef(nothing, :Qux), Dict{Symbol,Any}(), "", Symbol[], Symbol[], Symbol[]), uuid, nothing)
+    open(io -> CacheStore.write(io, pkg), path, "w")
+
+    calls = Ref(0)
+    oom_once(p) = (calls[] += 1) == 1 ? throw(OutOfMemoryError()) : _read_cache_file(p)
+
+    loaded = _read_package_cache(path, :Qux, uuid; read_cache=oom_once)
+    @test loaded isa Package
+    @test loaded.name == "Qux"
+    @test calls[] == 2
+end
+
+@testitem "Package cache: a cache that never fits in memory is kept and reported as unloadable" begin
+    using JuliaWorkspaces: _package_cache_path, _read_package_cache, _try_load_package_cache, PackageCacheUnloadable
+    using UUIDs: UUID
+
+    store = mktempdir()
+    uuid = UUID("00000000-0000-0000-0000-000000000006")
+    path = _package_cache_path(store, :Quux, uuid, v"1.0.0", nothing)
+    mkpath(dirname(path))
+    write(path, "stands in for a valid cache")
+
+    calls = Ref(0)
+    always_oom(p) = (calls[] += 1; throw(OutOfMemoryError()))
+
+    @test _read_package_cache(path, :Quux, uuid; read_cache=always_oom) isa PackageCacheUnloadable
+    @test calls[] == 2          # one retry, no more
+    @test isfile(path)          # valid file: deleting it would only re-index into the same OOM
+    @test _try_load_package_cache(store, :Quux, uuid, v"1.0.0", nothing; read_cache=always_oom) isa PackageCacheUnloadable
+
+    # Other failures are neither retried nor absorbed.
+    calls[] = 0
+    boom(p) = (calls[] += 1; error("boom"))
+    @test_throws ErrorException _read_package_cache(path, :Quux, uuid; read_cache=boom)
+    @test calls[] == 1
+end
