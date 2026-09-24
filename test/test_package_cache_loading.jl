@@ -111,3 +111,51 @@ end
     GC.gc(true); GC.gc(true)
     @test wr.value === nothing              # collected ⇒ the cache did not pin it
 end
+
+@testitem "Package cache loading: a cache that does not fit in memory is skipped, not re-queued" begin
+    using JuliaWorkspaces: JuliaWorkspaces, DynamicFeature, DynamicIndexingOnly, SContext, PkgCacheKey,
+        _ensure_package_cache_loaded!, _package_cache_path, input_package_metadata
+    using JuliaWorkspaces.Salsa: Runtime
+    using JuliaWorkspaces.SymbolServer: Package, ModuleStore, VarRef, CacheStore
+
+    store = mktempdir()
+    name = :HugePkg
+    uuid = Base.UUID("55555555-2222-3333-4444-555555555555")
+    version = v"0.12.7"
+    tree = "0123456789abcdef4567"
+    key = PkgCacheKey((name, uuid, version, tree))
+
+    cache_file = _package_cache_path(store, name, uuid, version, tree)
+    mkpath(dirname(cache_file))
+    pkg = Package(string(name), ModuleStore(VarRef(nothing, name), Dict{Symbol,Any}(), "", Symbol[], Symbol[], Symbol[]), uuid, nothing)
+    open(io -> CacheStore.write(io, pkg), cache_file, "w")
+
+    reads = Ref(0)
+    df = DynamicFeature(DynamicIndexingOnly, store; cache_reader=p -> (reads[] += 1; throw(OutOfMemoryError())))
+    rt = Runtime{SContext}(SContext(df))
+
+    # The lazy input must neither throw nor treat this as a miss.
+    result = @test_logs (:warn, r"Not enough memory to load the symbol cache for HugePkg") input_package_metadata(rt, name, uuid, version, tree)
+    @test result === nothing
+    @test reads[] == 2
+    @test key in df.unloadable_pkg_metadata
+    @test !(key in df.missing_pkg_metadata)
+    @test !(key in df.loaded_pkg_metadata)
+    @test isfile(cache_file)
+
+    # The eager loaders skip it without touching the disc.
+    @test !_ensure_package_cache_loaded!(rt, df, name, uuid, version, tree)
+    @test reads[] == 2
+
+    # A queued miss whose cache turns out not to fit leaves the missing set, so
+    # `_load_missing_package_metadata!` does not retry it on every environment.
+    other = PkgCacheKey((:OtherHugePkg, uuid, version, tree))
+    other_file = _package_cache_path(store, other.name, uuid, version, tree)
+    mkpath(dirname(other_file))
+    cp(cache_file, other_file)
+    push!(df.missing_pkg_metadata, other)
+    @test !_ensure_package_cache_loaded!(rt, df, other.name, uuid, version, tree)
+    @test other in df.unloadable_pkg_metadata
+    @test !(other in df.missing_pkg_metadata)
+    @test isfile(other_file)
+end

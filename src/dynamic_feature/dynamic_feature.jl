@@ -537,6 +537,11 @@ struct DynamicFeature
     # Package caches whose metadata input is already populated; guards against
     # re-reading (and re-`set_input`ing) multi-MB cache files.
     loaded_pkg_metadata::Set{PkgCacheKey}
+    # Package caches that are valid on disc but could not be read because the
+    # process ran out of memory, even after a full collection. Never retried for
+    # the life of the process, and never queued in `missing_pkg_metadata`:
+    # re-reading would only hit the same memory ceiling again.
+    unloadable_pkg_metadata::Set{PkgCacheKey}
     pending_count::Threads.Atomic{Int}
     # Whether any result has been consumed by `process_from_dynamic`, or a
     # reconcile completed without any work to do. Together with `pending_count`
@@ -587,6 +592,9 @@ struct DynamicFeature
     # Launch implementation; injectable so reactor tests observe launches
     # without spawning processes (same seam pattern as `progress_callback`).
     launcher::Function
+    # Reads one `.jstore` from a path; injectable so tests can simulate a read
+    # that runs out of memory (same seam pattern as `launcher`).
+    cache_reader::Function
     # ── Background refresh of served-stale standalone envs ──
     # Strictly lower priority than `launch_queue`; never counts as a pending
     # work item (readiness must not wait on refreshes).
@@ -599,6 +607,7 @@ struct DynamicFeature
             status_callback::Union{Nothing,Function}=nothing,
             err_handler::Union{Nothing,Function}=nothing,
             max_concurrent_djps::Int=4, launcher::Function=_launch_process!,
+            cache_reader::Function=_read_cache_file,
             max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS,
             djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
         return new(
@@ -616,8 +625,9 @@ struct DynamicFeature
             Set{DJPKey}(),          # done
             Set{DJPKey}(),          # last_required
             Set{DJPKey}(),          # reactor_required
-            Set{PkgCacheKey}(),
-            Set{PkgCacheKey}(),
+            Set{PkgCacheKey}(),     # missing_pkg_metadata
+            Set{PkgCacheKey}(),     # loaded_pkg_metadata
+            Set{PkgCacheKey}(),     # unloadable_pkg_metadata
             Threads.Atomic{Int}(0),
             Threads.Atomic{Bool}(false),
             Threads.Atomic{Bool}(false),
@@ -633,6 +643,7 @@ struct DynamicFeature
             Vector{DJPKey}(),
             Set{DJPKey}(),
             launcher,
+            cache_reader,
             Vector{DJPKey}(),
             Set{DJPKey}(),
         )

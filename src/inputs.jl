@@ -88,22 +88,31 @@ Salsa.@declare_input input_package_metadata(rt, name::Symbol, uuid::UUID, versio
 
 
     if ctx.dynamic_feature !== nothing
-        cache_path = _package_cache_path(ctx.dynamic_feature.store_path, name, uuid, version, git_tree_sha1)
+        df = ctx.dynamic_feature
+        key = PkgCacheKey((name, uuid, version, git_tree_sha1))
+        key in df.unloadable_pkg_metadata && return nothing
+
+        cache_path = _package_cache_path(df.store_path, name, uuid, version, git_tree_sha1)
 
         # A corrupt cache comes back as `nothing` (and is deleted from disc), so
         # it takes the miss path below and gets re-indexed — reading it must not
         # throw out of a Salsa derivation, where the exception would surface as
         # an uncaught `DerivedFunctionException` at the top of the host process.
-        package_data = _read_package_cache(cache_path, name, uuid)
+        package_data = _read_package_cache(cache_path, name, uuid; read_cache=df.cache_reader)
 
-        if package_data !== nothing
+        if package_data isa PackageCacheUnloadable
+            # Not a miss: queueing it would only read the same file into the
+            # same memory ceiling again.
+            _mark_package_cache_unloadable!(df, key)
+            return nothing
+        elseif package_data !== nothing
             # @info "Lazy load package metadata for" name uuid version git_tree_sha1 cache_path
 
-            push!(ctx.dynamic_feature.loaded_pkg_metadata, PkgCacheKey((name, uuid, version, git_tree_sha1)))
+            push!(df.loaded_pkg_metadata, key)
 
             return package_data
         else
-            push!(ctx.dynamic_feature.missing_pkg_metadata, PkgCacheKey((name, uuid, version, git_tree_sha1)))
+            push!(df.missing_pkg_metadata, key)
             # @info "Queued package metadata loading" name uuid version git_tree_sha1
             return nothing
         end
