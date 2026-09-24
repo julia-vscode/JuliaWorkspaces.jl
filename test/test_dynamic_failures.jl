@@ -367,3 +367,93 @@ end
     # become an `environment_errors` diagnostic on the user's Project.toml.
     @test _is_infra_failure(killed)
 end
+
+@testitem "Dynamic failures: a killed child's termination does not take down its retry" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, DynamicJuliaProcess, ReconcileMsg,
+        ProcessIndexFailedMsg, ProcessTerminatedMsg, ProcessIndexedMsg, TestEnvironmentReadyResult,
+        WatchTestEnvironmentKey, DJPKey, DJPRequestTimeoutException, DynamicProcessStarting,
+        transition!, state, handle!
+
+    # Mirror `_launch_process!`, which moves the child to `Starting`.
+    procs = DynamicJuliaProcess[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_failure_attempts=2,
+        launcher=(df, djp) -> (push!(procs, djp); transition!(djp.fsm, DynamicProcessStarting; reason="test")))
+
+    k = WatchTestEnvironmentKey("/ws/R", "R", UInt64(1))
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+    @test length(procs) == 1
+
+    # The timeout kills the first child and retries.
+    handle!(df, ProcessIndexFailedMsg(k, DJPRequestTimeoutException(k, "indexProject", 300), procs[1]))
+    @test length(procs) == 2
+
+    # Killing the first child ends its message loop, which reports the
+    # termination only now, while the retry is still starting under the same
+    # key. That used to kill the retry and settle the key as failed.
+    handle!(df, ProcessTerminatedMsg(k, procs[1]))
+    @test df.procs[k] === procs[2]
+    @test state(procs[2].fsm) == DynamicProcessStarting
+    @test k in df.inflight
+    @test k in df.launching
+    @test !(k in df.failed_projects)
+    @test !isready(df.out_channel)
+
+    handle!(df, ProcessIndexedMsg(k, "/tmp/testenv"))
+    @test take!(df.out_channel) isa TestEnvironmentReadyResult
+    @test isempty(df.inflight)
+    @test df.pending_count[] == 0
+end
+
+@testitem "Dynamic failures: a second failure report from a replaced child is ignored" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, DynamicJuliaProcess, ReconcileMsg,
+        ProcessIndexFailedMsg, WatchTestEnvironmentKey, DJPKey, DynamicProcessCrashException,
+        DynamicProcessStarting, transition!, state, handle!
+
+    procs = DynamicJuliaProcess[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_failure_attempts=2,
+        launcher=(df, djp) -> (push!(procs, djp); transition!(djp.fsm, DynamicProcessStarting; reason="test")))
+
+    k = WatchTestEnvironmentKey("/ws/R", "R", UInt64(1))
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+
+    # A child that dies mid-index fails both its message loop and its pending
+    # request, so it reports twice. Only the first may count.
+    crash = DynamicProcessCrashException(k, 1)
+    handle!(df, ProcessIndexFailedMsg(k, crash, procs[1]))
+    @test length(procs) == 2
+    handle!(df, ProcessIndexFailedMsg(k, crash, procs[1]))
+
+    @test df.procs[k] === procs[2]
+    @test state(procs[2].fsm) == DynamicProcessStarting
+    @test df.failure_attempts[(kind=:watch_test_environment, path="/ws/R", package="R")] == 1
+    @test k in df.inflight
+    @test !(k in df.failed_projects)
+    @test !isready(df.out_channel)
+end
+
+@testitem "Dynamic failures: an unexpected termination is retried once" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, DynamicJuliaProcess, ReconcileMsg,
+        ProcessTerminatedMsg, WatchTestEnvironmentKey, DJPKey, FailedResult,
+        DynamicProcessStarting, transition!, handle!
+
+    procs = DynamicJuliaProcess[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_failure_attempts=2,
+        launcher=(df, djp) -> (push!(procs, djp); transition!(djp.fsm, DynamicProcessStarting; reason="test")))
+
+    k = WatchTestEnvironmentKey("/ws/R", "R", UInt64(1))
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+
+    # The child registered under the key dying is a real failure: retried once...
+    handle!(df, ProcessTerminatedMsg(k, procs[1]))
+    @test length(procs) == 2
+    @test !isready(df.out_channel)
+
+    # ...and settled as an infra failure, with no user-facing message, the second time.
+    handle!(df, ProcessTerminatedMsg(k, procs[2]))
+    @test length(procs) == 2
+    result = take!(df.out_channel)
+    @test result isa FailedResult
+    @test isempty(result.message)
+    @test k in df.failed_projects
+    @test df.pending_count[] == 0
+end

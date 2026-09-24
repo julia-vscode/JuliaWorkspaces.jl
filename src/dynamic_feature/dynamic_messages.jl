@@ -81,6 +81,10 @@ type-specialized `handle!` method.
 """
 abstract type DynamicReactorMessage end
 
+# Supertype of `DynamicJuliaProcess` (dynamic_feature.jl, included after this
+# file), so lifecycle messages can name the child they came from.
+abstract type AbstractDynamicJuliaProcess end
+
 # --- Work messages: produced by the lazy Salsa inputs (inputs.jl) ---
 
 """Request to index/watch the environment of a project."""
@@ -195,15 +199,32 @@ struct ProcessIndexedMsg <: DynamicReactorMessage
     result_dir::String
 end
 
-"""Posted by the index task when the index/standalone request failed."""
+"""
+Posted by the index task when the index/standalone request failed, and by the
+prep tasks when the work failed before any child was launched.
+
+`djp` is the child process the failure came from, or `nothing` for a prep
+failure. A retry launches a fresh child under the same key, so the reactor uses
+it to drop a late failure from a child that has already been replaced.
+"""
 struct ProcessIndexFailedMsg <: DynamicReactorMessage
     key::DJPKey
     err::Any
+    djp::Union{Nothing,AbstractDynamicJuliaProcess}
 end
 
-"""Posted by `start(djp)` when the child process connection terminated."""
+ProcessIndexFailedMsg(key::DJPKey, err) = ProcessIndexFailedMsg(key, err, nothing)
+
+"""
+Posted by `start(djp)` when the child process connection terminated.
+
+Carries the child itself: killing a child also ends its message loop, which
+posts this message, and by then a retry may already be running under the same
+key. Matching on the key alone made that retry look like the dead child.
+"""
 struct ProcessTerminatedMsg <: DynamicReactorMessage
     key::DJPKey
+    djp::AbstractDynamicJuliaProcess
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════

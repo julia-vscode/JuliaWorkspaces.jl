@@ -24,7 +24,7 @@ See also [`is_ready`](@ref), [`wait_until_ready`](@ref).
 # in `dynamic_messages.jl` (included before this file). The FSM helpers live in
 # `dynamic_fsm.jl`.
 
-mutable struct DynamicJuliaProcess
+mutable struct DynamicJuliaProcess <: AbstractDynamicJuliaProcess
     key::DJPKey
     project_path::String
     package::Union{Nothing,String}
@@ -432,7 +432,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                                 dispatch_dynamicprocess_msg(endpoint, msg, (reactor_channel, djp))
                             end
 
-                            put!(reactor_channel, ProcessTerminatedMsg(djp.key))
+                            put!(reactor_channel, ProcessTerminatedMsg(djp.key, djp))
                         finally
                             close(endpoint)
                         end
@@ -458,9 +458,9 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                     # that actually kills the Julia process.
                     CancellationTokens.cancel(djp.cancellation_source)
                     wait(jl_process)
-                    put!(reactor_channel, ProcessIndexFailedMsg(djp.key, err))
+                    put!(reactor_channel, ProcessIndexFailedMsg(djp.key, err, djp))
                 else
-                    put!(reactor_channel, ProcessTerminatedMsg(djp.key))
+                    put!(reactor_channel, ProcessTerminatedMsg(djp.key, djp))
                 end
             finally
                 close(proc_kill_registration)
@@ -1336,7 +1336,7 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
         # task and leave the work item inflight forever.
         # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
         @info "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
-        put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err))
+        put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err, djp))
     end
     return
 end
@@ -1755,7 +1755,7 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
         # Internal detail: the user-facing report is emitted once, by the
         # `ProcessIndexFailedMsg` handler.
         @info "Dynamic index request failed" key exception=(err, catch_backtrace())
-        put!(df.in_channel, ProcessIndexFailedMsg(key, err))
+        put!(df.in_channel, ProcessIndexFailedMsg(key, err, djp))
     end
 
     return false
@@ -1850,6 +1850,15 @@ end
 function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
     key = msg.key
 
+    # A child that dies mid-index can report twice (its message loop and its
+    # pending request both fail). The first report already killed it and may
+    # have launched a retry under the same key; the second must not take that
+    # retry down with it.
+    if msg.djp !== nothing && get(df.procs, key, nothing) !== msg.djp
+        @debug "ProcessIndexFailedMsg from a replaced or killed process; ignoring" key
+        return false
+    end
+
     if key in df.refreshing
         # The served stale environment keeps working; do not poison
         # failed_projects over a refresh.
@@ -1921,8 +1930,14 @@ end
 
 function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     key = msg.key
-    djp = get(df.procs, key, nothing)
-    djp === nothing && return false
+    djp = msg.djp
+    # Killing a child ends its message loop, which posts this message. By then
+    # the child is gone from `df.procs`, and a retry may hold its key and its
+    # launch slot, so only the child currently registered under the key counts.
+    if get(df.procs, key, nothing) !== djp
+        @debug "ProcessTerminatedMsg from a replaced or killed process; ignoring" key
+        return false
+    end
 
     if key in df.refreshing && state(djp.fsm) in (DynamicProcessStarting, DynamicProcessConnected, DynamicProcessIndexing)
         @warn "Background refresh process terminated unexpectedly" key
@@ -2026,8 +2041,8 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
             try kill(djp) catch; end
             delete!(df.procs, key)
             # If the work was still in flight, balance the accounting now — the
-            # process's eventual ProcessTerminatedMsg is ignored once the proc
-            # has been removed from `df.procs`.
+            # process's eventual ProcessTerminatedMsg is ignored because the
+            # proc is no longer the one registered in `df.procs`.
             if key in df.inflight
                 _complete_work_item!(df, key)
                 delete!(df.launching, key)
