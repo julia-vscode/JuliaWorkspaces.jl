@@ -95,6 +95,17 @@ function manifest(c::Pkg.Types.Context)
 end
 
 """
+    manifest_uuids(c::Pkg.Types.Context)
+UUIDs of every package in the manifest of a Context. Pre-1.1 manifests are keyed by
+package name rather than UUID.
+"""
+@static if VERSION < v"1.1"
+    manifest_uuids(c::Pkg.Types.Context) = [UUID(first(p)["uuid"]) for p in values(manifest(c)) if haskey(first(p), "uuid")]
+else
+    manifest_uuids(c::Pkg.Types.Context) = collect(keys(manifest(c)))
+end
+
+"""
     read_manifest(manifest_filename)
 
 Read the manifest from the path and return the UUID -> PackageEntry map.
@@ -440,11 +451,22 @@ get_top_module(vr::VarRef) = vr.parent === nothing ? vr.name : get_top_module(vr
 # returns a silently truncated, run-to-run varying name list. That made the crawl miss
 # most of Base and Core on 1.13, which surfaced far downstream as `load_core` failing on
 # a `VarRef` where it expected a `ModuleStore`. `Base.unsorted_names` tracks the
-# signature for us and exists on every version we support.
-@static if VERSION < v"1.12-"
-    _unsorted_names(m, all, imported, _) = Base.unsorted_names(m; all, imported)
+# signature for us.
+#
+# `Base.unsorted_names` only exists from 1.9, though, and this file is also loaded by the
+# dynamic analysis process, which runs on every Julia back to 1.0. Before 1.9 we have no
+# choice but to call `jl_module_names` directly. That is safe only because its signature
+# was `(jl_module_t *m, int all, int imported)` on every release from 1.0 through 1.11
+# (checked in src/module.c of each release branch) — do not extend this branch past 1.8.
+# Also avoid keyword shorthand (`f(; all)`) here: it does not parse before 1.5.
+@static if VERSION >= v"1.12-"
+    _unsorted_names(m, all, imported, usings) =
+        Base.unsorted_names(m; all=all, imported=imported, usings=usings)
+elseif VERSION >= v"1.9-"
+    _unsorted_names(m, all, imported, _) = Base.unsorted_names(m; all=all, imported=imported)
 else
-    _unsorted_names(m, all, imported, usings) = Base.unsorted_names(m; all, imported, usings)
+    _unsorted_names(m, all, imported, _) =
+        ccall(:jl_module_names, Array{Symbol,1}, (Any, Cint, Cint), m, all, imported)
 end
 
 # bindings are world-age partitioned from 1.12 onwards, so an
@@ -769,7 +791,8 @@ rename would hit ENOENT.
 function write_cache_atomic(pkg::Package, outpath)
     dir = dirname(outpath)
     mkpath(dir)
-    tmp, io = mktemp(dir; cleanup = false)
+    # `cleanup` is 1.3+; before that `mktemp` never cleaned up anyway.
+    tmp, io = @static VERSION >= v"1.3-" ? mktemp(dir; cleanup = false) : mktemp(dir)
     try
         CacheStore.write(io, pkg)
         close(io)

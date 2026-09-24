@@ -20,9 +20,9 @@ using .CacheStore
 # Add some methods to check whether a package is part of the standard library and so
 # won't need recaching.
 @static if isdefined(Pkg.Types, :is_stdlib)
-    is_stdlib(uuid::UUID) = Pkg.Types.is_stdlib(uuid)
+    is_stdlib(uuid::UUID, _) = Pkg.Types.is_stdlib(uuid)
 else
-    is_stdlib(uuid::UUID) = uuid in keys(ctx.stdlibs)
+    is_stdlib(uuid::UUID, ctx) = uuid in keys(ctx.stdlibs)
 end
 
 # `progress_callback` is either `nothing` or a function taking
@@ -46,7 +46,7 @@ function get_store(store_path::String, progress_callback)
     # transitive dep whose parent is already cached would otherwise never be
     # loaded here — and then be tombstoned as uncacheable by the loop at the
     # bottom, permanently suppressing retries.
-    all_pkgs = [(packagename(ctx, uuid), uuid) for uuid in keys(manifest(ctx))]
+    all_pkgs = [(packagename(ctx, uuid), uuid) for uuid in manifest_uuids(ctx)]
     packages_to_load = []
 
     # Obtain the directory containing the active Manifest.toml. Any 'develop'ed dependencies
@@ -97,7 +97,7 @@ function get_store(store_path::String, progress_callback)
 
     # Stamp the world before loading packages, so cache_new_methods! below can
     # find methods they add to functions defined elsewhere.
-    world_before = Base.get_world_counter()
+    world_before = get_world_counter()
 
     # Load all packages together
     # This is important, or methods added to functions in other packages that are loaded earlier would not be in the cache
@@ -134,7 +134,7 @@ function get_store(store_path::String, progress_callback)
     visited = Base.IdSet{Module}([Base, Core])
 
     for (pid, m) in Base.loaded_modules
-        if pid.uuid !== nothing && is_stdlib(pid.uuid) &&
+        if pid.uuid !== nothing && is_stdlib(pid.uuid, ctx) &&
             isinmanifest(ctx, pid.uuid) &&
             isfile(joinpath(server.storedir, SymbolServer.get_cache_path(manifest(ctx), pid.uuid)...))
             push!(visited, m)
@@ -162,7 +162,7 @@ function get_store(store_path::String, progress_callback)
     # a cache now exists, write one when a non-deved package produced none, so the
     # launch gate stops re-attempting it. The gate checks the whole manifest, so
     # transitive deps must be covered too, not just the top-level packages_to_load.
-    for uuid in keys(manifest(ctx))
+    for uuid in manifest_uuids(ctx)
         try
             cache_path = joinpath(server.storedir, SymbolServer.get_cache_path(manifest(ctx), uuid)...)
             tomb = SymbolServer.tombstone_path(cache_path)
