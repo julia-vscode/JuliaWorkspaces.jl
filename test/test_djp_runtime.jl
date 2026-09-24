@@ -52,6 +52,8 @@ end
     @test args[end] == pipe
     # Whatever else changes, a child must never precompile an environment.
     @test "JULIA_PKG_PRECOMPILE_AUTO=0" in prepared.env
+    # The child uses it to die with this process.
+    @test "JULIA_DJP_PARENT_PID=$(getpid())" in prepared.env
 
     # An unprepared runtime still launches, just without cache-free loading.
     plain = _djp_child_cmd(DjpRuntime("jlx", v"1.12.0", "p", false), script, pipe)

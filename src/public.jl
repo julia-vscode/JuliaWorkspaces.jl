@@ -32,6 +32,7 @@ export JuliaWorkspace,
     is_ready,
     wait_until_ready,
     retry_failed_dynamic_projects!,
+    shutdown!,
     get_update_channel,
     get_legacy_cst,
     get_roots_for_uri,
@@ -753,6 +754,42 @@ function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
     empty!(df.last_required)
     df.reconciled_once[] = false
     _reconcile!(jw)
+
+    return
+end
+
+"""
+    shutdown!(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+
+Stop the workspace's dynamic feature and kill every indexing child process.
+Hosts should call this when they exit (for a language server, on the `exit`
+notification), so children do not outlive them.
+
+Blocks until the reactor has stopped. If `cancel_token` is provided, throws
+`CancellationTokens.OperationCanceledException` when it is cancelled first; the
+shutdown itself still goes ahead. Pass a token from
+`CancellationTokenSource(seconds)` to bound the wait.
+
+Children get SIGTERM and, if still alive after a grace period, SIGKILL; that
+escalation runs in this process, so a host that exits right away relies on the
+children's own parent-death handling instead. The workspace does no further
+dynamic work afterwards. No-op when the workspace has no dynamic feature or was
+already shut down.
+"""
+function shutdown!(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+    @debug "shutdown!"
+
+    df = jw.dynamic_feature
+    df === nothing && return
+    state(df.controller_fsm) == DynamicControllerRunning || return
+
+    done = Channel{Nothing}(1)
+    put!(df.in_channel, ShutdownMsg(done))
+    if cancel_token !== nothing
+        wait(done, cancel_token)
+    else
+        wait(done)
+    end
 
     return
 end

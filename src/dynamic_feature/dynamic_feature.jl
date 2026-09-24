@@ -213,6 +213,31 @@ logs for the whole length of an index.
 """
 const MAX_CAPTURED_CHILD_OUTPUT_LINES = 40
 
+"""
+    DJP_KILL_GRACE_SECONDS
+
+How long a child gets to exit after SIGTERM before it is sent SIGKILL. A Julia
+process that receives SIGTERM while inside `malloc` can deadlock instead of
+exiting (JuliaLang/julia#63307), and then holds on to all of its memory.
+"""
+const DJP_KILL_GRACE_SECONDS = 5.0
+
+# SIGTERM, then SIGKILL if `proc` is still alive after `grace_seconds`. Returns
+# immediately; the escalation runs on its own task. On Windows the SIGTERM is
+# already a hard `TerminateProcess`, so the escalation never fires there.
+function _terminate_process(proc::Base.Process, grace_seconds::Real=DJP_KILL_GRACE_SECONDS)
+    try kill(proc) catch end
+    @async try
+        if timedwait(() -> process_exited(proc), float(grace_seconds); pollint=0.1) !== :ok
+            @warn "Indexing child process did not exit after SIGTERM, sending SIGKILL" pid=getpid(proc)
+            kill(proc, Base.SIGKILL)
+        end
+    catch err
+        @debug "Could not SIGKILL indexing child process" exception=err
+    end
+    return nothing
+end
+
 # ─── Launch prioritization ───────────────────────────────────────────────────
 #
 # Environments higher up the directory tree resolve first, so a package's main
@@ -303,7 +328,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
 
             proc_kill_registration = CancellationTokens.register(token) do
                 @debug "Killing DynamicJuliaProcess due to cancellation" kind=djp.kind project_path=djp.project_path
-                try kill(jl_process) catch end
+                _terminate_process(jl_process)
             end
 
             try # This try/finally block closes the `proc_kill_registration`.
@@ -1949,7 +1974,7 @@ function handle!(df::DynamicFeature, ::ResetFailuresMsg)
     return false
 end
 
-function handle!(df::DynamicFeature, ::ShutdownMsg)
+function handle!(df::DynamicFeature, msg::ShutdownMsg)
     @info "Shutting down dynamic feature, terminating $(length(df.procs)) process(es)"
     transition!(df.controller_fsm, DynamicControllerShuttingDown; reason="shutdown requested")
 
@@ -1959,6 +1984,7 @@ function handle!(df::DynamicFeature, ::ShutdownMsg)
     end
 
     transition!(df.controller_fsm, DynamicControllerStopped; reason="shutdown complete")
+    msg.done === nothing || put!(msg.done, nothing)
     return true
 end
 
