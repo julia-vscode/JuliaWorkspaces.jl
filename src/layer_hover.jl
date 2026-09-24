@@ -729,7 +729,12 @@ end
 
 function _get_tooltip(b::StaticLint.Binding, documentation::String, meta_dict::MetaDict=_empty_hover_meta_dict, expr = nothing, env = nothing; show_definition = false)
     if b.val isa StaticLint.Binding
-        documentation = _get_hover(b.val, documentation, expr, env, meta_dict)
+        # An import binding renders what its chain ends on; a chain that loops
+        # back on itself ends nowhere and has nothing to add.
+        target = StaticLint.binding_chain_end(b)
+        if target !== nothing
+            documentation = _get_hover(target, documentation, expr, env, meta_dict)
+        end
     elseif b.val isa CSTParser.EXPR
         if CSTParser.defines_module(b.val)
             # Same-file module name: render the module's OWN docstring (if any)

@@ -4925,6 +4925,80 @@ end
     @test state.resolve_depth == 0
 end
 
+@testitem "binding_chain stops at a Binding it has already visited" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+    CST = JuliaWorkspaces.CSTParser
+
+    id(s) = CST.EXPR(:IDENTIFIER, nothing, nothing, 0, 0, s, nothing, nothing)
+    same(xs, ys) = length(xs) == length(ys) && all(((x, y),) -> x === y, zip(xs, ys))
+
+    plain = SL.Binding(id("p"), nothing, nothing, [])
+    @test same(SL.binding_chain(plain), [plain])
+    @test SL.binding_chain_end(plain) === plain
+
+    term = SL.Binding(id("t"), id("t"), nothing, [])
+    mid = SL.Binding(id("m"), term, nothing, [])
+    outer = SL.Binding(id("o"), mid, nothing, [])
+    @test same(SL.binding_chain(outer), [outer, mid, term])
+    @test SL.binding_chain_end(outer) === term
+
+    selfloop = SL.Binding(id("s"), nothing, nothing, [])
+    selfloop.val = selfloop
+    @test same(SL.binding_chain(selfloop), [selfloop])
+    @test SL.binding_chain_end(selfloop) === nothing
+
+    a = SL.Binding(id("a"), nothing, nothing, [])
+    b = SL.Binding(id("b"), a, nothing, [])
+    a.val = b
+    into = SL.Binding(id("i"), a, nothing, [])
+    @test same(SL.binding_chain(a), [a, b])
+    @test same(SL.binding_chain(into), [into, a, b])
+    @test SL.binding_chain_end(into) === nothing
+end
+
+@testitem "imports that name each other do not build a cyclic Binding chain" setup=[shared_static_lint] begin
+    SL = JuliaWorkspaces.StaticLint
+
+    # Written out here rather than with `binding_chain_end`, so the test says
+    # the same thing about code that predates that helper.
+    function loops(b)
+        seen = Base.IdSet{Any}()
+        while b isa SL.Binding
+            b in seen && return true
+            push!(seen, b)
+            b = b.val
+        end
+        return false
+    end
+
+    # `A` imports `cyc_fn` from `B`, which imports it back from `A`. `A`'s
+    # import fails on the first pass (`B` is not bound yet) and is retried;
+    # the retry must not fill `A`'s binding with `B`'s, which points at `A`'s.
+    plain = """
+    module A
+    using ..B: cyc_fn
+    end
+    module B
+    using ..A: cyc_fn
+    end
+    """
+    # The same loop through the alias form, which fills the alias in place.
+    aliased = """
+    module A
+    using ..B: cyc_g as cyc_fn
+    end
+    module B
+    using ..A: cyc_fn as cyc_g
+    end
+    """
+    for source in (plain, aliased)
+        cst, meta_dict = parse_and_pass(source)
+        bindings = [m.binding for m in values(meta_dict) if m.binding isa SL.Binding]
+        @test any(b -> b.val isa SL.Binding, bindings)
+        @test !any(loops, bindings)
+    end
+end
+
 @testitem "the rule-out check never contradicts real subtyping" setup=[shared_static_lint] begin
     SL = JuliaWorkspaces.StaticLint
 
