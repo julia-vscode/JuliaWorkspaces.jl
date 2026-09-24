@@ -488,9 +488,9 @@ Create an empty workspace. To build one directly from folders on disc, use
   (`0` or less disables the bound). Defaults to
   [`DEFAULT_MAX_FAILURE_ATTEMPTS`](@ref). See
   [`retry_failed_dynamic_projects!`](@ref) to clear the budget.
-- `djp_request_timeout_seconds::Int`: How long a child process may take to
-  answer one indexing request before the work item is failed (`0` or less means
-  no deadline). Defaults to
+- `djp_request_timeout_seconds::Int`: How long a child process may go without
+  showing progress on one indexing request before the work item is failed (`0`
+  or less means no deadline). Defaults to
   [`DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS`](@ref).
 - `resolve_workspace_environments::Bool`: When `false`, no standalone package
   projects or test environments are created; only real project environments
