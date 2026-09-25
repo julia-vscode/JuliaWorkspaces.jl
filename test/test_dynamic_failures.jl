@@ -226,7 +226,7 @@ end
 
     timed_out = _humanize_djp_failure(WatchEnvironmentKey(raw"c:\ws\P", UInt64(1)),
         DJPRequestTimeoutException(key, "indexProject", 300))
-    @test occursin("did not answer `indexProject` within 300s.", timed_out)
+    @test occursin("made no progress on `indexProject` for 300s.", timed_out)
 
     # An error with no recognizable wrapper still collapses to one line.
     plain = _humanize_djp_failure(CreateStandaloneProjectKey(raw"c:\ws\P", UInt64(1)), ErrorException("boom"))
@@ -271,6 +271,67 @@ end
         # streams would wait on it forever.
         try close(inbound) catch end
         try close(outbound) catch end
+    end
+end
+
+@testitem "Dynamic failures: child activity extends the request deadline" begin
+    using JuliaWorkspaces: DynamicJuliaProcess, DJPRequestTimeoutException, _send_djp_request,
+        _note_activity!, WatchEnvironmentKey, JuliaDynamicAnalysisProtocol
+    using JuliaWorkspaces: JSONRPC
+
+    # A fixed deadline killed children that were steadily indexing a large
+    # environment; only silence may fail the request.
+    key = WatchEnvironmentKey("/ws/P", UInt64(1))
+    djp = DynamicJuliaProcess(key, "/ws/P", nothing, :watch_environment)
+
+    inbound = Base.BufferStream()
+    outbound = Base.BufferStream()
+    djp.endpoint = JSONRPC.JSONRPCEndpoint(outbound, inbound)
+    JSONRPC.start(djp.endpoint)
+
+    active_for = 2.5
+    try
+        t0 = time()
+        activity = @async while time() - t0 < active_for
+            _note_activity!(djp)
+            sleep(0.3)
+        end
+
+        err = nothing
+        try
+            _send_djp_request(djp, 1,
+                JuliaDynamicAnalysisProtocol.index_project_request_type,
+                JuliaDynamicAnalysisProtocol.IndexProjectParams("/ws/P", nothing, "/tmp/store", nothing))
+        catch e
+            err = e
+        end
+        elapsed = time() - t0
+        wait(activity)
+
+        @test err isa DJPRequestTimeoutException
+        @test elapsed > active_for
+    finally
+        try close(inbound) catch end
+        try close(outbound) catch end
+    end
+end
+
+@testitem "Dynamic failures: any child message counts as activity" begin
+    using JuliaWorkspaces: DynamicJuliaProcess, dispatch_dynamicprocess_msg,
+        WatchEnvironmentKey, JuliaDynamicAnalysisProtocol
+
+    key = WatchEnvironmentKey("/ws/P", UInt64(1))
+    djp = DynamicJuliaProcess(key, "/ws/P", nothing, :watch_environment)
+    ch = Channel(Inf)
+
+    progress = (method=JuliaDynamicAnalysisProtocol.index_progress_notification_type.method,
+        params=Dict("message" => "Indexing Foo (1/2)...", "percentage" => 50))
+    unknown = (method="someFutureNotification", params=nothing)
+
+    for msg in (progress, unknown)
+        djp.last_activity[] = 0.0
+        dispatch_dynamicprocess_msg(nothing, msg, (ch, djp))
+        @test djp.last_activity[] > 0.0
     end
 end
 

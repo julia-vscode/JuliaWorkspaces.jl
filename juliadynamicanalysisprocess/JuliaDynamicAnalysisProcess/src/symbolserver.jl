@@ -142,7 +142,18 @@ function get_store(store_path::String, progress_callback)
         end
     end
 
-    symbols(env_symbols, nothing, getallns(), visited)
+    # The parent fails a request once the child has been silent for a while, and
+    # extraction over a large environment can take minutes. `missing` leaves the
+    # reported percentage unchanged; reports are throttled.
+    last_heartbeat = time()
+    allns = getallns()
+    for m in Base.loaded_modules_array()
+        in(m, visited) || symbols(env_symbols, m, allns, visited)
+        if progress_callback !== nothing && time() - last_heartbeat >= 10
+            progress_callback("Extracting symbols from loaded packages...", missing)
+            last_heartbeat = time()
+        end
+    end
 
     # Pick up overloads of foreign functions (e.g. Base.show) added without importing the name.
     cache_new_methods!(env_symbols, world_before; get_return_type=false)

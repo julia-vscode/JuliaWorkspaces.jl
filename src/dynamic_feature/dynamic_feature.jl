@@ -34,6 +34,9 @@ mutable struct DynamicJuliaProcess <: AbstractDynamicJuliaProcess
     cancellation_source::CancellationTokens.CancellationTokenSource
     fsm::FSM{DynamicProcessPhase}
     task::Union{Nothing,Task}
+    # `time()` of the last sign of life from the child (a message or an output
+    # line). The request deadline counts from here, not from the request start.
+    last_activity::Threads.Atomic{Float64}
 
     function DynamicJuliaProcess(key::DJPKey, project_path::String, package::Union{Nothing,String}, kind::Symbol)
         return new(
@@ -45,14 +48,18 @@ mutable struct DynamicJuliaProcess <: AbstractDynamicJuliaProcess
             nothing,
             CancellationTokens.CancellationTokenSource(),
             dynamic_process_fsm("$(kind):$(project_path)"),
-            nothing
+            nothing,
+            Threads.Atomic{Float64}(time())
         )
     end
 end
 
-# Thrown when a child does not answer an index request within its deadline. A
-# distinct type so the failure handler can say "timed out" rather than reporting
-# a bare cancellation, which is also what a deliberate `kill(djp)` produces.
+_note_activity!(djp::DynamicJuliaProcess) = (djp.last_activity[] = time(); nothing)
+
+# Thrown when a child shows no sign of progress on a request for longer than its
+# deadline. A distinct type so the failure handler can say "timed out" rather
+# than reporting a bare cancellation, which is also what a deliberate
+# `kill(djp)` produces.
 struct DJPRequestTimeoutException <: Exception
     key::DJPKey
     method::String
@@ -60,15 +67,15 @@ struct DJPRequestTimeoutException <: Exception
 end
 
 function Base.showerror(io::IO, e::DJPRequestTimeoutException)
-    print(io, "DJPRequestTimeoutException: the indexing child process did not answer `",
-        e.method, "` within ", e.timeout_seconds, "s")
+    print(io, "DJPRequestTimeoutException: the indexing child process made no progress on `",
+        e.method, "` for ", e.timeout_seconds, "s")
 end
 
 """
     _send_djp_request(djp, timeout_seconds, request_type, params)
 
-Send one request to a child indexing process and wait for its answer under a
-deadline.
+Send one request to a child indexing process and wait for its answer under an
+inactivity deadline.
 
 Without a deadline this wait is unbounded: a child that neither answers,
 terminates, nor throws holds its launch slot *and* keeps the work item pending
@@ -76,10 +83,16 @@ forever, so `is_ready` never becomes true and a one-shot host such as
 `julialint` blocks with no further output. `timeout_seconds <= 0` restores the
 old unbounded behaviour.
 
-The deadline is a `CancellationTokenSource` timer linked with the DJP's own
-cancellation token, so an explicit `kill(djp)` unblocks the wait through the
-same path. The combined token is passed as `client_token` (what actually stops
-us waiting, `JSONRPC.send_request`) and as `server_token` (sends
+The deadline restarts whenever the child shows a sign of life (see
+`djp.last_activity`): a progress notification or a line of output. A fixed
+deadline killed children that were steadily working through a large
+environment, and since caches are only written at the end, that discarded all
+of their work. A child that keeps reporting is not stuck.
+
+A watchdog task cancels a `CancellationTokenSource` linked with the DJP's own
+cancellation token once the child has been silent for `timeout_seconds`, so an
+explicit `kill(djp)` unblocks the wait through the same path. The combined
+token is passed as `client_token` (what actually stops us waiting, `JSONRPC.send_request`) and as `server_token` (sends
 `\$/cancelRequest` to the child — currently advisory, since the child's handler
 does blocking `Pkg` work and ignores its token, but correct for when it becomes
 cooperative).
@@ -96,8 +109,23 @@ function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, reque
             client_token=djp_token, server_token=djp_token)
     end
 
-    timeout_source = CancellationTokens.CancellationTokenSource(timeout_seconds)
+    # Launch and connect time don't count against the request.
+    _note_activity!(djp)
+    timeout_source = CancellationTokens.CancellationTokenSource()
     timeout_token = CancellationTokens.get_token(timeout_source)
+    # Exits within a second of the `finally` below cancelling `timeout_source`.
+    @async try
+        while !CancellationTokens.is_cancellation_requested(timeout_token)
+            idle = time() - djp.last_activity[]
+            if idle >= timeout_seconds
+                CancellationTokens.cancel(timeout_source)
+            else
+                sleep(min(timeout_seconds - idle, 1.0))
+            end
+        end
+    catch err
+        @error "DJP request watchdog failed" exception=(err, catch_backtrace())
+    end
     combined_source = CancellationTokens.CancellationTokenSource(timeout_token, djp_token)
     combined_token = CancellationTokens.get_token(combined_source)
 
@@ -277,6 +305,9 @@ end
 function dispatch_dynamicprocess_msg(endpoint, msg, ctx)
     reactor_channel, djp = ctx
 
+    # Any message, even one ignored below, shows the child is alive.
+    _note_activity!(djp)
+
     if msg.method == JuliaDynamicAnalysisProtocol.index_progress_notification_type.method
         params = try
             JuliaDynamicAnalysisProtocol.IndexProgressParams(msg.params)
@@ -337,6 +368,9 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 # this is the only account of what went wrong.
                 recent_output = String[]
                 record_output = function (line)
+                    # Output covers phases without progress reports
+                    # (instantiate, TestEnv) against the request deadline.
+                    _note_activity!(djp)
                     @debug "Output from DynamicJuliaProcess" project_path=djp.project_path package=djp.package line=line
                     push!(recent_output, line)
                     length(recent_output) > MAX_CAPTURED_CHILD_OUTPUT_LINES && popfirst!(recent_output)
@@ -513,10 +547,12 @@ const DEFAULT_MAX_FAILURE_ATTEMPTS = 2
 """
     DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS
 
-How long a child indexing process may take to answer one request. Generous —
-indexing a large environment from cold legitimately takes minutes — but finite,
-because an unbounded wait turns a wedged child into a wedged host: the work item
-stays pending forever and `is_ready` never becomes true.
+How long a child indexing process may go without showing progress (a progress
+notification or a line of output) on one request. The whole request may take
+much longer, as long as progress keeps arriving. Generous — loading one large
+package legitimately takes minutes — but finite, because an unbounded wait turns
+a wedged child into a wedged host: the work item stays pending forever and
+`is_ready` never becomes true.
 """
 const DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS = 300
 
@@ -604,8 +640,8 @@ struct DynamicFeature
     # leaves room for exactly one genuine "I fixed my Project.toml" retry;
     # `retry_failed_dynamic_projects!` clears the budget for anything beyond.
     max_failure_attempts::Int
-    # Seconds a child may take to answer one index request before the work item
-    # is failed (<= 0: no deadline). See `_send_djp_request`.
+    # Seconds a child may go without showing progress on one index request
+    # before the work item is failed (<= 0: no deadline). See `_send_djp_request`.
     djp_request_timeout_seconds::Int
     # Keys ready to launch but over the cap; drained best-`_launch_priority`
     # first, insertion order as the final tiebreak.
@@ -1178,7 +1214,7 @@ end
 
 # Our own timeout carries no useful nested cause; skip the generic unwrapping.
 _failure_reason(err::DJPRequestTimeoutException) =
-    "the indexing child process did not answer `$(err.method)` within $(err.timeout_seconds)s."
+    "the indexing child process made no progress on `$(err.method)` for $(err.timeout_seconds)s."
 
 function _failure_subject(key::DJPKey)
     if key isa WatchTestEnvironmentKey
