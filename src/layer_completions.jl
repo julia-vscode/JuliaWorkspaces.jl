@@ -613,17 +613,20 @@ end
 
 function _path_completion(t, state::_CompletionState)
     if t.kind == CSTParser.Tokenize.Tokens.STRING
-        path = t.val[2:prevind(t.val, lastindex(t.val))]
-        if startswith(path, "~")
-            path = replace(path, '~' => homedir())
-            dir, partial = splitdir(path)
-        else
-            dir, partial = splitdir(path)
-            if !startswith(dir, "/")
-                doc_path = something(uri2filepath(state.uri), "")
-                isempty(doc_path) && return
-                dir = joinpath(dirname(doc_path), dir)
-            end
+        # A STRING token is always closed (an unterminated one lexes as ERROR),
+        # so `t.endbyte` is the closing quote; past it there is nothing to complete.
+        t.startbyte < state.offset <= t.endbyte || return
+        # Complete the path typed so far — the text between the opening quote
+        # and the cursor — not the whole string, which may run on past the
+        # cursor. `partial` is then exactly the text the edit replaces.
+        path = String(codeunits(t.val)[2:state.offset - t.startbyte])
+        dir, partial = splitdir(path)
+        if dir == "~" || startswith(dir, "~/") || startswith(dir, "~\\")
+            dir = homedir() * dir[2:end]
+        elseif !startswith(dir, "/")
+            doc_path = something(uri2filepath(state.uri), "")
+            isempty(doc_path) && return
+            dir = joinpath(dirname(doc_path), dir)
         end
         try
             fs = readdir(dir)
