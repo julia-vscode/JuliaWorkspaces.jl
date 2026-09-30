@@ -2,8 +2,10 @@ Salsa.@derived function derived_project_files(rt)
     @debug "derived_project_files"
 
     files = input_files(rt)
+    configs = derived_lintconfig_files(rt)
 
-    return [file for file in files if file.scheme=="file" && (is_path_project_file(uri2filepath(file)) || is_path_manifest_file(uri2filepath(file)))]
+    return [file for file in files if file.scheme=="file" && (is_path_project_file(uri2filepath(file)) || is_path_manifest_file(uri2filepath(file))) &&
+        scope_selected(ancestor_configs(configs, file), uri2filepath(file), c -> derived_environments_path_filter(rt, c))]
 end
 
 """
