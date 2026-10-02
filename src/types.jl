@@ -582,10 +582,35 @@ of failing identically on every future run.
 Running out of memory is retried once after a full collection. If it happens
 again the file is kept, since it is valid, and `PackageCacheUnloadable()` is
 returned instead of `nothing`: re-indexing would write the same file and fail
-the same way. Any other error propagates.
+the same way.
+
+The store is shared with other processes: a file that vanishes before it is
+opened is a miss, and one another process holds (see
+`SymbolServer.is_transient_store_error`) is retried briefly, then a miss. Any
+other error propagates.
 """
 function _read_package_cache(cache_path::String, name, uuid; read_cache::Function=_read_cache_file)
-    isfile(cache_path) || return nothing
+    for delay in (_STORE_READ_RETRY_DELAYS..., nothing)
+        try
+            return _read_package_cache_once(cache_path, name, uuid, read_cache)
+        catch err
+            SymbolServer.is_missing_file_error(err) && return nothing
+            SymbolServer.is_transient_store_error(err) || rethrow()
+            if delay === nothing
+                @debug "Symbol cache stayed locked by another process; treating it as a miss" cache_path exception=(err,)
+                return nothing
+            end
+        end
+        # Blocks rather than yields: callers include Salsa derivations.
+        Libc.systemsleep(delay)
+    end
+end
+
+const _STORE_READ_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+
+function _read_package_cache_once(cache_path, name, uuid, read_cache)
+    st = stat(cache_path)
+    isfile(st) || return nothing
 
     try
         return _retry_after_gc_on_oom() do
@@ -598,7 +623,12 @@ function _read_package_cache(cache_path::String, name, uuid; read_cache::Functio
         err isa SymbolServer.CacheStore.CacheCorruptedError || rethrow()
         @warn "Couldn't read cache file for $name, deleting." cache_path exception=(err,)
         try
-            rm(cache_path; force=true)
+            # Only if it is still the file that was read: another process may
+            # have published a valid cache over it meanwhile.
+            cur = stat(cache_path)
+            if cur.inode == st.inode && cur.size == st.size && cur.mtime == st.mtime
+                rm(cache_path; force=true)
+            end
         catch rm_err
             @debug "Failed to delete corrupt cache file" cache_path exception=(rm_err, catch_backtrace())
         end
