@@ -260,21 +260,21 @@ function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit
     result = String[]
     julia_file_count = 0
 
-    root_repo = nothing
+    root_rules = nothing
     if gitignore !== nothing
-        excluded, root_repo = _governing_repo_info(gitignore, root)
+        excluded, root_rules = _governing_context(gitignore, root)
         excluded && return result
     end
 
-    # Each queued directory carries the config chains and the git repository
-    # that govern it. Breadth first, so a directory is only dequeued once every
-    # ancestor has contributed its config files. Explicit walk instead of
-    # `walkdir` because it's hard to stop it from recursing into the skipped
-    # directories.
-    remaining_dirs = Tuple{String,Vector{ConfigChain},Union{Nothing,_GitRepoInfo}}[(String(root), ConfigChain[ConfigChain() for _ in kinds], root_repo)]
+    # Each queued directory carries the config chains that govern it and the
+    # git ignore rules that judged it. Breadth first, so a directory is only
+    # dequeued once every ancestor has contributed its config files. Explicit
+    # walk instead of `walkdir` because it's hard to stop it from recursing
+    # into the skipped directories.
+    remaining_dirs = Tuple{String,Vector{ConfigChain},Union{Nothing,_IgnoreContext}}[(String(root), ConfigChain[ConfigChain() for _ in kinds], root_rules)]
 
     while !isempty(remaining_dirs)
-        dir, chains, repo = popfirst!(remaining_dirs)
+        dir, chains, ignore_rules = popfirst!(remaining_dirs)
         yield()
 
         entries = try
@@ -324,20 +324,20 @@ function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit
             end
         end
 
-        # A folder holding a `.git` is a nested repository whose own rules
-        # govern what lies below it. `dir` itself was judged by the outer
-        # repository's rules before it was queued.
+        # The rules for `dir`'s entries: its own `.gitignore` joins those that
+        # judged `dir`, and a folder holding a `.git` is a nested repository
+        # whose own rules govern what lies below it.
         if gitignore !== nothing
             has_git_entry = any(e -> basename(e[1]) == ".git", stated)
-            repo = _child_repo_info(gitignore, repo, dir, has_git_entry)
+            ignore_rules = _child_context(gitignore, ignore_rules, dir, has_git_entry)
         end
 
         for (filepath, is_dir, is_file) in stated
             if is_dir
                 basename(filepath) ∈ SKIPPED_DIRNAMES && continue
                 _scope_admits(chains, filepath, true) || continue
-                gitignore !== nothing && _is_excluded_dir(repo, filepath) && continue
-                push!(remaining_dirs, (filepath, chains, repo))
+                gitignore !== nothing && _is_excluded_dir(ignore_rules, filepath) && continue
+                push!(remaining_dirs, (filepath, chains, ignore_rules))
             elseif is_file && is_path_julia_file(filepath)
                 _scope_admits(chains, filepath, false) || continue
                 julia_file_count += 1
