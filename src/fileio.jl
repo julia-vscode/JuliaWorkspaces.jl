@@ -220,7 +220,7 @@ function _scope_admits(chains::Vector{ConfigChain}, path::AbstractString, is_dir
 end
 
 """
-    collect_workspace_paths(root; scope=nothing, file_limit=nothing, ignore_io_errors=false)
+    collect_workspace_paths(root; scope=nothing, file_limit=nothing, ignore_io_errors=false, gitignore=GitIgnoreFilter([root]))
         -> Union{Vector{String},Nothing}
 
 Every workspace-relevant file under the local directory `root`: Julia sources,
@@ -245,22 +245,36 @@ returns `nothing` — the tree is deemed too large to load. Callers passing a
 With `ignore_io_errors`, directories and entries that cannot be read or statted
 during the walk are skipped. Non-regular entries are always skipped, even when
 their names look like files this workspace would otherwise read.
+
+Folders that git ignores are not walked (see [`GitIgnoreFilter`](@ref)), and
+when `root` itself lies in one the result is empty. The default filter treats
+`root` as the workspace folder. A host walking a subfolder of a workspace folder
+(one its file watcher reported as created, say) passes a filter built from its
+workspace folders, so the rules above that subfolder apply. `gitignore=nothing`
+walks ignored folders too.
 """
-function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit::Union{Nothing,Int}=nothing, ignore_io_errors=false)
+function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit::Union{Nothing,Int}=nothing, ignore_io_errors=false, gitignore::Union{Nothing,GitIgnoreFilter}=GitIgnoreFilter([root]))
     kinds = _normalize_scope(scope)
     predicates = Any[SCOPE_CONFIG_PREDICATES[k] for k in kinds]
 
     result = String[]
     julia_file_count = 0
 
-    # Each queued directory carries the config chains that govern it. Breadth
-    # first, so a directory is only dequeued once every ancestor has contributed
-    # its config files. Explicit walk instead of `walkdir` because it's hard to
-    # stop it from recursing into the skipped directories.
-    remaining_dirs = Tuple{String,Vector{ConfigChain}}[(String(root), ConfigChain[ConfigChain() for _ in kinds])]
+    root_repo = nothing
+    if gitignore !== nothing
+        excluded, root_repo = _governing_repo_info(gitignore, root)
+        excluded && return result
+    end
+
+    # Each queued directory carries the config chains and the git repository
+    # that govern it. Breadth first, so a directory is only dequeued once every
+    # ancestor has contributed its config files. Explicit walk instead of
+    # `walkdir` because it's hard to stop it from recursing into the skipped
+    # directories.
+    remaining_dirs = Tuple{String,Vector{ConfigChain},Union{Nothing,_GitRepoInfo}}[(String(root), ConfigChain[ConfigChain() for _ in kinds], root_repo)]
 
     while !isempty(remaining_dirs)
-        dir, chains = popfirst!(remaining_dirs)
+        dir, chains, repo = popfirst!(remaining_dirs)
         yield()
 
         entries = try
@@ -310,11 +324,20 @@ function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit
             end
         end
 
+        # A folder holding a `.git` is a nested repository whose own rules
+        # govern what lies below it. `dir` itself was judged by the outer
+        # repository's rules before it was queued.
+        if gitignore !== nothing
+            has_git_entry = any(e -> basename(e[1]) == ".git", stated)
+            repo = _child_repo_info(gitignore, repo, dir, has_git_entry)
+        end
+
         for (filepath, is_dir, is_file) in stated
             if is_dir
                 basename(filepath) ∈ SKIPPED_DIRNAMES && continue
                 _scope_admits(chains, filepath, true) || continue
-                push!(remaining_dirs, (filepath, chains))
+                gitignore !== nothing && _is_excluded_dir(repo, filepath) && continue
+                push!(remaining_dirs, (filepath, chains, repo))
             elseif is_file && is_path_julia_file(filepath)
                 _scope_admits(chains, filepath, false) || continue
                 julia_file_count += 1
@@ -337,15 +360,16 @@ function collect_workspace_paths(root::AbstractString; scope=nothing, file_limit
 end
 
 """
-    read_path_into_textdocuments(uri; ignore_io_errors=false, file_limit=nothing, scope=nothing)
+    read_path_into_textdocuments(uri; ignore_io_errors=false, file_limit=nothing, scope=nothing, gitignore=GitIgnoreFilter([uri2filepath(uri)]))
         -> Union{Vector{TextFile}, Nothing}
 
 Read every workspace-relevant file (Julia sources, Project/Manifest, lint/format
 configs, Markdown) under the folder `uri` into `TextFile`s.
 
-`scope` restricts the walk to what one or more config kinds select; see
-[`collect_workspace_paths`](@ref), which does the walking. The default `nothing`
-reads the whole tree.
+`scope` restricts the walk to what one or more config kinds select, and
+`gitignore` decides which git-ignored folders are skipped; see
+[`collect_workspace_paths`](@ref), which does the walking. With the defaults the
+whole tree is read, except for folders git ignores.
 
 When `file_limit` is set and the tree contains more than that many Julia files,
 returns `nothing` (the tree is deemed too large to load) — the count is checked
@@ -356,7 +380,7 @@ return.
 With `ignore_io_errors`, a non-`file` URI yields an empty vector and unreadable
 files are skipped; otherwise both throw.
 """
-function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_limit::Union{Nothing,Int}=nothing, scope=nothing)
+function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_limit::Union{Nothing,Int}=nothing, scope=nothing, gitignore::Union{Nothing,GitIgnoreFilter}=uri.scheme == "file" ? GitIgnoreFilter([uri2filepath(uri)]) : nothing)
     result = TextFile[]
 
     if uri.scheme !== "file"
@@ -371,7 +395,7 @@ function read_path_into_textdocuments(uri::URI; ignore_io_errors=false, file_lim
 
     # Collect paths first so an over-limit tree aborts before any content is
     # read; contents are read afterwards with per-file yields.
-    candidate_paths = collect_workspace_paths(path; scope=scope, file_limit=file_limit, ignore_io_errors=ignore_io_errors)
+    candidate_paths = collect_workspace_paths(path; scope=scope, file_limit=file_limit, ignore_io_errors=ignore_io_errors, gitignore=gitignore)
     candidate_paths === nothing && return nothing
 
     for filepath in candidate_paths
@@ -425,7 +449,7 @@ function update_file_from_disc!(jw::JuliaWorkspace, path)
 end
 
 """
-    add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false, scope=nothing)
+    add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false, scope=nothing, gitignore=GitIgnoreFilter([path]))
 
 Recursively read all relevant files under the local folder `path` from disc and
 add them to the workspace `jw`. Julia sources, `Project.toml`/`Manifest.toml`,
@@ -435,16 +459,17 @@ reconciliation step runs, so this is more efficient than calling
 
 If `ignore_io_errors` is `true`, files that cannot be read are skipped instead
 of raising an error. `scope` restricts the walk to what one or more config kinds
-select; see [`collect_workspace_paths`](@ref).
+select, and folders git ignores are skipped unless `gitignore=nothing`; see
+[`collect_workspace_paths`](@ref).
 """
-function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false, scope=nothing)
+function add_folder_from_disc!(jw::JuliaWorkspace, path; ignore_io_errors=false, scope=nothing, gitignore::Union{Nothing,GitIgnoreFilter}=GitIgnoreFilter([path]))
     @debug "add_folder_from_disc!" path=path
 
     process_from_dynamic(jw)
 
     path_uri = filepath2uri(path)
 
-    files = read_path_into_textdocuments(path_uri, ignore_io_errors=ignore_io_errors, scope=scope)
+    files = read_path_into_textdocuments(path_uri, ignore_io_errors=ignore_io_errors, scope=scope, gitignore=gitignore)
 
     for i in files
         _add_file!(jw, i)
