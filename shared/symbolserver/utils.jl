@@ -108,6 +108,14 @@ is_missing_file_error(err) =
 
 const STORE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6)
 
+# The rename syscall alone, failing with an `IOError`. Before Julia 1.12,
+# `Base.Filesystem.rename` falls back to copying over the destination instead.
+function _rename(src, dst)
+    err = ccall(:jl_fs_rename, Int32, (Cstring, Cstring), src, dst)
+    err < 0 && Base.uv_error("rename($(repr(src)), $(repr(dst)))", err)
+    return dst
+end
+
 """
     publish_file(tmp, path; replace) -> Bool
 
@@ -125,7 +133,7 @@ function publish_file(tmp, path; replace::Bool)
                 rm(tmp; force=true)
                 return false
             end
-            Base.Filesystem.rename(tmp, path)
+            _rename(tmp, path)
             return true
         catch err
             (delay !== nothing && is_transient_store_error(err)) || rethrow()
