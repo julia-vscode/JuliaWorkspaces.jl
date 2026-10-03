@@ -28,6 +28,13 @@ path_selected
 dir_selected
 ```
 
+Folders that git ignores are left out of the walk:
+
+```@docs
+GitIgnoreFilter
+is_in_ignored_folder
+```
+
 ## Mutating a workspace
 
 ```@docs
