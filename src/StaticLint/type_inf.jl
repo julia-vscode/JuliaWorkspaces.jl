@@ -57,7 +57,31 @@ function _infer_tuple_decl_element!(binding, lhs, ann, state, scope)
     return true
 end
 
+# Inferring a binding can re-enter its own inference: `_is_scalar_index` infers
+# an index ref on demand, and a ref that was unresolved when the RHS was
+# traversed resolves to the binding being inferred (`i = p[i]`) or to a later
+# one that leads back to it (`a = x[b]; b = y[a]`). A re-entrant request leaves
+# the type unknown instead of recursing forever.
 function infer_type(binding::Binding, scope, state)
+    binding.type !== nothing && return
+    _begin_inference!(state, binding) || return
+    try
+        _infer_type(binding, scope, state)
+    finally
+        _end_inference!(state, binding)
+    end
+end
+
+_begin_inference!(_, _) = true
+_end_inference!(_, _) = nothing
+function _begin_inference!(state::Union{Toplevel,Delayed}, binding::Binding)
+    binding in state.inferring && return false
+    push!(state.inferring, binding)
+    return true
+end
+_end_inference!(state::Union{Toplevel,Delayed}, binding::Binding) = (delete!(state.inferring, binding); nothing)
+
+function _infer_type(binding::Binding, scope, state)
     if binding isa Binding
         binding.type !== nothing && return
         if binding.val isa EXPR && CSTParser.defines_module(binding.val)

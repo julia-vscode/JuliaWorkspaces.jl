@@ -269,6 +269,34 @@ end
     end
 end
 
+@testitem "an index that leads back to the assigned binding does not recurse" setup=[shared_static_lint] begin
+    using JuliaWorkspaces.StaticLint: Binding, isidentifier, valofid
+
+    # The index is unresolved when the RHS is traversed, so `_is_scalar_index`
+    # resolves it while the LHS is being inferred — to the LHS itself, or to a
+    # later binding that indexes back through it. Each of these overflowed the
+    # stack; the bindings in the cycle now stay untyped.
+    cases = [
+        "i = p[i]",
+        "const i = p[i]",
+        "function f(p)\n    i = p[i]\nend",
+        "function f(p)\n    i = p[1, i]\nend",
+        "function f(p)\n    while true\n        i = p[i]\n    end\nend",
+        "function f(p)\n    let\n        i = p[i]\n    end\nend",
+        "for k in 1:3\n    i = p[i]\nend",
+        "function f(x, y)\n    a = x[b]\n    b = y[a]\nend",
+        "function f(x)\n    a = x[c]\n    b = x[a]\n    c = x[b]\nend",
+        "module M\na = p[b]\nb = q[M.a]\nend",
+    ]
+    for src in cases
+        cst, meta_dict = parse_and_pass(src)
+        cycle = [m.binding for (_, m) in meta_dict if m.binding isa Binding &&
+                 isidentifier(m.binding.name) && valofid(m.binding.name) in ("i", "a", "b", "c")]
+        @test !isempty(cycle)
+        @test all(b -> b.type === nothing, cycle)
+    end
+end
+
 @testitem "assignments in a for-loop body are not loop iteration specs" setup=[shared_static_lint] begin
     using JuliaWorkspaces.StaticLint: Binding, valofid
 
