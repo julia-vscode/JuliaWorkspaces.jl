@@ -15,13 +15,16 @@
     try
         @test readline(out) == "ready"
 
-        _terminate_process(proc, 1.0)
+        termination = _terminate_process(proc, 1.0)
         if !Sys.iswindows()
             # Guards the test itself: SIGTERM alone must not have ended it.
             sleep(0.5)
             @test process_running(proc)
         end
-        @test timedwait(() -> process_exited(proc), 30.0) === :ok
+        # The returned task is what callers wait on: it ends only once the
+        # child is gone, and with it the timer polling for that.
+        @test timedwait(() -> istaskdone(termination), 30.0) === :ok
+        @test process_exited(proc)
         Sys.iswindows() || @test proc.termsignal == Base.SIGKILL
     finally
         kill(proc, Base.SIGKILL)
@@ -115,4 +118,35 @@ end
     jw2 = JuliaWorkspace(store_path=mktempdir(), dynamic=DynamicIndexingOnly)
     shutdown!(jw2; cancel_token=get_token(CancellationTokenSource()))
     @test state(jw2.dynamic_feature.controller_fsm) == DynamicControllerStopped
+end
+
+@testitem "DJP lifetime: shutdown! returns only once its children have exited" begin
+    # `shutdown!` used to return as soon as the children had been signalled, so a
+    # host that went on to exit (or a precompile workload that ended) still had
+    # the children and the timers escalating their kill running.
+    project_dir = mktempdir()
+    # No manifest, so only a child can resolve it.
+    write(joinpath(project_dir, "Project.toml"), """
+        [deps]
+        Example = "7876af07-990d-54b4-ab0e-23690620f79a"
+        """)
+    jw = JuliaWorkspace(store_path=mktempdir(), dynamic=DynamicIndexingOnly)
+    add_folder_from_disc!(jw, project_dir)
+    df = jw.dynamic_feature
+
+    # Wait until the child has connected, so there is a live process to stop.
+    procs = Base.Process[]
+    connected = timedwait(600.0) do
+        for djp in values(df.procs)
+            djp.proc === nothing || push!(procs, djp.proc)
+        end
+        !isempty(procs)
+    end
+    @test connected === :ok
+
+    shutdown!(jw)
+
+    @test all(process_exited, procs)
+    @test !isempty(df.child_tasks)
+    @test all(istaskdone, df.child_tasks)
 end

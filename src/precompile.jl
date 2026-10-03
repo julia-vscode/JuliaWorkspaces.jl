@@ -257,8 +257,9 @@ using PrecompileTools: @setup_workload, @compile_workload
 
         # Compile the dynamic-feature code paths (reactor, reconcile,
         # readiness waiting) that CLI tools hit. A plain scripts folder
-        # requires no environment indexing, so no child Julia processes are
-        # spawned during precompilation.
+        # requires no environment indexing, and the indexer runtime is not
+        # resolved ahead of time while precompiling, so no child Julia
+        # processes are spawned during precompilation.
         Logging.with_logger(Logging.NullLogger()) do
             scripts_dir = mktempdir()
             write(joinpath(scripts_dir, "script.jl"), "f(x) = x + 1\n")

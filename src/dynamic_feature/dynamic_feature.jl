@@ -251,19 +251,20 @@ exiting (JuliaLang/julia#63307), and then holds on to all of its memory.
 const DJP_KILL_GRACE_SECONDS = 5.0
 
 # SIGTERM, then SIGKILL if `proc` is still alive after `grace_seconds`. Returns
-# immediately; the escalation runs on its own task. On Windows the SIGTERM is
-# already a hard `TerminateProcess`, so the escalation never fires there.
+# immediately with the task running the escalation, which finishes once `proc`
+# has exited. On Windows the SIGTERM is already a hard `TerminateProcess`, so
+# the escalation never fires there.
 function _terminate_process(proc::Base.Process, grace_seconds::Real=DJP_KILL_GRACE_SECONDS)
     try kill(proc) catch end
-    @async try
+    return @async try
         if timedwait(() -> process_exited(proc), float(grace_seconds); pollint=0.1) !== :ok
             @warn "Indexing child process did not exit after SIGTERM, sending SIGKILL" pid=getpid(proc)
             kill(proc, Base.SIGKILL)
+            wait(proc)
         end
     catch err
         @debug "Could not SIGKILL indexing child process" exception=err
     end
-    return nothing
 end
 
 # ─── Launch prioritization ───────────────────────────────────────────────────
@@ -357,9 +358,10 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 )
             )
 
+            termination = Ref{Union{Nothing,Task}}(nothing)
             proc_kill_registration = CancellationTokens.register(token) do
                 @debug "Killing DynamicJuliaProcess due to cancellation" kind=djp.kind project_path=djp.project_path
-                _terminate_process(jl_process)
+                termination[] = _terminate_process(jl_process)
             end
 
             try # This try/finally block closes the `proc_kill_registration`.
@@ -498,6 +500,14 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 end
             finally
                 close(proc_kill_registration)
+                # A cancellation from another thread can land after the
+                # registration was closed, or before its callback has run.
+                if termination[] === nothing && CancellationTokens.is_cancellation_requested(token)
+                    termination[] = _terminate_process(jl_process)
+                end
+                # A killed child is not done until it has exited: `shutdown!`
+                # waits on this task to know nothing is left running.
+                termination[] === nothing || wait(termination[])
             end
         finally
             close(pipe_out)
@@ -661,6 +671,10 @@ struct DynamicFeature
     # work item (readiness must not wait on refreshes).
     refresh_queue::Vector{DJPKey}
     refreshing::Set{DJPKey}
+    # Supervising tasks of launched children (reactor-owned). A task finishes
+    # only once its child has exited, so `shutdown!` waits on these, including
+    # the children already killed under `DynamicIndexingOnly`.
+    child_tasks::Vector{Task}
 
     function DynamicFeature(djp_mode::DynamicMode, store_path::String;
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
@@ -707,6 +721,7 @@ struct DynamicFeature
             cache_reader,
             Vector{DJPKey}(),
             Set{DJPKey}(),
+            Task[],               # child_tasks
         )
     end
 end
@@ -1377,6 +1392,8 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
         @info "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
         put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err, djp))
     end
+    filter!(!istaskdone, df.child_tasks)
+    push!(df.child_tasks, djp.task)
     return
 end
 
@@ -1389,8 +1406,15 @@ _djp_runtime_progress(df::DynamicFeature) =
 # launch. Not when dynamic indexing is off (a download-only workspace never
 # launches a child), and not with an injected launcher (reactor tests must not
 # spawn Julia processes).
+#
+# Never while precompiling: the precompile workload starts a reactor, and the
+# helper process it would launch outlives the workload, so precompilation waits
+# on it (and, for a cold child environment, on a full `Pkg.precompile`). The
+# memoized answer would also be saved into the package image and then trusted
+# by every later session instead of checked.
 _should_prewarm_djp_runtime(df::DynamicFeature) =
-    df.djp_mode != DynamicOff && df.launcher === _launch_process!
+    df.djp_mode != DynamicOff && df.launcher === _launch_process! &&
+    ccall(:jl_generating_output, Cint, ()) == 0
 
 # Resolve the child runtime in the background as soon as the reactor starts, so
 # the one helper launch it costs overlaps with loading the workspace instead of
@@ -2038,7 +2062,16 @@ function handle!(df::DynamicFeature, msg::ShutdownMsg)
     end
 
     transition!(df.controller_fsm, DynamicControllerStopped; reason="shutdown complete")
-    msg.done === nothing || put!(msg.done, nothing)
+    if msg.done !== nothing
+        # Report done once every child has exited, including those killed
+        # earlier, so nothing started here is left running.
+        children = filter(!istaskdone, df.child_tasks)
+        @async try
+            foreach(wait, children)
+        finally
+            put!(msg.done, nothing)
+        end
+    end
     return true
 end
 
