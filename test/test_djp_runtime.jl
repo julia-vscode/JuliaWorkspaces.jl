@@ -161,3 +161,14 @@ end
     @test !_should_prewarm_djp_runtime(
         DynamicFeature(DynamicIndexingOnly, mktempdir(); launcher=(df, djp) -> nothing))
 end
+
+@testitem "DJP runtime: precompiling resolves nothing ahead of time" begin
+    # The precompile workload starts a reactor. Resolving the runtime there
+    # launched a helper process that precompilation had to wait on, and saved
+    # the answer into the package image, where every later session trusted it
+    # instead of checking. A fresh process shows what the image holds.
+    code = "using JuliaWorkspaces; print(isempty(JuliaWorkspaces._DJP_RUNTIME_CACHE))"
+    cmd = addenv(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`,
+        "JULIA_LOAD_PATH" => join(LOAD_PATH, Sys.iswindows() ? ';' : ':'))
+    @test read(cmd, String) == "true"
+end

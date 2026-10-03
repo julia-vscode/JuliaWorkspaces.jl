@@ -767,16 +767,18 @@ Stop the workspace's dynamic feature and kill every indexing child process.
 Hosts should call this when they exit (for a language server, on the `exit`
 notification), so children do not outlive them.
 
-Blocks until the reactor has stopped. If `cancel_token` is provided, throws
+Blocks until the reactor has stopped and every indexing child it launched has
+exited. If `cancel_token` is provided, throws
 `CancellationTokens.OperationCanceledException` when it is cancelled first; the
 shutdown itself still goes ahead. Pass a token from
 `CancellationTokenSource(seconds)` to bound the wait.
 
-Children get SIGTERM and, if still alive after a grace period, SIGKILL; that
-escalation runs in this process, so a host that exits right away relies on the
-children's own parent-death handling instead. The workspace does no further
-dynamic work afterwards. No-op when the workspace has no dynamic feature or was
-already shut down.
+Children get SIGTERM and, if still alive after a grace period
+(`DJP_KILL_GRACE_SECONDS`), SIGKILL, so a child stuck in its SIGTERM
+handling holds this up for that long. A host that abandons the wait and exits
+relies on the children's own parent-death handling instead. The workspace does
+no further dynamic work afterwards. No-op when the workspace has no dynamic
+feature or was already shut down.
 """
 function shutdown!(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
     @debug "shutdown!"
