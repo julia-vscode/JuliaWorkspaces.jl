@@ -75,6 +75,8 @@ end
     # No temp files left behind, and overwriting an existing cache still leaves
     # exactly one file: an in-place truncating write is what produced the
     # corrupt caches this guards against.
+    @test write_cache_atomic(pkg, out; replace=true) == out
+    @test readdir(dirname(out)) == ["Foo.jstore"]
     @test write_cache_atomic(pkg, out) == out
     @test readdir(dirname(out)) == ["Foo.jstore"]
 end

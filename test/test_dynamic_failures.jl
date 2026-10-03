@@ -370,6 +370,25 @@ end
     @test _is_infra_failure(DynamicProcessCrashException(WatchEnvironmentKey("/ws/P", UInt64(1)), 0))
 end
 
+@testitem "Dynamic failures: symbol store contention is classed as infrastructure" begin
+    using JuliaWorkspaces: _is_infra_failure
+    using JuliaWorkspaces: JSONRPC
+
+    # The message one indexing child produced while another process held the
+    # stdlib cache it tried to replace (top-500 sweep, Distributions).
+    @test _is_infra_failure(JSONRPC.JSONRPCError(-32000,
+        "Failed to index project at C:\\top100\\Distributions: IOError: unlink(\"C:\\depot\\scratchspaces\\e554591c-7f10-434f-9f27-2097f62a04fd\\store_path_v3\\S\\SparseArrays\\2f01184e-e22b-5df5-ae63-d93ebab69eaf\\1.13.0.jstore\"): resource busy or locked (EBUSY)", nothing))
+    @test _is_infra_failure(Base.IOError("rename(\"…/jl_AB12.tmp\", \"…/1.13.0.jstore\"): operation not permitted (EPERM)", Base.UV_EPERM))
+    @test _is_infra_failure(Base.IOError("stat(\"…/abc.tombstone\"): permission denied (EACCES)", Base.UV_EACCES))
+    @test _is_infra_failure(Base.IOError("rename(\"…/x.unavailable\", \"…/y.unavailable\"): permission denied (EACCES)", Base.UV_EACCES))
+
+    # A store file that is genuinely missing or unreadable for another reason
+    # is not contention.
+    @test !_is_infra_failure(Base.IOError("open(\"…/1.13.0.jstore\"): no such file or directory (ENOENT)", Base.UV_ENOENT))
+    # The project's own files stay the project's problem, whatever the errno.
+    @test !_is_infra_failure(Base.IOError("rename(\"/ws/P/a\", \"/ws/P/Project.toml\"): operation not permitted (EPERM)", Base.UV_EPERM))
+end
+
 @testitem "Dynamic failures: a crashed child reports its exit code and its output" begin
     using JuliaWorkspaces: DynamicProcessCrashException, WatchEnvironmentKey, _humanize_djp_failure
 

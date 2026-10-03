@@ -1063,7 +1063,7 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
 
         if !isfile(download_filepath) && isfile(download_filepath_unavailable)
             mkpath(dest_dir)
-            mv(download_filepath_unavailable, dest_filepath_unavailable, force=true)
+            SymbolServer.publish_file(download_filepath_unavailable, dest_filepath_unavailable; replace=false)
             @debug "Cloud cache unavailable for package" name=name
             return false
         end
@@ -1281,9 +1281,11 @@ _is_infra_failure(err) =
 
 # A depot file-lock collision (`IOError: stat(...manifest_usage.toml.pid...):
 # permission denied (EACCES)` during concurrent Pkg operations) says nothing
-# about the analyzed project - same infra class as a request timeout. Errors on
-# arbitrary project files still belong to the project, even when their errno is
-# EACCES or EBUSY.
+# about the analyzed project - same infra class as a request timeout. So does a
+# sharing violation on a symbol store file (`.jstore`, `.tombstone`,
+# `.unavailable`), which another process using the same store holds open.
+# Errors on arbitrary project files still belong to the project, even when their
+# errno is EACCES, EBUSY or EPERM.
 #
 # The parent hits the same contention on its own store work (`isfile` under an
 # unreadable store, `mkpath`/`mktempdir` of the download dir), and there the
@@ -1292,12 +1294,13 @@ _is_infra_failure(err) =
 # `JSONRPCError`, so that one case has no type left to compare.
 function _mentions_infrastructure_path(msg::AbstractString)
     occursin(r"(?:manifest|artifact|scratch|preferences)_usage\.toml\.pid", msg) ||
-        occursin("_downloads", msg)
+        occursin("_downloads", msg) ||
+        occursin(r"\.(?:jstore|tombstone|unavailable)\b", msg)
 end
 
 function _is_depot_lock_failure(err)
     if err isa Base.IOError
-        (err.code == Base.UV_EACCES || err.code == Base.UV_EBUSY) || return false
+        (err.code == Base.UV_EACCES || err.code == Base.UV_EBUSY || err.code == Base.UV_EPERM) || return false
         msg = try
             sprint(showerror, err)
         catch
@@ -1311,7 +1314,7 @@ function _is_depot_lock_failure(err)
             return false
         end
         return occursin("IOError", msg) &&
-            (occursin("EACCES", msg) || occursin("EBUSY", msg)) &&
+            (occursin("EACCES", msg) || occursin("EBUSY", msg) || occursin("EPERM", msg)) &&
             _mentions_infrastructure_path(msg)
     end
     return false

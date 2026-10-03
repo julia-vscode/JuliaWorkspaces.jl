@@ -70,7 +70,7 @@ function write_tombstone(path::AbstractString)
     try
         Pkg.TOML.print(io, data)
         close(io)
-        mv(tmp, path; force=true)
+        publish_file(tmp, path; replace=true)
     catch
         close(io)
         rm(tmp; force=true)
@@ -79,7 +79,68 @@ function write_tombstone(path::AbstractString)
     return path
 end
 
-delete_tombstone(path::AbstractString) = (isfile(path) && rm(path; force=true); nothing)
+# Best effort: a tombstone left beside an existing cache is inert, because the
+# `.jstore` check always precedes the tombstone check.
+function delete_tombstone(path::AbstractString)
+    try
+        rm(path; force=true)
+    catch err
+        is_transient_store_error(err) || rethrow()
+    end
+    return nothing
+end
+
+# ─── Shared-store file publishing ────────────────────────────────────────────
+# Every process using a depot shares its symbol store, so any store file can be
+# open in another process at any moment. Windows refuses to rename over, delete,
+# or open a file another process holds open (or one pending deletion, as a file
+# just renamed over is), with EACCES/EPERM/EBUSY; those clear once the other
+# side lets go. Opening an `IOStream` reports the C runtime's errno as a
+# `SystemError` rather than an `IOError`.
+
+is_transient_store_error(err) = Sys.iswindows() && (
+    (err isa Base.IOError && (err.code == Base.UV_EACCES || err.code == Base.UV_EPERM || err.code == Base.UV_EBUSY)) ||
+    (err isa SystemError && err.errnum == Libc.EACCES))
+
+is_missing_file_error(err) =
+    (err isa Base.IOError && err.code == Base.UV_ENOENT) ||
+    (err isa SystemError && err.errnum == Libc.ENOENT)
+
+const STORE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6)
+
+# The rename syscall alone, failing with an `IOError`. Before Julia 1.12,
+# `Base.Filesystem.rename` falls back to copying over the destination instead.
+function _rename(src, dst)
+    err = ccall(:jl_fs_rename, Int32, (Cstring, Cstring), src, dst)
+    err < 0 && Base.uv_error("rename($(repr(src)), $(repr(dst)))", err)
+    return dst
+end
+
+"""
+    publish_file(tmp, path; replace) -> Bool
+
+Move the finished temp file `tmp` to `path` by a plain rename, which never
+deletes `path` (`mv(...; force=true)` falls back to unlinking a destination it
+cannot rename over, which fails while a reader holds it). Without `replace`, an
+existing `path` wins and `tmp` is discarded: such keys name fixed content, so
+another writer's copy is as good as ours. Transient sharing violations are
+retried with backoff. Returns whether `tmp` became `path`.
+"""
+function publish_file(tmp, path; replace::Bool)
+    for delay in (STORE_RETRY_DELAYS..., nothing)
+        try
+            if !replace && isfile(path)
+                rm(tmp; force=true)
+                return false
+            end
+            _rename(tmp, path)
+            return true
+        catch err
+            (delay !== nothing && is_transient_store_error(err)) || rethrow()
+        end
+        sleep(delay)
+    end
+end
 
 """
     manifest(c::Pkg.Types.Context)
@@ -660,7 +721,7 @@ function get_file_from_cloud(manifest, uuid, environment_path, depot_dir, cache_
 
     @debug "Replacing PLACEHOLDER with:" pkg_src
     modify_dirs(cache.val, f -> modify_dir(f, r"^PLACEHOLDER", pkg_src))
-    write_cache_atomic(cache, file)
+    write_cache_atomic(cache, file; replace=true)
 
     @debug "Successfully downloaded, scrubbed and saved $(name)"
     return true
@@ -774,7 +835,7 @@ function load_package(c::Pkg.Types.Context, uuid, progress_callback, loadingbay,
 end
 
 """
-    write_cache_atomic(pkg::Package, outpath) -> String
+    write_cache_atomic(pkg::Package, outpath; replace=false) -> String
 
 Serialize `pkg` to `outpath` without ever leaving a torn file there.
 
@@ -783,12 +844,15 @@ truncated cache behind whenever the writer dies mid-write (host crash, Ctrl+C,
 OOM, a killed indexer child), and a truncated cache is indistinguishable from a
 corrupt one to every reader. Instead: write to a unique temp file in the
 destination directory, then rename atomically, so a shared store under parallel
-indexing can only ever see the old file or the new one (last writer wins,
-intact). `mktemp` rather than a `getpid()`-based name: containerized workers all
-run as PID 1 in their own namespace, so a PID-based temp would collide and one
-rename would hit ENOENT.
+indexing can only ever see a complete file. `mktemp` rather than a
+`getpid()`-based name: containerized workers all run as PID 1 in their own
+namespace, so a PID-based temp would collide and one rename would hit ENOENT.
+
+An existing cache is kept unless `replace` is set (first writer wins); see
+[`publish_file`](@ref). Only a cache whose content changes under the same key
+(a deved package) needs `replace`.
 """
-function write_cache_atomic(pkg::Package, outpath)
+function write_cache_atomic(pkg::Package, outpath; replace::Bool=false)
     dir = dirname(outpath)
     mkpath(dir)
     # `cleanup` is 1.3+; before that `mktemp` never cleaned up anyway.
@@ -796,18 +860,18 @@ function write_cache_atomic(pkg::Package, outpath)
     try
         CacheStore.write(io, pkg)
         close(io)
-        mv(tmp, outpath; force=true)
+        publish_file(tmp, outpath; replace=replace)
     catch
         close(io)
-        isfile(tmp) && rm(tmp; force=true)
+        try rm(tmp; force=true) catch end
         rethrow()
     end
     return outpath
 end
 
-function write_cache(uuid, pkg::Package, outpath)
+function write_cache(uuid, pkg::Package, outpath; replace::Bool=false)
     @info "Writing cache for $(pkg.name) ($uuid) to disc."
-    return write_cache_atomic(pkg, outpath)
+    return write_cache_atomic(pkg, outpath; replace=replace)
 end
 
 """
@@ -873,21 +937,66 @@ function get_cache_path(manifest, uuid)
     ]
 end
 
+"""
+    write_depot(server, ctx, written_caches) -> Set{String}
+
+Write the caches of every package in `server.depot`, returning the paths whose
+write failed with an I/O error. Such a failure skips only that package, since it
+says nothing about the environment and may well be transient.
+"""
 function write_depot(server::Server, ctx, written_caches)
+    failed = Set{String}()
     for (uuid, pkg) in server.depot
         cache_paths = get_cache_path(manifest(ctx), uuid)
         outpath = joinpath(server.storedir, cache_paths...)
         outpath in written_caches && continue
 
-        # A registered cache is keyed by tree hash, so an existing file is already
-        # correct — skip it. Dev'ed/stdlib caches are version-keyed, so still write.
-        if isfile(outpath) && tree_hash(frommanifest(manifest(ctx), uuid)) !== nothing
+        # Only a deved package's cache changes under the same key. Any other key
+        # (tree hash, or a stdlib's bundled version) names fixed content, so an
+        # existing file is kept: another process may have just published it, and
+        # may be reading it.
+        deved = is_package_deved(manifest(ctx), uuid)
+        try
+            if deved || !isfile(outpath)
+                write_cache(uuid, pkg, outpath; replace=deved)
+            end
             push!(written_caches, outpath)
-            continue
+        catch err
+            err isa Base.IOError || rethrow()
+            @warn "Could not write the cache for $(pkg.name); it will be retried on a later run." exception=(err, catch_backtrace())
+            push!(failed, outpath)
         end
+    end
+    return failed
+end
 
-        written_path = write_cache(uuid, pkg, outpath)
-        !isempty(written_path) && push!(written_caches, written_path)
+"""
+    record_cache_outcomes(storedir, ctx, failed_writes)
+
+Record the outcome for every manifest package: clear a stale tombstone when a
+cache now exists, write one when a non-deved package produced none, so the
+launch gate stops re-attempting it. The gate checks the whole manifest, so
+transitive deps are covered too. A package in `failed_writes` did produce a
+cache that could not be written; that may be transient, so it is not tombstoned.
+"""
+function record_cache_outcomes(storedir, ctx, failed_writes)
+    for uuid in manifest_uuids(ctx)
+        try
+            cache_path = joinpath(storedir, get_cache_path(manifest(ctx), uuid)...)
+            cache_path in failed_writes && continue
+            tomb = tombstone_path(cache_path)
+            if isfile(cache_path)
+                delete_tombstone(tomb)
+            elseif !is_package_deved(manifest(ctx), uuid) &&
+                   !tombstone_is_current(read_tombstone(tomb))
+                # Keep an existing current tombstone's timestamp so incidental child
+                # runs (for some other missing package) don't reset its TTL; only
+                # stamp fresh when none is current (absent / version-mismatched / expired).
+                write_tombstone(tomb)
+            end
+        catch err
+            @warn "Failed to record tombstone outcome for $uuid" exception=(err, catch_backtrace())
+        end
     end
 end
 
