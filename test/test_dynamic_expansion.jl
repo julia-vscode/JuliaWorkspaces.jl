@@ -200,8 +200,8 @@ end
     @test haskey(df.procs, a) && haskey(df.procs, b)
     # (Stand in for the children having served their batches.)
     empty!(df.expansion_queue[a]); empty!(df.expansion_queue[b])
-    df.procs[a].last_active = 1.0
-    df.procs[b].last_active = 2.0
+    df.procs[a].last_active = 1
+    df.procs[b].last_active = 2
     handle!(df, SetMaxAliveDjpsMsg(1))
     @test !haskey(df.procs, a) && haskey(df.procs, b)
     @test a in df.done

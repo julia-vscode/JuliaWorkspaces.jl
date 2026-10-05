@@ -3,6 +3,11 @@
 # reactor/result message types are defined in `dynamic_messages.jl` (included
 # before this file). The FSM helpers live in `dynamic_fsm.jl`.
 
+# Recency ticks for the live-children cap's LRU order. A counter rather than
+# `time()`, whose coarse resolution ties children that settle back to back.
+const _ACTIVITY_CLOCK = Threads.Atomic{Int}(0)
+_next_activity_tick() = Threads.atomic_add!(_ACTIVITY_CLOCK, 1) + 1
+
 mutable struct DynamicJuliaProcess <: AbstractDynamicJuliaProcess
     key::DJPKey
     project_path::String
@@ -17,9 +22,10 @@ mutable struct DynamicJuliaProcess <: AbstractDynamicJuliaProcess
     # `_expansion_batch_timeout!`): the first batch for a context pays for
     # loading the context's packages, later ones do not.
     expansion_contexts_seen::Set{String}
-    # `time()` of the last launch, index completion, or expansion batch on this
-    # child: the LRU order `_enforce_alive_cap!` evicts idle children in.
-    last_active::Float64
+    # Tick (`_next_activity_tick`) of the last launch, index completion, or
+    # expansion batch on this child: the LRU order `_enforce_alive_cap!` evicts
+    # idle children in.
+    last_active::Int
     # `time()` of the last sign of life from the child (a message or an output
     # line). The request deadline counts from here, not from the request start.
     last_activity::Threads.Atomic{Float64}
@@ -36,13 +42,13 @@ mutable struct DynamicJuliaProcess <: AbstractDynamicJuliaProcess
             dynamic_process_fsm("$(kind):$(project_path)"),
             nothing,
             Set{String}(),
-            time(),
+            _next_activity_tick(),
             Threads.Atomic{Float64}(time()),
         )
     end
 end
 
-_touch!(djp::DynamicJuliaProcess) = (djp.last_active = time(); djp)
+_touch!(djp::DynamicJuliaProcess) = (djp.last_active = _next_activity_tick(); djp)
 _note_activity!(djp::DynamicJuliaProcess) = (djp.last_activity[] = time(); nothing)
 
 # Thrown when a child misses a request's deadline: no sign of progress for
