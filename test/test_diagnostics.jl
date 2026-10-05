@@ -206,6 +206,47 @@ end
     @test get_diagnostic(jw, uri) isa Vector
 end
 
+@testitem "Diagnostics: an index that refers back to the assigned name, with v2 enabled" begin
+    using JuliaWorkspaces.URIs2: URI
+
+    # v2's diagnostics still run the StaticLint pass (and its type inference)
+    # for a package file, and hover on a local declines to v1's tooltip, so
+    # both must stay clear of main's #357 recursion.
+    project_toml = """
+    name = "IdxCycle"
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module IdxCycle
+    function f(p)
+        i = p[i]
+    end
+    function g(x, y)
+        a = x[b]
+        b = y[a]
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///idxcycle/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///idxcycle/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    uri = URI("file:///idxcycle/src/IdxCycle.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+    JuliaWorkspaces.set_v2_enabled!(jw, true)
+
+    @test get_diagnostic(jw, uri) isa Vector
+    @test get_hover_text(jw, uri, findfirst("i = p[", source).start) isa Union{Nothing,String}
+end
+
 @testitem "Diagnostics: standalone file no crash" begin
     using JuliaWorkspaces.URIs2: URI
 

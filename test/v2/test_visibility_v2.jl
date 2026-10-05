@@ -419,3 +419,42 @@ end
     # The full dict changed (ids shifted), and the per-name item moved.
     @test !isequal(vis(jw, ["M"]), full1) || item1 == derived_v2_visible_item(jw.runtime, VIS_ROOT, ["M"], "fa")
 end
+
+@testitem "v2 visibility: colon-list imports that name each other bind :unknown and terminate" setup=[VisV2WS] begin
+    # The shapes behind main's #349 (v1's import retry built a Binding loop):
+    # plain, aliased, and through module aliases, which the pass-2 retry
+    # resolves. Each side looks only in the other's declared names, so the
+    # name binds once, as :unknown, on both sides.
+    plain = "module A
+using ..B: cyc_fn
+end
+module B
+using ..A: cyc_fn
+end
+"
+    aliased = "module A
+using ..B: cyc_g as cyc_fn
+end
+module B
+using ..A: cyc_fn as cyc_g
+end
+"
+    via_alias = "module A
+using ..BB: cyc_fn
+end
+module B
+using ..AA: cyc_fn
+end
+import .B as BB
+import .A as AA
+"
+    for (src, a_name, b_name) in ((plain, "cyc_fn", "cyc_fn"), (aliased, "cyc_fn", "cyc_g"),
+                                  (via_alias, "cyc_fn", "cyc_fn"))
+        jw = vis_workspace(src)
+        a = vis(jw, ["A"])[a_name]
+        b = vis(jw, ["B"])[b_name]
+        @test a.kind === :unknown && a.origin === :import_binding
+        @test b.kind === :unknown && b.origin === :import_binding
+        @test JW.derived_v2_unresolved_import_findings(jw.runtime, VIS_ROOT) isa AbstractVector
+    end
+end
