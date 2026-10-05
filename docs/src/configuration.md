@@ -200,7 +200,8 @@ another of the same kind in an enclosing directory reports a `shadowed_config`
 diagnostic (`info` by default) naming the file it takes over from.
 
 Only settings are superseded; the message says so. The outer file's
-`include`/`exclude` keep applying, because
+`include`/`exclude` (and a `JuliaLint.toml`'s `exclude-environments`) keep
+applying, because
 [scope composes over the whole chain](#scope-every-enclosing-file-must-admit-the-file).
 
 `JuliaTestItems.toml` never reports this: version 1 of that file has nothing but
@@ -419,6 +420,26 @@ The link is declared by the `rule` field of `_ActionDef` in
 [`src/layer_actions.jl`](https://github.com/julia-vscode/JuliaWorkspaces.jl/blob/main/src/layer_actions.jl);
 `nothing` means "not a fix for anything".
 
+### Environment discovery: `exclude-environments`
+
+Every `Project.toml` and `Manifest.toml` in the workspace is normally treated as
+an environment to resolve. `exclude-environments` is a glob list, relative to
+the config file's directory, of such files to ignore:
+
+```toml
+exclude-environments = ["worktrees/**", "**/benchmark/Project.toml"]
+```
+
+Use it for directories holding copies of a project — git worktrees, build
+caches, scratch checkouts — whose environments would otherwise be resolved
+alongside the real one. Only environment discovery is affected; `.jl` files
+there are still linted unless `exclude` also covers them.
+
+It follows the [chain rule](#scope-every-enclosing-file-must-admit-the-file):
+an environment is discovered only if **every** enclosing `JuliaLint.toml`
+admits it, so a nested config cannot bring back one an ancestor excluded. A
+malformed value is reported under `config_errors` and excludes nothing.
+
 ## `JuliaFormat.toml`
 
 ```toml
@@ -503,6 +524,10 @@ that scope and settings invalidate independently:
   globs of one `JuliaLint.toml`. Deliberately separate from the above: were the
   globs part of `ParsedLintConfig`, editing `[rules]` would invalidate every
   file's scope, and editing `exclude` every file's rules.
+- `derived_environments_path_filter(rt, config_uri)` — parses the
+  `exclude-environments` globs of one `JuliaLint.toml`, consulted by
+  `derived_project_files`. Separate again, so editing lint scope or rules never
+  re-runs environment discovery.
 - `derived_effective_lint_config(rt, uri)` — resolves scope over the whole
   `ancestor_configs` chain, then preset < `[rules]` < overrides from the nearest
   config alone, yielding an [`EffectiveLintConfig`](@ref).

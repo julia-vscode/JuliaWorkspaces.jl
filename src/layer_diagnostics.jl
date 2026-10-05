@@ -48,7 +48,7 @@ const _LINT_CONFIG_MIGRATIONS = Dict{String,String}(
     "unresolved-import" => "use `[rules] unresolved_import = \"off\"`.",
 )
 
-const _LINT_CONFIG_TOP_LEVEL_KEYS = ["config-version", "preset", "include", "exclude", "rules", "override"]
+const _LINT_CONFIG_TOP_LEVEL_KEYS = ["config-version", "preset", "include", "exclude", "exclude-environments", "rules", "override"]
 
 # Validate one `[rules]` table, collecting `id => (severity, options)`.
 function _validate_lint_rules!(res::Vector{Diagnostic}, table, into::Dict{Symbol,Tuple{Union{Nothing,Symbol},Dict{Symbol,Any}}})
@@ -128,6 +128,7 @@ Salsa.@derived function derived_lintconfig_diagnostics(rt, uri)
 
     parse_glob_list!(res, toml_content, "include")
     parse_glob_list!(res, toml_content, "exclude")
+    parse_glob_list!(res, toml_content, "exclude-environments")
 
     haskey(toml_content, "rules") &&
         _validate_lint_rules!(res, toml_content["rules"], Dict{Symbol,Tuple{Union{Nothing,Symbol},Dict{Symbol,Any}}}())
@@ -192,6 +193,17 @@ Salsa.@derived function derived_lint_path_filter(rt, config_uri)
     discard = Diagnostic[]   # diagnostics are reported by derived_lintconfig_diagnostics
 
     return parse_path_filter!(discard, derived_toml_syntax_tree(rt, config_uri))
+end
+
+"""
+    derived_environments_path_filter(rt, config_uri) -> PathFilter
+
+The `exclude-environments` globs of one `JuliaLint.toml`. Separate from
+[`derived_lint_path_filter`](@ref) so lint scope and environment discovery
+invalidate independently.
+"""
+Salsa.@derived function derived_environments_path_filter(rt, config_uri)
+    return PathFilter(GlobPattern[], parse_glob_list!(Diagnostic[], derived_toml_syntax_tree(rt, config_uri), "exclude-environments"))
 end
 
 Salsa.@derived function derived_effective_lint_config(rt, uri)
