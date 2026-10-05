@@ -45,23 +45,29 @@ end
 _touch!(djp::DynamicJuliaProcess) = (djp.last_active = time(); djp)
 _note_activity!(djp::DynamicJuliaProcess) = (djp.last_activity[] = time(); nothing)
 
-# Thrown when a child shows no sign of progress on a request for longer than its
-# deadline. A distinct type so the failure handler can say "timed out" rather
-# than reporting a bare cancellation, which is also what a deliberate
-# `kill(djp)` produces.
+# Thrown when a child misses a request's deadline: no sign of progress for
+# longer than it (`idle_based`), or no answer within it at all. A distinct type
+# so the failure handler can say "timed out" rather than reporting a bare
+# cancellation, which is also what a deliberate `kill(djp)` produces.
 struct DJPRequestTimeoutException <: Exception
     key::DJPKey
     method::String
     timeout_seconds::Int
+    idle_based::Bool
 end
+DJPRequestTimeoutException(key::DJPKey, method::String, timeout_seconds::Int) =
+    DJPRequestTimeoutException(key, method, timeout_seconds, true)
+
+_timeout_description(e::DJPRequestTimeoutException) = e.idle_based ?
+    "the indexing child process made no progress on `$(e.method)` for $(e.timeout_seconds)s" :
+    "the indexing child process did not answer `$(e.method)` within $(e.timeout_seconds)s"
 
 function Base.showerror(io::IO, e::DJPRequestTimeoutException)
-    print(io, "DJPRequestTimeoutException: the indexing child process made no progress on `",
-        e.method, "` for ", e.timeout_seconds, "s")
+    print(io, "DJPRequestTimeoutException: ", _timeout_description(e))
 end
 
 """
-    _send_djp_request(djp, timeout_seconds, request_type, params)
+    _send_djp_request(djp, timeout_seconds, request_type, params; idle_based=true)
 
 Send one request to a child indexing process and wait for its answer under an
 inactivity deadline.
@@ -78,6 +84,11 @@ deadline killed children that were steadily working through a large
 environment, and since caches are only written at the end, that discarded all
 of their work. A child that keeps reporting is not stuck.
 
+`idle_based=false` makes the deadline count from the request start instead, for
+requests whose only failure mode is a hang the child may well talk through
+(macro expansion: a hanging macro next to a package logging in the
+background).
+
 A watchdog task cancels a `CancellationTokenSource` linked with the DJP's own
 cancellation token once the child has been silent for `timeout_seconds`, so an
 explicit `kill(djp)` unblocks the wait through the same path. The combined
@@ -90,7 +101,8 @@ Cancellation surfaces as a thrown exception, which the caller already converts
 into a `ProcessIndexFailedMsg`; that handler kills the child, frees the slot and
 completes the work item, so no teardown is needed here.
 """
-function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, request_type, params)
+function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, request_type, params;
+                           idle_based::Bool=true)
     djp_token = CancellationTokens.get_token(djp.cancellation_source)
 
     if timeout_seconds <= 0
@@ -100,12 +112,13 @@ function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, reque
 
     # Launch and connect time don't count against the request.
     _note_activity!(djp)
+    started = time()
     timeout_source = CancellationTokens.CancellationTokenSource()
     timeout_token = CancellationTokens.get_token(timeout_source)
     # Exits within a second of the `finally` below cancelling `timeout_source`.
     @async try
         while !CancellationTokens.is_cancellation_requested(timeout_token)
-            idle = time() - djp.last_activity[]
+            idle = time() - (idle_based ? djp.last_activity[] : started)
             if idle >= timeout_seconds
                 CancellationTokens.cancel(timeout_source)
             else
@@ -126,7 +139,7 @@ function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, reque
         if err isa CancellationTokens.OperationCanceledException &&
                 CancellationTokens.is_cancellation_requested(timeout_token) &&
                 !CancellationTokens.is_cancellation_requested(djp_token)
-            throw(DJPRequestTimeoutException(djp.key, request_type.method, timeout_seconds))
+            throw(DJPRequestTimeoutException(djp.key, request_type.method, timeout_seconds, idle_based))
         end
         rethrow()
     finally
@@ -198,7 +211,9 @@ _expansion_key_string(k::ExpansionKey) =
     expand_macros(djp, ctx_id, imports, ctx_module, entries, timeout_seconds) -> Vector{ExpansionOutcomeEntry}
 
 Send one expansion batch to the env's persistent child and map the child's
-keyed answers back onto `ExpansionKey`s. Entries the child did not answer
+keyed answers back onto `ExpansionKey`s. `timeout_seconds` bounds the whole
+batch, not the child's silence: the deadline is what contains a hanging macro,
+and stray output from the child must not keep extending it. Entries the child did not answer
 (malformed reply) settle as `:failed`. A failed entry keeps the child's
 (truncated) error text for debuggability — consumers key on `status`, never
 on the text, so this is observability only.
@@ -215,7 +230,8 @@ function expand_macros(djp::DynamicJuliaProcess, ctx_id::String, imports::Vector
             imports,
             ctx_module,
             [JuliaDynamicAnalysisProtocol.ExpandMacroEntry(_expansion_key_string(e.key), e.text) for e in entries]
-        )
+        );
+        idle_based=false
     )
 
     keymap = Dict(_expansion_key_string(e.key) => e.key for e in entries)
@@ -1374,8 +1390,7 @@ function _failure_reason(err)
 end
 
 # Our own timeout carries no useful nested cause; skip the generic unwrapping.
-_failure_reason(err::DJPRequestTimeoutException) =
-    "the indexing child process made no progress on `$(err.method)` for $(err.timeout_seconds)s."
+_failure_reason(err::DJPRequestTimeoutException) = _timeout_description(err) * "."
 
 function _failure_subject(key::DJPKey)
     if key isa WatchTestEnvironmentKey

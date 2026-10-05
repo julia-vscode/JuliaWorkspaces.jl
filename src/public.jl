@@ -1116,13 +1116,14 @@ end
 """
     set_djp_request_timeout!(jw::JuliaWorkspace, seconds::Int)
 
-Change how long a dynamic child process may take to answer one indexing
-request before the work item is failed (`seconds <= 0` means no deadline; the
+Change how long a dynamic child process may go without showing progress on one
+indexing request before the work item is failed (`seconds <= 0` means no deadline; the
 constructor's `djp_request_timeout_seconds` sets the initial value). The
 value is read per request, so it applies to requests issued after the reactor
 processes the change; a request already in flight keeps its old deadline.
-The macro-expansion batch timeouts are separate constants and deliberately
-unaffected.
+The macro-expansion batch timeouts are separate constants, count from the
+request start rather than from the child's last sign of life, and are
+deliberately unaffected.
 """
 function set_djp_request_timeout!(jw::JuliaWorkspace, seconds::Int)
     @debug "set_djp_request_timeout!" seconds=seconds

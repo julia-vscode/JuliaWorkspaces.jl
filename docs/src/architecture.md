@@ -284,7 +284,7 @@ runtime-relevant knob — the concurrency cap
 ([`set_max_concurrent_djps!`](@ref)), environment fabrication
 ([`set_resolve_workspace_environments!`](@ref)), the symbol-cache download
 policy ([`set_symbolcache!`](@ref)), the failure budget
-([`set_max_failure_attempts!`](@ref)) and the per-request deadline
+([`set_max_failure_attempts!`](@ref)) and the per-request inactivity deadline
 ([`set_djp_request_timeout!`](@ref)): reactor-owned knobs change via a queued
 message, Salsa-owned ones via their input plus a reconcile.
 

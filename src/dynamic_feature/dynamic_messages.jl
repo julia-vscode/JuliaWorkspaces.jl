@@ -283,7 +283,7 @@ struct SetMaxFailureAttemptsMsg <: DynamicReactorMessage
 end
 
 """
-Change the per-request child-index deadline in seconds (`<= 0`: unbounded).
+Change the child-index inactivity deadline in seconds (`<= 0`: unbounded).
 Read per request, so it applies to requests sent from then on; a request
 already in flight keeps its old deadline. See
 [`set_djp_request_timeout!`](@ref).

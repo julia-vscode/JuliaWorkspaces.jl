@@ -335,6 +335,49 @@ end
     end
 end
 
+@testitem "Dynamic failures: child activity does not extend an expansion batch's deadline" begin
+    using JuliaWorkspaces: DynamicJuliaProcess, DJPRequestTimeoutException, expand_macros,
+        _note_activity!, _failure_reason, WatchEnvironmentKey, ExpansionEntry, ExpansionKey
+    using JuliaWorkspaces: JSONRPC
+
+    # The expansion deadline is what contains a hanging macro; a child that
+    # keeps printing (a package logging in the background) must not dodge it.
+    key = WatchEnvironmentKey("/ws/P", UInt64(1))
+    djp = DynamicJuliaProcess(key, "/ws/P", nothing, :watch_environment)
+
+    inbound = Base.BufferStream()
+    outbound = Base.BufferStream()
+    djp.endpoint = JSONRPC.JSONRPCEndpoint(outbound, inbound)
+    JSONRPC.start(djp.endpoint)
+
+    active_for = 4.0
+    try
+        t0 = time()
+        activity = @async while time() - t0 < active_for
+            _note_activity!(djp)
+            sleep(0.3)
+        end
+
+        err = nothing
+        try
+            expand_macros(djp, "c1", String[], String[],
+                ExpansionEntry[(key=ExpansionKey((UInt64(1), UInt64(2), UInt64(3))), text="@m x")], 1)
+        catch e
+            err = e
+        end
+        elapsed = time() - t0
+        wait(activity)
+
+        @test err isa DJPRequestTimeoutException
+        @test !err.idle_based
+        @test elapsed < active_for
+        @test occursin("did not answer `juliadynamicanalysisprocess/expandMacros` within 1s", _failure_reason(err))
+    finally
+        try close(inbound) catch end
+        try close(outbound) catch end
+    end
+end
+
 @testitem "Dynamic failures: any child message counts as activity" begin
     using JuliaWorkspaces: DynamicJuliaProcess, dispatch_dynamicprocess_msg,
         WatchEnvironmentKey, JuliaDynamicAnalysisProtocol
