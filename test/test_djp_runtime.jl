@@ -162,6 +162,24 @@ end
         DynamicFeature(DynamicIndexingOnly, mktempdir(); launcher=(df, djp) -> nothing))
 end
 
+@testitem "DJP runtime: switching out of DynamicOff resolves ahead" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicOff, DynamicIndexingOnly, SetDynamicModeMsg,
+        handle!, _should_prewarm_djp_runtime, _reset_djp_runtime_cache!, _DJP_RUNTIME_CACHE
+
+    # The reactor of a workspace started under Off skipped the early start;
+    # turning indexing on at runtime is when the children are coming.
+    _reset_djp_runtime_cache!()
+    try
+        df = DynamicFeature(DynamicOff, mktempdir())
+        @test !_should_prewarm_djp_runtime(df)
+        handle!(df, SetDynamicModeMsg(DynamicIndexingOnly))
+        @test _should_prewarm_djp_runtime(df)
+        @test timedwait(() -> !isempty(_DJP_RUNTIME_CACHE), 600.0) === :ok
+    finally
+        _reset_djp_runtime_cache!()
+    end
+end
+
 @testitem "DJP runtime: precompiling resolves nothing ahead of time" begin
     # The precompile workload starts a reactor. Resolving the runtime there
     # launched a helper process that precompilation had to wait on, and saved

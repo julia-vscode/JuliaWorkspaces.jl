@@ -2643,6 +2643,9 @@ function handle!(df::DynamicFeature, msg::SetDynamicModeMsg)
         empty!(df.failed_projects)
         empty!(df.failure_attempts)
         empty!(df.failure_messages)
+        # The reactor started under Off and so skipped this; children are
+        # about to be launched now.
+        _prewarm_djp_runtime(df)
     elseif old == DynamicPersistent && msg.mode == DynamicIndexingOnly
         # What `_settle_child!` would have done at settle time: a settled
         # child has no role under IndexingOnly. In-flight and refreshing
