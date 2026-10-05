@@ -350,10 +350,14 @@ end
     djp.endpoint = JSONRPC.JSONRPCEndpoint(outbound, inbound)
     JSONRPC.start(djp.endpoint)
 
-    active_for = 4.0
+    # The child stays active until the request returns. The bound only keeps
+    # a regression (a deadline that activity does extend) from hanging the
+    # suite; it is far above the 1s deadline plus first-call compilation.
+    active_for = 60.0
     try
         t0 = time()
-        activity = @async while time() - t0 < active_for
+        returned = Ref(false)
+        activity = @async while !returned[] && time() - t0 < active_for
             _note_activity!(djp)
             sleep(0.3)
         end
@@ -366,6 +370,7 @@ end
             err = e
         end
         elapsed = time() - t0
+        returned[] = true
         wait(activity)
 
         @test err isa DJPRequestTimeoutException
