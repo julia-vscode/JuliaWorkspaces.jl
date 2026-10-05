@@ -315,8 +315,9 @@ else
 end
 
 function sha2_256_dir(path, sha=zeros(UInt8, 32))
-    (uperm(path) & 0x04) != 0x04 && return
-    startswith(path, ".") && return
+    # Skipped entries must pass the running hash on, or the caller's next `.+=` fails.
+    (uperm(path) & 0x04) != 0x04 && return sha
+    startswith(basename(path), ".") && return sha
     if isfile(path) && endswith(path, ".jl")
         s1 = open(path) do f
             sha2_256(f)
