@@ -1558,3 +1558,116 @@ end
     # The real keyword position is unaffected.
     @test occursin(wheredoc, hover("where {T}"))
 end
+
+@testitem "Hover: modules that import a name from each other" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, get_hover_text, get_completions, get_definitions, get_signature_help
+    using JuliaWorkspaces.URIs2: URI
+
+    # `A` imports `cyc_fn` from `B` and `B` imports it back from `A`, so neither
+    # module has it. Inside `@eval` the module tree does not see the two
+    # modules, so the per-file pass resolves both imports through its own
+    # scopes. Retrying `A`'s import used to point `A`'s binding at `B`'s, which
+    # already pointed back at `A`'s, and hover, completion, go-to-definition
+    # and signature help all followed that loop until the stack overflowed.
+    project_toml = """
+    name = "CycImp"
+    uuid = "a2345678-1234-1234-1234-1234567890ab"
+    version = "0.1.0"
+    """
+    manifest_toml = """
+    julia_version = "1.11.0"
+    manifest_format = "2.0"
+    project_hash = "abc123"
+
+    [deps]
+    """
+    source = """
+    module CycImp
+    @eval begin
+    module A
+    using ..B: cyc_fn
+    g() = cyc_fn(1)
+    h() = cyc
+    end
+    module B
+    using ..A: cyc_fn
+    end
+    end
+    end
+    """
+
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(URI("file:///cycimp/Project.toml"), SourceText(project_toml, "toml")))
+    add_file!(jw, TextFile(URI("file:///cycimp/Manifest.toml"), SourceText(manifest_toml, "toml")))
+    uri = URI("file:///cycimp/src/CycImp.jl")
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+    use = first(findfirst("cyc_fn(1)", source)) + 1
+    @test get_hover_text(jw, uri, use) isa Union{Nothing,String}
+    @test get_definitions(jw, uri, use) isa Vector
+    @test get_signature_help(jw, uri, first(findfirst("(1)", source)) + 1) !== missing
+    completions = get_completions(jw, uri, last(findfirst("h() = cyc", source)) + 1)
+    @test any(i -> i.label == "cyc_fn", completions.items)
+end
+
+@testitem "Hover: a Binding chain that loops back on itself" begin
+    using JuliaWorkspaces: JuliaWorkspace, add_file!, TextFile, SourceText, SignatureInfo, DefinitionResult
+    using JuliaWorkspaces.URIs2: URI
+    SL = JuliaWorkspaces.StaticLint
+    CST = JuliaWorkspaces.CSTParser
+
+    id(s) = CST.EXPR(:IDENTIFIER, nothing, nothing, 0, 0, s, nothing, nothing)
+    meta = Dict{UInt64,SL.Meta}()
+    scope = SL.Scope(nothing, id("x"), Dict{String,SL.Binding}(), Dict{Symbol,Any}(), nothing)
+
+    # Every link of a loop is a binding whose `val` is another binding, so there
+    # is nothing to render: the walks stop and return what they were given.
+    selfloop = SL.Binding(id("s"), nothing, nothing, [])
+    selfloop.val = selfloop
+    a = SL.Binding(id("a"), nothing, nothing, [])
+    b = SL.Binding(id("b"), a, nothing, [])
+    a.val = b
+    for x in (selfloop, a, b)
+        @test JuliaWorkspaces._get_tooltip(x, "", meta) == ""                    # completion
+        @test JuliaWorkspaces._get_hover(x, "doc", nothing, nothing, meta) == "doc"  # hover
+        sigs = SignatureInfo[]
+        JuliaWorkspaces._get_signatures(x, scope, sigs, nothing, meta)
+        @test isempty(sigs)
+        defs = DefinitionResult[]
+        JuliaWorkspaces._get_definitions_from_val(x, scope, nothing, defs, nothing)
+        @test isempty(defs)
+    end
+
+    # A chain that ends renders exactly what its last binding renders.
+    source = """
+    \"\"\"
+        chained(x)
+
+    Documented.
+    \"\"\"
+    chained(x) = x
+    chained(x, y) = x
+    """
+    uri = URI("file:///hoverchain/test.jl")
+    jw = JuliaWorkspace()
+    add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+    rt = jw.runtime
+    fmeta = JuliaWorkspaces.derived_file_analysis(rt, JuliaWorkspaces.derived_best_root_for_uri(rt, uri), uri).meta
+    cst = JuliaWorkspaces.derived_julia_legacy_syntax_tree(rt, uri)
+    tls = SL.scopeof(cst, fmeta)
+    target = tls.names["chained"]
+    @test target isa SL.Binding && target.val isa CST.EXPR
+
+    outer = SL.Binding(id("outer"), SL.Binding(id("mid"), target, nothing, []), nothing, [])
+    expected = JuliaWorkspaces._get_tooltip(target, "", fmeta; show_definition = true)
+    @test occursin("Documented.", expected)
+    @test JuliaWorkspaces._get_tooltip(outer, "", fmeta) == expected
+    @test JuliaWorkspaces._get_hover(outer, "", nothing, nothing, fmeta) == expected
+
+    direct = SignatureInfo[]
+    JuliaWorkspaces._get_signatures(target, tls, direct, nothing, fmeta)
+    chained = SignatureInfo[]
+    JuliaWorkspaces._get_signatures(outer, tls, chained, nothing, fmeta)
+    @test length(direct) == 2
+    @test [s.label for s in chained] == [s.label for s in direct]
+end

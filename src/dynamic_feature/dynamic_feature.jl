@@ -3,7 +3,12 @@
 # reactor/result message types are defined in `dynamic_messages.jl` (included
 # before this file). The FSM helpers live in `dynamic_fsm.jl`.
 
-mutable struct DynamicJuliaProcess
+# Recency ticks for the live-children cap's LRU order. A counter rather than
+# `time()`, whose coarse resolution ties children that settle back to back.
+const _ACTIVITY_CLOCK = Threads.Atomic{Int}(0)
+_next_activity_tick() = Threads.atomic_add!(_ACTIVITY_CLOCK, 1) + 1
+
+mutable struct DynamicJuliaProcess <: AbstractDynamicJuliaProcess
     key::DJPKey
     project_path::String
     package::Union{Nothing,String}
@@ -17,9 +22,13 @@ mutable struct DynamicJuliaProcess
     # `_expansion_batch_timeout!`): the first batch for a context pays for
     # loading the context's packages, later ones do not.
     expansion_contexts_seen::Set{String}
-    # `time()` of the last launch, index completion, or expansion batch on this
-    # child: the LRU order `_enforce_alive_cap!` evicts idle children in.
-    last_active::Float64
+    # Tick (`_next_activity_tick`) of the last launch, index completion, or
+    # expansion batch on this child: the LRU order `_enforce_alive_cap!` evicts
+    # idle children in.
+    last_active::Int
+    # `time()` of the last sign of life from the child (a message or an output
+    # line). The request deadline counts from here, not from the request start.
+    last_activity::Threads.Atomic{Float64}
 
     function DynamicJuliaProcess(key::DJPKey, project_path::String, package::Union{Nothing,String}, kind::Symbol)
         return new(
@@ -33,32 +42,41 @@ mutable struct DynamicJuliaProcess
             dynamic_process_fsm("$(kind):$(project_path)"),
             nothing,
             Set{String}(),
-            time(),
+            _next_activity_tick(),
+            Threads.Atomic{Float64}(time()),
         )
     end
 end
 
-_touch!(djp::DynamicJuliaProcess) = (djp.last_active = time(); djp)
+_touch!(djp::DynamicJuliaProcess) = (djp.last_active = _next_activity_tick(); djp)
+_note_activity!(djp::DynamicJuliaProcess) = (djp.last_activity[] = time(); nothing)
 
-# Thrown when a child does not answer an index request within its deadline. A
-# distinct type so the failure handler can say "timed out" rather than reporting
-# a bare cancellation, which is also what a deliberate `kill(djp)` produces.
+# Thrown when a child misses a request's deadline: no sign of progress for
+# longer than it (`idle_based`), or no answer within it at all. A distinct type
+# so the failure handler can say "timed out" rather than reporting a bare
+# cancellation, which is also what a deliberate `kill(djp)` produces.
 struct DJPRequestTimeoutException <: Exception
     key::DJPKey
     method::String
     timeout_seconds::Int
+    idle_based::Bool
 end
+DJPRequestTimeoutException(key::DJPKey, method::String, timeout_seconds::Int) =
+    DJPRequestTimeoutException(key, method, timeout_seconds, true)
+
+_timeout_description(e::DJPRequestTimeoutException) = e.idle_based ?
+    "the indexing child process made no progress on `$(e.method)` for $(e.timeout_seconds)s" :
+    "the indexing child process did not answer `$(e.method)` within $(e.timeout_seconds)s"
 
 function Base.showerror(io::IO, e::DJPRequestTimeoutException)
-    print(io, "DJPRequestTimeoutException: the indexing child process did not answer `",
-        e.method, "` within ", e.timeout_seconds, "s")
+    print(io, "DJPRequestTimeoutException: ", _timeout_description(e))
 end
 
 """
-    _send_djp_request(djp, timeout_seconds, request_type, params)
+    _send_djp_request(djp, timeout_seconds, request_type, params; idle_based=true)
 
-Send one request to a child indexing process and wait for its answer under a
-deadline.
+Send one request to a child indexing process and wait for its answer under an
+inactivity deadline.
 
 Without a deadline this wait is unbounded: a child that neither answers,
 terminates, nor throws holds its launch slot *and* keeps the work item pending
@@ -66,10 +84,21 @@ forever, so `is_ready` never becomes true and a one-shot host such as
 `julialint` blocks with no further output. `timeout_seconds <= 0` restores the
 old unbounded behaviour.
 
-The deadline is a `CancellationTokenSource` timer linked with the DJP's own
-cancellation token, so an explicit `kill(djp)` unblocks the wait through the
-same path. The combined token is passed as `client_token` (what actually stops
-us waiting, `JSONRPC.send_request`) and as `server_token` (sends
+The deadline restarts whenever the child shows a sign of life (see
+`djp.last_activity`): a progress notification or a line of output. A fixed
+deadline killed children that were steadily working through a large
+environment, and since caches are only written at the end, that discarded all
+of their work. A child that keeps reporting is not stuck.
+
+`idle_based=false` makes the deadline count from the request start instead, for
+requests whose only failure mode is a hang the child may well talk through
+(macro expansion: a hanging macro next to a package logging in the
+background).
+
+A watchdog task cancels a `CancellationTokenSource` linked with the DJP's own
+cancellation token once the child has been silent for `timeout_seconds`, so an
+explicit `kill(djp)` unblocks the wait through the same path. The combined
+token is passed as `client_token` (what actually stops us waiting, `JSONRPC.send_request`) and as `server_token` (sends
 `\$/cancelRequest` to the child — currently advisory, since the child's handler
 does blocking `Pkg` work and ignores its token, but correct for when it becomes
 cooperative).
@@ -78,7 +107,8 @@ Cancellation surfaces as a thrown exception, which the caller already converts
 into a `ProcessIndexFailedMsg`; that handler kills the child, frees the slot and
 completes the work item, so no teardown is needed here.
 """
-function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, request_type, params)
+function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, request_type, params;
+                           idle_based::Bool=true)
     djp_token = CancellationTokens.get_token(djp.cancellation_source)
 
     if timeout_seconds <= 0
@@ -86,8 +116,24 @@ function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, reque
             client_token=djp_token, server_token=djp_token)
     end
 
-    timeout_source = CancellationTokens.CancellationTokenSource(timeout_seconds)
+    # Launch and connect time don't count against the request.
+    _note_activity!(djp)
+    started = time()
+    timeout_source = CancellationTokens.CancellationTokenSource()
     timeout_token = CancellationTokens.get_token(timeout_source)
+    # Exits within a second of the `finally` below cancelling `timeout_source`.
+    @async try
+        while !CancellationTokens.is_cancellation_requested(timeout_token)
+            idle = time() - (idle_based ? djp.last_activity[] : started)
+            if idle >= timeout_seconds
+                CancellationTokens.cancel(timeout_source)
+            else
+                sleep(min(timeout_seconds - idle, 1.0))
+            end
+        end
+    catch err
+        @error "DJP request watchdog failed" exception=(err, catch_backtrace())
+    end
     combined_source = CancellationTokens.CancellationTokenSource(timeout_token, djp_token)
     combined_token = CancellationTokens.get_token(combined_source)
 
@@ -99,7 +145,7 @@ function _send_djp_request(djp::DynamicJuliaProcess, timeout_seconds::Int, reque
         if err isa CancellationTokens.OperationCanceledException &&
                 CancellationTokens.is_cancellation_requested(timeout_token) &&
                 !CancellationTokens.is_cancellation_requested(djp_token)
-            throw(DJPRequestTimeoutException(djp.key, request_type.method, timeout_seconds))
+            throw(DJPRequestTimeoutException(djp.key, request_type.method, timeout_seconds, idle_based))
         end
         rethrow()
     finally
@@ -171,7 +217,9 @@ _expansion_key_string(k::ExpansionKey) =
     expand_macros(djp, ctx_id, imports, ctx_module, entries, timeout_seconds) -> Vector{ExpansionOutcomeEntry}
 
 Send one expansion batch to the env's persistent child and map the child's
-keyed answers back onto `ExpansionKey`s. Entries the child did not answer
+keyed answers back onto `ExpansionKey`s. `timeout_seconds` bounds the whole
+batch, not the child's silence: the deadline is what contains a hanging macro,
+and stray output from the child must not keep extending it. Entries the child did not answer
 (malformed reply) settle as `:failed`. A failed entry keeps the child's
 (truncated) error text for debuggability — consumers key on `status`, never
 on the text, so this is observability only.
@@ -188,7 +236,8 @@ function expand_macros(djp::DynamicJuliaProcess, ctx_id::String, imports::Vector
             imports,
             ctx_module,
             [JuliaDynamicAnalysisProtocol.ExpandMacroEntry(_expansion_key_string(e.key), e.text) for e in entries]
-        )
+        );
+        idle_based=false
     )
 
     keymap = Dict(_expansion_key_string(e.key) => e.key for e in entries)
@@ -260,6 +309,32 @@ logs for the whole length of an index.
 """
 const MAX_CAPTURED_CHILD_OUTPUT_LINES = 40
 
+"""
+    DJP_KILL_GRACE_SECONDS
+
+How long a child gets to exit after SIGTERM before it is sent SIGKILL. A Julia
+process that receives SIGTERM while inside `malloc` can deadlock instead of
+exiting (JuliaLang/julia#63307), and then holds on to all of its memory.
+"""
+const DJP_KILL_GRACE_SECONDS = 5.0
+
+# SIGTERM, then SIGKILL if `proc` is still alive after `grace_seconds`. Returns
+# immediately with the task running the escalation, which finishes once `proc`
+# has exited. On Windows the SIGTERM is already a hard `TerminateProcess`, so
+# the escalation never fires there.
+function _terminate_process(proc::Base.Process, grace_seconds::Real=DJP_KILL_GRACE_SECONDS)
+    try kill(proc) catch end
+    return @async try
+        if timedwait(() -> process_exited(proc), float(grace_seconds); pollint=0.1) !== :ok
+            @warn "Indexing child process did not exit after SIGTERM, sending SIGKILL" pid=getpid(proc)
+            kill(proc, Base.SIGKILL)
+            wait(proc)
+        end
+    catch err
+        @debug "Could not SIGKILL indexing child process" exception=err
+    end
+end
+
 # ─── Launch prioritization ───────────────────────────────────────────────────
 #
 # Environments higher up the directory tree resolve first, so a package's main
@@ -302,6 +377,9 @@ end
 # instead.
 function dispatch_dynamicprocess_msg(endpoint, msg, ctx)
     reactor_channel, djp = ctx
+
+    # Any message, even one ignored below, shows the child is alive.
+    _note_activity!(djp)
 
     if msg.method == JuliaDynamicAnalysisProtocol.index_progress_notification_type.method
         params = try
@@ -352,9 +430,10 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 )
             )
 
+            termination = Ref{Union{Nothing,Task}}(nothing)
             proc_kill_registration = CancellationTokens.register(token) do
                 @debug "Killing DynamicJuliaProcess due to cancellation" kind=djp.kind project_path=djp.project_path
-                try kill(jl_process) catch end
+                termination[] = _terminate_process(jl_process)
             end
 
             try # This try/finally block closes the `proc_kill_registration`.
@@ -363,6 +442,9 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                 # this is the only account of what went wrong.
                 recent_output = String[]
                 record_output = function (line)
+                    # Output covers phases without progress reports
+                    # (instantiate, TestEnv) against the request deadline.
+                    _note_activity!(djp)
                     @debug "Output from DynamicJuliaProcess" project_path=djp.project_path package=djp.package line=line
                     push!(recent_output, line)
                     length(recent_output) > MAX_CAPTURED_CHILD_OUTPUT_LINES && popfirst!(recent_output)
@@ -458,7 +540,7 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                                 dispatch_dynamicprocess_msg(endpoint, msg, (reactor_channel, djp))
                             end
 
-                            put!(reactor_channel, ProcessTerminatedMsg(djp.key))
+                            put!(reactor_channel, ProcessTerminatedMsg(djp.key, djp))
                         finally
                             close(endpoint)
                         end
@@ -484,12 +566,20 @@ function start(djp::DynamicJuliaProcess, reactor_channel::Channel, token::Cancel
                     # that actually kills the Julia process.
                     CancellationTokens.cancel(djp.cancellation_source)
                     wait(jl_process)
-                    put!(reactor_channel, ProcessIndexFailedMsg(djp.key, err))
+                    put!(reactor_channel, ProcessIndexFailedMsg(djp.key, err, djp))
                 else
-                    put!(reactor_channel, ProcessTerminatedMsg(djp.key))
+                    put!(reactor_channel, ProcessTerminatedMsg(djp.key, djp))
                 end
             finally
                 close(proc_kill_registration)
+                # A cancellation from another thread can land after the
+                # registration was closed, or before its callback has run.
+                if termination[] === nothing && CancellationTokens.is_cancellation_requested(token)
+                    termination[] = _terminate_process(jl_process)
+                end
+                # A killed child is not done until it has exited: `shutdown!`
+                # waits on this task to know nothing is left running.
+                termination[] === nothing || wait(termination[])
             end
         finally
             close(pipe_out)
@@ -539,10 +629,12 @@ const DEFAULT_MAX_FAILURE_ATTEMPTS = 2
 """
     DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS
 
-How long a child indexing process may take to answer one request. Generous —
-indexing a large environment from cold legitimately takes minutes — but finite,
-because an unbounded wait turns a wedged child into a wedged host: the work item
-stays pending forever and `is_ready` never becomes true.
+How long a child indexing process may go without showing progress (a progress
+notification or a line of output) on one request. The whole request may take
+much longer, as long as progress keeps arriving. Generous — loading one large
+package legitimately takes minutes — but finite, because an unbounded wait turns
+a wedged child into a wedged host: the work item stays pending forever and
+`is_ready` never becomes true.
 """
 const DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS = 300
 
@@ -638,6 +730,11 @@ struct DynamicFeature
     # Package caches whose metadata input is already populated; guards against
     # re-reading (and re-`set_input`ing) multi-MB cache files.
     loaded_pkg_metadata::Set{PkgCacheKey}
+    # Package caches that are valid on disc but could not be read because the
+    # process ran out of memory, even after a full collection. Never retried for
+    # the life of the process, and never queued in `missing_pkg_metadata`:
+    # re-reading would only hit the same memory ceiling again.
+    unloadable_pkg_metadata::Set{PkgCacheKey}
     pending_count::Threads.Atomic{Int}
     # Whether any result has been consumed by `process_from_dynamic`, or a
     # reconcile completed without any work to do. Together with `pending_count`
@@ -690,10 +787,10 @@ struct DynamicFeature
     # A `Ref` because hosts change it at runtime (`SetMaxFailureAttemptsMsg`);
     # reactor-owned.
     max_failure_attempts::Base.RefValue{Int}
-    # Seconds a child may take to answer one index request before the work item
-    # is failed (<= 0: no deadline). See `_send_djp_request`. A `Ref` because
-    # hosts change it at runtime (`SetDjpRequestTimeoutMsg`); reactor-owned,
-    # read per request.
+    # Seconds a child may go without showing progress on one index request
+    # before the work item is failed (<= 0: no deadline). See `_send_djp_request`.
+    # A `Ref` because hosts change it at runtime (`SetDjpRequestTimeoutMsg`);
+    # reactor-owned, read per request.
     djp_request_timeout_seconds::Base.RefValue{Int}
     # Keys ready to launch but over the cap; drained best-`_launch_priority`
     # first, insertion order as the final tiebreak.
@@ -705,6 +802,9 @@ struct DynamicFeature
     # Launch implementation; injectable so reactor tests observe launches
     # without spawning processes (same seam pattern as `progress_callback`).
     launcher::Function
+    # Reads one `.jstore` from a path; injectable so tests can simulate a read
+    # that runs out of memory (same seam pattern as `launcher`).
+    cache_reader::Function
     # ── Background refresh of served-stale standalone envs ──
     # Strictly lower priority than `launch_queue`; never counts as a pending
     # work item (readiness must not wait on refreshes).
@@ -714,8 +814,10 @@ struct DynamicFeature
     # FIFO of batches per env key, waiting for the child to be settled (Done).
     # Never counts as a pending work item and never holds a launch slot.
     expansion_queue::Dict{DJPKey,Vector{ExpansionBatchMsg}}
-    # Env keys with an expansion batch currently in flight (one per child).
-    expansion_inflight::Set{DJPKey}
+    # Env keys with an expansion batch currently in flight (one per child), and
+    # the child serving it: a late answer from a child that has since been
+    # replaced under the same key must not touch the replacement.
+    expansion_inflight::Dict{DJPKey,DynamicJuliaProcess}
     # Env keys we already revived a child for (see `_drain_expansion_queue!`):
     # a cache-hit environment completes without ever launching one, so the
     # first batch launches it through the refresh machinery — at most once
@@ -727,6 +829,10 @@ struct DynamicFeature
     # expansion keys `_reconcile_expansions!` has already sent, so a key is
     # requested at most once per session. Only ever touched from the host task.
     requested_expansions::Set{ExpansionKey}
+    # Supervising tasks of launched children (reactor-owned). A task finishes
+    # only once its child has exited, so `shutdown!` waits on these, including
+    # the children already killed under `DynamicIndexingOnly`.
+    child_tasks::Vector{Task}
 
     function DynamicFeature(djp_mode::DynamicMode, store_path::String;
             download_enabled::Bool=false, upstream_url::String=DEFAULT_SYMBOLCACHE_UPSTREAM,
@@ -736,6 +842,7 @@ struct DynamicFeature
             max_concurrent_djps::Int=4, max_alive_djps::Int=DEFAULT_MAX_ALIVE_DJPS,
             v2_lifecycle::Bool=false,
             launcher::Function=_launch_process!,
+            cache_reader::Function=_read_cache_file,
             max_failure_attempts::Int=DEFAULT_MAX_FAILURE_ATTEMPTS,
             djp_request_timeout_seconds::Int=DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS)
         return new(
@@ -753,8 +860,9 @@ struct DynamicFeature
             Set{DJPKey}(),          # done
             Set{DJPKey}(),          # last_required
             Set{DJPKey}(),          # reactor_required
-            Set{PkgCacheKey}(),
-            Set{PkgCacheKey}(),
+            Set{PkgCacheKey}(),     # missing_pkg_metadata
+            Set{PkgCacheKey}(),     # loaded_pkg_metadata
+            Set{PkgCacheKey}(),     # unloadable_pkg_metadata
             Threads.Atomic{Int}(0),
             Threads.Atomic{Bool}(false),
             Threads.Atomic{Bool}(false),
@@ -772,12 +880,14 @@ struct DynamicFeature
             Vector{DJPKey}(),
             Set{DJPKey}(),
             launcher,
+            cache_reader,
             Vector{DJPKey}(),
             Set{DJPKey}(),
             Dict{DJPKey,Vector{ExpansionBatchMsg}}(),
-            Set{DJPKey}(),
+            Dict{DJPKey,DynamicJuliaProcess}(),
             Set{DJPKey}(),
             Set{ExpansionKey}(),
+            Task[],               # child_tasks
         )
     end
 end
@@ -1136,7 +1246,7 @@ function _download_single_cache(pkg::MissingPackage, store_path::String, upstrea
 
         if !isfile(download_filepath) && isfile(download_filepath_unavailable)
             mkpath(dest_dir)
-            mv(download_filepath_unavailable, dest_filepath_unavailable, force=true)
+            SymbolServer.publish_file(download_filepath_unavailable, dest_filepath_unavailable; replace=false)
             @debug "Cloud cache unavailable for package" name=name
             return false
         end
@@ -1286,8 +1396,7 @@ function _failure_reason(err)
 end
 
 # Our own timeout carries no useful nested cause; skip the generic unwrapping.
-_failure_reason(err::DJPRequestTimeoutException) =
-    "the indexing child process did not answer `$(err.method)` within $(err.timeout_seconds)s."
+_failure_reason(err::DJPRequestTimeoutException) = _timeout_description(err) * "."
 
 function _failure_subject(key::DJPKey)
     if key isa WatchTestEnvironmentKey
@@ -1356,9 +1465,11 @@ _is_infra_failure(err) =
 
 # A depot file-lock collision (`IOError: stat(...manifest_usage.toml.pid...):
 # permission denied (EACCES)` during concurrent Pkg operations) says nothing
-# about the analyzed project - same infra class as a request timeout. Errors on
-# arbitrary project files still belong to the project, even when their errno is
-# EACCES or EBUSY.
+# about the analyzed project - same infra class as a request timeout. So does a
+# sharing violation on a symbol store file (`.jstore`, `.tombstone`,
+# `.unavailable`), which another process using the same store holds open.
+# Errors on arbitrary project files still belong to the project, even when their
+# errno is EACCES, EBUSY or EPERM.
 #
 # The parent hits the same contention on its own store work (`isfile` under an
 # unreadable store, `mkpath`/`mktempdir` of the download dir), and there the
@@ -1367,12 +1478,13 @@ _is_infra_failure(err) =
 # `JSONRPCError`, so that one case has no type left to compare.
 function _mentions_infrastructure_path(msg::AbstractString)
     occursin(r"(?:manifest|artifact|scratch|preferences)_usage\.toml\.pid", msg) ||
-        occursin("_downloads", msg)
+        occursin("_downloads", msg) ||
+        occursin(r"\.(?:jstore|tombstone|unavailable)\b", msg)
 end
 
 function _is_depot_lock_failure(err)
     if err isa Base.IOError
-        (err.code == Base.UV_EACCES || err.code == Base.UV_EBUSY) || return false
+        (err.code == Base.UV_EACCES || err.code == Base.UV_EBUSY || err.code == Base.UV_EPERM) || return false
         msg = try
             sprint(showerror, err)
         catch
@@ -1386,7 +1498,7 @@ function _is_depot_lock_failure(err)
             return false
         end
         return occursin("IOError", msg) &&
-            (occursin("EACCES", msg) || occursin("EBUSY", msg)) &&
+            (occursin("EACCES", msg) || occursin("EBUSY", msg) || occursin("EPERM", msg)) &&
             _mentions_infrastructure_path(msg)
     end
     return false
@@ -1434,14 +1546,11 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
     transition!(djp.fsm, DynamicProcessStarting; reason="launching")
     token = CancellationTokens.get_token(djp.cancellation_source)
     djp.task = @async try
-        # Resolving the runtime may have to prepare the child environment,
-        # which is slow. It happens at most once per session — usually never,
-        # because the on-disc stamp survives restarts — but it must not run on
-        # the reactor, so it runs here, inside the child's own task. Concurrent
-        # children queue behind the first one rather than each preparing.
-        runtime = djp_runtime(default_djp_julia_exe(), df.store_path;
-            on_prepare = () -> put!(df.in_channel,
-                ProcessProgressMsg(djp.key, "Preparing the Julia indexing runtime...", 0)))
+        # Normally already resolved: reactor start kicks this off (see
+        # `_prewarm_djp_runtime`). If it is still running, or preparing the
+        # child environment, this waits for it. That must not happen on the
+        # reactor, so it happens here, inside the task of the child.
+        runtime = djp_runtime(default_djp_julia_exe(); progress=_djp_runtime_progress(df))
         start(djp, df.in_channel, token, runtime)
     catch err
         # `start` reports errors from its supervised region itself; this catches
@@ -1450,9 +1559,46 @@ function _launch_process!(df::DynamicFeature, djp::DynamicJuliaProcess)
         # task and leave the work item inflight forever.
         # Reported to the user once, by the `ProcessIndexFailedMsg` handler.
         @info "DynamicJuliaProcess failed to launch" key=djp.key exception=(err, catch_backtrace())
-        put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err))
+        put!(df.in_channel, ProcessIndexFailedMsg(djp.key, err, djp))
     end
+    filter!(!istaskdone, df.child_tasks)
+    push!(df.child_tasks, djp.task)
     return
+end
+
+# The one-time preparation of the child environment gets its own progress bar:
+# at reactor start there is no work item to report it against.
+_djp_runtime_progress(df::DynamicFeature) =
+    (message, percentage) -> _report_progress(df, "prepare-runtime", message, percentage)
+
+# Whether reactor start should resolve the child runtime ahead of the first
+# launch. Not when dynamic indexing is off (a download-only workspace never
+# launches a child), and not with an injected launcher (reactor tests must not
+# spawn Julia processes).
+#
+# Never while precompiling: the precompile workload starts a reactor, and the
+# helper process it would launch outlives the workload, so precompilation waits
+# on it (and, for a cold child environment, on a full `Pkg.precompile`). The
+# memoized answer would also be saved into the package image and then trusted
+# by every later session instead of checked.
+_should_prewarm_djp_runtime(df::DynamicFeature) =
+    df.djp_mode[] != DynamicOff && df.launcher === _launch_process! &&
+    ccall(:jl_generating_output, Cint, ()) == 0
+
+# Resolve the child runtime in the background as soon as the reactor starts, so
+# the one helper launch it costs overlaps with loading the workspace instead of
+# delaying the first child. `_launch_process!` picks up the memoized result.
+function _prewarm_djp_runtime(df::DynamicFeature)
+    _should_prewarm_djp_runtime(df) || return nothing
+    @async try
+        djp_runtime(default_djp_julia_exe(); progress=_djp_runtime_progress(df))
+    catch err
+        # Only an early start: nothing is memoized on failure, so the first
+        # launch resolves again and a real problem surfaces through the normal
+        # launch-failure path.
+        @debug "Resolving the dynamic analysis runtime ahead of time failed" exception=(err, catch_backtrace())
+    end
+    return nothing
 end
 
 _has_free_slot(df::DynamicFeature) =
@@ -1568,7 +1714,7 @@ function _evict_one_child!(df::DynamicFeature; idle_only::Bool)
     victim = nothing
     victim_busy = true
     for (key, djp) in df.procs
-        (_is_settled_child(df, key) && !(key in df.expansion_inflight)) || continue
+        (_is_settled_child(df, key) && !haskey(df.expansion_inflight, key)) || continue
         busy = _has_queued_batches(df, key)
         idle_only && busy && continue
         if victim === nothing || (victim_busy && !busy) ||
@@ -1703,6 +1849,7 @@ function Base.run(df::DynamicFeature)
 end
 
 function start(df::DynamicFeature)
+    _prewarm_djp_runtime(df)
     @async try
         Base.run(df)
     catch err
@@ -1973,7 +2120,7 @@ function handle!(df::DynamicFeature, msg::ProcessLaunchedMsg)
         # Internal detail: the user-facing report is emitted once, by the
         # `ProcessIndexFailedMsg` handler.
         @info "Dynamic index request failed" key exception=(err, catch_backtrace())
-        put!(df.in_channel, ProcessIndexFailedMsg(key, err))
+        put!(df.in_channel, ProcessIndexFailedMsg(key, err, djp))
     end
 
     return false
@@ -2070,6 +2217,15 @@ end
 function handle!(df::DynamicFeature, msg::ProcessIndexFailedMsg)
     key = msg.key
 
+    # A child that dies mid-index can report twice (its message loop and its
+    # pending request both fail). The first report already killed it and may
+    # have launched a retry under the same key; the second must not take that
+    # retry down with it.
+    if msg.djp !== nothing && get(df.procs, key, nothing) !== msg.djp
+        @debug "ProcessIndexFailedMsg from a replaced or killed process; ignoring" key
+        return false
+    end
+
     if key in df.refreshing
         # The served stale environment keeps working; do not poison
         # failed_projects over a refresh.
@@ -2144,8 +2300,14 @@ end
 
 function handle!(df::DynamicFeature, msg::ProcessTerminatedMsg)
     key = msg.key
-    djp = get(df.procs, key, nothing)
-    djp === nothing && return false
+    djp = msg.djp
+    # Killing a child ends its message loop, which posts this message. By then
+    # the child is gone from `df.procs`, and a retry may hold its key and its
+    # launch slot, so only the child currently registered under the key counts.
+    if get(df.procs, key, nothing) !== djp
+        @debug "ProcessTerminatedMsg from a replaced or killed process; ignoring" key
+        return false
+    end
 
     if key in df.refreshing && state(djp.fsm) in (DynamicProcessStarting, DynamicProcessConnected, DynamicProcessIndexing)
         @warn "Background refresh process terminated unexpectedly" key
@@ -2209,7 +2371,7 @@ end
 
 # Send the next queued batch for `key` when its child is settled and idle.
 function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
-    key in df.expansion_inflight && return
+    haskey(df.expansion_inflight, key) && return
     q = get(df.expansion_queue, key, nothing)
     (q === nothing || isempty(q)) && return
     djp = get(df.procs, key, nothing)
@@ -2241,17 +2403,17 @@ function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
     state(djp.fsm) == DynamicProcessDone || return   # still indexing/launching; kicked again on Done
 
     batch = popfirst!(q)
-    push!(df.expansion_inflight, key)
+    df.expansion_inflight[key] = djp
     _touch!(djp)
     transition!(djp.fsm, DynamicProcessIndexing; reason="macro expansion batch")
     timeout_seconds = _expansion_batch_timeout!(djp, batch.ctx_id)
     @async try
         outcomes = expand_macros(djp, batch.ctx_id, batch.imports, batch.ctx_module,
                                  batch.entries, timeout_seconds)
-        put!(df.in_channel, ExpansionBatchDoneMsg(key, outcomes))
+        put!(df.in_channel, ExpansionBatchDoneMsg(key, djp, outcomes))
     catch err
         @info "Macro expansion batch failed" key exception=(err, catch_backtrace())
-        put!(df.in_channel, ExpansionBatchFailedMsg(key, ExpansionKey[e.key for e in batch.entries], err))
+        put!(df.in_channel, ExpansionBatchFailedMsg(key, djp, ExpansionKey[e.key for e in batch.entries], err))
     end
     return
 end
@@ -2275,10 +2437,19 @@ function handle!(df::DynamicFeature, msg::ExpansionBatchMsg)
     return false
 end
 
+# Clear the in-flight mark only if `djp` is the child it was set for; a reconcile
+# or failure may have handed the key to a replacement in the meantime.
+function _clear_expansion_inflight!(df::DynamicFeature, key::DJPKey, djp)
+    get(df.expansion_inflight, key, nothing) === djp && delete!(df.expansion_inflight, key)
+    return
+end
+
 function handle!(df::DynamicFeature, msg::ExpansionBatchDoneMsg)
-    delete!(df.expansion_inflight, msg.env_key)
+    _clear_expansion_inflight!(df, msg.env_key, msg.djp)
+    # The results are content-addressed and valid whichever child produced
+    # them; only the child's own bookkeeping is skipped for a replaced one.
     djp = get(df.procs, msg.env_key, nothing)
-    if djp !== nothing
+    if djp !== nothing && djp === msg.djp
         _touch!(djp)
         state(djp.fsm) == DynamicProcessIndexing &&
             transition!(djp.fsm, DynamicProcessDone; reason="macro expansion batch done")
@@ -2294,16 +2465,22 @@ end
 
 function handle!(df::DynamicFeature, msg::ExpansionBatchFailedMsg)
     key = msg.env_key
-    delete!(df.expansion_inflight, key)
-    @warn "Macro expansion batch for $(_short_path(_key_path(key))) failed: $(_failure_reason(msg.err))"
+    _clear_expansion_inflight!(df, key, msg.djp)
+    current = get(df.procs, key, nothing) === msg.djp
+    if current
+        @warn "Macro expansion batch for $(_short_path(_key_path(key))) failed: $(_failure_reason(msg.err))"
+    else
+        # The child was killed and replaced while the batch was in flight; its
+        # failure says nothing about the replacement.
+        @debug "Expansion batch failure from a replaced child; not touching the current one" key
+    end
 
     # A failed batch (timeout = a hanging macro, or the child died) forfeits the
     # child: expansion for this env stays unavailable until a re-key respawns
     # it. Every queued entry settles `:failed` (the negative cache), so the same
     # macrocalls cannot kill a future child again.
-    djp = get(df.procs, key, nothing)
-    if djp !== nothing
-        try kill(djp) catch; end
+    if current
+        try kill(msg.djp) catch; end
         delete!(df.procs, key)
     end
     _settle_expansions_failed!(df, msg.entry_keys)
@@ -2466,6 +2643,9 @@ function handle!(df::DynamicFeature, msg::SetDynamicModeMsg)
         empty!(df.failed_projects)
         empty!(df.failure_attempts)
         empty!(df.failure_messages)
+        # The reactor started under Off and so skipped this; children are
+        # about to be launched now.
+        _prewarm_djp_runtime(df)
     elseif old == DynamicPersistent && msg.mode == DynamicIndexingOnly
         # What `_settle_child!` would have done at settle time: a settled
         # child has no role under IndexingOnly. In-flight and refreshing
@@ -2494,7 +2674,7 @@ function handle!(df::DynamicFeature, ::ResetFailuresMsg)
     return false
 end
 
-function handle!(df::DynamicFeature, ::ShutdownMsg)
+function handle!(df::DynamicFeature, msg::ShutdownMsg)
     @info "Shutting down dynamic feature, terminating $(length(df.procs)) process(es)"
     transition!(df.controller_fsm, DynamicControllerShuttingDown; reason="shutdown requested")
 
@@ -2504,6 +2684,16 @@ function handle!(df::DynamicFeature, ::ShutdownMsg)
     end
 
     transition!(df.controller_fsm, DynamicControllerStopped; reason="shutdown complete")
+    if msg.done !== nothing
+        # Report done once every child has exited, including those killed
+        # earlier, so nothing started here is left running.
+        children = filter(!istaskdone, df.child_tasks)
+        @async try
+            foreach(wait, children)
+        finally
+            put!(msg.done, nothing)
+        end
+    end
     return true
 end
 
@@ -2545,8 +2735,8 @@ function handle!(df::DynamicFeature, msg::ReconcileMsg)
             try kill(djp) catch; end
             delete!(df.procs, key)
             # If the work was still in flight, balance the accounting now — the
-            # process's eventual ProcessTerminatedMsg is ignored once the proc
-            # has been removed from `df.procs`.
+            # process's eventual ProcessTerminatedMsg is ignored because the
+            # proc is no longer the one registered in `df.procs`.
             if key in df.inflight
                 _complete_work_item!(df, key)
                 delete!(df.launching, key)

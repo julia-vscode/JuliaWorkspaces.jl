@@ -128,6 +128,10 @@ type-specialized `handle!` method.
 """
 abstract type DynamicReactorMessage end
 
+# Supertype of `DynamicJuliaProcess` (dynamic_feature.jl, included after this
+# file), so lifecycle messages can name the child they came from.
+abstract type AbstractDynamicJuliaProcess end
+
 # --- Work messages: produced by the lazy Salsa inputs (inputs.jl) ---
 
 """Request to index/watch the environment of a project."""
@@ -190,21 +194,36 @@ struct ExpansionBatchMsg <: DynamicReactorMessage
     entries::Vector{ExpansionEntry}
 end
 
-"""Posted by the async expansion task once the child answered a batch."""
+"""
+Posted by the async expansion task once the child answered a batch. `djp` is
+the child that served it: a replacement under the same key must not be
+mistaken for it.
+"""
 struct ExpansionBatchDoneMsg <: DynamicReactorMessage
     env_key::DJPKey
+    djp::AbstractDynamicJuliaProcess
     results::Vector{ExpansionOutcomeEntry}
 end
 
-"""Posted by the async expansion task when a batch failed (timeout, child death, JSONRPC error)."""
+"""
+Posted by the async expansion task when a batch failed (timeout, child death,
+JSONRPC error). `djp` as for `ExpansionBatchDoneMsg`.
+"""
 struct ExpansionBatchFailedMsg <: DynamicReactorMessage
     env_key::DJPKey
+    djp::AbstractDynamicJuliaProcess
     entry_keys::Vector{ExpansionKey}
     err::Any
 end
 
-"""Request an orderly shutdown of the reactor."""
-struct ShutdownMsg <: DynamicReactorMessage end
+"""
+Request an orderly shutdown of the reactor. `done`, if given, receives `nothing`
+once every process has been killed and the reactor has stopped.
+"""
+struct ShutdownMsg <: DynamicReactorMessage
+    done::Union{Nothing,Channel{Nothing}}
+end
+ShutdownMsg() = ShutdownMsg(nothing)
 
 """
 Forget all failure bookkeeping, so previously-failed projects are attempted
@@ -264,7 +283,7 @@ struct SetMaxFailureAttemptsMsg <: DynamicReactorMessage
 end
 
 """
-Change the per-request child-index deadline in seconds (`<= 0`: unbounded).
+Change the child-index inactivity deadline in seconds (`<= 0`: unbounded).
 Read per request, so it applies to requests sent from then on; a request
 already in flight keeps its old deadline. See
 [`set_djp_request_timeout!`](@ref).
@@ -379,15 +398,32 @@ struct ProcessIndexedMsg <: DynamicReactorMessage
     result_dir::String
 end
 
-"""Posted by the index task when the index/standalone request failed."""
+"""
+Posted by the index task when the index/standalone request failed, and by the
+prep tasks when the work failed before any child was launched.
+
+`djp` is the child process the failure came from, or `nothing` for a prep
+failure. A retry launches a fresh child under the same key, so the reactor uses
+it to drop a late failure from a child that has already been replaced.
+"""
 struct ProcessIndexFailedMsg <: DynamicReactorMessage
     key::DJPKey
     err::Any
+    djp::Union{Nothing,AbstractDynamicJuliaProcess}
 end
 
-"""Posted by `start(djp)` when the child process connection terminated."""
+ProcessIndexFailedMsg(key::DJPKey, err) = ProcessIndexFailedMsg(key, err, nothing)
+
+"""
+Posted by `start(djp)` when the child process connection terminated.
+
+Carries the child itself: killing a child also ends its message loop, which
+posts this message, and by then a retry may already be running under the same
+key. Matching on the key alone made that retry look like the dead child.
+"""
 struct ProcessTerminatedMsg <: DynamicReactorMessage
     key::DJPKey
+    djp::AbstractDynamicJuliaProcess
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════

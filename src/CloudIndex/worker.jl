@@ -104,7 +104,7 @@ function index_and_scrub(store_path)
             (loc === nothing || !isfile(loc)) && continue
             src = dirname(loc)
             modify_dirs(pkg.val, f -> modify_dir(f, src, "PLACEHOLDER"))
-            write_cache(pkg.uuid, pkg, path)   # atomic; safe for concurrent scrubs
+            write_cache(pkg.uuid, pkg, path; replace=true)   # atomic; safe for concurrent scrubs
         end
     catch err
         err isa InterruptException && return EXIT_INTERRUPTED

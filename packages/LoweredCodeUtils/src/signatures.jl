@@ -51,16 +51,13 @@ In this case, `lastpc == pc`.
 If no 3-argument `:method` expression is found, `nothing` will be returned in place of `(mt, sigt)`.
 """
 function signature(interp::Interpreter, frame::Frame, @nospecialize(stmt), pc::Int)
-    mod = moduleof(frame)
     lastpc = frame.pc = pc
     while !ismethod3(stmt)  # wait for the 3-arg :method or 4-arg define_method
         if isanonymous_typedef(stmt)
             lastpc = pc = step_through_methoddef(interp, frame, stmt)   # define an anonymous function
-        elseif is_Typeof_for_anonymous_methoddef(stmt, frame.framecode.src.code, mod)
-            return nothing, pc
         else
             lastpc = pc
-            pc = step_expr!(interp, frame, stmt, true)
+            pc = throw_if_breakpoint(step_expr!(interp, frame, stmt, true))
             pc === nothing && return nothing, lastpc
         end
         stmt = pc_expr(frame, pc)
@@ -84,19 +81,6 @@ end
 signature(interp::Interpreter, frame::Frame, pc::Int) = signature(interp, frame, pc_expr(frame, pc), pc)
 signature(frame::Frame, pc::Int) = signature(RecursiveInterpreter(), frame, pc)
 
-function is_Typeof_for_anonymous_methoddef(@nospecialize(stmt), code::Vector{Any}, mod::Module)
-    isexpr(stmt, :call) || return false
-    f = stmt.args[1]
-    isa(f, QuoteNode) || return false
-    f.value === Core.Typeof || return false
-    arg1 = stmt.args[2]
-    if isa(arg1, SSAValue)
-        arg1 = code[arg1.id]
-    end
-    arg1 isa Symbol || return false
-    return !isdefined(mod, arg1)
-end
-
 function minid(@nospecialize(node), stmts, id)
     if isa(node, SSAValue)
         id = min(id, node.id)
@@ -112,18 +96,16 @@ end
 
 function signature_top(frame, stmt::Expr, pc)
     @assert ismethod3(stmt)
-    if is_define_method_call_4arg(stmt)
-        return minid(stmt.args[4], frame.framecode.src.code, pc)
-    end
-    return minid(stmt.args[2], frame.framecode.src.code, pc)
+    return minid(method_sig(stmt), frame.framecode.src.code, pc)
 end
 
 function step_through_methoddef(interp::Interpreter, frame::Frame, @nospecialize(stmt))
-    while !ismethod(stmt)
-        pc = step_expr!(interp, frame, stmt, true)
+    while true
+        pc = throw_if_breakpoint(step_expr!(interp, frame, stmt, true))
+        pc === nothing && error("frame terminated before reaching a `:method` expression")
+        ismethod(stmt) && return pc  # `stmt` was the `:method` expression, so the method is now defined
         stmt = pc_expr(frame, pc)
     end
-    return step_expr!(interp, frame, stmt, true)  # also define the method
 end
 
 """
@@ -331,7 +313,7 @@ function set_to_running_name!(interp::Interpreter, replacements::Dict{GlobalRef,
         throw(err)
     end
     replacements[callee] = cname
-    mi = methodinfos[cname] = methodinfos[callee]
+    methodinfos[cname] = methodinfos[callee]
     src = frame.framecode.src
     replacename!(src, callee=>cname) # the method itself
     return replacements
@@ -344,9 +326,7 @@ Rename the gensymmed methods in `frame` to match those that are currently active
 The issues are described in https://github.com/JuliaLang/julia/issues/30908.
 `frame` will be modified in-place as needed.
 
-Returns a vector of `name=>start:stop` pairs specifying the range of lines in `frame`
-at which method definitions occur. In some cases there may be more than one method with
-the same name in the `start:stop` range.
+Returns a dictionary mapping each method's lowered `GlobalRef` to its [`MethodInfo`](@ref).
 """
 function rename_framemethods! end
 
@@ -365,7 +345,7 @@ function _rename_framemethods!(interp::Interpreter, frame::Frame,
         end
     end
     for sc in selfcalls
-        linetop, linebody, callee, caller = sc.linetop, sc.linebody, sc.callee, sc.caller
+        linetop, callee = sc.linetop, sc.callee
         cname = get(replacements, callee, nothing)
         if cname !== nothing && cname !== callee
             replacename!(method_body(src.code[linetop])::CodeInfo, callee=>cname)
@@ -389,7 +369,7 @@ rename_framemethods!(frame::Frame) = rename_framemethods!(RecursiveInterpreter()
 
 Scans forward from `pc` in `frame` until a method is found that calls `name`.
 `pctop` points to the beginning of that method's signature.
-`isgen` is true if `name` corresponds to sa GeneratedFunctionStub.
+`isgen` is true if `name` corresponds to a generated-function stub.
 
 Alternatively, this returns `nothing` if `pc` does not appear to point to either
 a keyword or generated method.
@@ -397,7 +377,6 @@ a keyword or generated method.
 function find_name_caller_sig(interp::Interpreter, frame::Frame, pc::Int, name::GlobalRef)
     stmt = pc_expr(frame, pc)
     while true
-        pc0 = pc
         while !ismethod3(stmt)
             pc = next_or_nothing(interp, frame, pc)
             pc === nothing && return nothing
@@ -454,7 +433,7 @@ function replacename!(args::AbstractVector, pr)
             replacename!(a.val::Expr, pr)
         elseif a === oldname
             args[i] = newname
-        elseif a == oldname.name
+        elseif a === oldname.name
             args[i] = newname.name
         end
     end
@@ -465,6 +444,7 @@ function get_running_name(interp::Interpreter, frame::Frame, pc::Int, name::Glob
     nameinfo = find_name_caller_sig(interp, frame, pc, name)
     if nameinfo === nothing
         pc = skip_until(@nospecialize(stmt)->ismethod3(stmt), frame, pc)
+        pc === nothing && return name, nothing, nothing  # no `:method` remains in `frame`
         pc = next_or_nothing(interp, frame, pc)
         return name, pc, nothing
     end
@@ -508,16 +488,41 @@ end
 
 Advance the program counter without executing the corresponding line.
 If `frame` is finished, `nextpc` will be `nothing`.
+
+`next_or_nothing!` still advances the world of `frame` for a `:latestworld` statement, so
+that the statements that follow see the definitions made before it.
 """
 next_or_nothing(frame::Frame, pc::Int) = next_or_nothing(RecursiveInterpreter(), frame, pc)
 next_or_nothing(::Interpreter, frame::Frame, pc::Int) = pc < nstatements(frame.framecode) ? pc+1 : nothing
 next_or_nothing!(frame::Frame) = next_or_nothing!(RecursiveInterpreter(), frame)
 function next_or_nothing!(::Interpreter, frame::Frame)
     pc = frame.pc
+    # Since Julia 1.12, top-level code advances its world only at `:latestworld`, which
+    # JuliaInterpreter follows, so skipping one would leave later statements reading
+    # bindings in a world prior to their definition. This is done here rather than by
+    # selecting `:latestworld` in `lines_required!`, since a selected statement pulls in its
+    # control flow and type definition, which would grow the slice by branch conditions,
+    # loops, and types it does not need.
+    isexpr(pc_expr(frame, pc), :latestworld) && (frame.world = Base.get_world_counter())
     if pc < nstatements(frame.framecode)
         return frame.pc = pc + 1
     end
     return nothing
+end
+
+# `step_expr!` and `next_until!` return a `BreakpointRef` when execution hits a breakpoint, or when
+# `JuliaInterpreter.break_on(:error)`/`break_on(:throw)` is active and a statement throws.
+# The method-definition walkers in this file are not debugger commands and cannot pause, so a
+# `BreakpointRef` is never a valid program counter here: if it carries the error that triggered it,
+# that error is rethrown (i.e., what would have propagated had `break_on` been inactive); otherwise
+# an error is raised. Either way `pc` is narrowed to `Union{Int,Nothing}` for the callers.
+function throw_if_breakpoint(pc)
+    if pc isa BreakpointRef
+        err = pc.err
+        err === nothing && error("unexpected breakpoint while processing method definitions: ", pc)
+        throw(err)
+    end
+    return pc
 end
 
 """
@@ -570,22 +575,26 @@ occurs for "empty method" expressions, e.g., `:(function foo end)`. `pc` will be
 
 By default the method will be defined (evaluated). You can prevent this by setting `define=false`.
 This is recommended if you are simply extracting signatures from code that has already been evaluated.
+
+`pc` is never a `BreakpointRef`: hitting a breakpoint while stepping (or a statement throwing while
+`JuliaInterpreter.break_on(:error)` is active) raises an error instead.
 """
 function methoddef!(interp::Interpreter, signatures::Vector{MethodInfoKey}, frame::Frame, @nospecialize(stmt), pc::Int; define::Bool=true)
-    framecode, pcin = frame.framecode, pc
+    framecode = frame.framecode
     if ismethod3(stmt)
         pc3 = pc
         arg1 = method_name(stmt)
-        (mt, sigt), pc = signature(interp, frame, stmt, pc)
+        methinfo, pc = signature(interp, frame, stmt, pc)
+        mt, sigt = methinfo::MethodInfoKey  # `stmt` is already the 3-arg `:method`, so a signature is always found
         # Resolve the signature against the live method tables at the latest committed world.
         # `whichtt`'s default world is the caller's task world, which is too old here: the method
         # may have just been defined by `step_expr!` (advancing the world past `frame.world`), and
         # a caller may be driving this in a task pinned to an older world (e.g. Revise revising).
         meth = whichtt(sigt, mt; world=Base.get_world_counter())
         if isa(meth, Method) && (meth.sig <: sigt && sigt <: meth.sig)
-            pc = define ? step_expr!(interp, frame, stmt, true) : next_or_nothing!(interp, frame)
+            pc = define ? throw_if_breakpoint(step_expr!(interp, frame, stmt, true)) : next_or_nothing!(interp, frame)
         elseif define
-            pc = step_expr!(interp, frame, stmt, true)
+            pc = throw_if_breakpoint(step_expr!(interp, frame, stmt, true))
             meth = whichtt(sigt, mt; world=Base.get_world_counter())
         end
         if isa(meth, Method) && (meth.sig <: sigt && sigt <: meth.sig)
@@ -593,17 +602,17 @@ function methoddef!(interp::Interpreter, signatures::Vector{MethodInfoKey}, fram
         else
             if arg1 === false || arg1 === nothing || isa(mt, MethodTable)
                 # If it's anonymous and not defined, define it
-                pc = step_expr!(interp, frame, stmt, true)
+                pc = throw_if_breakpoint(step_expr!(interp, frame, stmt, true))
                 meth = whichtt(sigt, mt; world=Base.get_world_counter())
                 isa(meth, Method) && push!(signatures, MethodInfoKey(mt, meth.sig))
                 return pc, pc3
             else
                 # guard against busted lookup, e.g., https://github.com/JuliaLang/julia/issues/31112
                 code = framecode.src
-                codeloc = codelocation(code, pc)
+                codeloc = codelocation(code, pc3)
                 loc = linetable(code, codeloc)
                 ft = Base.unwrap_unionall((Base.unwrap_unionall(sigt)::DataType).parameters[1])
-                if !startswith(String((ft.name::Core.TypeName).name), "##")
+                if !startswith(String((ft.name::Core.TypeName).name), "##") && loc !== nothing
                     @warn "file $(loc.file), line $(loc.line): no method found for $sigt"
                 end
                 if pc == pc3
@@ -611,7 +620,7 @@ function methoddef!(interp::Interpreter, signatures::Vector{MethodInfoKey}, fram
                 end
             end
         end
-        frame.pc = pc
+        # `frame.pc` is already up to date: `step_expr!` and `next_or_nothing!` both advance it
         return pc, pc3
     end
     ismethod1(stmt) || Base.invokelatest(error, "expected method opening, got ", stmt)
@@ -662,16 +671,18 @@ function methoddef!(interp::Interpreter, signatures::Vector{MethodInfoKey}, fram
         stmt = stmt::Expr
         mmod3 = method_module(stmt)
         name3 = normalize_defsig(method_name(stmt), mmod3 !== nothing ? mmod3 : moduleof(frame))
-        methinfo === nothing && (error("expected a signature"); return next_or_nothing(interp, frame, pc)), pc3
+        methinfo === nothing && error("expected a signature")
         mt, sigt = methinfo
         # Methods like f(x::Ref{<:Real}) that use gensymmed typevars will not have the *exact*
         # signature of the active method. So let's get the active signature.
         frame.pc = pc
-        pc = define ? step_expr!(interp, frame, stmt, true) : next_or_nothing!(interp, frame)
+        pc = define ? throw_if_breakpoint(step_expr!(interp, frame, stmt, true)) : next_or_nothing!(interp, frame)
         meth = whichtt(sigt, mt; world=Base.get_world_counter())
         isa(meth, Method) && push!(signatures, MethodInfoKey(mt, meth.sig)) # inner methods are not visible
         name === name3 && return pc, pc3     # if this was an inner method we should keep going
-        stmt = pc_expr(frame, pc)  # there *should* be more statements in this frame
+        # this was an inner method, so the frame must still contain the outer method
+        pc === nothing && error("frame terminated after inner method ", name3, " without defining ", name)
+        stmt = pc_expr(frame, pc)
     end
 end
 methoddef!(interp::Interpreter, signatures::Vector{MethodInfoKey}, frame::Frame, pc::Int; define::Bool=true) =
@@ -680,7 +691,7 @@ function methoddef!(interp::Interpreter, signatures::Vector{MethodInfoKey}, fram
     pc = frame.pc
     stmt = pc_expr(frame, pc)
     if !ismethod(stmt)
-        pc = next_until!(ismethod, interp, frame, true)
+        pc = throw_if_breakpoint(next_until!(is_frame_at_method, interp, frame, true))
     end
     pc === nothing && error("pc at end of frame without finding a method")
     methoddef!(interp, signatures, frame, pc; define)
@@ -690,14 +701,24 @@ methoddef!(signatures::Vector{MethodInfoKey}, frame::Frame, pc::Int; define::Boo
 methoddef!(signatures::Vector{MethodInfoKey}, frame::Frame; define::Bool=true) =
     methoddef!(RecursiveInterpreter(), signatures, frame; define)
 
+"""
+    ret = methoddefs!([interp::Interpreter=RecursiveInterpreter()], signatures, frame; define=true)
+
+Process all method definitions at or after `frame.pc`, appending each method-table/signature
+pair to `signatures`. As with [`methoddef!`](@ref), set `define=false` to extract signatures
+without evaluating methods that are already defined. Returns the next program counter, normally
+`nothing` after reaching the end of the frame.
+"""
 function methoddefs!(interp::Interpreter, signatures::Vector{MethodInfoKey}, frame::Frame, pc::Int; define::Bool=true)
     ret = methoddef!(interp, signatures, frame, pc; define)
-    pc = ret === nothing ? ret : ret[1]
+    ret === nothing && return nothing
+    pc = ret[1]
     return _methoddefs!(interp, signatures, frame, pc; define)
 end
 function methoddefs!(interp::Interpreter, signatures::Vector{MethodInfoKey}, frame::Frame; define::Bool=true)
     ret = methoddef!(interp, signatures, frame; define)
-    pc = ret === nothing ? ret : ret[1]
+    ret === nothing && return nothing
+    pc = ret[1]
     return _methoddefs!(interp, signatures, frame, pc; define)
 end
 methoddefs!(signatures::Vector{MethodInfoKey}, frame::Frame, pc::Int; define::Bool=true) =
@@ -705,11 +726,11 @@ methoddefs!(signatures::Vector{MethodInfoKey}, frame::Frame, pc::Int; define::Bo
 methoddefs!(signatures::Vector{MethodInfoKey}, frame::Frame; define::Bool=true) =
     methoddefs!(RecursiveInterpreter(), signatures, frame; define)
 
-function _methoddefs!(interp::Interpreter, signatures::Vector{MethodInfoKey}, frame::Frame, pc::Int; define::Bool=define)
+function _methoddefs!(interp::Interpreter, signatures::Vector{MethodInfoKey}, frame::Frame, pc::Union{Int,Nothing}; define::Bool=true)
     while pc !== nothing
         stmt = pc_expr(frame, pc)
         if !ismethod(stmt)
-            pc = next_until!(ismethod, interp, frame, true)
+            pc = throw_if_breakpoint(next_until!(is_frame_at_method, interp, frame, true))
         end
         pc === nothing && break
         ret = methoddef!(interp, signatures, frame, pc; define)
@@ -720,11 +741,11 @@ end
 
 function is_self_call(@nospecialize(stmt), slotnames, argno::Integer=1)
     if isa(stmt, Expr)
-        if stmt.head == :call
+        if stmt.head === :call
             a = stmt.args[argno]
             if isa(a, SlotNumber) || isa(a, Core.SlotNumber)
                 sn = slotnames[a.id]
-                if sn == Symbol("#self#") || sn == Symbol("") # allow empty to fix https://github.com/timholy/CodeTracking.jl/pull/48
+                if sn === Symbol("#self#") || sn === Symbol("") # allow empty to fix https://github.com/timholy/CodeTracking.jl/pull/48
                     return true
                 end
             end

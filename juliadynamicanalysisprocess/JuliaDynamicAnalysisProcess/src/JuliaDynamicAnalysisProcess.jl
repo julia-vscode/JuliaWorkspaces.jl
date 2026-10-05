@@ -236,7 +236,9 @@ function _expansion_ctx_module!(state::JuliaDynamicAnalysisProcessState, ctx_id:
                     real = nxt
                 end
                 if real isa Module
-                    _bind_real_macros!(m, real)
+                    # `invokelatest` for the same reason: `names`/`isdefined`
+                    # must see the package the `using` above just loaded.
+                    Base.invokelatest(_bind_real_macros!, m, real)
                     return (real, m)
                 end
             catch err
@@ -283,7 +285,7 @@ function expand_macros_request(params::JuliaDynamicAnalysisProtocol.ExpandMacros
         end
     end
 
-    return JuliaDynamicAnalysisProtocol.ExpandMacrosResult(entries, UInt64(Base.get_world_counter()))
+    return JuliaDynamicAnalysisProtocol.ExpandMacrosResult(entries, UInt64(SymbolServer.get_world_counter()))
 end
 
 JSONRPC.@message_dispatcher dispatch_msg begin

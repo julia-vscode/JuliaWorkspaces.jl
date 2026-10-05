@@ -301,18 +301,16 @@ using PrecompileTools: @setup_workload, @compile_workload
 
         # Compile the dynamic-feature code paths (reactor, reconcile,
         # readiness waiting) that CLI tools hit. A plain scripts folder
-        # requires no environment indexing, so no child Julia processes are
-        # spawned during precompilation.
+        # requires no environment indexing, and the indexer runtime is not
+        # resolved ahead of time while precompiling, so no child Julia
+        # processes are spawned during precompilation.
         Logging.with_logger(Logging.NullLogger()) do
             scripts_dir = mktempdir()
             write(joinpath(scripts_dir, "script.jl"), "f(x) = x + 1\n")
             jw2 = JuliaWorkspace(store_path=mktempdir(), dynamic=DynamicIndexingOnly)
             add_folder_from_disc!(jw2, scripts_dir)
             get_diagnostics_blocking(jw2)
-            put!(jw2.dynamic_feature.in_channel, ShutdownMsg())
-            while state(jw2.dynamic_feature.controller_fsm) != DynamicControllerStopped
-                yield()
-            end
+            shutdown!(jw2)
         end
     end
 end

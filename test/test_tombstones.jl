@@ -386,3 +386,50 @@ end
         @test read_tombstone(tomb).timestamp == old_ts   # preserved, not reset to ~now
     end
 end
+
+@testitem "Tombstones: a cache whose write failed is not tombstoned" begin
+    using JuliaWorkspaces.SymbolServer: Server, Package, ModuleStore, VarRef, write_depot,
+        record_cache_outcomes, tombstone_path
+    using Pkg
+    using UUIDs: UUID
+
+    mktempdir() do root
+        proj = joinpath(root, "proj"); store = joinpath(root, "store")
+        mkpath(proj); mkpath(store)
+        ua = "aaaaaaaa-0000-0000-0000-000000000001"; ta = "a" ^ 40
+        ub = "bbbbbbbb-0000-0000-0000-000000000002"; tb = "b" ^ 40
+        write(joinpath(proj, "Project.toml"), "[deps]\nPkgA = \"$ua\"\nPkgB = \"$ub\"\n")
+        write(joinpath(proj, "Manifest.toml"), """
+        julia_version = "$(VERSION)"
+        manifest_format = "2.0"
+        project_hash = "0000000000000000000000000000000000000000"
+
+        [[deps.PkgA]]
+        git-tree-sha1 = "$ta"
+        uuid = "$ua"
+        version = "1.0.0"
+
+        [[deps.PkgB]]
+        git-tree-sha1 = "$tb"
+        uuid = "$ub"
+        version = "1.0.0"
+        """)
+        ctx = Pkg.Types.Context(env=Pkg.Types.EnvCache(joinpath(proj, "Project.toml")))
+
+        # PkgA was indexed but its cache can't be published (a non-empty
+        # directory sits where the file goes); PkgB produced nothing at all.
+        server = Server(store, ctx, Dict{UUID,Package}())
+        server.depot[UUID(ua)] = Package("PkgA",
+            ModuleStore(VarRef(nothing, :PkgA), Dict{Symbol,Any}(), "", Symbol[], Symbol[], Symbol[]), UUID(ua), nothing)
+        jstore_a = joinpath(store, "P", "PkgA", ua, "$ta.jstore")
+        mkpath(joinpath(jstore_a, "blocker"))
+
+        failed = write_depot(server, ctx, String[])
+        @test failed == Set([jstore_a])
+
+        record_cache_outcomes(store, ctx, failed)
+        # A failed write may be transient: no tombstone, so the next run retries.
+        @test !isfile(tombstone_path(jstore_a))
+        @test isfile(tombstone_path(joinpath(store, "P", "PkgB", ub, "$tb.jstore")))
+    end
+end

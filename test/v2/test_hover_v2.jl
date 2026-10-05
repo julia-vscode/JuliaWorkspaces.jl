@@ -214,3 +214,43 @@ end
     @test checked[] > 100
     @test mismatches == String[]
 end
+
+@testitem "hover v2: modules that import a name from each other" setup=[HoverV2WS] begin
+    using JuliaWorkspaces: get_completions, get_definitions, get_references, get_highlights,
+        get_signature_help
+
+    # `A` and `B` import `cyc_fn` from each other (main's #349: v1's import
+    # retry built a Binding loop that every feature walked until the stack
+    # overflowed). v2 binds the name `:unknown` and declines, so the fixed v1
+    # path answers: everything terminates and matches the flag-off workspace.
+    # Plain tree modules, and the `@eval` form v1 resolves per file.
+    body = "module A
+using ..B: cyc_fn
+g() = cyc_fn(1)
+h() = cyc
+end
+module B
+using ..A: cyc_fn
+end
+"
+    for b_src in (body, "@eval begin
+$(body)end
+")
+        jw = hv_workspace("", b_src)
+        jw_off = hv_workspace("", b_src; flag=false)
+        use = findfirst("g() = cyc_f", b_src).stop
+        paren = findfirst("cyc_fn(1", b_src).stop
+
+        @test JW._get_hover_v2(jw.runtime, B_URI, use - 1) === nothing
+        @test JW._get_signature_help_v2(jw.runtime, B_URI, paren - 1) === nothing
+        @test get_hover_text(jw, B_URI, use) == get_hover_text(jw_off, B_URI, use)
+        sigs(w) = [(s.label, s.documentation) for s in get_signature_help(w, B_URI, paren).signatures]
+        @test sigs(jw) == sigs(jw_off)
+        @test get_definitions(jw, B_URI, use) isa Vector
+        @test get_references(jw, B_URI, use) isa Vector
+        @test get_highlights(jw, B_URI, use) isa Vector
+        labels(w) = Set(i.label for i in get_completions(w, B_URI, findfirst("h() = cyc", b_src).stop + 1).items)
+        @test "cyc_fn" in labels(jw)
+        @test labels(jw) == labels(jw_off)
+    end
+end

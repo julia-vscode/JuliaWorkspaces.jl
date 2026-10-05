@@ -127,6 +127,8 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         return Some{Any}(Core._expr(getargs(interp, args, frame)...))
     elseif @static isdefinedglobal(Core, :_import) && f === Core._import
         return Some{Any}(Core._import(getargs(interp, args, frame)...))
+    elseif @static isdefinedglobal(Core, :_new_cancel_source) && f === Core._new_cancel_source
+        return Some{Any}(Core._new_cancel_source(getargs(interp, args, frame)...))
     elseif f === Core._primitivetype
         return Some{Any}(Core._primitivetype(getargs(interp, args, frame)...))
     elseif f === Core._setsuper!
@@ -145,6 +147,8 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         else
             return Some{Any}(Core._svec_ref(getargs(interp, args, frame)...))
         end
+    elseif @static isdefinedglobal(Core, :_task) && f === Core._task
+        return Some{Any}(Core._task(getargs(interp, args, frame)...))
     elseif f === Core._typebody!
         return Some{Any}(Core._typebody!(getargs(interp, args, frame)...))
     elseif f === Core._typevar
@@ -157,11 +161,25 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         return Some{Any}(Core._using(getargs(interp, args, frame)...))
     elseif f === Core.apply_type
         return Some{Any}(Core.apply_type(getargs(interp, args, frame)...))
+    elseif @static isdefinedglobal(Core, :bitsizeof) && f === Core.bitsizeof
+        if nargs == 1
+            return Some{Any}(Core.bitsizeof(lookup(interp, frame, args[2])))
+        else
+            return Some{Any}(Core.bitsizeof(getargs(interp, args, frame)...))
+        end
+    elseif @static isdefinedglobal(Core, :cancellation_point!) && f === Core.cancellation_point!
+        return Some{Any}(Core.cancellation_point!(getargs(interp, args, frame)...))
     elseif f === Core.compilerbarrier
         if nargs == 2
             return Some{Any}(Core.compilerbarrier(lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
         else
             return Some{Any}(Core.compilerbarrier(getargs(interp, args, frame)...))
+        end
+    elseif @static isdefinedglobal(Core, :const_memoryrefget) && f === Core.const_memoryrefget
+        if nargs == 3
+            return Some{Any}(Core.const_memoryrefget(lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
+        else
+            return Some{Any}(Core.const_memoryrefget(getargs(interp, args, frame)...))
         end
     elseif @static isdefinedglobal(Core, :current_scope) && f === Core.current_scope
         if nargs == 0
@@ -177,6 +195,12 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         return Some{Any}(Core.declare_const(getargs(interp, args, frame)...))
     elseif @static isdefinedglobal(Core, :declare_global) && f === Core.declare_global
         return Some{Any}(Core.declare_global(getargs(interp, args, frame)...))
+    elseif @static isdefinedglobal(Core, :depwarn_partition) && f === Core.depwarn_partition
+        if nargs == 1
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.depwarn_partition, lookup(interp, frame, args[2])))
+        else
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.depwarn_partition, getargs(interp, args, frame)...))
+        end
     elseif f === Core.donotdelete
         return Some{Any}(Core.donotdelete(getargs(interp, args, frame)...))
     elseif f === Core.finalizer
@@ -195,6 +219,12 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         else
             return Some{Any}(Base.invoke_in_world(frame.world, Core.get_binding_type, getargs(interp, args, frame)...))
         end
+    elseif @static isdefinedglobal(Core, :getglobal_partition) && f === Core.getglobal_partition
+        if nargs == 3
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.getglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
+        else
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.getglobal_partition, getargs(interp, args, frame)...))
+        end
     elseif f === Core.ifelse
         if nargs == 3
             return Some{Any}(Core.ifelse(lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
@@ -203,6 +233,12 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         end
     elseif @static isdefinedglobal(Core, :invoke_in_world) && f === Core.invoke_in_world
         return Some{Any}(Core.invoke_in_world(getargs(interp, args, frame)...))
+    elseif @static isdefinedglobal(Core, :isdefinedglobal_partition) && f === Core.isdefinedglobal_partition
+        if nargs == 2
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.isdefinedglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
+        else
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.isdefinedglobal_partition, getargs(interp, args, frame)...))
+        end
     elseif @static isdefinedglobal(Core, :memorynew) && f === Core.memorynew
         if nargs == 2
             return Some{Any}(Core.memorynew(lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
@@ -277,6 +313,42 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         else
             return Some{Any}(Core.memoryrefunset!(getargs(interp, args, frame)...))
         end
+    elseif @static isdefinedglobal(Core, :modifyglobal_partition) && f === Core.modifyglobal_partition
+        if nargs == 3
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.modifyglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
+        elseif nargs == 4
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.modifyglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4]), lookup(interp, frame, args[5])))
+        else
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.modifyglobal_partition, getargs(interp, args, frame)...))
+        end
+    elseif @static isdefinedglobal(Core, :replaceglobal_partition) && f === Core.replaceglobal_partition
+        if nargs == 3
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.replaceglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
+        elseif nargs == 4
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.replaceglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4]), lookup(interp, frame, args[5])))
+        elseif nargs == 5
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.replaceglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4]), lookup(interp, frame, args[5]), lookup(interp, frame, args[6])))
+        else
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.replaceglobal_partition, getargs(interp, args, frame)...))
+        end
+    elseif @static isdefinedglobal(Core, :setglobal_partition) && f === Core.setglobal_partition
+        if nargs == 2
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.setglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
+        elseif nargs == 3
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.setglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
+        else
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.setglobal_partition, getargs(interp, args, frame)...))
+        end
+    elseif @static isdefinedglobal(Core, :setglobalonce_partition) && f === Core.setglobalonce_partition
+        if nargs == 2
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.setglobalonce_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
+        elseif nargs == 3
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.setglobalonce_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
+        elseif nargs == 4
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.setglobalonce_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4]), lookup(interp, frame, args[5])))
+        else
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.setglobalonce_partition, getargs(interp, args, frame)...))
+        end
     elseif f === Core.sizeof
         if nargs == 1
             return Some{Any}(Core.sizeof(lookup(interp, frame, args[2])))
@@ -285,6 +357,20 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         end
     elseif f === Core.svec
         return Some{Any}(Core.svec(getargs(interp, args, frame)...))
+    elseif @static isdefinedglobal(Core, :swapglobal_partition) && f === Core.swapglobal_partition
+        if nargs == 2
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.swapglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
+        elseif nargs == 3
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.swapglobal_partition, lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
+        else
+            return Some{Any}(Base.invoke_in_world(frame.world, Core.swapglobal_partition, getargs(interp, args, frame)...))
+        end
+    elseif @static isdefinedglobal(Core, :task_result_type) && f === Core.task_result_type
+        if nargs == 1
+            return Some{Any}(Core.task_result_type(lookup(interp, frame, args[2])))
+        else
+            return Some{Any}(Core.task_result_type(getargs(interp, args, frame)...))
+        end
     elseif @static isdefinedglobal(Core, :throw_methoderror) && f === Core.throw_methoderror
         return Some{Any}(Core.throw_methoderror(getargs(interp, args, frame)...))
     elseif f === applicable
@@ -518,21 +604,13 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         else
             return Some{Any}(Core.arrayset(getargs(interp, args, frame)...))
         end
-    elseif @static (isdefinedglobal(Core, :arrayset) && Core.arrayset isa Core.Builtin) && f === Core.arrayset
+    elseif @static (isdefinedglobal(Core, :arraysize) && Core.arraysize isa Core.Builtin) && f === Core.arraysize
         if nargs == 1
-            return Some{Any}(Core.arrayset(lookup(interp, frame, args[2])))
+            return Some{Any}(Core.arraysize(lookup(interp, frame, args[2])))
         elseif nargs == 2
-            return Some{Any}(Core.arrayset(lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
-        elseif nargs == 3
-            return Some{Any}(Core.arrayset(lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4])))
-        elseif nargs == 4
-            return Some{Any}(Core.arrayset(lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4]), lookup(interp, frame, args[5])))
-        elseif nargs == 5
-            return Some{Any}(Core.arrayset(lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4]), lookup(interp, frame, args[5]), lookup(interp, frame, args[6])))
-        elseif nargs == 6
-            return Some{Any}(Core.arrayset(lookup(interp, frame, args[2]), lookup(interp, frame, args[3]), lookup(interp, frame, args[4]), lookup(interp, frame, args[5]), lookup(interp, frame, args[6]), lookup(interp, frame, args[7])))
+            return Some{Any}(Core.arraysize(lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
         else
-            return Some{Any}(Core.arrayset(getargs(interp, args, frame)...))
+            return Some{Any}(Core.arraysize(getargs(interp, args, frame)...))
         end
     elseif @static (isdefinedglobal(Core, :const_arrayref) && Core.const_arrayref isa Core.Builtin) && f === Core.const_arrayref
         if nargs == 1

@@ -28,6 +28,13 @@ path_selected
 dir_selected
 ```
 
+Folders that git ignores are left out of the walk:
+
+```@docs
+GitIgnoreFilter
+is_in_ignored_folder
+```
+
 ## Mutating a workspace
 
 ```@docs
@@ -93,6 +100,7 @@ set_resolve_workspace_environments!
 set_symbolcache!
 set_max_failure_attempts!
 set_djp_request_timeout!
+shutdown!
 ```
 
 ## Language features

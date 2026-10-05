@@ -274,7 +274,9 @@ function _v2_test_expansion_env(rt, uri)
     _file_needs_test_env(rt, pkg_path, uri) || return nothing
     test_member = _test_member_project_folder(rt, pkg_uri)
     test_member === nothing || return _v2_watch_expansion_env(rt, test_member)
-    isfile(joinpath(pkg_path, "test", "runtests.jl")) || return nothing
+    # The workspace, not the disc, as in the scheduler (`derived_required_dynamic_projects`):
+    # a `test/` kept out of the walk (gitignored, `scope`) gets no test-env child.
+    derived_has_file(rt, filepath2uri(joinpath(pkg_path, "test", "runtests.jl"))) || return nothing
     key = _test_environment_key(rt, pkg_uri, pkg)
     key === nothing && return nothing
     key in input_failed_dynamic_keys(rt) && return nothing

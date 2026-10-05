@@ -1,3 +1,26 @@
+# Die with the host. On Windows libuv already does this (non-detached children
+# live in a kill-on-close job object); on Unix an orphan would keep indexing, or
+# stay deadlocked, long after the host is gone.
+const host_pid = something(tryparse(Int, get(ENV, "JULIA_DJP_PARENT_PID", "")), 0)
+if host_pid != 0 && !Sys.iswindows()
+    @static if Sys.islinux()
+        # PR_SET_PDEATHSIG (1) = SIGKILL (9): the kernel kills us when the host
+        # dies, even if this process is stuck.
+        ccall(:prctl, Cint, (Cint, Culong, Culong, Culong, Culong), 1, 9, 0, 0, 0)
+    end
+
+    # `_exit` skips atexit hooks: there is nothing to save, and they could block.
+    exit_if_orphaned() = ccall(:getppid, Cint, ()) != host_pid && ccall(:_exit, Union{}, (Cint,), 1)
+
+    # The host may have died before prctl ran.
+    exit_if_orphaned()
+
+    @static if !Sys.islinux()
+        # No PDEATHSIG here, so poll. Best effort: only fires when this process yields.
+        global host_watchdog = Timer(_ -> exit_if_orphaned(), 2.0; interval=2.0)
+    end
+end
+
 @info "Julia dynamic analysis process launching"
 
 version_specific_env_path = normpath(joinpath(@__DIR__, "../environments", "v$(VERSION.major).$(VERSION.minor)", "Project.toml"))

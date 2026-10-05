@@ -11,9 +11,13 @@ function resolve_import_block(x::EXPR, state::TraverseState, root, usinged, mark
                 # A previous pass bound the alias synthetically (as a copy of
                 # the inner component's synthetic binding, or directly for
                 # colon-form aliases). Fill that object in place so references
-                # that already resolved to it see the real target.
-                existing.val = lhsbinding.val
-                existing.type = lhsbinding.type
+                # that already resolved to it see the real target — unless
+                # the target leads back to the alias (see
+                # `closes_binding_cycle`), which leaves it unresolved.
+                if !closes_binding_cycle(existing, lhsbinding.val)
+                    existing.val = lhsbinding.val
+                    existing.type = lhsbinding.type
+                end
             else
                 getmeta(x.args[2], meta_dict).binding = Binding(x.args[2], lhsbinding.val, lhsbinding.type, lhsbinding.refs)
                 setref!(x.args[2], bindingof(x.args[2], meta_dict), meta_dict)
@@ -343,12 +347,24 @@ function _ensure_synthetic_import_binding_on!(arg::EXPR, state)
     return
 end
 
+"""
+    closes_binding_cycle(b::Binding, val)
+
+Would storing `val` in `b.val` make `b`'s chain of import bindings loop? True
+when `val` is `b` itself or leads back to it. Two modules that import a name
+from each other (`using ..B: f` in `A`, `using ..A: f` in `B`) get there: the
+second import binds `B.f` to `A`'s still-unresolved `f`, and the retry of the
+first then finds `B.f`. Neither module has `f`, so both imports are really
+unresolved, and the synthetic binding is the right thing to keep.
+"""
+closes_binding_cycle(b::Binding, val) = val isa Binding && any(c -> c === b, binding_chain(val))
+
 # Late (ResolveOnly-retry) resolution: fill a synthetic binding in place so
 # every reference already pointing at this Binding object sees the real target.
 function fill_synthetic_import_binding!(b::Binding, val, state)
     val = maybe_lookup(val, state)
     val === nothing && return b # lookup failed: keep the synthetic binding so the import stays flagged
-    val === b && return b # never create a self-referential binding
+    closes_binding_cycle(b, val) && return b # nothing to fill it with: the import stays flagged
     # a module context is a runtime handle and must never be stored in a
     # Binding — store the plain-data TreeRef it denotes instead (the
     # TreeRef-continuation arm of `_get_field` re-derives the context when

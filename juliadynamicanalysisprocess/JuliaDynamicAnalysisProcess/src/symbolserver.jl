@@ -20,9 +20,9 @@ using .CacheStore
 # Add some methods to check whether a package is part of the standard library and so
 # won't need recaching.
 @static if isdefined(Pkg.Types, :is_stdlib)
-    is_stdlib(uuid::UUID) = Pkg.Types.is_stdlib(uuid)
+    is_stdlib(uuid::UUID, _) = Pkg.Types.is_stdlib(uuid)
 else
-    is_stdlib(uuid::UUID) = uuid in keys(ctx.stdlibs)
+    is_stdlib(uuid::UUID, ctx) = uuid in keys(ctx.stdlibs)
 end
 
 # `progress_callback` is either `nothing` or a function taking
@@ -46,7 +46,7 @@ function get_store(store_path::String, progress_callback)
     # transitive dep whose parent is already cached would otherwise never be
     # loaded here — and then be tombstoned as uncacheable by the loop at the
     # bottom, permanently suppressing retries.
-    all_pkgs = [(packagename(ctx, uuid), uuid) for uuid in keys(manifest(ctx))]
+    all_pkgs = [(packagename(ctx, uuid), uuid) for uuid in manifest_uuids(ctx)]
     packages_to_load = []
 
     # Obtain the directory containing the active Manifest.toml. Any 'develop'ed dependencies
@@ -79,6 +79,10 @@ function get_store(store_path::String, progress_callback)
                     if err isa CacheStore.CacheCorruptedError
                         @info "Couldn't load $pk_name ($uuid) from corrupt cache, will recache."
                         push!(packages_to_load, uuid)
+                    elseif is_missing_file_error(err) || is_transient_store_error(err)
+                        # Gone or held by another process using the same store.
+                        @info "Couldn't open the cache of $pk_name ($uuid), will recache." exception=err
+                        push!(packages_to_load, uuid)
                     else
                         rethrow()
                     end
@@ -97,7 +101,7 @@ function get_store(store_path::String, progress_callback)
 
     # Stamp the world before loading packages, so cache_new_methods! below can
     # find methods they add to functions defined elsewhere.
-    world_before = Base.get_world_counter()
+    world_before = get_world_counter()
 
     # Load all packages together
     # This is important, or methods added to functions in other packages that are loaded earlier would not be in the cache
@@ -134,7 +138,7 @@ function get_store(store_path::String, progress_callback)
     visited = Base.IdSet{Module}([Base, Core])
 
     for (pid, m) in Base.loaded_modules
-        if pid.uuid !== nothing && is_stdlib(pid.uuid) &&
+        if pid.uuid !== nothing && is_stdlib(pid.uuid, ctx) &&
             isinmanifest(ctx, pid.uuid) &&
             isfile(joinpath(server.storedir, SymbolServer.get_cache_path(manifest(ctx), pid.uuid)...))
             push!(visited, m)
@@ -142,7 +146,18 @@ function get_store(store_path::String, progress_callback)
         end
     end
 
-    symbols(env_symbols, nothing, getallns(), visited)
+    # The parent fails a request once the child has been silent for a while, and
+    # extraction over a large environment can take minutes. `missing` leaves the
+    # reported percentage unchanged; reports are throttled.
+    last_heartbeat = time()
+    allns = getallns()
+    for m in Base.loaded_modules_array()
+        in(m, visited) || symbols(env_symbols, m, allns, visited)
+        if progress_callback !== nothing && time() - last_heartbeat >= 10
+            progress_callback("Extracting symbols from loaded packages...", missing)
+            last_heartbeat = time()
+        end
+    end
 
     # Pick up overloads of foreign functions (e.g. Base.show) added without importing the name.
     cache_new_methods!(env_symbols, world_before; get_return_type=false)
@@ -156,29 +171,8 @@ function get_store(store_path::String, progress_callback)
     end
 
     progress_callback === nothing || progress_callback("Writing symbol caches to disc...", step_pct(n_to_load + 2))
-    write_depot(server, server.context, written_caches)
-
-    # Record the outcome for every manifest package: clear a stale tombstone when
-    # a cache now exists, write one when a non-deved package produced none, so the
-    # launch gate stops re-attempting it. The gate checks the whole manifest, so
-    # transitive deps must be covered too, not just the top-level packages_to_load.
-    for uuid in keys(manifest(ctx))
-        try
-            cache_path = joinpath(server.storedir, SymbolServer.get_cache_path(manifest(ctx), uuid)...)
-            tomb = SymbolServer.tombstone_path(cache_path)
-            if isfile(cache_path)
-                SymbolServer.delete_tombstone(tomb)
-            elseif !is_package_deved(manifest(ctx), uuid) &&
-                   !SymbolServer.tombstone_is_current(SymbolServer.read_tombstone(tomb))
-                # Keep an existing current tombstone's timestamp so incidental child
-                # runs (for some other missing package) don't reset its TTL; only
-                # stamp fresh when none is current (absent / version-mismatched / expired).
-                SymbolServer.write_tombstone(tomb)
-            end
-        catch err
-            @warn "Failed to record tombstone outcome for $uuid" exception=(err, catch_backtrace())
-        end
-    end
+    failed_writes = write_depot(server, server.context, written_caches)
+    record_cache_outcomes(server.storedir, ctx, failed_writes)
 
     @info "Symbol server indexing took $((time_ns() - start_time) / 1e9) seconds."
 end

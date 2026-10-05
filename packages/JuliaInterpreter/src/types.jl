@@ -36,7 +36,7 @@ As of JuliaInterpreter v0.10, `Compiled` is now an alias for [`NonRecursiveInter
 This alias remains for backward compatibility. Prefer [`NonRecursiveInterpreter`](@ref) in new code.
 """
 const Compiled = NonRecursiveInterpreter # for backward compatibility
-Base.similar(::Compiled, sz) = Compiled()  # to support similar(stack, 0)
+Base.similar(::Compiled, _sz) = Compiled()  # to support similar(stack, 0)
 
 """
     method_table(interpreter::Interpreter) -> mt::Union{Nothing,MethodTable}
@@ -57,12 +57,6 @@ end
 
 Base.show(io::IO, ssa::SSAValue)    = print(io, "%J", ssa.id)
 Base.show(io::IO, slot::SlotNumber) = print(io, "_J", slot.id)
-
-# Breakpoint support
-truecondition(frame) = true
-falsecondition(frame) = false
-const break_on_error = Ref(false)
-const break_on_throw = Ref(false)
 
 """
     BreakpointState(isactive=true, condition=JuliaInterpreter.truecondition)
@@ -124,10 +118,11 @@ function do_coverage(m::Module)
     return false
 end
 
-# Element type of `FrameCode.world_deps`: the binding partitions of globals whose *values*
-# `optimize!` resolved at framecode-build time (e.g. a library name baked into a compiled `ccall`
-# wrapper; see `record_world_dep!`). `Core.BindingPartition` only exists on Julia 1.12+; pre-1.12
-# a binding cannot be replaced in a way the world age tracks, so `world_deps` is always empty there.
+# Element type of `FrameCode.world_deps`: the binding partitions of globals whose *values* were
+# resolved at framecode-build time (e.g. a folded `const` global or a library name baked into a
+# compiled `ccall` wrapper; see `record_world_dep!`). `Core.BindingPartition` only exists on
+# Julia 1.12+; pre-1.12 a binding cannot be replaced in a way the world age tracks, so
+# `world_deps` is always empty there.
 @static if isbindingresolved_deprecated
     const BindingPartition = Core.BindingPartition
 else
@@ -159,10 +154,11 @@ struct FrameCode
     # true if `src.code` holds *unlowered* surface statements of a `:toplevel`/`:module`
     # expression that must be interpreted statement-by-statement (see `step_toplevel!`)
     is_toplevel_surface::Bool
-    # `Core.BindingPartition`s for globals whose values `optimize!` baked into this framecode's
-    # compiled `ccall`/`llvmcall` wrappers (empty unless any were baked). Each is an in-place
-    # invalidation token: redefining the binding drops its `max_world`, so `framecode_valid_world`
-    # can reject this cached `FrameCode` for worlds in which a baked value would be stale.
+    # `Core.BindingPartition`s for globals whose values were baked into this framecode, as folded
+    # `const` globals or into compiled `ccall`/`llvmcall` wrappers (empty unless any were baked).
+    # Each is an in-place invalidation token: redefining the binding drops its `max_world`, so
+    # `framecode_valid_world` can reject this cached `FrameCode` for worlds in which a baked value
+    # would be stale.
     # Only populated on Julia 1.12+ (see `record_world_dep!`).
     world_deps::Vector{BindingPartition}
 end
@@ -189,11 +185,11 @@ function is_breakpoint_expr(ex::Expr)
     return isa(q, QuoteNode) && q.value === :__BREAKPOINT_MARKER__
 end
 
-@static if isbindingresolved_deprecated
-    is_breakpoint_marker(stmt) = is_global_ref(stmt, JuliaInterpreter, :__BREAK_POINT_MARKER__)
-else
-    is_breakpoint_marker(stmt) = stmt === __BREAK_POINT_MARKER__
-end
+# `@bp` lowers to a `GlobalRef` of the `__BREAK_POINT_MARKER__` const. `optimize!` folds it
+# to its value in method scope (unwrapped from the `QuoteNode` by `lookup_stmt`), while
+# toplevel or unoptimized code keeps the `GlobalRef`, so accept both forms.
+is_breakpoint_marker(@nospecialize(stmt)) =
+    stmt === __BREAK_POINT_MARKER__ || is_global_ref(stmt, JuliaInterpreter, :__BREAK_POINT_MARKER__)
 
 @static if VERSION ≥ v"1.12.0-DEV.173"
 function pushuniquefiles!(unique_files::Set{Symbol}, lt::Core.DebugInfo)
@@ -229,13 +225,12 @@ default_world() = tls_world_age()
 
 function FrameCode(scope, src::CodeInfo; generator=false, optimize=true, world::UInt=default_world(),
                    is_toplevel_surface::Bool=false)
-    if optimize
-        src, methodtables, world_deps = optimize!(copy(src), scope, world)
-    else
-        src = replace_coretypes!(copy(src))
-        methodtables = Vector{Union{Compiled,DispatchableMethod}}(undef, length(src.code))
-        world_deps = BindingPartition[]
-    end
+    src = replace_coretypes!(copy(src))
+    methodtables = Vector{Union{Compiled,DispatchableMethod}}(undef, length(src.code))
+    world_deps = BindingPartition[]
+    compile_llvmcalls!(src, methodtables, world_deps, scope, world)
+    expose_eval_call!(src, scope)
+    optimize && optimize!(src, methodtables, world_deps, scope, world)
     breakpoints = Vector{BreakpointState}(undef, length(src.code))
     for (i, pc_expr) in enumerate(src.code)
         if is_breakpoint_marker(lookup_stmt(src.code, pc_expr, world))
@@ -365,12 +360,15 @@ mutable struct Frame
     # frames refresh it per statement, and `:latestworld` markers advance it after a
     # world-incrementing statement.
     world::UInt
+    # True while the frame sits in the recycling pool (`junk_frames`). Lets `recycle` be
+    # idempotent (see there) with a field load instead of an `IdSet` membership test.
+    pooled::Bool
 end
 function Frame(framecode::FrameCode, framedata::FrameData, pc=1, caller=nothing,
                world::UInt=default_world())
     if length(junk_frames) > 0
         frame = pop!(junk_frames)
-        delete!(pooled_frames, frame)
+        frame.pooled = false
         frame.framecode = framecode
         frame.framedata = framedata
         frame.pc = pc
@@ -381,21 +379,26 @@ function Frame(framecode::FrameCode, framedata::FrameData, pc=1, caller=nothing,
         frame.world = world
         return frame
     else
-        return Frame(framecode, framedata, pc, 1, caller, nothing, 0, world)
+        return Frame(framecode, framedata, pc, 1, caller, nothing, 0, world, false)
     end
 end
 """
-    frame = Frame(mod::Module, src::CodeInfo; world=JuliaInterpreter.default_world(), kwargs...)
+    frame = Frame(mod::Module, src::CodeInfo; world::UInt=Base.get_world_counter(), kwargs...)
 
-Construct a `Frame` to evaluate `src` in module `mod`. `world` sets the world age used for
-dispatch; it defaults to the calling task's current world, matching the semantics of an
-ordinary (non-`invokelatest`) call. Pass `world=Base.get_world_counter()` to instead resolve
-methods and bindings in the latest committed world. Additional keyword arguments
-(`generator`, `optimize`) are forwarded to [`FrameCode`](@ref).
+Construct a `Frame` to evaluate the top-level code `src` in module `mod`. `world` sets the
+world age used for dispatch. Like native evaluation of top-level code, it defaults to the
+latest committed world, and when the frame is run at top level (`istoplevel=true`), it
+advances at each `:latestworld` statement on Julia 1.12 and later, and before each statement
+on earlier versions. Additional keyword arguments (`generator`, `optimize`) are forwarded to
+[`FrameCode`](@ref).
+
+Pass `optimize=false` to skip [`JuliaInterpreter.optimize!`](@ref): the statements of `src`
+then stay as lowered, except for the transformations required to interpret them (`llvmcall`s
+are always compiled). Statement indices are preserved either way.
 """
-function Frame(mod::Module, src::CodeInfo; world::UInt=default_world(), kwargs...)
+function Frame(mod::Module, src::CodeInfo; world::UInt=Base.get_world_counter(), caller_will_catch_err::Bool=false, kwargs...)
     framecode = FrameCode(mod, src; world, kwargs...)
-    return Frame(framecode, prepare_framedata(framecode, []), 1, nothing, world)
+    return Frame(framecode, prepare_framedata(framecode, [], empty_svec, caller_will_catch_err), 1, nothing, world)
 end
 # Build a synthetic `CodeInfo` whose `code` holds the *unlowered* surface statements of a
 # `:toplevel`/`:module` body. Such a frame is stepped statement-by-statement by `step_toplevel!`,
@@ -403,8 +406,7 @@ end
 function toplevel_codeinfo(mod::Module, stmts::Vector{Any})
     ci = ((Meta.lower(mod, :(1 + 1))::Expr).args[1])::CodeInfo   # a throwaway skeleton; we overwrite its body
     code = copy(stmts)
-    lastreal = findlast(s -> !isa(s, LineNumberNode), code)
-    push!(code, Core.ReturnNode(lastreal === nothing ? nothing : Core.SSAValue(lastreal)))
+    push!(code, Core.ReturnNode(isempty(code) ? nothing : Core.SSAValue(length(code))))
     n = length(code)
     ci.code = code
     ci.ssavaluetypes = n
@@ -421,10 +423,10 @@ function toplevel_codeinfo(mod::Module, stmts::Vector{Any})
     return ci
 end
 
-function toplevel_frame(mod::Module, stmts::Vector{Any}; world::UInt=default_world())
+function toplevel_frame(mod::Module, stmts::Vector{Any}; world::UInt=Base.get_world_counter(), caller_will_catch_err::Bool=false)
     ci = toplevel_codeinfo(mod, stmts)
     framecode = FrameCode(mod, ci; optimize=false, is_toplevel_surface=true, world)
-    return Frame(framecode, prepare_framedata(framecode, []), 1, nothing, world)
+    return Frame(framecode, prepare_framedata(framecode, [], empty_svec, caller_will_catch_err), 1, nothing, world)
 end
 
 """
@@ -435,18 +437,24 @@ Construct a `Frame` to evaluate `ex` in module `mod`.
 `ex` may be an ordinary expression (lowered to a `:thunk`) or a `:toplevel`/`:module`
 expression, in which case the resulting frame interprets the surface statements directly.
 
+A `:module` expression is evaluated like native evaluation does: the frame creates a fresh
+module when it reaches the expression (replacing any existing module of the same name),
+interprets the body in it, runs its `__init__` (natively), and evaluates to the module.
+This differs from [`ExprSplitter`](@ref), which re-enters existing modules and never runs
+`__init__`.
+
 This constructor can error, for example if lowering `ex` results in an `:error` or `:incomplete`
 expression, or if it otherwise fails to return a `:thunk`.
 """
-function Frame(mod::Module, ex::Expr; world::UInt=default_world())
+function Frame(mod::Module, ex::Expr; world::UInt=Base.get_world_counter(), caller_will_catch_err::Bool=false)
     if isexpr(ex, :toplevel)
-        return toplevel_frame(mod, ex.args; world)
+        return toplevel_frame(mod, ex.args; world, caller_will_catch_err)
     elseif isexpr(ex, :module)
-        newmod, modbody = find_or_create_module(mod, ex)
-        return toplevel_frame(newmod, modbody.args; world)
+        # The module is created when the frame evaluates the expression, not here.
+        return toplevel_frame(mod, Any[ex]; world, caller_will_catch_err)
     end
     lwr = Meta.lower(mod, ex)
-    isexpr(lwr, :thunk, 1) && return Frame(mod, (lwr.args[1])::CodeInfo; world)
+    isexpr(lwr, :thunk, 1) && return Frame(mod, (lwr.args[1])::CodeInfo; world, caller_will_catch_err)
     if isexpr(lwr, :error) || isexpr(lwr, :incomplete)
         if isexpr(ex, :block)
             # `ExprSplitter` wraps each split statement in a block carrying its
@@ -455,27 +463,29 @@ function Frame(mod::Module, ex::Expr; world::UInt=default_world())
             # top level, so the wrapper block itself fails with 'misplaced
             # declaration'. Retry the block's statements as toplevel-surface
             # statements, which are lowered individually in toplevel context.
-            return toplevel_frame(mod, ex.args; world)
+            return toplevel_frame(mod, ex.args; world, caller_will_catch_err)
         end
         throw(ArgumentError("lowering returned an error, $lwr"))
     end
     # `macroexpand` inside lowering can surface a `:toplevel`/`:module` (lowering leaves these intact)
     if isexpr(lwr, (:toplevel, :module))
-        return Frame(mod, lwr::Expr; world)
+        return Frame(mod, lwr::Expr; world, caller_will_catch_err)
     end
     # Lowering is the identity on bare declarations (`global x`, `public x`, `using`/
     # `import`/`export`, ...) and returns a literal (e.g. `nothing`) for expressions
     # without effects. Wrap the original expression in a single-statement
     # toplevel-surface frame, whose driver evaluates such statements directly.
-    return toplevel_frame(mod, Any[ex]; world)
+    return toplevel_frame(mod, Any[ex]; world, caller_will_catch_err)
 end
 
-caller(frame) = frame.caller
-callee(frame) = frame.callee
+caller(frame::Frame) = frame.caller
+callee(frame::Frame) = frame.callee
 
-function traverse(f, frame)
-    while f(frame) !== nothing
-        frame = f(frame)
+function traverse(f, frame::Frame)
+    nextframe = f(frame)
+    while nextframe !== nothing
+        frame = nextframe
+        nextframe = f(frame)
     end
     return frame
 end
@@ -676,3 +686,9 @@ function Base.show(io::IO, bp::BreakpointFileLocation)
         print(io, " [disabled]")
     end
 end
+
+# Breakpoint support
+truecondition(::Frame) = true
+falsecondition(::Frame) = false
+const break_on_error = Ref(false)
+const break_on_throw = Ref(false)

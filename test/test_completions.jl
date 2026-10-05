@@ -1699,3 +1699,40 @@ end
     result = get_completions(jw, uri, first(findfirst("parti", src)) + 5)
     @test any(item -> startswith(item.label, "partition"), result.items)
 end
+
+@testitem "Completions: path completion replaces only the text before the cursor" begin
+    using JuliaWorkspaces: JuliaWorkspaces, JuliaWorkspace, add_file!, TextFile, SourceText, get_completions, CompletionKinds, Position
+    using JuliaWorkspaces.URIs2: filepath2uri
+
+    mktempdir() do dir
+        mkdir(joinpath(dir, "src"))
+        touch(joinpath(dir, "src", "xyz.jl"))
+
+        # The path string is the first thing in the file, so the text before
+        # the cursor is shorter than the string's last path component.
+        source = "\"src/xyz.jl\"\n"
+        uri = filepath2uri(joinpath(dir, "main.jl"))
+        jw = JuliaWorkspace()
+        add_file!(jw, TextFile(uri, SourceText(source, "julia")))
+
+        files(result) = filter(i -> i.kind == CompletionKinds.File, result.items)
+
+        # Cursor right after `"s`: complete `s`, which used to put the edit's
+        # start before the file and throw from `position_at`.
+        items = files(get_completions(jw, uri, 3))
+        @test length(items) == 1
+        @test items[1].label == "src/"
+        @test items[1].text_edit.start == Position(1, 2)
+        @test items[1].text_edit.stop == Position(1, 3)
+
+        # Cursor before the closing quote: complete the last path component.
+        items = files(get_completions(jw, uri, 12))
+        @test length(items) == 1
+        @test items[1].label == "xyz.jl"
+        @test items[1].text_edit.start == Position(1, 6)
+        @test items[1].text_edit.stop == Position(1, 12)
+
+        # Cursor after the closing quote: no path completions.
+        @test isempty(files(get_completions(jw, uri, 13)))
+    end
+end
