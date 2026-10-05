@@ -266,6 +266,111 @@ end
                 end
             end
         end
+
+        @static if isdefined(Core, :_defaultctors) || isdefined(Base, :_defaultctors)
+            @testset "Default constructors for macro-generated types" begin
+                local mod = private_module()
+                Core.eval(mod, quote
+                    macro anonymous_interface(empty)
+                        # A leading `#` would let LoweredCodeUtils reuse the loaded name.
+                        N = Symbol("AnonymousInterface", gensym())
+                        if empty
+                            return esc(quote
+                                Base.@kwdef struct $N end
+                                Base.convert(::Type{$N}, ::NamedTuple{(),Tuple{}}) = $N()
+                                $N
+                            end)
+                        end
+                        return esc(quote
+                            Base.@kwdef struct $N
+                                value::Int
+                            end
+                            Base.convert(::Type{$N}, nt::NamedTuple) = $N(; nt...)
+                            $N
+                        end)
+                    end
+                end)
+                for empty in (false, true)
+                    lnn = LineNumberNode(@__LINE__, Symbol(@__FILE__))
+                    # The block makes ExprSplitter lower the macro expansion as a thunk.
+                    ex = Expr(:block, lnn, Expr(:macrocall, Symbol("@anonymous_interface"), lnn, empty))
+                    loaded = Core.eval(mod, ex)
+                    args = empty ? () : (7,)
+                    nt = empty ? NamedTuple() : (value=7,)
+                    @test @invokelatest(hasmethod(loaded, Tuple{map(typeof, args)...}))
+                    @test @invokelatest(convert(loaded, nt)) === @invokelatest(loaded(args...))
+
+                    oldnames = @invokelatest names(mod; all=true)
+                    exinfos, _, _ = Revise.eval_with_signatures(mod, ex; mode=:sigs)
+                    newnames = setdiff(@invokelatest(names(mod; all=true)), oldnames)
+                    generated_name = only(n for n in newnames if startswith(string(n), "AnonymousInterface"))
+                    generated = @invokelatest getglobal(mod, generated_name)
+                    @test generated !== loaded
+                    @test startswith(string(nameof(generated)), "AnonymousInterface")
+                    @test @invokelatest(hasmethod(generated, Tuple{map(typeof, args)...}))
+                    if empty
+                        @test @invokelatest(convert(generated, nt)) === @invokelatest(generated())
+                    else
+                        # :sigs does not install the keyword constructor, only defaultctors.
+                        @test @invokelatest(generated(args...)).value == 7
+                    end
+                    siginfos = Revise.SigInfo[x for x in exinfos if x isa Revise.SigInfo]
+                    defaultsigs = empty ? [Tuple{Type{generated}}] :
+                        [Tuple{Type{generated},Any}, Tuple{Type{generated},Int}]
+                    @test all(sig -> any(si -> si.sig == sig, siginfos), defaultsigs)
+                    world = Base.get_world_counter()
+                    @test all(siginfos) do siginfo
+                        !isempty(Base._methods_by_ftype(siginfo.sig, siginfo.mt, -1, world))
+                    end
+                end
+            end
+
+            @testset "Default constructors for reused loaded types" begin
+                local mod = private_module()
+                exprs = [:(struct LoadedEmpty end),
+                         :(struct LoadedField
+                             value::Int
+                         end),
+                         :(struct LoadedParametric{T}
+                             value::T
+                         end)]
+                foreach(ex -> Core.eval(mod, ex), exprs)
+                Core.eval(mod, quote
+                    LoadedEmpty(::Nothing) = LoadedEmpty()
+                    LoadedField(value::Int) = invoke(LoadedField, Tuple{Any}, value + 1)
+                    LoadedField(::Nothing) = LoadedField(7)
+                    LoadedParametric(value::T) where T = LoadedParametric{T}(value + one(value))
+                    LoadedParametric(::Nothing) = LoadedParametric(7)
+                end)
+                types = [getglobal(mod, name) for name in (:LoadedEmpty, :LoadedField, :LoadedParametric)]
+                ctors = [types; types[3]{Int}]
+                loaded_methods = [collect(@invokelatest(methods(T))) for T in ctors]
+                @test @invokelatest(types[1](nothing)) === @invokelatest(types[1]())
+                @test @invokelatest(types[2](nothing)).value == 8
+                @test @invokelatest(types[3](nothing)).value == 8
+                for _ in 1:2
+                    for (ex, T) in zip(exprs, types)
+                        world = Base.get_world_counter()
+                        exinfos, _, _ = Revise.eval_with_signatures(mod, ex; mode=:sigs)
+                        @test Base.get_world_counter() == world
+                        @test @invokelatest(getglobal(mod, nameof(T))) === T
+                        siginfos = Revise.SigInfo[x for x in exinfos if x isa Revise.SigInfo]
+                        @test !isempty(siginfos)
+                        @test all(siginfos) do siginfo
+                            !isempty(Base._methods_by_ftype(siginfo.sig, siginfo.mt, -1, world))
+                        end
+                    end
+                    @test all(zip(ctors, loaded_methods)) do (T, oldmethods)
+                        newmethods = collect(@invokelatest(methods(T)))
+                        length(newmethods) == length(oldmethods) &&
+                            all(old -> any(new -> new === old, newmethods), oldmethods)
+                    end
+                    @test @invokelatest(types[1](nothing)) === @invokelatest(types[1]())
+                    @test @invokelatest(types[2](nothing)).value == 8
+                    @test @invokelatest(types[3](nothing)).value == 8
+                end
+            end
+        end
     end
 
     do_test("Comparison and line numbering") && @testset "Comparison and line numbering" begin
@@ -1134,6 +1239,7 @@ end
             using .Sub
             const SETTING = 17
             const CHANGED = 1
+            global TO_CONST::Int = 42
             const MOVING = :was_in_root
             const view = "shadow"
             read_setting() = SETTING
@@ -1144,6 +1250,8 @@ end
         sleep(mtimedelay)
         @eval using RetractGlobals
         @test RetractGlobals.SETTING == 17
+        @test RetractGlobals.TO_CONST == 42
+        @test !isconst(RetractGlobals, :TO_CONST)
         @test RetractGlobals.view == "shadow"
         sleep(mtimedelay)
         write(fn, """
@@ -1154,6 +1262,7 @@ end
             end
             using .Sub
             const CHANGED = 2
+            const TO_CONST = 42
             include("more.jl")
             end
             """)
@@ -1163,11 +1272,61 @@ end
         @test !isdefined(RetractGlobals, :SETTING)
         @test isempty(methods(RetractGlobals.read_setting))
         @test RetractGlobals.CHANGED == 2
+        @test RetractGlobals.TO_CONST == 42
+        @test isconst(RetractGlobals, :TO_CONST)
         @test RetractGlobals.MOVING === :now_in_more
         @test RetractGlobals.view === Base.view
         @test RetractGlobals.tag() === :sub
 
         rm_precompile("RetractGlobals")
+        pop!(LOAD_PATH)
+    end
+
+    do_test("Global binding invalidation") && Base.VERSION >= v"1.14.0-DEV" &&
+            @testset "Global binding invalidation" begin
+        # Julia 1.14 propagates local-inference binding dependencies to compiled callers.
+        # Requires JuliaLang/julia#61756 + JuliaLang/julia#62359
+        testdir = newtestdir()
+        dn = joinpath(testdir, "BindingInvalidation", "src")
+        mkpath(dn)
+        fn = joinpath(dn, "BindingInvalidation.jl")
+        src = """
+            module BindingInvalidation
+            global StringType = String
+            struct Info
+                a::StringType
+                b::String
+                c::AbstractString
+            end
+            struct Container
+                info::Info
+            end
+            observe(x::Info) = begin
+                print(devnull,
+                    x.a, fieldtype(Info, :a),
+                    x.b, fieldtype(Info, :b),
+                    x.c, fieldtype(Info, :c),
+                    StringType)
+                StringType
+            end
+            inner(container::Container) = observe(container.info)
+            outer(x) = inner(Container(Info("a", string(x), "c")))
+            end
+            """
+        write(fn, src)
+        sleep(mtimedelay)
+        @eval using BindingInvalidation
+        @test BindingInvalidation.outer("x") === String
+        sleep(mtimedelay)
+        write(fn, replace(src,
+            "global StringType = String" => "const StringType = AbstractString"))
+        @yry()
+        @test isempty(Revise.queue_errors)
+        @test BindingInvalidation.StringType === AbstractString
+        @test isconst(BindingInvalidation, :StringType)
+        @test BindingInvalidation.outer("x") === AbstractString
+
+        rm_precompile("BindingInvalidation")
         pop!(LOAD_PATH)
     end
 
@@ -1204,6 +1363,46 @@ end
         @test ImportSwitch.call_tag() === :B
 
         rm_precompile("ImportSwitch")
+        pop!(LOAD_PATH)
+    end
+
+    do_test("Retracted import during type deletion") && isdefined(Base, :delete_binding) &&
+            @testset "Retracted import during type deletion" begin
+        # Extending an explicit import list deletes and later re-binds the imported
+        # names. A type edit in the same revision extracts signatures from not-yet-parsed
+        # files, which must still see the imported names.
+        testdir = newtestdir()
+        dn = joinpath(testdir, "ImportAndStruct", "src")
+        mkpath(dn)
+        fn = joinpath(dn, "ImportAndStruct.jl")
+        mainsrc(names) = """
+            module ImportAndStruct
+            module Sub
+            struct Factor end
+            other() = 1
+            end
+            using .Sub: $names
+            include("a.jl")
+            include("b.jl")
+            end
+            """
+        write(fn, mainsrc("Factor"))
+        write(joinpath(dn, "a.jl"), "solve(::Factor) = 1\n")
+        bfile = joinpath(dn, "b.jl")
+        write(bfile, "struct S\n    x::Int\nend\n")
+        sleep(mtimedelay)
+        @eval using ImportAndStruct
+        @test ImportAndStruct.solve(ImportAndStruct.Factor()) == 1
+        sleep(mtimedelay)
+        write(fn, mainsrc("Factor, other"))
+        write(bfile, "struct S{T}\n    x::T\nend\n")
+        @yry()
+        @test isempty(Revise.queue_errors)
+        @test ImportAndStruct.S isa UnionAll
+        @test ImportAndStruct.other() == 1
+        @test ImportAndStruct.solve(ImportAndStruct.Factor()) == 1
+
+        rm_precompile("ImportAndStruct")
         pop!(LOAD_PATH)
     end
 
@@ -1671,13 +1870,8 @@ end
             """)
         sleep(mtimedelay)
         write(joinpath(dn, "file.jl"), "struct Ord2 end")
-        # TODO: remove also the log messages check when this test is fixed
-        @test_logs (:error, r"Failed to revise") (:warn, r"The running code does not match the saved version") yry()
-        @latestworld
-        @test_broken Order2.f(Order2.Ord2()) == 1
-        # Resolve it with retry
-        Revise.retry()
-        @latestworld
+        @yry()
+        @test isempty(Revise.queue_errors)
         @test Order2.f(Order2.Ord2()) == 1
 
         # Cross-module dependencies
@@ -1707,6 +1901,144 @@ end
 
         rm_precompile("Order1")
         rm_precompile("Order2")
+        pop!(LOAD_PATH)
+    end
+
+    # A file newly `include`d by a revision is evaluated at its position in the
+    # package's include order relative to the other files of the same revision.
+    do_test("New include order") && @testset "New include order" begin
+        testdir = newtestdir()
+        dn = joinpath(testdir, "IncOrder", "src")
+        mkpath(dn)
+        write(joinpath(dn, "IncOrder.jl"), """
+            module IncOrder
+            include("types.jl")
+            include("mid.jl")
+            include("later.jl")
+            end
+            """)
+        write(joinpath(dn, "types.jl"), "abstract type Pen end")
+        write(joinpath(dn, "mid.jl"), "# a comment")
+        write(joinpath(dn, "later.jl"), "total(p::Pen, x) = penalty(p, x)")
+        sleep(mtimedelay)
+        @eval using IncOrder
+        sleep(mtimedelay)
+
+        # The new file uses a struct that an earlier-included file gains in the same
+        # revision.
+        write(joinpath(dn, "types.jl"), """
+            abstract type Pen end
+            struct PowerPen <: Pen
+                p::Int
+            end
+            """)
+        write(joinpath(dn, "powerpen.jl"), "penalty(pen::PowerPen, x) = x^pen.p")
+        write(joinpath(dn, "IncOrder.jl"), """
+            module IncOrder
+            include("types.jl")
+            include("powerpen.jl")
+            include("mid.jl")
+            include("later.jl")
+            end
+            """)
+        @yry()
+        @test isempty(Revise.queue_errors)
+        @test IncOrder.total(IncOrder.PowerPen(2), 3) == 9
+
+        # A later-included file changed in the same revision uses a struct the new file
+        # defines.
+        write(joinpath(dn, "logpen.jl"), "struct LogPen <: Pen end")
+        write(joinpath(dn, "later.jl"), """
+            total(p::Pen, x) = penalty(p, x)
+            penalty(::LogPen, x) = log(x)
+            """)
+        write(joinpath(dn, "IncOrder.jl"), """
+            module IncOrder
+            include("types.jl")
+            include("powerpen.jl")
+            include("logpen.jl")
+            include("mid.jl")
+            include("later.jl")
+            end
+            """)
+        @yry()
+        @test isempty(Revise.queue_errors)
+        @test IncOrder.total(IncOrder.LogPen(), 1.0) == 0.0
+
+        # The new `include` is in a non-root file, and the file that depends on the
+        # new file is included later by the root.
+        write(joinpath(dn, "abspen.jl"), "struct AbsPen <: Pen end")
+        write(joinpath(dn, "mid.jl"), """
+            # a comment
+            include("abspen.jl")
+            """)
+        write(joinpath(dn, "later.jl"), """
+            total(p::Pen, x) = penalty(p, x)
+            penalty(::LogPen, x) = log(x)
+            penalty(::AbsPen, x) = abs(x)
+            """)
+        @yry()
+        @test isempty(Revise.queue_errors)
+        @test IncOrder.total(IncOrder.AbsPen(), -2) == 2
+
+        # A new file that fails to evaluate keeps its own record empty, so retrying
+        # evaluates it from the start. The rest of the file that `include`s it is
+        # still evaluated.
+        write(joinpath(dn, "sqpen.jl"), "penalty(::SqPen, x) = x^2")
+        write(joinpath(dn, "IncOrder.jl"), """
+            module IncOrder
+            include("types.jl")
+            include("powerpen.jl")
+            include("logpen.jl")
+            include("mid.jl")
+            include("later.jl")
+            include("sqpen.jl")
+            unrelated() = 1
+            end
+            """)
+        @test_logs (:error, r"Failed to revise.*sqpen\.jl") (:warn, r"The running code does not match the saved version") match_mode=:any yry()
+        @latestworld
+        @test IncOrder.unrelated() == 1
+        @test any(k -> k[2] == joinpath("src", "sqpen.jl"), keys(Revise.queue_errors))
+        write(joinpath(dn, "types.jl"), """
+            abstract type Pen end
+            struct PowerPen <: Pen
+                p::Int
+            end
+            struct SqPen <: Pen end
+            """)
+        @yry()
+        @test_throws MethodError IncOrder.total(IncOrder.SqPen(), 3)
+        Revise.retry()
+        @latestworld
+        @test isempty(Revise.queue_errors)
+        @test IncOrder.total(IncOrder.SqPen(), 3) == 9
+
+        # An edit to a new file that failed to evaluate triggers its evaluation.
+        write(joinpath(dn, "cubepen.jl"), "penalty(::CubePen, x) = x^3")
+        write(joinpath(dn, "IncOrder.jl"), """
+            module IncOrder
+            include("types.jl")
+            include("powerpen.jl")
+            include("logpen.jl")
+            include("mid.jl")
+            include("later.jl")
+            include("sqpen.jl")
+            include("cubepen.jl")
+            unrelated() = 1
+            end
+            """)
+        @test_logs (:error, r"Failed to revise.*cubepen\.jl") (:warn, r"The running code does not match the saved version") match_mode=:any yry()
+        @latestworld
+        write(joinpath(dn, "cubepen.jl"), """
+            struct CubePen <: Pen end
+            penalty(::CubePen, x) = x^3
+            """)
+        @yry()
+        @test isempty(Revise.queue_errors)
+        @test IncOrder.total(IncOrder.CubePen(), 2) == 8
+
+        rm_precompile("IncOrder")
         pop!(LOAD_PATH)
     end
 
@@ -1876,6 +2208,41 @@ end
         @test get_docstring(ds) == "g"
 
         rm_precompile("FirstDocstring")
+
+        # A signature containing a `UnionAll` parameter
+        same = Revise.same_type_modulo_typevar_names
+        @test same(Tuple{Int, AbstractVector{var"#s1"} where var"#s1"<:Integer},
+                   Tuple{Int, AbstractVector{var"#s2"} where var"#s2"<:Integer})
+        @test !same(Union{Tuple{Any}, Tuple{T}} where T<:Float64, Union{Tuple{Any}, Tuple{T}} where T)
+        @test !same(Union{Tuple{Any}, Tuple{T}} where T, Tuple{Any})
+        @test !same(Tuple{T,T} where T, Tuple{T,S} where {T,S})
+        @test same(Tuple{Vararg{T,N}} where {T,N}, Tuple{Vararg{S,M}} where {S,M})
+        @test !same(Tuple{Vararg{Int}}, Tuple{Vararg{Integer}})
+        dn = joinpath(testdir, "UnionAllDocstring", "src")
+        mkpath(dn)
+        write(joinpath(dn, "UnionAllDocstring.jl"), """
+            module UnionAllDocstring
+            "f1" f(::AbstractVector{<:Integer}) = 1
+            end
+            """)
+        sleep(mtimedelay)
+        @eval using UnionAllDocstring
+        sleep(mtimedelay)
+        ds = @doc(UnionAllDocstring.f)
+        @test get_docstring(ds) == "f1"
+        for str in ("f2", "f3")
+            write(joinpath(dn, "UnionAllDocstring.jl"), """
+                module UnionAllDocstring
+                "$str" f(::AbstractVector{<:Integer}) = 1
+                end
+                """)
+            @yry()
+            ds = @doc(UnionAllDocstring.f)
+            @test get_docstring(ds) == str
+            @test length(Base.Docs.meta(UnionAllDocstring)[Base.Docs.Binding(UnionAllDocstring, :f)].docs) == 1
+        end
+
+        rm_precompile("UnionAllDocstring")
         pop!(LOAD_PATH)
     end
 
@@ -3412,6 +3779,44 @@ end
         @test lines[1] == "ERROR: BoundsError: attempt to access 3-element $(Vector{Int}) at index [4]"
         @test any(str -> endswith(str, "callee_error.jl:12"), lines)
         @test_throws UndefVarError CalleeError.foo(0.1f0)
+
+        # `JuliaInterpreter.break_on(:error)` (e.g. left on by Debugger.jl) makes `step_expr!`
+        # return a `BreakpointRef` instead of throwing. Revise cannot pause at it, so the
+        # original error must surface, not a failure on the `BreakpointRef` being used as a pc.
+        file = joinpath(testdir, "breakon.jl")
+        goodsrc = """
+            module BreakOn
+            for T in (Int, Float64)
+                @eval fbreakon(x::\$T) = 1
+            end
+            end
+            """
+        write(file, goodsrc)
+        sleep(mtimedelay)
+        includet(file)
+        @test BreakOn.fbreakon(1) == 1
+        sleep(mtimedelay)
+        write(file, replace(goodsrc, "Float64" => "Flaot64"))   # typo in a statement Revise itself steps
+        JuliaInterpreter.break_on(:error)
+        err = try
+            timedwait(() -> !isempty(Revise.revision_queue), event_timeout; pollint=0.02)
+            revise(throw=true)
+            nothing
+        catch err
+            err
+        finally
+            JuliaInterpreter.break_off(:error)
+        end
+        @test err isa Revise.ReviseEvalException
+        @test err.exc isa UndefVarError
+        @test occursin("Flaot64", sprint(showerror, err))
+        # Revision must work again once `break_on` is off. Use content that differs from the
+        # originally-tracked source: an errored revision leaves the stored expressions
+        # untouched, so restoring the identical text would be seen as "no change".
+        write(file, replace(goodsrc, "= 1" => "= 2"))
+        @yry()
+        @test BreakOn.fbreakon(1) == 2
+        @test BreakOn.fbreakon(1.0) == 2
 
         # Issue #877 (lowering errors)
         file = joinpath(testdir, "goodbadfile.jl")
@@ -5310,6 +5715,10 @@ end
             end
             @yry()
             @test Revise.hasfile(pkgdata, mainjl)
+            # Re-tracking a file already registered replaces its entry rather than duplicating it,
+            # and the package's own module is the parent for files git-tracking parses.
+            @test length(Revise.fileindices(pkgdata, relpath(mainjl, pkgdata))) == 1
+            @test !isdefined(Core.Compiler, Symbol(modname))
             @test startswith(logs[end].message, "skipping src/extra.jl") || startswith(logs[end-1].message, "skipping src/extra.jl")
             rm_precompile("ModuleWithNewFile")
             pop!(LOAD_PATH)
@@ -6163,6 +6572,67 @@ do_test("Event-named files bypass the ctime filter") && @testset "Event-named fi
     @test Revise.scan_changed_files(dir, wf, tracked, nothing) == [file=>id]
 end
 
+do_test("File vanishes during scan (issue #1142)") && @testset "File vanishes during scan (issue #1142)" begin
+    # Editors that save by delete-and-recreate can remove the file between the
+    # scan's existence check and the content hash; the watcher task must survive.
+    dir = randtmp()
+    mkdir(dir)
+    push!(to_remove, dir)
+    file = "tracked.jl"
+    fullpath = joinpath(dir, file)
+    write(fullpath, "f() = 1")
+    id = Base.PkgId("FakePkg")
+    wf = Revise.WatchList()
+    push!(wf, file=>id)
+    tracked = collect(wf.trackedfiles)
+
+    # Errors that do not mean "vanished" still propagate: a directory without
+    # search permission makes `stat` fail with EACCES (not applicable on
+    # Windows, and root bypasses permission checks).
+    if !Sys.iswindows() && ccall(:getuid, Cuint, ()) != 0
+        chmod(dir, 0o000)
+        try
+            @test_throws Base.IOError Revise.scan_changed_files(dir, wf, tracked, Set([file]))
+        finally
+            chmod(dir, 0o700)
+        end
+    end
+
+    stop = Ref(false)
+    writer = Threads.@spawn begin
+        n = 0
+        while !stop[]
+            try
+                rm(fullpath; force=true)
+                write(fullpath, "f() = $n")
+            catch err
+                # On Windows the scanner's open handle can make the delete or
+                # recreate itself fail transiently; the stressor just retries.
+                err isa Union{Base.IOError,SystemError} || rethrow()
+            end
+            n += 1
+        end
+    end
+    t0 = time()
+    try
+        while time() - t0 < 1
+            # Forcing the stored ctime to match sends the scan down the
+            # content-hash path; the file may vanish under this read too.
+            wf.file_ctimes[file] = try
+                ctime(fullpath)
+            catch err
+                Revise.vanished_error(err) || rethrow()
+                0.0
+            end
+            Revise.scan_changed_files(dir, wf, tracked, Set([file]))
+        end
+        @test true   # no exception escaped the scan loop
+    finally
+        stop[] = true
+        wait(writer)
+    end
+end
+
 ## A missing tracked file is often transient: code generators delete a whole
 ## directory and rewrite it over several seconds (issue #945). Within
 ## `missing_file_grace`, a `revise()` must neither delete the file's methods nor
@@ -6515,6 +6985,23 @@ do_test("Removed include, missing file") && @testset "Removed include, missing f
                              (pkgdata, joinpath("src", "gone.jl")))
     @test !Revise.pkgfileless((pkgdata, joinpath("src", "gone.jl")),
                               (pkgdata, joinpath("src", "GoneInclude.jl")))
+    # The per-file watcher (`watching_files[]` mode) finds "gone.jl" untracked and
+    # must end quietly, rather than warning once `watch_reappear_grace` expires
+    # (possibly during a later testset's stderr capture).
+    old_grace = Revise.watch_reappear_grace[]
+    Revise.watch_reappear_grace[] = 0.0
+    warnfile = randtmp()
+    try
+        open(warnfile, "w") do io
+            redirect_stderr(io) do
+                sleep(0.5)
+            end
+        end
+        @test !occursin("is not an existing file", read(warnfile, String))
+    finally
+        Revise.watch_reappear_grace[] = old_grace
+        rm(warnfile; force=true)
+    end
 
     rm_precompile("GoneInclude")
     pop!(LOAD_PATH)
@@ -7249,6 +7736,21 @@ do_test("@includet uses caller's module (issue #682)") && @testset "@includet us
     @test Base.invokelatest(module682.f_682) == 2
 end
 
+do_test("revise(mod) on a tracked submodule of Main") && @testset "revise(mod) on a tracked submodule of Main" begin
+    testdir = newtestdir()
+
+    srcfile = joinpath(testdir, "revise_mod.jl")
+    write(srcfile, "f_revise_mod() = 1")
+
+    mod = @eval module ReviseModTracked end
+    includet(mod, srcfile)
+    @test Base.invokelatest(mod.f_revise_mod) == 1
+
+    write(srcfile, "f_revise_mod() = 2")
+    Revise.revise(mod)
+    @test Base.invokelatest(mod.f_revise_mod) == 2
+end
+
 do_test("misc - coverage") && !isinteractive() && @testset "misc - coverage" begin
     @test Revise.ReviseEvalException("undef", UndefVarError(:foo)).loc isa String
     @test !Revise.throwto_repl(UndefVarError(:foo))   # this causes an error in interactive
@@ -7269,24 +7771,25 @@ do_test("watch reappearance") && @testset "watch reappearance" begin
     dir = mktempdir()
     key = dir
     Revise.watched_files[key] = Revise.WatchList()
+    watched() = haskey(Revise.watched_files, key)
     old_grace = Revise.watch_reappear_grace[]
     try
         # Present: resume immediately.
-        @test Revise.await_watched_path(isdir, dir, key) === :reappeared
+        @test Revise.await_watched_path(isdir, watched, dir) === :reappeared
         # Missing but reappears within the grace period: resume.
         rm(dir; recursive=true)
         recreate = @async (sleep(0.3); mkdir(dir))
         Revise.watch_reappear_grace[] = 5.0
-        @test Revise.await_watched_path(isdir, dir, key) === :reappeared
+        @test Revise.await_watched_path(isdir, watched, dir) === :reappeared
         wait(recreate)
         # Missing past the grace period: give up (and the caller warns).
         rm(dir; recursive=true)
         Revise.watch_reappear_grace[] = 0.2
-        @test Revise.await_watched_path(isdir, dir, key) === :gone
+        @test Revise.await_watched_path(isdir, watched, dir) === :gone
         # Missing and no longer registered (package moved/removed): give up quietly.
         Revise.watch_reappear_grace[] = 5.0
         delete!(Revise.watched_files, key)
-        @test Revise.await_watched_path(isdir, dir, key) === :removed
+        @test Revise.await_watched_path(isdir, watched, dir) === :removed
     finally
         Revise.watch_reappear_grace[] = old_grace
         haskey(Revise.watched_files, key) && delete!(Revise.watched_files, key)
@@ -7491,6 +7994,67 @@ do_test("Frozen world") && @testset "Frozen world" begin
     finally
         Revise.worldage[] = saved
     end
+
+    # The pin protects execution only if it also protects *compilation*: a caller of
+    # `frozen(f, ...)` compiled in the latest world must carry no inference edges into
+    # `f`, or invalidations from later-loaded packages propagate to the caller and
+    # recompiling it re-infers `f`'s entire call graph in the latest world (issue #1134).
+    # Any static call to `f` shows up as an `:invoke` of a Revise method.
+    # Any static call to `f` shows up as an `:invoke` of a Revise method.
+    function invoke_target(stmt)
+        Meta.isexpr(stmt, :invoke) || return nothing
+        target = stmt.args[1]
+        target isa Core.CodeInstance && (target = target.def)
+        isdefined(Core, :ABIOverride) && target isa Core.ABIOverride && (target = target.def)
+        return target isa Core.MethodInstance ? target : nothing
+    end
+    src, _ = only(code_typed(Revise.frozen, (typeof(Revise._revise),); optimize=true))
+    static_revise_calls = [mi.def for mi in filter(!isnothing, map(invoke_target, src.code)) if mi.def.module === Revise]
+    @test isempty(static_revise_calls)
+
+    # The same requirement applies to every entry point that user code or Julia calls in
+    # the latest world: each must reach the revision engine only through `frozen` (or
+    # `invokelatest`). Follow static `:invoke`s transitively through Revise's own methods
+    # from each entry point and check that the closure never reaches engine code.
+    ourmods = (Revise, Revise.JuliaInterpreter, Revise.LoweredCodeUtils, Revise.CodeTracking)
+    function static_invoke_closure!(seen, codes)
+        for (src, _) in codes, stmt in src.code
+            mi = invoke_target(stmt)
+            mi === nothing && continue
+            mi in seen && continue
+            push!(seen, mi)
+            Base.moduleroot(mi.def.module) in ourmods || continue
+            static_invoke_closure!(seen, Base.code_typed_by_type(mi.specTypes; optimize=true))
+        end
+        return seen
+    end
+    engine_names = ("_revise", "_track", "_includet", "_entr", "_add_callback", "_errors", "_retry",
+                    "_add_require", "eval_require_now", "watch_package", "revise_file_now",
+                    "instantiate_sigs!", "methods_by_execution!", "parse_and_maybe_eval_source!",
+                    "init_watching")
+    function is_engine(m::Method)
+        Base.moduleroot(m.module) in (Revise.JuliaInterpreter, Revise.LoweredCodeUtils) && return true
+        name = String(m.name)
+        return any(n -> name == n || startswith(name, "#" * n * "#"), engine_names)
+    end
+    entries = [
+        (revise, ()), (revise, (Module,)),
+        (Revise.track, (Module,)), (Revise.track, (Module, String)), (Revise.track, (String,)),
+        (includet, (String,)), (includet, (typeof(identity), Module, String)),
+        (entr, (typeof(identity), Vector{String})), (entr, (typeof(identity), Vector{String}, Vector{Module})),
+        (Revise.errors, ()), (Revise.retry, ()),
+        (Revise.add_callback, (typeof(identity), Vector{String})), (Revise.remove_callback, (Symbol,)),
+        (Revise.add_require, (String, Module, String, String, Expr)),
+        (Revise.watch_package_callback, (Base.PkgId,)),
+        (Revise.revise_first, (Expr,)),
+    ]
+    leaks = Dict{Any,Vector{Method}}()
+    for (f, argtypes) in entries
+        seen = static_invoke_closure!(Set{Core.MethodInstance}(), code_typed(f, argtypes; optimize=true))
+        leaked = [mi.def for mi in seen if is_engine(mi.def)]
+        isempty(leaked) || (leaks[(f, argtypes)] = leaked)
+    end
+    @test isempty(leaks)
 end
 
 do_test("Frozen world user-code frame") && @testset "Frozen world user-code frame" begin

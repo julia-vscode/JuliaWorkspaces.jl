@@ -92,6 +92,34 @@ function clear_meta(x::EXPR, meta_dict)
     # end
 end
 
+"""
+    binding_chain(b::Binding) -> Vector{Binding}
+
+`b` followed by every binding reached through `val` while `val` is itself a
+`Binding` (an import binding points at the binding it imports), stopping
+before a binding that is already in the chain. Import resolution refuses to
+close such a loop (see `closes_binding_cycle`); this stops on one anyway.
+"""
+function binding_chain(b::Binding)
+    chain = Binding[b]
+    while (next = last(chain).val) isa Binding
+        any(c -> c === next, chain) && break
+        push!(chain, next)
+    end
+    return chain
+end
+
+"""
+    binding_chain_end(b::Binding) -> Union{Binding,Nothing}
+
+The binding at the end of `b`'s chain: the first one whose `val` is not a
+`Binding`, or `nothing` if the chain loops back on itself and so never ends.
+"""
+function binding_chain_end(b::Binding)
+    e = last(binding_chain(b))
+    return e.val isa Binding ? nothing : e
+end
+
 function get_root_method(b)
     return b
 end

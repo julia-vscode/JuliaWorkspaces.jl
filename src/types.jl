@@ -605,9 +605,9 @@ Create an empty workspace. To build one directly from folders on disc, use
   [`DEFAULT_MAX_FAILURE_ATTEMPTS`](@ref); changeable at runtime with
   [`set_max_failure_attempts!`](@ref). See
   [`retry_failed_dynamic_projects!`](@ref) to clear the budget.
-- `djp_request_timeout_seconds::Int`: How long a child process may take to
-  answer one indexing request before the work item is failed (`0` or less means
-  no deadline). Defaults to
+- `djp_request_timeout_seconds::Int`: How long a child process may go without
+  showing progress on one indexing request before the work item is failed (`0`
+  or less means no deadline). Defaults to
   [`DEFAULT_DJP_REQUEST_TIMEOUT_SECONDS`](@ref); changeable at runtime with
   [`set_djp_request_timeout!`](@ref).
 - `resolve_workspace_environments::Bool`: When `false`, no standalone package
@@ -669,7 +669,34 @@ function _package_cache_path(store_path, name, uuid, version, git_tree_sha1)
 end
 
 """
-    _read_package_cache(cache_path, name, uuid) -> Union{SymbolServer.Package,Nothing}
+    PackageCacheUnloadable
+
+Returned by [`_read_package_cache`](@ref) when a cache could not be read because
+the process ran out of memory, even after a full collection. The file itself is
+fine and stays on disc; the package is skipped for the life of the process (see
+`unloadable_pkg_metadata`).
+"""
+struct PackageCacheUnloadable end
+
+_read_cache_file(cache_path::String) = open(SymbolServer.CacheStore.read, cache_path)
+
+# A failed allocation does not make Julia collect first: the stock GC only
+# collects before an allocation when the heap is over its target, then throws as
+# soon as malloc fails. Garbage from before the read can still be what fills
+# memory, so collect fully and try exactly once more.
+function _retry_after_gc_on_oom(f)
+    try
+        return f()
+    catch err
+        err isa OutOfMemoryError || rethrow()
+    end
+    GC.gc(true)
+    return f()
+end
+
+"""
+    _read_package_cache(cache_path, name, uuid; read_cache=_read_cache_file)
+        -> Union{SymbolServer.Package,Nothing,PackageCacheUnloadable}
 
 Read one `.jstore` and rebase its `PLACEHOLDER` source paths onto the package's
 actual location. Returns `nothing` when the file does not exist or cannot be
@@ -678,27 +705,66 @@ read, which every caller treats as a plain cache miss.
 A corrupt cache (a truncated write from a killed indexer, a stale serialization
 format, a file torn by a host crash) is **deleted** rather than merely skipped:
 the miss then feeds the normal re-index path, so the store heals itself instead
-of failing identically on every future run. Only `CacheCorruptedError` is
-absorbed — anything else still propagates.
-"""
-function _read_package_cache(cache_path::String, name, uuid)
-    isfile(cache_path) || return nothing
+of failing identically on every future run.
 
-    package_data = try
-        open(cache_path) do io
-            SymbolServer.CacheStore.read(io)
+Running out of memory is retried once after a full collection. If it happens
+again the file is kept, since it is valid, and `PackageCacheUnloadable()` is
+returned instead of `nothing`: re-indexing would write the same file and fail
+the same way.
+
+The store is shared with other processes: a file that vanishes before it is
+opened is a miss, and one another process holds (see
+`SymbolServer.is_transient_store_error`) is retried briefly, then a miss. Any
+other error propagates.
+"""
+function _read_package_cache(cache_path::String, name, uuid; read_cache::Function=_read_cache_file)
+    for delay in (_STORE_READ_RETRY_DELAYS..., nothing)
+        try
+            return _read_package_cache_once(cache_path, name, uuid, read_cache)
+        catch err
+            SymbolServer.is_missing_file_error(err) && return nothing
+            SymbolServer.is_transient_store_error(err) || rethrow()
+            if delay === nothing
+                @debug "Symbol cache stayed locked by another process; treating it as a miss" cache_path exception=(err,)
+                return nothing
+            end
+        end
+        # Blocks rather than yields: callers include Salsa derivations.
+        Libc.systemsleep(delay)
+    end
+end
+
+const _STORE_READ_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+
+function _read_package_cache_once(cache_path, name, uuid, read_cache)
+    st = stat(cache_path)
+    isfile(st) || return nothing
+
+    try
+        return _retry_after_gc_on_oom() do
+            package_data = read_cache(cache_path)
+            _rebase_package_paths!(package_data, name, uuid)
+            package_data
         end
     catch err
+        err isa OutOfMemoryError && return PackageCacheUnloadable()
         err isa SymbolServer.CacheStore.CacheCorruptedError || rethrow()
         @warn "Couldn't read cache file for $name, deleting." cache_path exception=(err,)
         try
-            rm(cache_path; force=true)
+            # Only if it is still the file that was read: another process may
+            # have published a valid cache over it meanwhile.
+            cur = stat(cache_path)
+            if cur.inode == st.inode && cur.size == st.size && cur.mtime == st.mtime
+                rm(cache_path; force=true)
+            end
         catch rm_err
             @debug "Failed to delete corrupt cache file" cache_path exception=(rm_err, catch_backtrace())
         end
         return nothing
     end
+end
 
+function _rebase_package_paths!(package_data, name, uuid)
     pkg_path = Base.locate_package(Base.PkgId(uuid, string(name)))
 
     # TODO Reenable this
@@ -709,12 +775,21 @@ function _read_package_cache(cache_path::String, name, uuid)
     if pkg_path !== nothing
         SymbolServer.modify_dirs(package_data.val, f -> SymbolServer.modify_dir(f, r"^PLACEHOLDER", joinpath(pkg_path, "src")))
     end
-
     return package_data
 end
 
-function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1)
-    return _read_package_cache(_package_cache_path(store_path, name, uuid, version, git_tree_sha1), name, uuid)
+function _try_load_package_cache(store_path, name, uuid, version, git_tree_sha1; read_cache::Function=_read_cache_file)
+    return _read_package_cache(_package_cache_path(store_path, name, uuid, version, git_tree_sha1), name, uuid; read_cache)
+end
+
+# Record a package whose cache is valid but does not fit in memory. It leaves
+# `missing_pkg_metadata` so nothing retries it, and is never read again.
+function _mark_package_cache_unloadable!(df::DynamicFeature, key::PkgCacheKey)
+    push!(df.unloadable_pkg_metadata, key)
+    delete!(df.missing_pkg_metadata, key)
+    cache_path = _package_cache_path(df.store_path, key.name, key.uuid, key.version, key.git_tree_sha1)
+    @warn "Not enough memory to load the symbol cache for $(key.name); its symbols are unavailable until the language server restarts." cache_path cache_file_size=Base.format_bytes(filesize(cache_path)) free_memory=Base.format_bytes(Sys.free_memory())
+    return
 end
 
 """
@@ -722,17 +797,25 @@ end
 
 Populate the `input_package_metadata` input for one package from its on-disc
 symbol cache, unless it is already populated. Returns `true` when the input
-holds data after the call, `false` when no cache exists on disc.
+holds data after the call, `false` when no cache exists on disc or it does not
+fit in memory.
 """
-function _ensure_package_cache_loaded!(jw::JuliaWorkspace, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing})
-    df = jw.dynamic_feature
+_ensure_package_cache_loaded!(jw::JuliaWorkspace, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing}) =
+    _ensure_package_cache_loaded!(jw.runtime, jw.dynamic_feature, name, uuid, version, git_tree_sha1)
+
+function _ensure_package_cache_loaded!(rt, df::DynamicFeature, name::Symbol, uuid::UUID, version::VersionNumber, git_tree_sha1::Union{String,Nothing})
     key = PkgCacheKey((name, uuid, version, git_tree_sha1))
     key in df.loaded_pkg_metadata && return true
+    key in df.unloadable_pkg_metadata && return false
 
-    package_data = _try_load_package_cache(df.store_path, name, uuid, version, git_tree_sha1)
+    package_data = _try_load_package_cache(df.store_path, name, uuid, version, git_tree_sha1; read_cache=df.cache_reader)
     package_data === nothing && return false
+    if package_data isa PackageCacheUnloadable
+        _mark_package_cache_unloadable!(df, key)
+        return false
+    end
 
-    set_input_package_metadata!(jw.runtime, name, uuid, version, git_tree_sha1, package_data)
+    set_input_package_metadata!(rt, name, uuid, version, git_tree_sha1, package_data)
     push!(df.loaded_pkg_metadata, key)
     return true
 end
@@ -759,7 +842,8 @@ end
 
 Load the on-disc symbol caches for every package recorded in
 `missing_pkg_metadata` into the Salsa runtime. Successfully loaded entries are
-removed from the set; entries with no cache on disc yet stay for a later
+removed from the set, and so are caches that do not fit in memory (see
+`unloadable_pkg_metadata`); entries with no cache on disc yet stay for a later
 retry. Reading dozens of caches (some tens of MB) takes seconds, and this runs
 on the consumer task — typically a host's main dispatch loop — so it yields
 between packages to keep other tasks responsive and reports per-package

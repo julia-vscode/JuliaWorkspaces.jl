@@ -84,6 +84,7 @@ then call themselves on the same directory or file to wait for the next set of c
 ```@docs
 Revise.revise_dir_queued
 Revise.revise_file_queued
+Revise.poll_from_saved_state
 ```
 
 The following functions support user callbacks, and are used in the implementation of `entr`
@@ -104,6 +105,7 @@ Revise.hold_cache!
 Revise.cache_snapshot_is_valid
 Revise.cached_source_is_current
 Revise.include_targets
+Revise.maybe_add_includes_to_pkgdata!
 ```
 
 Revise pins its own method dispatch to the world age captured at initialization, so that

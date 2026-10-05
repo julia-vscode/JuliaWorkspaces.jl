@@ -219,9 +219,14 @@ end
 function _get_signatures(b, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope=nothing) end
 
 function _get_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope=nothing)
-    if b.val isa StaticLint.Binding
-        _get_signatures(b.val, tls, sigs, env, meta_dict, in_scope)
+    # Every binding on an import chain contributes, innermost first; a chain
+    # that loops back on itself stops before it repeats.
+    for c in Iterators.reverse(StaticLint.binding_chain(b))
+        _get_own_signatures(c, tls, sigs, env, meta_dict, in_scope)
     end
+end
+
+function _get_own_signatures(b::StaticLint.Binding, tls::StaticLint.Scope, sigs::Vector{SignatureInfo}, env, meta_dict, in_scope)
     if b.type == StaticLint.CoreTypes.Function || b.type == StaticLint.CoreTypes.DataType
         b.val isa SymbolServer.SymStore && _get_signatures(b.val, tls, sigs, env, meta_dict, in_scope)
         for ref in b.refs

@@ -46,6 +46,7 @@ struct BreakOnCall <: Interpreter end
 function finish_and_return!(::BreakOnCall, frame::Frame, ::Bool=false)
     return BreakpointRef(frame.framecode, 0)
 end
+finish_latestworld!(::BreakOnCall, frame::Frame) = BreakpointRef(frame.framecode, 0)
 
 """
     ret = finish_stack!(interp::Interpreter, frame::Frame, rootistoplevel::Bool=false)
@@ -59,7 +60,7 @@ reference to the breakpoint.
 """
 function finish_stack!(interp::Interpreter, frame::Frame, rootistoplevel::Bool=false)
     frame0 = frame
-    frame = leaf(frame)
+    frame = leaf(frame)::Frame
     while true
         istoplevel = rootistoplevel && is_toplevel_frame(frame)
         ret = try
@@ -81,7 +82,13 @@ function finish_stack!(interp::Interpreter, frame::Frame, rootistoplevel::Bool=f
             # Driver frames record each statement's value (see `step_toplevel!`). The statement's
             # side effects, including any global assignment, were performed by the child frame,
             # so a surface `:(=)` must not be re-executed here.
-            frame.framedata.ssavalues[pc] = ret
+            try
+                # completing a `:module` statement runs `__init__`, which may throw
+                toplevel_child_returned!(frame, ret)
+            catch err
+                frame = unwind_exception(frame, err)
+                continue
+            end
         elseif isassign(frame, pc)
             lhs = SSAValue(pc)
             do_assignment!(frame, lhs, ret)
@@ -260,6 +267,7 @@ that supply default positional arguments or handle keywords. `cframe` is the lea
 which execution should start.
 """
 function maybe_step_through_wrapper!(interp::Interpreter, frame::Frame)
+    is_toplevel_frame(frame) && return frame
     code = frame.framecode
     src = code.src
     stmts, scope = src.code, code.scope::Method
@@ -304,7 +312,7 @@ function maybe_step_through_wrapper!(interp::Interpreter, frame::Frame)
             return frame
         end
         frame.framedata.ssavalues[frame.pc] = Wrapper()
-        return maybe_step_through_wrapper!(interp, callee(frame))
+        return maybe_step_through_wrapper!(interp, callee(frame)::Frame)
     end
     maybe_step_through_nkw_meta!(frame)
     maybe_step_through_arg_destructuring!(interp, frame)
@@ -373,8 +381,59 @@ end
 maybe_step_through_arg_destructuring!(frame::Frame) = maybe_step_through_arg_destructuring!(RecursiveInterpreter(), frame)
 
 const kwhandler = Core.kwcall
-const kwextrastep = 0
 const kw_has_f_first = VERSION.major == 1 && VERSION.minor == 11
+
+function is_kwcall_stmt(@nospecialize(stmt))
+    isexpr(stmt, :(=)) && (stmt = stmt.args[2])
+    isexpr(stmt, :call) || return false
+    f = stmt.args[1]
+    return is_quotenode_egal(f, kwhandler) || is_global_ref(f, Core, :kwcall)
+end
+
+function find_kwcall(src::CodeInfo, first::Int, last::Int)
+    candidates = first:min(last, length(src.code))
+    found = findfirst(i -> is_kwcall_stmt(src.code[i]), candidates)
+    return found === nothing ? nothing : candidates[found]
+end
+
+function is_merge_call(@nospecialize(stmt))
+    isexpr(stmt, :(=)) && (stmt = stmt.args[2])
+    isexpr(stmt, :call) || return false
+    f = stmt.args[1]
+    return is_quotenode_egal(f, Base.merge) || is_global_ref(f, Base, :merge)
+end
+
+function advance_to_kwcall!(interp::Interpreter, frame::Frame, pccall::Int, istoplevel::Bool)
+    while frame.pc != pccall
+        pc = step_expr!(interp, frame, istoplevel)
+        pc isa Int || return frame
+    end
+    return frame
+end
+
+# When stepping into a frame, advance from its entry to the first call or return, past
+# statements that would show the user internal-looking code that is not even the next call:
+# - On Julia 1.12 a method body may start with bare global loads (e.g. the `+` of
+#   `f(x) = g(x) + 1`). `optimize!` folds `const` globals to `QuoteNode`s, so the leading
+#   load is either a `GlobalRef` or a `QuoteNode`. Keyword/closure bodies (gensym `#` names)
+#   keep their exact entry point.
+# - The lowered code of a top-level statement typically begins with global declarations,
+#   `:latestworld`, and global loads. A declaration may itself be a builtin call (see
+#   `is_global_declaration_call`), which is not the next call either. (The statements of a
+#   driver frame are not stepped through, since each would run a whole surface statement.)
+function maybe_step_through_prelude!(interp::Interpreter, frame::Frame, istoplevel::Bool)
+    frame.framecode.is_toplevel_surface && return frame.pc
+    scope = scopeof(frame)
+    if scope isa Method
+        entrystmt = pc_expr(frame)
+        (entrystmt isa GlobalRef || entrystmt isa QuoteNode) || return frame.pc
+        startswith(string(scope.name), "#") && return frame.pc
+    end
+    return maybe_next_until!(interp, frame, istoplevel) do fr::Frame
+        stmt = pc_expr(fr)
+        shouldbreak(fr, fr.pc) || (is_call_or_return(stmt) && !is_global_declaration_call(stmt))
+    end
+end
 
 """
     frame = maybe_step_through_kwprep!(interp::Interpreter, frame::Frame)
@@ -393,38 +452,35 @@ function maybe_step_through_kwprep!(interp::Interpreter, frame::Frame, istopleve
     n = length(src.code)
     stmt = pc_expr(frame, pc)
     if isbindingresolved_deprecated && !isa(stmt, Tuple{Symbol,Vararg{Symbol}}) && !is_empty_namedtuple(stmt) && n >= pc+1
-        pc += 1
-        stmt = pc_expr(frame, pc)
+        nextstmt = pc_expr(frame, pc + 1)
+        if isa(nextstmt, Tuple{Symbol,Vararg{Symbol}}) || is_empty_namedtuple(nextstmt)
+            pc += 1
+            stmt = nextstmt
+        end
     elseif kw_has_f_first && pc < n && is_empty_namedtuple(pc_expr(frame, pc+1)) && isa(stmt, QuoteNode)
         pc = step_expr!(interp, frame, istoplevel)
         stmt = pc_expr(frame, pc)
     end
     if isa(stmt, Tuple{Symbol,Vararg{Symbol}})
         # Check to see if we're creating a NamedTuple followed by kwfunc call
-        pccall = pc + 4 + kwextrastep + isbindingresolved_deprecated
-        if pccall <= n
+        if pc + 1 <= n
             stmt1 = src.code[pc+1]
             # We deliberately check isexpr(stmt, :call) rather than is_call(stmt): if it's
             # assigned to a local, it's *not* kwarg preparation.
             if isexpr(stmt1, :call) && ((is_quotenode_egal(stmt1.args[1], Core.apply_type) && is_quoted_type(stmt1.args[2], :NamedTuple)) ||
                                         (is_global_ref(stmt1.args[1], Core, :apply_type) && is_global_ref(stmt1.args[2], Core, :NamedTuple)))
-                stmt4, stmt5 = src.code[pc+4+isbindingresolved_deprecated], src.code[pc+5+isbindingresolved_deprecated]
-                if isexpr(stmt4, :call) && (is_quotenode_egal(stmt4.args[1], kwhandler) || is_global_ref(stmt4.args[1], Core, :kwcall))
-                    while pc < pccall
-                        pc = step_expr!(interp, frame, istoplevel)
-                    end
-                    return frame
-                elseif isexpr(stmt5, :call) && (is_quotenode_egal(stmt5.args[1], kwhandler) || is_global_ref(stmt5.args[1], Core, :kwcall)) && pccall+1 <= n
-                    # This happens when the call is scoped by a module
-                    pccall += 1
-                    while pc < pccall
-                        pc = step_expr!(interp, frame, istoplevel)
-                    end
-                    maybe_next_call!(interp, frame, istoplevel)
-                    return frame
+                # Lowering has moved the kwcall relative to the NamedTuple setup
+                # several times. Find it by shape rather than maintaining version-
+                # dependent offsets (which were already wrong on Julia 1.12).
+                pccall = find_kwcall(src, pc + 2, pc + 8)
+                if pccall !== nothing
+                    return advance_to_kwcall!(interp, frame, pccall, istoplevel)
                 end
             end
         end
+    elseif is_merge_call(stmt) && pc > 1 && is_empty_namedtuple(src.code[pc - 1])
+        pccall = find_kwcall(src, pc + 1, n)
+        pccall === nothing || return advance_to_kwcall!(interp, frame, pccall, istoplevel)
     elseif is_empty_namedtuple(stmt)
         # Creating an empty NamedTuple, now split by type (no supplied kwargs vs kwargs...)
         if pc + 1 <= n
@@ -454,17 +510,9 @@ function maybe_step_through_kwprep!(interp::Interpreter, frame::Frame, istopleve
                             end
                         end
                     end
-                elseif (is_quotenode_egal(f, Base.merge) || is_global_ref(f, Base, :merge)) && ((pccall = pc + 7 + 2*isbindingresolved_deprecated) <= n)
-                    stmtk = src.code[pccall-1]
-                    if isexpr(stmtk, :call) && (is_quotenode_egal(stmtk.args[1], kwhandler) || is_global_ref(stmtk.args[1], Core, :kwcall))
-                        for i = 1:4 + isbindingresolved_deprecated
-                            pc = step_expr!(interp, frame, istoplevel)
-                        end
-                        stmti = src.code[pc]
-                        if isexpr(stmti, :call) && (is_quotenode_egal(stmti.args[1], #= deliberately not kwhandler =# Core.kwfunc) || is_global_ref(stmti.args[1], Core, :kwfunc))
-                            pc = step_expr!(interp, frame, istoplevel)
-                        end
-                    end
+                elseif is_merge_call(stmt1)
+                    pccall = find_kwcall(src, pc + 2, n)
+                    pccall === nothing || return advance_to_kwcall!(interp, frame, pccall, istoplevel)
                 end
             end
         end
@@ -474,15 +522,13 @@ end
 maybe_step_through_kwprep!(frame::Frame, istoplevel::Bool=false) =
     maybe_step_through_kwprep!(RecursiveInterpreter(), frame, istoplevel)
 
-@static if isbindingresolved_deprecated
-    function is_empty_namedtuple(stmt)
-        isexpr(stmt, :call) && length(stmt.args) == 1 || return false
-        arg1 = stmt.args[1]
-        isa(arg1, GlobalRef) || return false
-        return arg1.name === :NamedTuple
-    end
-else
-    is_empty_namedtuple(stmt) = isexpr(stmt, :call) && is_quoted_type(stmt.args[1], :NamedTuple) && length(stmt.args) == 1
+# The `NamedTuple` callee is a `QuoteNode` when `optimize!` folded the const (method scope),
+# or a `GlobalRef` when it didn't (toplevel scope on 1.12+, or `optimize=false`); accept both forms.
+function is_empty_namedtuple(stmt)
+    isexpr(stmt, :call) && length(stmt.args) == 1 || return false
+    arg1 = stmt.args[1]
+    is_quoted_type(arg1, :NamedTuple) && return true
+    return isa(arg1, GlobalRef) && arg1.name === :NamedTuple
 end
 
 """
@@ -525,18 +571,23 @@ maybe_reset_frame!(frame::Frame, @nospecialize(pc), rootistoplevel::Bool) =
 # returning the frame that caught the exception at the pc of the catch
 # or rethrow the error
 function unwind_exception(frame::Frame, @nospecialize(exc))
-    while frame !== nothing
-        if !isempty(frame.framedata.exception_frames)
-            # Exception caught: land in the handler with the same state updates as
-            # `handle_err` (scope restore, handler pop, exception-stack push), so the
-            # handler cannot be reused for a later exception outside its `try`.
-            @assert is_leaf(frame)
-            frame.pc = enter_exception_handler!(frame.framedata, exc)
-            return frame
-        end
-        frame = return_from(frame)
+    # Find the handler before unlinking anything: if no frame on the stack
+    # catches `exc`, rethrow with the frame tree intact so a frontend can keep
+    # its session (inspect locals, resume from the statement that threw).
+    handler = frame
+    while handler !== nothing && isempty(handler.framedata.exception_frames)
+        handler = caller(handler)
     end
-    rethrow(exc)
+    handler === nothing && rethrow(exc)
+    while frame !== handler
+        frame = return_from(frame)::Frame
+    end
+    # Exception caught: land in the handler with the same state updates as
+    # `handle_err` (scope restore, handler pop, exception-stack push), so the
+    # handler cannot be reused for a later exception outside its `try`.
+    @assert is_leaf(frame)
+    frame.pc = enter_exception_handler!(frame.framedata, exc)
+    return frame
 end
 
 function maybe_step_through_nkw_meta!(frame::Frame)
@@ -553,10 +604,26 @@ function more_calls_on_current_line(frame::Frame)
     while curr_pc <= length(frame.framecode.src.code)
         _, new_line = whereis(frame, curr_pc)
         new_line == curr_line || return false
-        is_call(pc_expr(frame, curr_pc)) && return true
+        stmt = pc_expr(frame, curr_pc)
+        is_call(stmt) && !is_assignment_write_call(stmt) && return true
         curr_pc += 1
     end
     return false
+end
+
+# Indexed/property assignment is lowered as a final `setindex!`/`setproperty!`
+# call. For `sl`, users generally want the last call that computes the RHS; a
+# line containing only the assignment still enters its write call because this
+# predicate is used only while looking for *later* calls.
+function is_assignment_write_call(@nospecialize(stmt))
+    isexpr(stmt, :(=)) && (stmt = stmt.args[2])
+    isexpr(stmt, :call) || return false
+    f = stmt.args[1]
+    isa(f, QuoteNode) && (f = f.value)
+    if isa(f, GlobalRef)
+        return f.name === :setindex! || f.name === :setproperty!
+    end
+    return f === setindex! || f === setproperty!
 end
 
 """
@@ -602,12 +669,13 @@ function debug_command(interp::Interpreter, frame::Frame, cmd::Symbol, rootistop
         return frame, frame.pc
     end
 
+    rootframe = root(frame)
     istoplevel = rootistoplevel && is_toplevel_frame(frame)
     cmd0 = cmd
     is_si = false
     if cmd === :si
         stmt = pc_expr(frame)
-        cmd = is_call(stmt) ? :s : :se
+        cmd = frame.framecode.is_toplevel_surface || is_call(stmt) ? :s : :se
         is_si = true
     end
     try
@@ -635,6 +703,23 @@ function debug_command(interp::Interpreter, frame::Frame, cmd::Symbol, rootistop
             cmd = :s
         end
         if cmd === :s
+            if frame.framecode.is_toplevel_surface
+                # The lowered frame of a surface statement is its callee: enter it like a
+                # call. (The surface expression itself cannot be stepped, since its
+                # arguments may contain calls.)
+                pc = step_expr!(BreakOnCall(), frame, true)
+                isa(pc, BreakpointRef) || return maybe_reset_frame!(interp, frame, pc, rootistoplevel)
+                newframe = leaf(frame)
+                if !is_si && newframe !== frame && pc.stmtidx == 0
+                    pc = maybe_step_through_prelude!(interp, newframe, istoplevel)
+                    isa(pc, BreakpointRef) && return leaf(newframe), pc
+                    return newframe, BreakpointRef(newframe.framecode, 0)
+                end
+                return newframe, pc
+            end
+            # Keyword calls begin with NamedTuple construction, which is not a
+            # useful step target. Skip it before searching for the next call.
+            is_si || maybe_step_through_kwprep!(interp, frame, istoplevel)
             pc = maybe_next_call!(interp, frame, istoplevel)
             (isa(pc, BreakpointRef) || pc === nothing) && return maybe_reset_frame!(interp, frame, pc, rootistoplevel)
             is_si || maybe_step_through_kwprep!(interp, frame, istoplevel)
@@ -643,6 +728,10 @@ function debug_command(interp::Interpreter, frame::Frame, cmd::Symbol, rootistop
             is_return(stmt0) && return maybe_reset_frame!(interp, frame, nothing, rootistoplevel)
             if isexpr(stmt, :(=))
                 stmt = stmt.args[2]
+            end
+            # This call bypasses step_expr!, which refreshes top-level worlds before 1.12.
+            @static if VERSION < v"1.12-"
+                is_toplevel_frame(frame) && (frame.world = Base.get_world_counter())
             end
             local ret
             try
@@ -656,6 +745,10 @@ function debug_command(interp::Interpreter, frame::Frame, cmd::Symbol, rootistop
                 cmd0 === :si && return newframe, ret
                 is_si || (newframe = maybe_step_through_wrapper!(interp, newframe))
                 is_si || maybe_step_through_kwprep!(interp, newframe, istoplevel)
+                if !is_si
+                    pc = maybe_step_through_prelude!(interp, newframe, istoplevel)
+                    isa(pc, BreakpointRef) && return leaf(newframe), pc
+                end
                 return newframe, BreakpointRef(newframe.framecode, 0)
             end
             # if we got here, the call returned a value
@@ -670,11 +763,24 @@ function debug_command(interp::Interpreter, frame::Frame, cmd::Symbol, rootistop
         end
         cmd === :finish && return maybe_reset_frame!(interp, frame, finish!(interp, frame, istoplevel), rootistoplevel)
     catch err
-        frame = unwind_exception(frame, err)
+        # Returning may recycle `frame` before module initialization re-enters the interpreter.
+        # Recover from the live stack, not from the possibly reused entry frame.
+        frame = unwind_exception(leaf(rootframe), err)
         if cmd === :c
             return debug_command(interp, frame, :c, rootistoplevel)
         else
-            return debug_command(interp, frame, :nc, rootistoplevel)
+            # Stop at the handler's first user-visible statement. Advancing to
+            # the next *call* (as this used to) silently executed the catch
+            # body's assignments (e.g. `y = -1`), so single-stepping never
+            # displayed the error path.
+            handleristoplevel = rootistoplevel && is_toplevel_frame(frame)
+            stmt = pc_expr(frame)
+            if isexpr(stmt, :(=)) && isexpr((stmt::Expr).args[2], :the_exception)
+                # the exception binding (`err = the_exception`) is plumbing
+                step_expr!(interp, frame, handleristoplevel)
+            end
+            pc = maybe_next_until!(is_next_line_stop, interp, frame, handleristoplevel)
+            return maybe_reset_frame!(interp, frame, pc, rootistoplevel)
         end
     end
     throw(ArgumentError("command $cmd not recognized"))

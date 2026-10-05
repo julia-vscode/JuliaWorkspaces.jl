@@ -424,7 +424,16 @@ function _get_definitions_from_val(x::Union{SymbolServer.FunctionStore,SymbolSer
 end
 
 function _get_definitions_from_val(b::StaticLint.Binding, tls, env, results, runtime, root=nothing; in_scope=nothing)
-    if !(b.val isa CSTParser.EXPR)
+    # Every binding on an import chain contributes, innermost first; a chain
+    # that loops back on itself stops before it repeats.
+    for c in Iterators.reverse(StaticLint.binding_chain(b))
+        _get_own_definitions(c, tls, env, results, runtime, root; in_scope=in_scope)
+    end
+end
+
+function _get_own_definitions(b::StaticLint.Binding, tls, env, results, runtime, root; in_scope)
+    # the chain already covers a `val` that is itself a Binding
+    if !(b.val isa CSTParser.EXPR || b.val isa StaticLint.Binding)
         _get_definitions_from_val(b.val, tls, env, results, runtime, root; in_scope=in_scope)
     end
     if b.type === StaticLint.CoreTypes.Function || b.type === StaticLint.CoreTypes.DataType

@@ -1,5 +1,13 @@
 using LibGit2, InteractiveUtils
 
+# This file is also loaded by the dynamic analysis process, which runs on every Julia
+# back to 1.0, so it must not rely on anything newer. `getglobal` is 1.9+; before that
+# `getfield` on a module is the same thing. (`invokelatest` is only exported from 1.9
+# too, which is why it is always written `Base.invokelatest` here.)
+@static if !isdefined(Base, :getglobal)
+    getglobal(m::Module, s::Symbol) = getfield(m, s)
+end
+
 mutable struct Server
     storedir::String
     context::Pkg.Types.Context
@@ -87,6 +95,14 @@ struct DataTypeStore <: SymStore
     end
 end
 
+# `Base.fieldtypes` is 1.1+, and through 1.4 it throws "cannot assign variables in other
+# modules" for `Core.Module`. There a concrete type's `types` is always populated.
+@static if VERSION >= v"1.5-"
+    _fieldtypes(@nospecialize(t)) = Base.fieldtypes(t)
+else
+    _fieldtypes(@nospecialize(t)) = t.types
+end
+
 function DataTypeStore(@nospecialize(t), symbol, parent_mod)
     ur_t = Base.unwrap_unionall(t)
     parameters = if isdefined(ur_t, :parameters)
@@ -98,7 +114,7 @@ function DataTypeStore(@nospecialize(t), symbol, parent_mod)
     end
     has_fields = isconcretetype(ur_t) && fieldcount(ur_t) > 0
     types = if has_fields
-        Any[_parameter(p) for p in Base.fieldtypes(ur_t)]
+        Any[_parameter(p) for p in _fieldtypes(ur_t)]
     elseif isdefined(ur_t, :types)
         Any[_parameter(p) for p in ur_t.types]
     else
@@ -193,12 +209,16 @@ function maybe_fixup_stdlib_path(path)
     return path
 end
 
-_default_world_age() =
-    if isdefined(Base, :get_world_counter)
-        Base.get_world_counter()
-    else
-        typemax(UInt)
-    end
+# `Base.get_world_counter` is 1.2+.
+@static if isdefined(Base, :get_world_counter)
+    get_world_counter() = Base.get_world_counter()
+else
+    get_world_counter() = ccall(:jl_get_world_counter, UInt, ())
+end
+
+# Not `typemax(UInt)` before 1.2: `methodinfo` memoizes on the world, so a constant world
+# would keep serving method lists from before a package load and miss its overloads.
+_default_world_age() = get_world_counter()
 
 const _METHOD_WORLD_FIELD =
     :primary_world in fieldnames(Method) ? :primary_world : :min_world
@@ -293,7 +313,7 @@ function cache_methods(@nospecialize(f), name, env, get_return_type; min_world::
         # method as written.
         if is_vararg && nargs < nsigparams
             last_param = sig.parameters[end]
-            if last_param isa Core.TypeofVararg
+            if Base.isvarargtype(last_param) # not `isa Core.TypeofVararg`, which is 1.7+
                 # Unbounded `Vararg{T}` or `Vararg{T,N} where N` survives in the tuple.
                 push!(MS.sig, argnames[nargs + 1] => FakeTypeName(last_param))
             else
@@ -372,16 +392,16 @@ end
 # (`isdefined` would say true, then `getglobal` throws), so it filters those out
 # before we read them. Only on 1.12+; fall back to `isdefined` on 1.11.
 @static if isdefined(Base, :isdefinedglobal)
-    _isdefinedglobal(m::Module, s::Symbol) = invokelatest(Base.isdefinedglobal, m, s)
+    _isdefinedglobal(m::Module, s::Symbol) = Base.invokelatest(Base.isdefinedglobal, m, s)
 else
-    _isdefinedglobal(m::Module, s::Symbol) = invokelatest(isdefined, m, s)
+    _isdefinedglobal(m::Module, s::Symbol) = Base.invokelatest(isdefined, m, s)
 end
 
 # Whether `s` is exported by `m`. invokelatest for the same world-age reason as
 # name enumeration. Pre-1.11 has no `public` keyword, and `names(m)` there is the
 # exported set. (The public set needs no predicate — `unsorted_names(m)` IS it.)
 @static if isdefined(Base, :isexported)
-    _isexported(m::Module, s::Symbol) = invokelatest(Base.isexported, m, s)
+    _isexported(m::Module, s::Symbol) = Base.invokelatest(Base.isexported, m, s)
 else
     _isexported(m::Module, s::Symbol) = s in unsorted_names(m)
 end
@@ -391,7 +411,7 @@ end
 # `_isdefinedglobal`); without it one such name aborts the whole package.
 function _try_getglobal(m::Module, s::Symbol)
     try
-        return (true, invokelatest(getglobal, m, s))
+        return (true, Base.invokelatest(getglobal, m, s))
     catch err
         err isa UndefVarError && return (false, nothing)
         rethrow()
@@ -821,7 +841,7 @@ function load_core(; get_return_type = false)
     # `invokelatest` and `invoke_in_world` forward keyword arguments to their
     # target (`f(args...; kwargs...)`), but each is a single crawled method whose
     # `Base.kwarg_decl` reports no keywords and whose parameters are the generic
-    # `(x...)` — so `check_call` would flag `invokelatest(f, args...; kw=v)` as an
+    # `(x...)` — so `check_call` would flag `Base.invokelatest(f, args...; kw=v)` as an
     # unknown keyword, and hover/signature-help shows meaningless `x...`. Replace
     # the methods with their documented forms (mirroring the internal
     # `_call_latest`/`_call_in_world` signatures) plus a keyword splat so any

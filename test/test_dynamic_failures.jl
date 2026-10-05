@@ -206,8 +206,8 @@ end
     using JuliaWorkspaces: DynamicJuliaProcess, WatchEnvironmentKey, _expansion_batch_timeout!,
         FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS, DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS
 
-    # Building a context loads its packages (a workspace member may even
-    # precompile), so the first batch per context and child is generous; the
+    # Building a context loads its packages (a workspace member from source,
+    # since children never precompile), so the first batch per context and child is generous; the
     # later ones keep the tight budget that contains a hanging macro.
     @test FIRST_EXPANSION_BATCH_TIMEOUT_SECONDS > DEFAULT_EXPANSION_BATCH_TIMEOUT_SECONDS
     key = WatchEnvironmentKey(raw"c:\ws\P", UInt64(1))
@@ -245,7 +245,7 @@ end
 
     timed_out = _humanize_djp_failure(WatchEnvironmentKey(raw"c:\ws\P", UInt64(1)),
         DJPRequestTimeoutException(key, "indexProject", 300))
-    @test occursin("did not answer `indexProject` within 300s.", timed_out)
+    @test occursin("made no progress on `indexProject` for 300s.", timed_out)
 
     # An error with no recognizable wrapper still collapses to one line.
     plain = _humanize_djp_failure(CreateStandaloneProjectKey(raw"c:\ws\P", UInt64(1)), ErrorException("boom"))
@@ -293,6 +293,67 @@ end
     end
 end
 
+@testitem "Dynamic failures: child activity extends the request deadline" begin
+    using JuliaWorkspaces: DynamicJuliaProcess, DJPRequestTimeoutException, _send_djp_request,
+        _note_activity!, WatchEnvironmentKey, JuliaDynamicAnalysisProtocol
+    using JuliaWorkspaces: JSONRPC
+
+    # A fixed deadline killed children that were steadily indexing a large
+    # environment; only silence may fail the request.
+    key = WatchEnvironmentKey("/ws/P", UInt64(1))
+    djp = DynamicJuliaProcess(key, "/ws/P", nothing, :watch_environment)
+
+    inbound = Base.BufferStream()
+    outbound = Base.BufferStream()
+    djp.endpoint = JSONRPC.JSONRPCEndpoint(outbound, inbound)
+    JSONRPC.start(djp.endpoint)
+
+    active_for = 2.5
+    try
+        t0 = time()
+        activity = @async while time() - t0 < active_for
+            _note_activity!(djp)
+            sleep(0.3)
+        end
+
+        err = nothing
+        try
+            _send_djp_request(djp, 1,
+                JuliaDynamicAnalysisProtocol.index_project_request_type,
+                JuliaDynamicAnalysisProtocol.IndexProjectParams("/ws/P", nothing, "/tmp/store", nothing))
+        catch e
+            err = e
+        end
+        elapsed = time() - t0
+        wait(activity)
+
+        @test err isa DJPRequestTimeoutException
+        @test elapsed > active_for
+    finally
+        try close(inbound) catch end
+        try close(outbound) catch end
+    end
+end
+
+@testitem "Dynamic failures: any child message counts as activity" begin
+    using JuliaWorkspaces: DynamicJuliaProcess, dispatch_dynamicprocess_msg,
+        WatchEnvironmentKey, JuliaDynamicAnalysisProtocol
+
+    key = WatchEnvironmentKey("/ws/P", UInt64(1))
+    djp = DynamicJuliaProcess(key, "/ws/P", nothing, :watch_environment)
+    ch = Channel(Inf)
+
+    progress = (method=JuliaDynamicAnalysisProtocol.index_progress_notification_type.method,
+        params=Dict("message" => "Indexing Foo (1/2)...", "percentage" => 50))
+    unknown = (method="someFutureNotification", params=nothing)
+
+    for msg in (progress, unknown)
+        djp.last_activity[] = 0.0
+        dispatch_dynamicprocess_msg(nothing, msg, (ch, djp))
+        @test djp.last_activity[] > 0.0
+    end
+end
+
 @testitem "Dynamic failures: a depot lock collision is classed as infrastructure" begin
     using JuliaWorkspaces: _is_infra_failure, DynamicProcessCrashException, WatchEnvironmentKey
     using JuliaWorkspaces: JSONRPC
@@ -326,6 +387,25 @@ end
     # process put an `environment_errors` diagnostic on every Project.toml in the
     # workspace at once.
     @test _is_infra_failure(DynamicProcessCrashException(WatchEnvironmentKey("/ws/P", UInt64(1)), 0))
+end
+
+@testitem "Dynamic failures: symbol store contention is classed as infrastructure" begin
+    using JuliaWorkspaces: _is_infra_failure
+    using JuliaWorkspaces: JSONRPC
+
+    # The message one indexing child produced while another process held the
+    # stdlib cache it tried to replace (top-500 sweep, Distributions).
+    @test _is_infra_failure(JSONRPC.JSONRPCError(-32000,
+        "Failed to index project at C:\\top100\\Distributions: IOError: unlink(\"C:\\depot\\scratchspaces\\e554591c-7f10-434f-9f27-2097f62a04fd\\store_path_v3\\S\\SparseArrays\\2f01184e-e22b-5df5-ae63-d93ebab69eaf\\1.13.0.jstore\"): resource busy or locked (EBUSY)", nothing))
+    @test _is_infra_failure(Base.IOError("rename(\"…/jl_AB12.tmp\", \"…/1.13.0.jstore\"): operation not permitted (EPERM)", Base.UV_EPERM))
+    @test _is_infra_failure(Base.IOError("stat(\"…/abc.tombstone\"): permission denied (EACCES)", Base.UV_EACCES))
+    @test _is_infra_failure(Base.IOError("rename(\"…/x.unavailable\", \"…/y.unavailable\"): permission denied (EACCES)", Base.UV_EACCES))
+
+    # A store file that is genuinely missing or unreadable for another reason
+    # is not contention.
+    @test !_is_infra_failure(Base.IOError("open(\"…/1.13.0.jstore\"): no such file or directory (ENOENT)", Base.UV_ENOENT))
+    # The project's own files stay the project's problem, whatever the errno.
+    @test !_is_infra_failure(Base.IOError("rename(\"/ws/P/a\", \"/ws/P/Project.toml\"): operation not permitted (EPERM)", Base.UV_EPERM))
 end
 
 @testitem "Dynamic failures: a crashed child reports its exit code and its output" begin
@@ -385,4 +465,94 @@ end
     # Still an infra failure: it says nothing about the project, so it must not
     # become an `environment_errors` diagnostic on the user's Project.toml.
     @test _is_infra_failure(killed)
+end
+
+@testitem "Dynamic failures: a killed child's termination does not take down its retry" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, DynamicJuliaProcess, ReconcileMsg,
+        ProcessIndexFailedMsg, ProcessTerminatedMsg, ProcessIndexedMsg, TestEnvironmentReadyResult,
+        WatchTestEnvironmentKey, DJPKey, DJPRequestTimeoutException, DynamicProcessStarting,
+        transition!, state, handle!
+
+    # Mirror `_launch_process!`, which moves the child to `Starting`.
+    procs = DynamicJuliaProcess[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_failure_attempts=2,
+        launcher=(df, djp) -> (push!(procs, djp); transition!(djp.fsm, DynamicProcessStarting; reason="test")))
+
+    k = WatchTestEnvironmentKey("/ws/R", "R", UInt64(1))
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+    @test length(procs) == 1
+
+    # The timeout kills the first child and retries.
+    handle!(df, ProcessIndexFailedMsg(k, DJPRequestTimeoutException(k, "indexProject", 300), procs[1]))
+    @test length(procs) == 2
+
+    # Killing the first child ends its message loop, which reports the
+    # termination only now, while the retry is still starting under the same
+    # key. That used to kill the retry and settle the key as failed.
+    handle!(df, ProcessTerminatedMsg(k, procs[1]))
+    @test df.procs[k] === procs[2]
+    @test state(procs[2].fsm) == DynamicProcessStarting
+    @test k in df.inflight
+    @test k in df.launching
+    @test !(k in df.failed_projects)
+    @test !isready(df.out_channel)
+
+    handle!(df, ProcessIndexedMsg(k, "/tmp/testenv"))
+    @test take!(df.out_channel) isa TestEnvironmentReadyResult
+    @test isempty(df.inflight)
+    @test df.pending_count[] == 0
+end
+
+@testitem "Dynamic failures: a second failure report from a replaced child is ignored" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, DynamicJuliaProcess, ReconcileMsg,
+        ProcessIndexFailedMsg, WatchTestEnvironmentKey, DJPKey, DynamicProcessCrashException,
+        DynamicProcessStarting, transition!, state, handle!
+
+    procs = DynamicJuliaProcess[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_failure_attempts=2,
+        launcher=(df, djp) -> (push!(procs, djp); transition!(djp.fsm, DynamicProcessStarting; reason="test")))
+
+    k = WatchTestEnvironmentKey("/ws/R", "R", UInt64(1))
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+
+    # A child that dies mid-index fails both its message loop and its pending
+    # request, so it reports twice. Only the first may count.
+    crash = DynamicProcessCrashException(k, 1)
+    handle!(df, ProcessIndexFailedMsg(k, crash, procs[1]))
+    @test length(procs) == 2
+    handle!(df, ProcessIndexFailedMsg(k, crash, procs[1]))
+
+    @test df.procs[k] === procs[2]
+    @test state(procs[2].fsm) == DynamicProcessStarting
+    @test df.failure_attempts[(kind=:watch_test_environment, path="/ws/R", package="R")] == 1
+    @test k in df.inflight
+    @test !(k in df.failed_projects)
+    @test !isready(df.out_channel)
+end
+
+@testitem "Dynamic failures: an unexpected termination is retried once" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, DynamicJuliaProcess, ReconcileMsg,
+        ProcessTerminatedMsg, WatchTestEnvironmentKey, DJPKey, FailedResult,
+        DynamicProcessStarting, transition!, handle!
+
+    procs = DynamicJuliaProcess[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); max_failure_attempts=2,
+        launcher=(df, djp) -> (push!(procs, djp); transition!(djp.fsm, DynamicProcessStarting; reason="test")))
+
+    k = WatchTestEnvironmentKey("/ws/R", "R", UInt64(1))
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+
+    # The child registered under the key dying is a real failure: retried once...
+    handle!(df, ProcessTerminatedMsg(k, procs[1]))
+    @test length(procs) == 2
+    @test !isready(df.out_channel)
+
+    # ...and settled as an infra failure, with no user-facing message, the second time.
+    handle!(df, ProcessTerminatedMsg(k, procs[2]))
+    @test length(procs) == 2
+    result = take!(df.out_channel)
+    @test result isa FailedResult
+    @test isempty(result.message)
+    @test k in df.failed_projects
+    @test df.pending_count[] == 0
 end

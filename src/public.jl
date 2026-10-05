@@ -15,6 +15,8 @@ export JuliaWorkspace,
     TextFile, SourceText,
     workspace_from_folders,
     add_folder_from_disc!,
+    GitIgnoreFilter,
+    is_in_ignored_folder,
     add_file_from_disc!,
     update_file_from_disc!,
     get_text_files,
@@ -41,6 +43,7 @@ export JuliaWorkspace,
     set_symbolcache!,
     set_max_failure_attempts!,
     set_djp_request_timeout!,
+    shutdown!,
     get_update_channel,
     get_legacy_cst,
     get_roots_for_uri,
@@ -1162,6 +1165,42 @@ function retry_failed_dynamic_projects!(jw::JuliaWorkspace)
     empty!(df.last_required)
     df.reconciled_once[] = false
     _reconcile!(jw)
+
+    return
+end
+
+"""
+    shutdown!(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+
+Stop the workspace's dynamic feature and kill every indexing child process.
+Hosts should call this when they exit (for a language server, on the `exit`
+notification), so children do not outlive them.
+
+Blocks until the reactor has stopped and every indexing child it launched has
+exited. If `cancel_token` is provided, throws
+`CancellationTokens.OperationCanceledException` when it is cancelled first; the
+shutdown itself still goes ahead. Pass a token from
+`CancellationTokenSource(seconds)` to bound the wait.
+
+Children get SIGTERM and, if still alive after a grace period
+(`DJP_KILL_GRACE_SECONDS`), SIGKILL, so a child stuck in its SIGTERM
+handling holds this up for that long. A host that abandons the wait and exits
+relies on the children's own parent-death handling instead. The workspace does
+no further dynamic work afterwards. No-op when it was already shut down.
+"""
+function shutdown!(jw::JuliaWorkspace; cancel_token::Union{CancellationTokens.CancellationToken,Nothing}=nothing)
+    @debug "shutdown!"
+
+    df = jw.dynamic_feature
+    state(df.controller_fsm) == DynamicControllerRunning || return
+
+    done = Channel{Nothing}(1)
+    put!(df.in_channel, ShutdownMsg(done))
+    if cancel_token !== nothing
+        wait(done, cancel_token)
+    else
+        wait(done)
+    end
 
     return
 end

@@ -12,6 +12,10 @@ jobs:
     with:
       include-all-compatible-minor-versions: true
       include-rc-versions: true
+      # A full GC after every test item (the default with more than one test process)
+      # takes 40-75s per collection on the macOS aarch64 runners under Julia >= 1.12,
+      # which pushed those legs past the 6h job limit.
+      gc-between-testitems: "false"
       # Which files hold test items is decided by JuliaTestItems.toml, not here.
       github_job_prep_script: .github/ci_prep.jl
     permissions: write-all

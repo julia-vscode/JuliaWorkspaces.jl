@@ -35,10 +35,8 @@ const compiled_modules = Set{Module}()
 
 const junk_framedata = FrameData[] # to allow re-use of allocated memory (this is otherwise a bottleneck)
 const junk_frames = Frame[]
-# Tracks which frames are currently pooled, so `recycle` can be idempotent (see below).
-const pooled_frames = Base.IdSet{Frame}()
 debug_mode() = false
-@noinline function _check_frame_not_in_junk(frame)
+@noinline function _check_frame_not_in_junk(frame::Frame)
     @assert frame.framedata ∉ junk_framedata
     @assert frame ∉ junk_frames
 end
@@ -49,9 +47,9 @@ end
     # catch block. `return_from`'s link-clearing is idempotent, but pooling a frame twice
     # lets it be handed out twice, aliasing a live frame into its own caller chain (an
     # infinite loop on the next exception). Pool each frame at most once.
-    frame in pooled_frames && return
+    frame.pooled && return
     debug_mode() && _check_frame_not_in_junk(frame)
-    push!(pooled_frames, frame)
+    frame.pooled = true
     push!(junk_framedata, frame.framedata)
     push!(junk_frames, frame)
 end
@@ -67,6 +65,7 @@ end
 function link_caller_callee!(caller::Frame, callee::Frame)
     caller.callee = callee
     callee.caller = caller
+    copy!(callee.framedata.current_scopes, caller.framedata.current_scopes)
     return callee
 end
 
@@ -107,24 +106,49 @@ function find_toplevel_module_id(parentmod::Module, newname::Symbol, ex::Expr)
     return fallback
 end
 
+# The parts of a `:module` expression, in either the 3-arg or the 4-arg (syntax-versioned) form.
+struct ModuleExprParts
+    syntax_version::Any # an AST element, `nothing` for the 3-arg form
+    std_imports::Bool
+    name::Symbol
+    body::Expr
+    ModuleExprParts(@nospecialize(syntax_version), std_imports::Bool, name::Symbol, body::Expr) =
+        new(syntax_version, std_imports, name, body)
+end
+
+# Validate the parts as native evaluation does, throwing the same errors.
+function ModuleExprParts(ex::Expr)
+    @assert ex.head === :module
+    args = ex.args
+    # Native evaluation (Julia 1.14) tells the syntax version from the `Bool` that follows it.
+    # Earlier versions never produce the 4-arg form.
+    i = (!isempty(args) && !isa(args[1], Bool)) ? 2 : 1
+    syntax_version = i == 2 ? args[1] : nothing
+    if length(args) != i + 2 || !isa(args[i+2], Expr)
+        error("syntax: malformed module expression")
+    end
+    # e.g. an unescaped module name from a macro, which is a `GlobalRef`
+    name = args[i+1]
+    name isa Symbol || throw(TypeError(:module, "", Symbol, name))
+    body = args[i+2]::Expr
+    body.head === :block || error("syntax: module expression third argument must be a block")
+    return ModuleExprParts(syntax_version, args[i] === true, name, body)
+end
+
 """
     mod, body = find_or_create_module(parentmod::Module, ex::Expr)
 
 Given a `:module` expression `ex`, return the module it refers to (creating an empty one in
 `parentmod` if it does not yet exist) together with the `:block` of body statements. Handles
 both the 3-arg and 4-arg (syntax-versioned) `:module` forms.
+
+This is the revision-oriented resolution used by [`ExprSplitter`](@ref): unlike native
+evaluation, it re-enters an existing module, and it never runs `__init__`. `Frame` instead
+evaluates `:module` expressions as native evaluation does.
 """
 function find_or_create_module(parentmod::Module, ex::Expr)
-    @assert ex.head === :module
-    if length(ex.args) == 3
-        (std_imports, newname, modbody) = ex.args[1:3]
-        syntax_version = nothing
-    elseif length(ex.args) == 4
-        (syntax_version, std_imports, newname, modbody) = ex.args[1:4]
-    else
-        error("unexpected :module form with $(length(ex.args)) args")
-    end
-    newname = newname::Symbol
+    parts = ModuleExprParts(ex)
+    newname = parts.name
     mod = nothing
     if invokelatest(isdefinedglobal, parentmod, newname)
         found = invokelatest(getglobal, parentmod, newname)
@@ -154,13 +178,102 @@ function find_or_create_module(parentmod::Module, ex::Expr)
     end
     if mod === nothing
         loc = firstline(ex)
-        module_ex = Expr(:module, std_imports, newname, Expr(:block, loc))
-        if syntax_version !== nothing
-            pushfirst!(module_ex.args, syntax_version)
+        module_ex = Expr(:module, parts.std_imports, newname, Expr(:block, loc))
+        if parts.syntax_version !== nothing
+            pushfirst!(module_ex.args, parts.syntax_version)
         end
         mod = Core.eval(parentmod, module_ex)::Module
     end
-    return mod, modbody::Expr
+    return mod, parts.body
+end
+
+# Native evaluation of a `:module` expression creates the module, evaluates the body in it,
+# and then completes it, which runs `__init__`. `Frame` interprets the body in between.
+# Julia 1.13 exports the two native steps (JuliaLang/julia#59604), and Julia 1.14 adds a
+# syntax-version argument to the first, along with `Base._setup_module!`.
+const has_module_c_api = VERSION ≥ v"1.13.0-DEV.1199"
+
+# Create the module of the `:module` expression `ex` as native evaluation does: always a fresh
+# module, replacing an existing binding of the same name in `parentmod`. Return it with the
+# `:block` of body statements, to be evaluated before `end_module`.
+function begin_module(parentmod::Module, ex::Expr)
+    parts = ModuleExprParts(ex)
+    body = parts.body
+    # Like native evaluation, take the module's location from the first body statement.
+    lnn = isempty(body.args) ? nothing : body.args[1]
+    lnn isa LineNumberNode || (lnn = nothing)
+    @static if has_module_c_api
+        filename = (lnn === nothing || !isa(lnn.file, Symbol)) ? "none" : String(lnn.file)
+        lineno = lnn === nothing ? 0 : lnn.line
+        @static if isdefinedglobal(Base, :_setup_module!)
+            newmod = ccall(:jl_begin_new_module, Any, (Any, Any, Any, Cint, Cstring, Cint),
+                           parentmod, parts.name, parts.syntax_version, parts.std_imports, filename, lineno)
+        else
+            newmod = ccall(:jl_begin_new_module, Any, (Any, Any, Cint, Cstring, Cint),
+                           parentmod, parts.name, parts.std_imports, filename, lineno)
+        end
+    else
+        # Evaluate an empty module natively and interpret the body into it afterwards. The
+        # module is then already closed natively, so `end_module` emulates the deferred
+        # initialization (imprecisely if the parent is itself being evaluated natively).
+        newmod = Core.eval(parentmod, Expr(:module, parts.std_imports, parts.name,
+                                           lnn === nothing ? Expr(:block) : Expr(:block, lnn)))
+        @lock module_init_lock push!(open_modules, newmod)
+    end
+    return newmod::Module, body
+end
+
+# Complete a module created by `begin_module` after its body has been evaluated, as native
+# evaluation does: unless its parent module is still being evaluated, run the `__init__`
+# functions of `mod` and of its completed submodules (natively), in the order they completed.
+function end_module(mod::Module)
+    @static if has_module_c_api
+        ccall(:jl_end_new_module, Cvoid, (Any,), mod)
+    else
+        initializers = Module[]
+        @lock module_init_lock begin
+            delete!(open_modules, mod)
+            if ccall(:jl_generating_output, Cint, ()) == 0
+                push!(module_init_order, mod)
+                if !(parentmodule(mod) in open_modules)
+                    filter!(module_init_order) do m::Module
+                        is_submodule(m, mod) || return true
+                        push!(initializers, m)
+                        return false
+                    end
+                end
+            end
+        end
+        foreach(run_module_initializer, initializers)
+    end
+    return mod
+end
+
+@static if !has_module_c_api
+# The native bookkeeping of open modules and pending initializers, for the modules whose body
+# `Frame` interprets.
+const open_modules = Base.IdSet{Module}()
+const module_init_order = Module[]
+const module_init_lock = ReentrantLock()
+
+function is_submodule(m::Module, parent::Module)
+    while m !== parent
+        p = parentmodule(m)
+        p === m && return false
+        m = p
+    end
+    return true
+end
+
+function run_module_initializer(m::Module)
+    try
+        if invokelatest(isdefinedglobal, m, :__init__)
+            invokelatest(invokelatest(getglobal, m, :__init__))
+        end
+    catch err
+        rethrow(InitError(nameof(m), err))
+    end
+end
 end
 
 """
@@ -178,7 +291,6 @@ function clear_caches()
     empty!(framedict)
     empty!(genframedict)
     empty!(junk_frames)
-    empty!(pooled_frames)
     for bp in breakpoints()
         empty!(bp.instances)
     end
@@ -259,8 +371,7 @@ function prepare_framecode(method::Method, @nospecialize(argtypes); enter_genera
         return Compiled()
     end
     # Get static parameters
-    (ti, lenv::SimpleVector) = ccall(:jl_type_intersection_with_env, Any, (Any, Any),
-                        argtypes, sig)::SimpleVector
+    (_ti, lenv::SimpleVector) = @ccall jl_type_intersection_with_env(argtypes::Any, sig::Any)::SimpleVector
     enter_generated &= is_generated(method)
     if is_generated(method) && !enter_generated
         framecode = get(genframedict, (method, argtypes::DataType), nothing)
@@ -327,9 +438,9 @@ end
     JuliaInterpreter.framecode_valid_world(framecode, world)
 
 Return `true` if `framecode`'s baked-in binding resolutions are valid in `world`.
-On Julia 1.12+, `optimize!` may bake `const`-global values (e.g. library names for
-`ccall` wrappers) into a `FrameCode`; if any such binding is later redefined, the cached
-`FrameCode` must be rebuilt. `prepare_framecode` and `get_framecode` call this before
+On Julia 1.12+, building a `FrameCode` may bake `const`-global values (folded constants, or
+e.g. library names for `ccall` wrappers) into it; if any such binding is later redefined, the
+cached `FrameCode` must be rebuilt. `prepare_framecode` and `get_framecode` call this before
 returning a cached entry.
 """
 function framecode_valid_world(framecode::FrameCode, world::UInt)
@@ -425,7 +536,6 @@ end
 
 function prepare_framedata(framecode, argvals::Vector{Any}, lenv::SimpleVector=empty_svec, caller_will_catch_err::Bool=false)
     src = framecode.src
-    slotnames = src.slotnames
     ssavt = src.ssavaluetypes
     ng, ns = isa(ssavt, Int) ? ssavt : length(ssavt::Vector{Any}), length(src.slotflags)
     if length(junk_framedata) > 0
@@ -522,7 +632,7 @@ function prepare_frame(framecode::FrameCode, args::Vector{Any}, lenv::SimpleVect
 end
 
 function prepare_frame_caller(caller::Frame, framecode::FrameCode, args::Vector{Any}, lenv::SimpleVector)
-    caller_will_catch_err = !isempty(caller.framedata.exception_frames) || caller.framedata.caller_will_catch_err
+    caller_will_catch_err = will_catch_err(caller)
     caller.callee = frame = prepare_frame(framecode, args, lenv, caller_will_catch_err; world=caller.world)
     copy!(frame.framedata.current_scopes, caller.framedata.current_scopes)
     frame.caller = caller
@@ -572,7 +682,7 @@ ex = quote
         end
 end
 mod = Main
-ex = :($(Expr(:toplevel, :(#= REPL[7]:6 =#), :(const threshold = 0.1))))
+ex = :(\$(Expr(:toplevel, :(#= REPL[7]:6 =#), :(const threshold = 0.1))))
 ```
 
 `ExprSplitter` created `Main.Private` so that its internal expressions could be evaluated.
@@ -798,7 +908,7 @@ function enter_call_expr(expr::Expr;
                          world::UInt=default_world(),
                          method_table::Union{Nothing,MethodTable}=nothing)
     r = determine_method_for_expr(expr; enter_generated, world, method_table)
-    if r !== nothing && !isa(r[1], Compiled)
+    if r !== nothing && !(r isa Tuple{Compiled,Vararg{Any}})
         return prepare_frame(Base.front(r)...; world)
     end
     nothing
@@ -852,7 +962,7 @@ function enter_call(@nospecialize(finfo), @nospecialize(args...);
         error(f, " is a builtin or intrinsic")
     end
     r = prepare_call(f, allargs; enter_generated, world, method_table)
-    if r !== nothing && !isa(r[1], Compiled)
+    if r !== nothing && !(r isa Tuple{Compiled,Vararg{Any}})
         return prepare_frame(Base.front(r)...; world)
     end
     return nothing

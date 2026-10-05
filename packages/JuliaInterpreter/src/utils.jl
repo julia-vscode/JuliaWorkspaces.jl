@@ -19,6 +19,9 @@ end
 # into the stack (see `step_toplevel!`), so a frame with a caller may still be toplevel.
 is_toplevel_frame(frame::Frame) = scopeof(frame) isa Module
 
+is_core_eval(scope) = scope isa Method && scope.sig === Tuple{typeof(Core.eval),Module,Any}
+will_catch_err(frame::Frame) = !isempty(frame.framedata.exception_frames) || frame.framedata.caller_will_catch_err
+
 function Base.nameof(frame::Frame)
     s = frame.framecode.scope
     isa(s, Method) ? s.name : nameof(s)
@@ -82,9 +85,9 @@ end
 
 separate_kwargs(args...; kwargs...) = (args, values(kwargs))
 
-pc_expr(src::CodeInfo, pc) = src.code[pc]
-pc_expr(framecode::FrameCode, pc) = pc_expr(framecode.src, pc)
-pc_expr(frame::Frame, pc) = pc_expr(frame.framecode, pc)
+pc_expr(src::CodeInfo, pc::Int) = src.code[pc]
+pc_expr(framecode::FrameCode, pc::Int) = pc_expr(framecode.src, pc)
+pc_expr(frame::Frame, pc::Int) = pc_expr(frame.framecode, pc)
 pc_expr(frame::Frame) = pc_expr(frame, frame.pc)
 
 function find_used(code::CodeInfo)
@@ -140,18 +143,6 @@ function wrap_params(expr, sparams::Vector{Symbol})
     return isempty(params) ? expr : Expr(:where, expr, params...)
 end
 
-function scopename(tn::TypeName)
-    modpath = Base.fullname(tn.module)
-    if isa(modpath, Tuple{Symbol})
-        return Expr(:., modpath[1], QuoteNode(tn.name))
-    end
-    ex = Expr(:., modpath[end-1], QuoteNode(modpath[end]))
-    for i = length(modpath)-2:-1:1
-        ex = Expr(:., modpath[i], ex)
-    end
-    return Expr(:., ex, QuoteNode(tn.name))
-end
-
 ## Predicates
 
 isidentical(x) = Base.Fix2(===, x)   # recommended over isequal(::Symbol) since it cannot be invalidated
@@ -187,6 +178,22 @@ function is_define_method_call(@nospecialize(stmt))
     f = stmt.args[1]
     return f === Core.define_method || is_global_ref(f, Core, :define_method) ||
            is_quotenode_egal(f, Core.define_method)
+end
+
+# Lowering declares a global with a builtin call on some versions: `Core.declare_global` on
+# Julia 1.13+, and `Core.set_binding_type!` for a typed global on Julia 1.10–1.11.
+function is_global_declaration_call(@nospecialize(stmt))
+    isexpr(stmt, :call) || return false
+    f = stmt.args[1]
+    @static if isdefinedglobal(Core, :declare_global)
+        return f === Core.declare_global || is_global_ref(f, Core, :declare_global) ||
+               is_quotenode_egal(f, Core.declare_global)
+    elseif isdefinedglobal(Core, :set_binding_type!)
+        return f === Core.set_binding_type! || is_global_ref(f, Core, :set_binding_type!) ||
+               is_quotenode_egal(f, Core.set_binding_type!)
+    else
+        return false
+    end
 end
 
 is_methoddef1(@nospecialize(stmt)) = isexpr(stmt, :method, 1) ||
@@ -277,6 +284,27 @@ function is_doc_expr(@nospecialize(ex))
 end
 
 is_leaf(frame::Frame) = frame.callee === nothing
+
+# Is `ex` a `Core.tuple(...)` call, as lowering emits for a `ccall`'s `(name, lib)` target on
+# Julia < 1.13? The constructor may appear as a `QuoteNode`, a `GlobalRef`, or the function itself.
+function is_core_tuple_call(@nospecialize(ex))
+    isexpr(ex, :call) || return false
+    a = (ex::Expr).args[1]
+    return a === Core.tuple ||
+           (isa(a, QuoteNode) && a.value === Core.tuple) ||
+           (isa(a, GlobalRef) && a.mod === Core && a.name === :tuple)
+end
+
+# Is `ex` a `Base.getproperty(x, :name)` call, as lowering emits for a qualified name `x.name` in
+# some positions (e.g. inside a `ccall` target on Julia < 1.13)? The function may appear as a
+# `QuoteNode`, a `GlobalRef`, or the function itself.
+function is_getproperty_call(@nospecialize(ex))
+    isexpr(ex, :call, 3) || return false
+    a = (ex::Expr).args[1]
+    return a === Base.getproperty ||
+           (isa(a, QuoteNode) && a.value === Base.getproperty) ||
+           is_global_ref(a, Base, :getproperty)
+end
 
 is_vararg_type(@nospecialize x) = x isa Core.TypeofVararg
 
@@ -505,7 +533,6 @@ function codelocation(code::CodeInfo, idx::Int)
     idx′ = idx - 1
     # if zero, look behind until we find where we last might have had a line
     while idx′ > 0
-        ex = code.code[idx′]
         codeloc = codelocs(code, idx′)
         codeloc == 0 || return codeloc
         idx′ -= 1
@@ -599,12 +626,6 @@ function framecode_lines(src::CodeInfo)
         push!(lines, chomp(String(take!(buf))))
     end
     return lines
-    show(buf, src)
-    code = filter!(split(String(take!(buf)), '\n')) do line
-        !(line == "CodeInfo(" || line == ")" || isempty(line) || occursin("within `", line))
-    end
-    code .= replace.(code, Ref(r"\$\(QuoteNode\((.+?)\)\)" => s"\1"))
-    return code
 end
 framecode_lines(framecode::FrameCode) = framecode_lines(framecode.src)
 
@@ -799,7 +820,7 @@ function eval_code(frame::Frame, expr::Expr)
     used_symbols = Set{Symbol}((Symbol("#self#"),))
     extract_usage!(used_symbols, expr)
     # see https://github.com/JuliaLang/julia/issues/31255 for the Symbol("") check
-    vars = filter(v -> v.name != Symbol("") && v.name in used_symbols, locals(frame))
+    vars = filter(v -> v.name !== Symbol("") && v.name in used_symbols, locals(frame))
     defined_ssa    = findall(i -> isassigned(data.ssavalues, i) && Symbol("%$i")  in used_symbols, 1:length(data.ssavalues))
     defined_locals = findall(i-> data.locals[i] isa Some        && Symbol("@_$i") in used_symbols, 1:length(data.locals))
     res = gensym()
