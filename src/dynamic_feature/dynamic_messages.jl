@@ -194,15 +194,24 @@ struct ExpansionBatchMsg <: DynamicReactorMessage
     entries::Vector{ExpansionEntry}
 end
 
-"""Posted by the async expansion task once the child answered a batch."""
+"""
+Posted by the async expansion task once the child answered a batch. `djp` is
+the child that served it: a replacement under the same key must not be
+mistaken for it.
+"""
 struct ExpansionBatchDoneMsg <: DynamicReactorMessage
     env_key::DJPKey
+    djp::AbstractDynamicJuliaProcess
     results::Vector{ExpansionOutcomeEntry}
 end
 
-"""Posted by the async expansion task when a batch failed (timeout, child death, JSONRPC error)."""
+"""
+Posted by the async expansion task when a batch failed (timeout, child death,
+JSONRPC error). `djp` as for `ExpansionBatchDoneMsg`.
+"""
 struct ExpansionBatchFailedMsg <: DynamicReactorMessage
     env_key::DJPKey
+    djp::AbstractDynamicJuliaProcess
     entry_keys::Vector{ExpansionKey}
     err::Any
 end

@@ -181,8 +181,8 @@ end
     @test length(launches) == 3
     # … until `a` is idle: its batch served (stand in for the child), the
     # completion admits `b` by evicting `a`.
-    empty!(df.expansion_queue[a]); push!(df.expansion_inflight, a)
-    handle!(df, ExpansionBatchDoneMsg(a, ExpansionOutcomeEntry[]))
+    empty!(df.expansion_queue[a]); df.expansion_inflight[a] = df.procs[a]
+    handle!(df, ExpansionBatchDoneMsg(a, df.procs[a], ExpansionOutcomeEntry[]))
     drain_out!(df)
     @test length(launches) == 4 && launches[end] == b
     @test b in df.refreshing && !haskey(df.procs, a)
@@ -218,7 +218,7 @@ end
     handle!(df, batch(b, UInt64(6)))
     @test haskey(df.procs, b)
     push!(df.expansion_revive_attempted, b)   # as `_drain_expansion_queue!` records once it revived
-    handle!(df, ExpansionBatchFailedMsg(b, ExpansionKey[ExpansionKey((UInt64(1), UInt64(2), UInt64(6)))], ErrorException("boom")))
+    handle!(df, ExpansionBatchFailedMsg(b, df.procs[b], ExpansionKey[ExpansionKey((UInt64(1), UInt64(2), UInt64(6)))], ErrorException("boom")))
     drain_out!(df)
     @test !haskey(df.procs, b)
     handle!(df, batch(b, UInt64(7)))
@@ -406,4 +406,56 @@ end
     @test by_name["y"].addr != 0
 
     jw.dynamic_feature === nothing || put!(jw.dynamic_feature.in_channel, JW.ShutdownMsg())
+end
+
+@testitem "Dynamic expansion: a late batch answer from a replaced child leaves the replacement alone" begin
+    using JuliaWorkspaces: DynamicFeature, DynamicPersistent, ReconcileMsg, ExpansionBatchDoneMsg,
+        ExpansionBatchFailedMsg, MacroExpansionsResult, ExpansionOutcomeEntry, ExpansionBatchMsg,
+        WatchTestEnvironmentKey, DJPKey, ExpansionKey, handle!
+
+    launches = DJPKey[]
+    df = DynamicFeature(DynamicPersistent, mktempdir(); v2_lifecycle=true,
+        launcher=(df, djp) -> push!(launches, djp.key))
+    k = WatchTestEnvironmentKey("/ws/a", "A", UInt64(1))
+    drain_out!(df) = (while isready(df.out_channel); take!(df.out_channel); end)
+
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+    old = df.procs[k]
+    # (Stand in for `old` serving a batch, as `_drain_expansion_queue!` sets up.)
+    df.expansion_queue[k] = ExpansionBatchMsg[]
+    df.expansion_inflight[k] = old
+
+    # A reconcile drops the key, killing `old`, and the next one brings it
+    # back with a fresh child before `old`'s cancelled batch task reports.
+    handle!(df, ReconcileMsg(Set{DJPKey}()))
+    @test !haskey(df.expansion_inflight, k)
+    handle!(df, ReconcileMsg(Set{DJPKey}([k])))
+    @test length(launches) == 2
+    new = df.procs[k]
+    @test new !== old
+    df.expansion_inflight[k] = new   # the replacement is serving a batch of its own
+    drain_out!(df)
+
+    # `old`'s failure settles its own entries but neither kills the
+    # replacement nor clears the replacement's in-flight batch.
+    ek1 = ExpansionKey((UInt64(1), UInt64(2), UInt64(3)))
+    handle!(df, ExpansionBatchFailedMsg(k, old, ExpansionKey[ek1], ErrorException("killed")))
+    @test get(df.procs, k, nothing) === new
+    @test df.expansion_inflight[k] === new
+    msg = take!(df.out_channel)
+    @test msg isa MacroExpansionsResult
+    @test only(msg.entries).key == ek1 && only(msg.entries).status === :failed
+
+    # A late success from `old` is still published (results are
+    # content-addressed) without touching the replacement's bookkeeping.
+    ek2 = ExpansionKey((UInt64(1), UInt64(2), UInt64(4)))
+    handle!(df, ExpansionBatchDoneMsg(k, old, ExpansionOutcomeEntry[(key=ek2, status=:ok, text="x")]))
+    @test df.expansion_inflight[k] === new
+    msg = take!(df.out_channel)
+    @test msg isa MacroExpansionsResult && only(msg.entries).status === :ok
+
+    # The replacement's own answer clears the mark.
+    handle!(df, ExpansionBatchDoneMsg(k, new, ExpansionOutcomeEntry[]))
+    @test !haskey(df.expansion_inflight, k)
+    @test get(df.procs, k, nothing) === new
 end

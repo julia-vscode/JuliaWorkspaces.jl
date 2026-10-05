@@ -792,8 +792,10 @@ struct DynamicFeature
     # FIFO of batches per env key, waiting for the child to be settled (Done).
     # Never counts as a pending work item and never holds a launch slot.
     expansion_queue::Dict{DJPKey,Vector{ExpansionBatchMsg}}
-    # Env keys with an expansion batch currently in flight (one per child).
-    expansion_inflight::Set{DJPKey}
+    # Env keys with an expansion batch currently in flight (one per child), and
+    # the child serving it: a late answer from a child that has since been
+    # replaced under the same key must not touch the replacement.
+    expansion_inflight::Dict{DJPKey,DynamicJuliaProcess}
     # Env keys we already revived a child for (see `_drain_expansion_queue!`):
     # a cache-hit environment completes without ever launching one, so the
     # first batch launches it through the refresh machinery — at most once
@@ -860,7 +862,7 @@ struct DynamicFeature
             Vector{DJPKey}(),
             Set{DJPKey}(),
             Dict{DJPKey,Vector{ExpansionBatchMsg}}(),
-            Set{DJPKey}(),
+            Dict{DJPKey,DynamicJuliaProcess}(),
             Set{DJPKey}(),
             Set{ExpansionKey}(),
             Task[],               # child_tasks
@@ -1691,7 +1693,7 @@ function _evict_one_child!(df::DynamicFeature; idle_only::Bool)
     victim = nothing
     victim_busy = true
     for (key, djp) in df.procs
-        (_is_settled_child(df, key) && !(key in df.expansion_inflight)) || continue
+        (_is_settled_child(df, key) && !haskey(df.expansion_inflight, key)) || continue
         busy = _has_queued_batches(df, key)
         idle_only && busy && continue
         if victim === nothing || (victim_busy && !busy) ||
@@ -2348,7 +2350,7 @@ end
 
 # Send the next queued batch for `key` when its child is settled and idle.
 function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
-    key in df.expansion_inflight && return
+    haskey(df.expansion_inflight, key) && return
     q = get(df.expansion_queue, key, nothing)
     (q === nothing || isempty(q)) && return
     djp = get(df.procs, key, nothing)
@@ -2380,17 +2382,17 @@ function _drain_expansion_queue!(df::DynamicFeature, key::DJPKey)
     state(djp.fsm) == DynamicProcessDone || return   # still indexing/launching; kicked again on Done
 
     batch = popfirst!(q)
-    push!(df.expansion_inflight, key)
+    df.expansion_inflight[key] = djp
     _touch!(djp)
     transition!(djp.fsm, DynamicProcessIndexing; reason="macro expansion batch")
     timeout_seconds = _expansion_batch_timeout!(djp, batch.ctx_id)
     @async try
         outcomes = expand_macros(djp, batch.ctx_id, batch.imports, batch.ctx_module,
                                  batch.entries, timeout_seconds)
-        put!(df.in_channel, ExpansionBatchDoneMsg(key, outcomes))
+        put!(df.in_channel, ExpansionBatchDoneMsg(key, djp, outcomes))
     catch err
         @info "Macro expansion batch failed" key exception=(err, catch_backtrace())
-        put!(df.in_channel, ExpansionBatchFailedMsg(key, ExpansionKey[e.key for e in batch.entries], err))
+        put!(df.in_channel, ExpansionBatchFailedMsg(key, djp, ExpansionKey[e.key for e in batch.entries], err))
     end
     return
 end
@@ -2414,10 +2416,19 @@ function handle!(df::DynamicFeature, msg::ExpansionBatchMsg)
     return false
 end
 
+# Clear the in-flight mark only if `djp` is the child it was set for; a reconcile
+# or failure may have handed the key to a replacement in the meantime.
+function _clear_expansion_inflight!(df::DynamicFeature, key::DJPKey, djp)
+    get(df.expansion_inflight, key, nothing) === djp && delete!(df.expansion_inflight, key)
+    return
+end
+
 function handle!(df::DynamicFeature, msg::ExpansionBatchDoneMsg)
-    delete!(df.expansion_inflight, msg.env_key)
+    _clear_expansion_inflight!(df, msg.env_key, msg.djp)
+    # The results are content-addressed and valid whichever child produced
+    # them; only the child's own bookkeeping is skipped for a replaced one.
     djp = get(df.procs, msg.env_key, nothing)
-    if djp !== nothing
+    if djp !== nothing && djp === msg.djp
         _touch!(djp)
         state(djp.fsm) == DynamicProcessIndexing &&
             transition!(djp.fsm, DynamicProcessDone; reason="macro expansion batch done")
@@ -2433,16 +2444,22 @@ end
 
 function handle!(df::DynamicFeature, msg::ExpansionBatchFailedMsg)
     key = msg.env_key
-    delete!(df.expansion_inflight, key)
-    @warn "Macro expansion batch for $(_short_path(_key_path(key))) failed: $(_failure_reason(msg.err))"
+    _clear_expansion_inflight!(df, key, msg.djp)
+    current = get(df.procs, key, nothing) === msg.djp
+    if current
+        @warn "Macro expansion batch for $(_short_path(_key_path(key))) failed: $(_failure_reason(msg.err))"
+    else
+        # The child was killed and replaced while the batch was in flight; its
+        # failure says nothing about the replacement.
+        @debug "Expansion batch failure from a replaced child; not touching the current one" key
+    end
 
     # A failed batch (timeout = a hanging macro, or the child died) forfeits the
     # child: expansion for this env stays unavailable until a re-key respawns
     # it. Every queued entry settles `:failed` (the negative cache), so the same
     # macrocalls cannot kill a future child again.
-    djp = get(df.procs, key, nothing)
-    if djp !== nothing
-        try kill(djp) catch; end
+    if current
+        try kill(msg.djp) catch; end
         delete!(df.procs, key)
     end
     _settle_expansions_failed!(df, msg.entry_keys)
