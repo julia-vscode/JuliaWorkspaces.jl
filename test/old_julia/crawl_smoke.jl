@@ -1,4 +1,5 @@
-# Smoke test for the shared symbol server code on old Julia versions.
+# Smoke test for the shared symbol server code, and the dynamic analysis process's own
+# sources, on old Julia versions.
 #
 # `shared/symbolserver/` is also loaded by the dynamic analysis process, which runs on
 # every Julia back to 1.0, but the main test suite only runs on modern Julia. This script
@@ -6,7 +7,8 @@
 # runs the same getenvtree/symbols/cache_new_methods! pipeline over Core, Base and a
 # stdlib, checks that name enumeration sees every name `names` reports (a wrong-arity
 # `jl_module_names` ccall silently truncates that list), and round-trips the result
-# through the cache file writer and reader.
+# through the cache file writer and reader. It also parses every source file of the
+# process package and exercises its Base-only helpers.
 #
 # Run with `julia test/old_julia/crawl_smoke.jl`. Keep it runnable on Julia 1.0: no
 # keyword shorthand, no `isnothing`, no `@something`, etc.
@@ -24,6 +26,13 @@ include(joinpath(SHARED, "utils.jl"))
 include(joinpath(SHARED, "serialize.jl"))
 using .CacheStore
 
+end
+
+# The process package's helpers that need only Base, loaded as the package does.
+module ChildHelpers
+const CHILD_SRC = joinpath(@__DIR__, "..", "..", "juliadynamicanalysisprocess", "JuliaDynamicAnalysisProcess", "src")
+include(joinpath(CHILD_SRC, "workspace_members.jl"))
+include(joinpath(CHILD_SRC, "expansion_text.jl"))
 end
 
 using .SymbolServer: unsorted_names, symbols, getenvtree, getallns, cache_new_methods!,
@@ -91,4 +100,40 @@ using Test
             length(env[:Base].vals), " Base, ", length(env[:LinearAlgebra].vals),
             " LinearAlgebra entries; names(all=true): ", length(names(Core, all=true)), " Core, ",
             length(names(Base, all=true)), " Base, ", length(names(LinearAlgebra, all=true)), " LinearAlgebra")
+end
+
+# Every file of the process package is parsed on every Julia the process runs on, even
+# the parts that only run on newer ones.
+function parses_cleanly(path)
+    src = read(path, String)
+    pos = 1
+    while pos <= ncodeunits(src)
+        ex, pos = try
+            Meta.parse(src, pos)
+        catch
+            return false
+        end
+        ex isa Expr && (ex.head === :error || ex.head === :incomplete) && return false
+    end
+    return true
+end
+
+@testset "dynamic analysis process sources on Julia $VERSION" begin
+    child_files = [joinpath(ChildHelpers.CHILD_SRC, f) for f in readdir(ChildHelpers.CHILD_SRC) if endswith(f, ".jl")]
+    push!(child_files, joinpath(@__DIR__, "..", "..", "shared", "julia_dynamic_analysis_process_protocol.jl"))
+    for path in child_files
+        @test parses_cleanly(path)
+    end
+
+    @test ChildHelpers._bare_import_name("using Foo") == "Foo"
+    @test ChildHelpers._bare_import_name("using Foo: bar") === nothing
+
+    expanded = ChildHelpers._expand_fully(Main, :(@assert x > 0))
+    @test expanded isa Expr
+    @test !occursin("\$(Expr", string(expanded))
+    @test ChildHelpers._surface_form(Expr(:isdefined, :x)) == Expr(:macrocall, Symbol("@isdefined"), nothing, :x)
+
+    scratch = Module(:SmokeScratch)
+    ChildHelpers._bind_real_macros!(scratch, Base)
+    @test isdefined(scratch, Symbol("@assert"))
 end

@@ -2,7 +2,8 @@ name: Old Julia symbol server smoke test
 
 # shared/symbolserver is also loaded by the dynamic analysis process, which runs on every
 # Julia back to 1.0, but the main CI only covers the versions this package supports.
-# This runs a crawl + cache round-trip of Core, Base and a stdlib on old Julia versions.
+# This runs a crawl + cache round-trip of Core, Base and a stdlib on old Julia versions,
+# and parses the process package's sources and runs its Base-only helpers.
 
 on:
   push: {branches: [main]}
