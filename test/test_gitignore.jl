@@ -287,3 +287,23 @@ end
         @test !any(is_staged_copy, derived_required_dynamic_projects(jw.runtime))
     end
 end
+
+@testitem "gitignore: the CPack copy stays out of the v2 engine too (c54)" setup=[GitIgnoreRepos] begin
+    using JuliaWorkspaces: JuliaWorkspace, add_folder_from_disc!, derived_required_dynamic_projects,
+        derived_package_folders, derived_v2_workspace_package_roots, set_v2_enabled!
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
+
+    mktempdir() do root
+        full = make_package_repo(root)
+        under_copy(path) = startswith(lowercase(path), lowercase(full))
+
+        jw = JuliaWorkspace()
+        add_folder_from_disc!(jw, root)
+        set_v2_enabled!(jw, true)
+        rt = jw.runtime
+        @test !any(f -> under_copy(uri2filepath(f)), derived_package_folders(rt))
+        @test !any(k -> under_copy(JuliaWorkspaces._key_folder_path(k)), derived_required_dynamic_projects(rt))
+        @test lowercase(uri2filepath(derived_v2_workspace_package_roots(rt)["Pkg1"])) ==
+            lowercase(joinpath(root, "src", "Pkg1.jl"))
+    end
+end

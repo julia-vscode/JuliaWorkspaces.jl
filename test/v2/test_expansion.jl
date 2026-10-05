@@ -324,10 +324,10 @@ end
     # The harvest picks the site up through the standalone env.
     @test !isempty(JW.derived_required_macro_expansions(jw.runtime))
 
-    # A test file whose test environment is NOT scheduled (no `test/runtests.jl`
-    # on disc for this in-memory fixture) has only the package's own
-    # environment: the standalone child.
-    test_uri = URI("file:///nm/test/runtests.jl")
+    # A test file whose test environment is NOT scheduled (`test/runtests.jl`
+    # is not a workspace file) has only the package's own environment: the
+    # standalone child.
+    test_uri = URI("file:///nm/test/other.jl")
     add_file!(jw, TextFile(test_uri, SourceText("g() = @somemacro 1\n", "julia")))
     @test JW.derived_v2_expansion_env(jw.runtime, test_uri).key isa JW.CreateStandaloneProjectKey
 
@@ -410,6 +410,50 @@ end
     @test env.env_hash != proj_hash
     @test JW.derived_v2_expansion_env(jw.runtime, filepath2uri(joinpath(dir, "src", "Full.jl"))).key ==
         WatchEnvironmentKey(dir, proj_hash)
+end
+
+@testitem "expansion env: a gitignored test/ folder gets no test-environment child" setup=[ExpansionWS] begin
+    using JuliaWorkspaces: add_folder_from_disc!, derived_required_dynamic_projects, WatchTestEnvironmentKey
+    using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
+
+    # `test/runtests.jl` exists on disc, but the folder walk skips the ignored
+    # `test/`, so the scheduler makes no test-env item. A file that would use
+    # the test env (here: test items in `src/`) must not route its batches to
+    # a child that never comes.
+    dir = uri2filepath(filepath2uri(mktempdir()))
+    mkpath(joinpath(dir, ".git")); mkpath(joinpath(dir, "src")); mkpath(joinpath(dir, "test"))
+    write(joinpath(dir, ".gitignore"), "test/
+")
+    write(joinpath(dir, "Project.toml"), "name = \"Ign\"
+uuid = \"6c090b5c-8e37-4b6a-b4fc-a2a1e85ec9e1\"
+version = \"1.0.0\"
+")
+    write(joinpath(dir, "Manifest.toml"), "julia_version = \"1.12.0\"
+manifest_format = \"2.0\"
+project_hash = \"x\"
+")
+    write(joinpath(dir, "src", "Ign.jl"), "module Ign
+end
+@testitem \"t\" begin
+    @pkgmacro 1
+end
+")
+    write(joinpath(dir, "test", "runtests.jl"), "using TestItemRunner
+@run_package_tests
+")
+
+    jw = JuliaWorkspace()
+    add_folder_from_disc!(jw, dir)
+    JW.set_v2_enabled!(jw, true)
+    JW.set_macro_expansion!(jw, true)
+    src_uri = filepath2uri(joinpath(dir, "src", "Ign.jl"))
+    @test !JW.derived_has_file(jw.runtime, filepath2uri(joinpath(dir, "test", "runtests.jl")))
+    required = derived_required_dynamic_projects(jw.runtime)
+    @test !any(k -> k isa WatchTestEnvironmentKey, required)
+    env = JW.derived_v2_expansion_env(jw.runtime, src_uri)
+    @test env !== nothing
+    @test !(env.key isa WatchTestEnvironmentKey)
+    @test env.key in required
 end
 
 @testitem "expansion env: a test/ folder that is a workspace member expands in the root's child" setup=[ExpansionWS] begin
